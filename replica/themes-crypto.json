@@ -1,0 +1,231 @@
+{
+ "_about": "Themes for prediction market apps. Patterns are case-insensitive regular expressions.",
+ "request_patterns": [
+  "\\bi wish\\b",
+  "\\bplease add\\b",
+  "\\bwould be (nice|great|good|helpful)\\b",
+  "\\bwould love\\b",
+  "\\bneeds? (a|an|the|to|more)\\b",
+  "\\bno way to\\b",
+  "\\bshould (have|be|add|let|allow|void)\\b",
+  "\\bwhy (can'?t|isn'?t|doesn'?t|won'?t)\\b",
+  "\\b(can'?t|cannot|unable to) (even )?(withdraw|cash out|add|change|edit|set|choose|delete|contact)\\b",
+  "\\bdoesn'?t (have|support|let|allow)\\b"
+ ],
+ "themes": [
+  {
+   "id": "withdrawals",
+   "label": "Withdrawals slow, held or blocked",
+   "kind": "complaint",
+   "patterns": [
+    "\\bwithdraw",
+    "\\bcash ?out\\b",
+    "\\bpayouts?\\b",
+    "\\bget (my|the) (money|funds|winnings)\\b",
+    "\\bpaid out\\b",
+    "\\bdoesn'?t pay\\b",
+    "\\bwon'?t pay\\b",
+    "\\bwait(ed|ing)? (for )?\\d* ?(days?|weeks?|business)\\b",
+    "\\bbusiness days?\\b",
+    "\\bpending\\b"
+   ]
+  },
+  {
+   "id": "deposits",
+   "label": "Deposit problems and holds",
+   "kind": "complaint",
+   "patterns": [
+    "\\bdeposit",
+    "\\bcleared?\\b",
+    "\\bcredit card\\b",
+    "\\bdebit card\\b",
+    "\\bbank (transfer|account)\\b",
+    "\\bcash advance\\b"
+   ]
+  },
+  {
+   "id": "support",
+   "label": "Support that does not answer",
+   "kind": "complaint",
+   "patterns": [
+    "\\bcustomer (service|support)\\b",
+    "\\bsupport\\b",
+    "\\bno (response|reply)\\b",
+    "\\bnever (replied|responded|heard back|got back)\\b",
+    "\\bchat ?bot\\b",
+    "\\bagent\\b",
+    "\\bemailed?\\b"
+   ]
+  },
+  {
+   "id": "account",
+   "label": "Account blocked, verification, identity",
+   "kind": "complaint",
+   "patterns": [
+    "\\bverif",
+    "\\bkyc\\b",
+    "\\bssn\\b",
+    "\\bid\\b",
+    "\\bblocked\\b",
+    "\\bbanned\\b",
+    "\\bfrozen\\b",
+    "\\bsuspended\\b",
+    "\\block(ed)? (me )?out\\b",
+    "\\bclosed my account\\b",
+    "\\bidentity\\b"
+   ]
+  },
+  {
+   "id": "resolution",
+   "label": "Rules unclear, resolved against the user",
+   "kind": "complaint",
+   "patterns": [
+    "\\bresolv",
+    "\\bresolution\\b",
+    "\\bvoid(ed)?\\b",
+    "\\bdispute",
+    "\\brules?\\b",
+    "\\bsettled\\b",
+    "\\bsettle(ment)?\\b",
+    "\\bdidn'?t count\\b",
+    "\\bUMA\\b",
+    "\\boracle\\b",
+    "\\bgraded\\b",
+    "\\bunclear\\b",
+    "\\bfine print\\b"
+   ]
+  },
+  {
+   "id": "rigged",
+   "label": "Feels rigged or like a scam",
+   "kind": "complaint",
+   "patterns": [
+    "\\brigged\\b",
+    "\\bscam",
+    "\\bfixed\\b",
+    "\\bmanipulat",
+    "\\bbots?\\b",
+    "\\bcrooked\\b",
+    "\\bsteal|stole|robbed\\b",
+    "\\bfraud"
+   ]
+  },
+  {
+   "id": "fees",
+   "label": "Fees and prices",
+   "kind": "complaint",
+   "patterns": [
+    "\\bfees?\\b",
+    "\\bcharg(e|ed|es)\\b",
+    "\\bspread\\b",
+    "\\bexpensive\\b",
+    "\\bhidden\\b",
+    "\\bcommission\\b",
+    "\\bodds? (are|is|were)\\b"
+   ]
+  },
+  {
+   "id": "promos",
+   "label": "Bonus or referral not paid",
+   "kind": "complaint",
+   "patterns": [
+    "\\bbonus\\b",
+    "\\breferral",
+    "\\bpromo",
+    "\\bfree bet",
+    "\\bcredit(s|ed)?\\b",
+    "\\bgiveaway\\b",
+    "\\boffer\\b"
+   ]
+  },
+  {
+   "id": "bugs",
+   "label": "Bugs and crashes",
+   "kind": "complaint",
+   "patterns": [
+    "\\bcrash(es|ed|ing)?\\b",
+    "\\bbugs?\\b",
+    "\\bbuggy\\b",
+    "\\bglitch",
+    "\\bfreez(e|es|ing)\\b",
+    "\\bbroken\\b",
+    "\\bnot working\\b",
+    "\\berror\\b",
+    "\\bslow\\b",
+    "\\blag"
+   ]
+  },
+  {
+   "id": "liquidity",
+   "label": "Thin markets or bad prices to exit",
+   "kind": "complaint",
+   "patterns": [
+    "\\bliquidity\\b",
+    "\\bcan'?t sell\\b",
+    "\\bno (buyers?|bids?)\\b",
+    "\\bcash out for\\b",
+    "\\bcouldn'?t sell\\b"
+   ]
+  },
+  {
+   "id": "harm",
+   "label": "Predatory or addictive",
+   "kind": "complaint",
+   "patterns": [
+    "\\baddict",
+    "\\bpredatory\\b",
+    "\\bgambling problem\\b",
+    "\\bruin(ed|ing)? lives\\b",
+    "\\bdrug"
+   ]
+  },
+  {
+   "id": "stuck_funds",
+   "label": "Funds stuck: deposits not credited, wallet or allowance problems",
+   "kind": "complaint",
+   "patterns": [
+    "\\bstuck\\b",
+    "\\bnot credited\\b",
+    "\\bnot (been )?(arrive|recogni[sz]ed)\\b",
+    "\\bhaven.?t arrived\\b",
+    "\\bhavent arrived\\b",
+    "\\ballowances?\\b",
+    "\\bproxy\\b",
+    "\\bdeposit wallet\\b",
+    "\\binaccessible\\b",
+    "\\bnever came\\b",
+    "\\bwithdraw (fails|impossible)\\b",
+    "\\bmissing deposit\\b",
+    "\\brecover"
+   ]
+  },
+  {
+   "id": "outage",
+   "label": "Outages and settlement failures",
+   "kind": "complaint",
+   "patterns": [
+    "\\boutage\\b",
+    "\\bnever settle\\b",
+    "\\bcan.?t close\\b",
+    "\\bblocked\\b",
+    "\\bsomething went wrong\\b",
+    "\\bnot (being )?sent\\b"
+   ]
+  },
+  {
+   "id": "crypto",
+   "label": "Crypto rails and wallets",
+   "kind": "request",
+   "patterns": [
+    "\\bcrypto\\b",
+    "\\busdc\\b",
+    "\\busdt\\b",
+    "\\bwallet\\b",
+    "\\bbridge\\b",
+    "\\bpolygon\\b",
+    "\\bsolana\\b",
+    "\\bbsc\\b"
+   ]
+  }
+ ]
+}

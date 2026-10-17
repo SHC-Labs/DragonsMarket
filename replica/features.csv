@@ -1,0 +1,47 @@
+feature,area,priority,original,clone,notes
+Browse events by category with search,discovery,must,yes,partial,"search, status filters (all, open, in resolution, final) and sort on the home page; no categories because markets carry none yet"
+Event page with one or many markets,market,must,yes,partial,"one market per page: rules, price, resolution, trade ticket; tested on a local chain"
+Yes/No share pricing between 0 and 1,market,must,yes,partial,"built as a constant-product curve in pm-market, sandbox tested; no order book"
+Limit and market orders,trading,must,yes,no,GTC and FOK at minimum
+Order book with depth,trading,must,yes,no,
+Fill-or-kill and fill-and-kill,trading,should,yes,no,Polymarket has GTC GTD FOK FAK plus post-only
+Positions and open orders in portfolio,portfolio,must,yes,partial,"positions, balances and redeem on /portfolio; no order book so no open orders"
+Cancel resting orders,trading,must,yes,no,not in the curve test build
+Split and merge a full Yes+No set,trading,should,yes,no,Polymarket mechanic
+Negative-risk multi-outcome events,market,should,yes,no,exactly one outcome wins
+Deposit from any chain via NEAR Intents,funding,must,partial,no,both incumbents already take multi-chain deposits. Not a differentiator
+Withdraw to any chain,funding,must,partial,no,
+Fee model: taker fee on p*(1-p) with zero maker fee,fees,must,yes,no,Polymarket formula verified. Rates 0 to 0.07 by category
+Maker rebates and liquidity rewards,liquidity,should,yes,no,needed to fix the empty book
+Resolution with proposal and challenge window,resolution,must,yes,partial,"contract and site (propose, challenge, finalise) tested on a local chain; not on testnet"
+Dispute escalation,resolution,should,yes,partial,"Council view with juror cards, votes, verdict and seal; panel is hand-picked, no random draw"
+Redeem winnings,portfolio,must,yes,partial,contract and site tested on a local chain; wallet signing not verified with a real wallet
+Price history chart,market,must,yes,yes,"step chart on the market page and featured card, drawn from a bounded 120-point price log kept by the contract; local chain only"
+Real-time prices over WebSocket,data,must,yes,no,
+Public REST API and SDK,platform,should,yes,no,
+Builder or referral attribution,platform,could,yes,no,Polymarket builder codes
+Identity verification and region gating,compliance,must,yes,no,not optional on the legal path
+Trade surveillance and alerts,compliance,must,yes,no,DCM core principle. Real-time monitoring required
+Market listing review process,compliance,must,yes,no,contracts must not be readily susceptible to manipulation
+Audit log of every admin action,compliance,must,yes,no,
+Responsible limits and self-exclusion,compliance,should,yes,no,state gambling regulators are the pressure point
+Comments and social,social,could,yes,no,
+Leaderboard and public profiles,social,could,yes,no,
+Mobile app,platform,could,yes,no,
+Perpetual futures,platform,could,yes,skip,separate regulated product
+Sports league data licences,data,could,yes,skip,licensed content
+Kalshi or Polymarket liquidity and market makers,liquidity,must,yes,skip,the network is not cloneable. See requirements.md
+CFTC DCM or QCX registration,licence,must,yes,skip,a licence is not a feature. See requirements.md
+Withdrawal status tracker with published time promise,funding,must,no,partial,"waiting, done and failed shown for contract withdrawals; Intents withdrawals and the time promise not built"
+Support that reaches a person with case status,support,must,no,no,180 Polymarket and 29 Kalshi reviews. Cost is staff not code
+Plain rules on trade screen locked before market opens,market,must,no,yes,rules block with fingerprint sits above the ticket on the market page; tested on a local chain
+Stated void policy on every market incl participant does not play,market,should,no,partial,void policy is required on-chain and shown on the page; admin form not built
+Show when funds become withdrawable and why,funding,should,no,no,89 Polymarket and 22 Kalshi deposit hold reviews
+Deposit status with quote expiry shown,funding,must,no,no,crypto-native check: about 16 of 26 posts and issues are stuck or missing money. Deposit address is tied to a quote
+Refund and recovery path for failed or late deposits,funding,must,no,no,includes an operator tool and a written process
+Settlement failure shown to the user and unwindable,trading,must,no,partial,a failed transaction is explained from the chain's panic text with a reference; no unwind
+Redeem with no deadline proved by tests,portfolio,must,no,partial,"no time check in redeem; tested 10 minutes after final, a sandbox cannot prove years"
+Yes and No quick-buy buttons on every market card,market,should,yes,yes,open the market with the side chosen; tested on a local chain
+Fluid layout from phone to 4K TV,platform,must,no,yes,"root size and grid columns follow the screen width; tested at 390, 820, 1440, 1920 and 3840 px wide"
+Anyone can void an unanswered market after its deadline,resolution,must,no,partial,void_if_unresolved on the market; tested in the sandbox; website does not show it yet
+Dispute jury fixed per case,resolution,must,no,yes,oracle copies the panel into the case when it is challenged; tested in the sandbox

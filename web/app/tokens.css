@@ -1,0 +1,59 @@
+/* Generated from tokens.json by generate.py. Edit the JSON, not this file. Dark theme only. */
+:root {
+  color-scheme: dark;
+  --bg: #0e0f11;
+  --surface: #16181b;
+  --raised: #1e2125;
+  --border: #2b2f35;
+  --border-input: #7b828c;
+  --text: #ece8df;
+  --text-muted: #a2a8b0;
+  --accent: #ece8df;
+  --on-accent: #0e0f11;
+  --focus: #e5a93c;
+  --danger: #f2767f;
+  --success: #5bc9b0;
+  --yes: #4fc3d4;
+  --yes-soft: #0f2c32;
+  --no: #f2767f;
+  --no-soft: #341b1f;
+  --warning: #e5a93c;
+  --warning-soft: #2e2410;
+  --info: #b4bccb;
+  --info-soft: #1c2027;
+  --council: #b9abf2;
+  --council-soft: #1c1832;
+  --font-sans-stack: IBM Plex Sans, Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --font-mono-stack: JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display-stack: Instrument Serif, Georgia, Times New Roman, serif;
+  --text-xs-size: 0.75rem;  --text-xs-line: 1rem;  --text-xs-weight: 500;
+  --text-sm-size: 0.875rem;  --text-sm-line: 1.25rem;  --text-sm-weight: 400;
+  --text-base-size: 1rem;  --text-base-line: 1.5rem;  --text-base-weight: 400;
+  --text-lg-size: 1.25rem;  --text-lg-line: 1.75rem;  --text-lg-weight: 600;
+  --text-xl-size: 1.75rem;  --text-xl-line: 2.125rem;  --text-xl-weight: 600;
+  --text-display-size: 2.5rem;  --text-display-line: 2.75rem;  --text-display-weight: 600;
+  --space-0: 0px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.875rem;
+  --radius-pill: 999px;
+  --shadow-pop: 0 8px 24px rgba(0,0,0,.55);
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --motion-ease: cubic-bezier(.2,.8,.2,1);
+  --layout-content-max: 1080px;
+  --layout-ticket-width: 360px;
+  --layout-header-height: 56px;
+  --layout-breakpoint-stack: 900px;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --motion-fast: 0ms; --motion-base: 0ms; }
+}

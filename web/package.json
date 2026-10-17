@@ -1,0 +1,40 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "tokens": "cp ../replica/design/tokens.css app/tokens.css && grep -v '@import' ../replica/design/tailwind-theme.css > app/theme.css",
+    "test": "vitest run",
+    "e2e": "playwright test",
+    "serve": "node scripts/serve.mjs",
+    "build:dev": "bash scripts/build-dev.sh"
+  },
+  "dependencies": {
+    "@hot-labs/near-connect": "^0.11.4",
+    "@visx/curve": "^4.0.0",
+    "@visx/scale": "^4.0.0",
+    "@visx/shape": "^4.0.0",
+    "iconsax-react": "^0.0.8",
+    "next": "16.4.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "^1.63.0",
+    "@tailwindcss/turbopack": "^4",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.4.0",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
+  }
+}

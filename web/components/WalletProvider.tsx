@@ -1,0 +1,112 @@
+"use client";
+
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import type { NearConnector } from "@hot-labs/near-connect";
+import { config } from "@/lib/config";
+import type { FunctionCall } from "@/lib/market";
+
+// NEAR Connect, the connector NEAR's docs recommend. Keys stay in the user's wallet; this app only asks it to sign.
+// Not verified with a real wallet yet: the sandbox has no wallet, so that check waits for the testnet deploy.
+interface WalletState {
+  account: string | null;
+  walletAvailable: boolean;
+  openConnect: () => void;
+  disconnect: () => void;
+  send: (call: FunctionCall) => Promise<string>;
+}
+
+const Ctx = createContext<WalletState>({
+  account: null,
+  walletAvailable: false,
+  openConnect: () => {},
+  disconnect: () => {},
+  send: () => Promise.reject(new Error("wallet not ready")),
+});
+
+export const useWallet = () => useContext(Ctx);
+
+const noSubscription = () => () => {};
+const nobody = () => null;
+
+// The local test chain has no wallet. To look at account views, the page can pretend to be an account:
+// open any page with ?as=<account id> once and it is remembered. Reads only; sending is refused.
+function readDevAccount(): string | null {
+  try {
+    const asked = new URLSearchParams(window.location.search).get("as");
+    if (asked) window.localStorage.setItem("pm-dev-account", asked);
+    return asked ?? window.localStorage.getItem("pm-dev-account");
+  } catch {
+    return null;
+  }
+}
+
+export function WalletProvider({ children }: { children: ReactNode }) {
+  const connector = useRef<NearConnector | null>(null);
+  const [walletAccount, setAccount] = useState<string | null>(null);
+  const walletAvailable = config.network !== "sandbox";
+  const devAccount = useSyncExternalStore(noSubscription, walletAvailable ? nobody : readDevAccount, nobody);
+  const account = walletAvailable ? walletAccount : devAccount;
+
+  useEffect(() => {
+    if (!walletAvailable) return;
+    let live = true;
+    let c: NearConnector | null = null;
+    const onIn = (p: { accounts: { accountId: string }[] }) => live && setAccount(p.accounts[0]?.accountId ?? null);
+    const onOut = () => live && setAccount(null);
+
+    import("@hot-labs/near-connect").then(async ({ NearConnector }) => {
+      if (!live) return;
+      c = new NearConnector({
+        network: config.network === "mainnet" ? "mainnet" : "testnet",
+        features: { signAndSendTransaction: true },
+      });
+      connector.current = c;
+      c.on("wallet:signIn", onIn);
+      c.on("wallet:signOut", onOut);
+      try {
+        const { accounts } = await c.getConnectedWallet();
+        if (live) setAccount(accounts[0]?.accountId ?? null);
+      } catch {
+        // no saved session, stay signed out
+      }
+    });
+
+    return () => {
+      live = false;
+      c?.off("wallet:signIn", onIn);
+      c?.off("wallet:signOut", onOut);
+    };
+  }, [walletAvailable]);
+
+  const openConnect = useCallback(() => {
+    connector.current?.connect().catch(() => {
+      // the person closed the wallet dialog
+    });
+  }, []);
+
+  const disconnect = useCallback(() => {
+    connector.current?.disconnect().catch(() => {});
+  }, []);
+
+  const send = useCallback(async (call: FunctionCall) => {
+    const c = connector.current;
+    if (!c) throw new Error("wallet not ready");
+    const wallet = await c.wallet();
+    const result = await wallet.signAndSendTransaction({
+      receiverId: call.receiverId,
+      actions: [
+        {
+          type: "FunctionCall",
+          params: { methodName: call.methodName, args: call.args, gas: call.gas, deposit: call.deposit },
+        },
+      ],
+    });
+    return result.transaction.hash;
+  }, []);
+
+  const value = useMemo(
+    () => ({ account, walletAvailable, openConnect, disconnect, send }),
+    [account, walletAvailable, openConnect, disconnect, send],
+  );
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+}
