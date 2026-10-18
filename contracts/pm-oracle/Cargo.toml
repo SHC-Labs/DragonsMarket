@@ -12,3 +12,5 @@ near-sdk = { workspace = true }
 
 [dev-dependencies]
 near-sdk = { workspace = true, features = ["unit-testing"] }
+ed25519-dalek = "2"
+proptest = "1"

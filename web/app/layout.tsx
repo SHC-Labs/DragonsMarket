@@ -28,11 +28,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html lang="en" suppressHydrationWarning className={`${plex.variable} ${jetbrains.variable} ${instrument.variable}`}>
       <head><script dangerouslySetInnerHTML={{ __html: `(function(){var t='dark';try{t=localStorage.getItem('council-theme')||'dark'}catch(e){}document.documentElement.dataset.theme=t==='light'?'light':'dark'})()` }} /></head>
       <body className="min-h-screen">
+        <a href="#main-content" className="skip-link">Skip to content</a>
         <WalletProvider>
           <SmoothScroll />
           <div className="relative z-[1] flex min-h-screen flex-col">
             <Header />
-            <main className="mx-auto w-full max-w-[var(--page-max)] flex-1 px-[var(--gutter)] pb-24">{children}</main>
+            <main id="main-content" tabIndex={-1} className="mx-auto w-full max-w-[var(--page-max)] flex-1 px-[var(--gutter)] pb-24">{children}</main>
             <Footer />
           </div>
         </WalletProvider>

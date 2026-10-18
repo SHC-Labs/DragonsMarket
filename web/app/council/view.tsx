@@ -3,13 +3,13 @@ import Link from "next/link";
 import { CouncilSeal } from "@/components/Threshold";
 import { isConfigured } from "@/lib/config";
 import { usePoll } from "@/lib/hooks";
-import { getCase, getOracleConfig, listMarkets } from "@/lib/market";
+import { getCase, listMarkets } from "@/lib/market";
 import { StateBadge } from "@/components/ui";
 async function loadCouncil() {
   if (!isConfigured) return { panel: [], cases: [] };
-  const [oracle, markets] = await Promise.all([getOracleConfig(), listMarkets()]);
+  const markets = await listMarkets();
   const cases = await Promise.all(markets.filter(m => m.status === "closed" || m.status === "resolved").map(async market => ({ market, record: await getCase(market.id) })));
-  return { panel: oracle.panel, cases: cases.filter(c => c.record) };
+  return { panel: [], cases: cases.filter(c => c.record) };
 }
 export function CouncilView() {
   const { data, error, loading, reload } = usePoll(loadCouncil, [], 8000);

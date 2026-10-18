@@ -183,7 +183,12 @@ async fn revealed_votes_settle_early_and_a_silent_juror_does_not_block() -> anyh
     assert_eq!(case["final_outcome"], "no");
     assert_eq!(case["applied"], true);
     assert_eq!(market_json(&w, id).await["outcome"], "no");
-    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND);
+    // Dave won, so Carol's bond is the loser's: a quarter is split between the two jurors who revealed No, and Dave
+    // keeps his own bond and the rest.
+    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND - BOND / 4);
+    assert_eq!((claimable(&w, jury[0].id()).await, claimable(&w, jury[1].id()).await), (BOND / 8, BOND / 8));
+    assert_eq!(claimable(&w, jury[2].id()).await, 0);
+    assert_eq!(case["delinquent"], serde_json::json!([]), "the third juror committed and was given no chance to reveal");
 
     // The third juror never revealed. The case is closed to them now.
     refused(reveal(&w, &jury[2], id, "yes", "c", "Too late.").await, "no open dispute");

@@ -48,15 +48,16 @@ async fn an_unanswered_market_is_voided_by_anyone_after_its_deadline_so_money_is
     assert_eq!(ft_balance(&w, w.carol.id()).await, before, "a late bond is refunded");
     assert!(case_json(&w, id).await.is_null());
 
-    // A stranger voids it. Everyone can redeem half a unit per share.
+    // A stranger voids it. Everyone redeems at the market's closing price.
     w.dave.call(w.market.id(), "void_if_unresolved").args_json(json!({ "market_id": id.to_string() })).transact().await?.into_result()?;
     let m = market_json(&w, id).await;
     assert_eq!(m["outcome"], "void");
     assert_eq!(m["status"], "resolved");
+    let price = u(&m["void_price_yes"]);
     w.alice.call(w.market.id(), "redeem").args_json(json!({ "market_id": id.to_string() })).transact().await?.into_result()?;
     w.bob.call(w.market.id(), "redeem").args_json(json!({ "market_id": id.to_string() })).transact().await?.into_result()?;
-    assert_eq!(market_balance(&w, w.alice.id()).await, alice_yes / 2);
-    assert_eq!(market_balance(&w, w.bob.id()).await, bob_no / 2);
+    assert_eq!(market_balance(&w, w.alice.id()).await, alice_yes * price / 1_000_000);
+    assert_eq!(market_balance(&w, w.bob.id()).await, bob_no * (1_000_000 - price) / 1_000_000);
     assert!(invariant(&w, id).await);
 
     // It cannot be voided twice.
@@ -133,7 +134,8 @@ async fn a_jury_must_be_an_odd_size_of_at_most_21() -> anyhow::Result<()> {
         .args_json(json!({
             "owner_id": w.owner.id(), "market_contract": w.market.id(), "bond_token": w.ft.id(), "bond": BOND.to_string(),
             "window_ms": WINDOW_MS.to_string(), "panel_deadline_ms": PANEL_MS.to_string(),
-            "council": w.council.id(), "jury_size": 4, "draw_delay_blocks": "2"
+            "council": w.council.id(), "jury_size": 4, "draw_delay_blocks": "2", "min_proposal_ms": "60000",
+            "operator_id": w.owner.id(), "network": "sandbox", "price_threshold": 2
         }))
         .transact()
         .await?
@@ -145,22 +147,58 @@ async fn a_jury_must_be_an_odd_size_of_at_most_21() -> anyhow::Result<()> {
 // A proposal is refused unless there is real slack, beyond the challenge window and the panel deadline,
 // for the final apply() call to reach the market before a permissionless void could race it.
 #[tokio::test]
-async fn a_proposal_needs_slack_beyond_the_window_and_panel_for_apply_to_land() -> anyhow::Result<()> {
+async fn a_late_proposal_is_refused_when_apply_could_not_land_but_an_early_one_opens() -> anyhow::Result<()> {
     let w = setup().await?;
-    // window + panel = 60s + 120s = 180s exactly, no room left for apply() to land before resolve_by.
-    let tight = market_with_deadline(&w, 120, 180).await?;
+    // Both markets leave the minimum 300s after close. A proposal needs window + panel + buffer = 210s of it
+    // left, so it is accepted until 90s after close and refused after. (skip_secs and real transaction time both
+    // drift a little, so each check keeps 30s or more of headroom from that line.)
+    let late = market_with_deadline(&w, 120, 300).await?;
+    let early = market_with_deadline(&w, 120, 300).await?;
     skip_secs(&w.worker, 130).await;
-    let before = ft_balance(&w, w.carol.id()).await;
-    let _ = propose(&w, &w.carol, tight, "yes").await;
-    assert_eq!(ft_balance(&w, w.carol.id()).await, before, "a bond with no slack for apply() is refunded");
-    assert!(case_json(&w, tight).await.is_null(), "no case opened with zero slack");
+    propose(&w, &w.carol, early, "yes").await?;
+    assert_eq!(case_json(&w, early).await["stage"], "proposed", "10s after close there is room for a case to finish");
 
-    // Real slack beyond the minimum, and a case opens normally. (skip_secs and real transaction time both
-    // drift a little, so this leaves headroom above the exact 210s boundary rather than landing on it.)
-    let roomy = market_with_deadline(&w, 120, 300).await?;
-    skip_secs(&w.worker, 130).await;
-    propose(&w, &w.carol, roomy, "yes").await?;
-    assert_eq!(case_json(&w, roomy).await["stage"], "proposed", "real slack beyond the minimum is enough to open a case");
+    skip_secs(&w.worker, 110).await;
+    let before = ft_balance(&w, w.carol.id()).await;
+    let _ = propose(&w, &w.carol, late, "yes").await;
+    assert_eq!(ft_balance(&w, w.carol.id()).await, before, "a bond with no room for apply() is refunded");
+    assert!(case_json(&w, late).await.is_null(), "no case opened 120s after close");
+    Ok(())
+}
+
+// A market whose deadline leaves no room for any case to finish could only end in a flat-half Void, which pays
+// whoever holds the cheap side. The oracle refuses to register it, and pm-market keeps an unregistered market shut.
+#[tokio::test]
+async fn a_market_that_leaves_too_little_time_to_resolve_never_opens() -> anyhow::Result<()> {
+    let w = setup().await?;
+    assert_eq!(config(&w.oracle).await["min_resolve_gap_ns"], (MIN_RESOLVE_GAP_SECS * 1_000_000_000).to_string());
+    let t = now(&w.worker).await;
+    let close_at = t + 120 * 1_000_000_000;
+    let create = |gap_ns: u64| {
+        w.owner
+            .call(w.market.id(), "create_market")
+            .args_json(json!({
+                "title": "Gap test", "rule_text": "Resolves Yes if it does.", "resolution_source": "https://example.com",
+                "void_policy": "Void if cancelled.", "category": "tech", "subcategory": "ai",
+                "close_at": close_at.to_string(), "resolve_by": (close_at + gap_ns).to_string()
+            }))
+            .gas(Gas::from_tgas(100))
+            .transact()
+    };
+
+    let too_short: String = create(MIN_RESOLVE_GAP_SECS * 1_000_000_000 - 1).await?.into_result()?.json()?;
+    let too_short: u64 = too_short.parse()?;
+    assert_eq!(market_json(&w, too_short).await["registered"], false, "one nanosecond short: the oracle refused it");
+    w.owner.call(w.market.id(), "retry_register").args_json(json!({ "market_id": too_short.to_string() })).gas(Gas::from_tgas(100)).transact().await?.into_result()?;
+    assert_eq!(market_json(&w, too_short).await["registered"], false, "retrying cannot change the dates");
+    let before = ft_balance(&w, w.owner.id()).await;
+    ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{too_short}")).await?;
+    assert_eq!(ft_balance(&w, w.owner.id()).await, before, "the seed is refunded: the market cannot be funded or traded");
+    assert_eq!(u(&market_json(&w, too_short).await["locked"]), 0);
+
+    let exact: String = create(MIN_RESOLVE_GAP_SECS * 1_000_000_000).await?.into_result()?.json()?;
+    let exact: u64 = exact.parse()?;
+    assert_eq!(market_json(&w, exact).await["registered"], true, "exactly the minimum gap registers");
     Ok(())
 }
 
@@ -188,5 +226,67 @@ async fn oversized_evidence_and_reasons_are_refused() -> anyhow::Result<()> {
     refused(reveal(&w, &jury[0], id, "no", "s", &"r".repeat(1200)).await, "reason is too long");
     refused(reveal(&w, &jury[1], id, "no", &long_salt, "The source says no.").await, "salt is too long");
     reveal(&w, &jury[0], id, "no", "s", &"r".repeat(1000)).await?;
+    Ok(())
+}
+
+// settle() sends unlock_case once and does not wait for it. If that call fails the jury's seats are stuck as serving,
+// and anyone can call retry_unlock to send it again.
+#[tokio::test]
+async fn a_failed_unlock_leaves_seats_locked_until_anyone_retries_it() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let id = create_seeded_market(&w, 120).await?;
+    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    skip_secs(&w.worker, 130).await;
+    let retry = |who: &near_workspaces::Account| {
+        who.call(w.oracle.id(), "retry_unlock").args_json(json!({ "market_id": id.to_string() })).gas(Gas::from_tgas(100)).transact()
+    };
+
+    // Nothing to unlock before there is a case, or while it is only proposed or still being decided.
+    refused(retry(&w.dave).await?.into_result(), "no case for that market");
+    propose(&w, &w.carol, id, "yes").await?;
+    refused(retry(&w.dave).await?.into_result(), "no settled dispute to unlock");
+    challenge(&w, &w.dave, id).await?;
+    let jury = draw_jury(&w, id).await?;
+    refused(retry(&w.dave).await?.into_result(), "no settled dispute to unlock");
+
+    for j in &jury[..2] {
+        commit(&w, j, id, "no", "s").await?;
+    }
+    to_reveal_phase(&w, id).await;
+    for j in &jury[..2] {
+        reveal(&w, j, id, "no", "s", "The source says no.").await?;
+    }
+    assert_eq!(case_json(&w, id).await["stage"], "final");
+    let token = jury[2].id().to_string();
+    assert!(stake_of(&w, &token).await["serving"].is_null(), "the normal unlock freed the seat");
+
+    // Put one seat back as a failed unlock would have left it.
+    relock_seat(&w, &token, id).await?;
+    assert_eq!(stake_of(&w, &token).await["serving"], id.to_string());
+    refused(request_unstake(&w, &jury[2], &token).await, "this seat is serving on an open case");
+
+    // A stranger retries, and the seat is free again.
+    retry(&w.dave).await?.into_result()?;
+    assert!(stake_of(&w, &token).await["serving"].is_null());
+    request_unstake(&w, &jury[2], &token).await?;
+
+    // Retrying again changes nothing and does not fail.
+    retry(&w.dave).await?.into_result()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unchallenged_case_has_no_jury_to_unlock() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let id = create_seeded_market(&w, 120).await?;
+    skip_secs(&w.worker, 130).await;
+    propose(&w, &w.carol, id, "yes").await?;
+    skip_secs(&w.worker, 70).await;
+    finalize(&w, id).await?;
+    assert_eq!(case_json(&w, id).await["stage"], "final");
+    refused(
+        w.dave.call(w.oracle.id(), "retry_unlock").args_json(json!({ "market_id": id.to_string() })).gas(Gas::from_tgas(100)).transact().await?.into_result(),
+        "no settled dispute to unlock",
+    );
     Ok(())
 }

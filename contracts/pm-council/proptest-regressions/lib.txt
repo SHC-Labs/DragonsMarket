@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 581fd7ece0e13089fff6e4efa8f375a9133d56e4fc7112b8c1acab3bba4cc051 # shrinks to seat_count = 11, excluded = [false, false, false, false, false, false, false, true, false, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false], n_raw = 15, seed = [13, 17, 23, 124, 45, 57, 11, 1, 27, 0, 0, 2, 3, 2, 63, 7, 1, 2, 6, 94, 6, 2, 24, 2, 64, 8, 37, 49, 20, 8, 58, 101], case_key = 271829518769413717
+cc 8e520b2a92d5c92eb1efc527fcbead5c5b75c9e14a08aa74e87dfaeaa923cd91 # shrinks to ops = [(0, 13, 1), (0, 2, 1), (0, 3, 1), (2, 0, 1), (1, 0, 6), (3, 5, 1)]

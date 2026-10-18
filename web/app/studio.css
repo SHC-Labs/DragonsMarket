@@ -473,3 +473,81 @@ a[href*="side=yes"],a[href*="side=no"],
 .compact-market-card .market-card-meta { border-top:1px solid var(--border); margin-top:.75rem; padding-top:.85rem; }
 [data-testid="market-card"] a.market-outcome-option[href*="side="] { border:0; background:transparent; box-shadow:none; }
 [data-testid="market-card"] a.market-outcome-option[href*="side="]:hover { background:var(--raised); }
+
+/* Route palettes also tint shared chrome; mint remains the signature accent. */
+:root:has(.initiation-page) {
+  --bg:#0c1511; --surface:#14221a; --raised:#1e3427;
+  --border:#35543f; --border-input:#7d9d87;
+  --text:#edf5ee; --text-muted:#b0c6b6;
+  --accent:#a8dfc0; --on-accent:#112c1d; --focus:#c2eed3;
+  --council:#a8dfc0; --council-soft:#1a3e2b;
+  --yes:#a8dfc0; --yes-soft:#1a3e2b; --no:#d7e7dc; --no-soft:#14221a;
+  --info:#b0c6b6; --info-soft:#1e3427;
+  --page-accent-hover:#c2eed3; --page-on-hover:#112c1d;
+}
+:root[data-theme="light"]:has(.initiation-page) {
+  --bg:#f7faf5; --surface:#fff; --raised:#e6f0e6;
+  --border:#c9d9ca; --border-input:#6a8772;
+  --text:#162d1e; --text-muted:#526b59;
+  --accent:#23734d; --on-accent:#fff; --focus:#23734d;
+  --council:#23734d; --council-soft:#dcefe2;
+  --yes:#23734d; --yes-soft:#dcefe2; --no:#294e38; --no-soft:#fff;
+  --info:#526b59; --info-soft:#e6f0e6;
+  --page-accent-hover:#195b3b; --page-on-hover:#fff;
+}
+:root:has(.tribunal-page) {
+  --bg:#151a16; --surface:#1e2720; --raised:#2d3b30;
+  --border:#455c49; --border-input:#8aab90;
+  --text:#f0f4ec; --text-muted:#becbb8;
+  --accent:#bedcc5; --on-accent:#1c3021; --focus:#d7edda;
+  --council:#bedcc5; --council-soft:#304736;
+  --yes:#bedcc5; --yes-soft:#304736; --no:#e1e8da; --no-soft:#1e2720;
+  --info:#becbb8; --info-soft:#2d3b30;
+  --page-accent-hover:#d7edda; --page-on-hover:#1c3021;
+}
+:root[data-theme="light"]:has(.tribunal-page) {
+  --bg:#f7f8f2; --surface:#fff; --raised:#e9eee2;
+  --border:#d0d9c8; --border-input:#788b70;
+  --text:#243024; --text-muted:#596852;
+  --accent:#506b54; --on-accent:#fff; --focus:#506b54;
+  --council:#506b54; --council-soft:#e0eadb;
+  --yes:#506b54; --yes-soft:#e0eadb; --no:#344a35; --no-soft:#fff;
+  --info:#596852; --info-soft:#e9eee2;
+  --page-accent-hover:#3d5541; --page-on-hover:#fff;
+}
+:root:has(.tribunal-page, .initiation-page) .ritual-button:hover {
+  background:var(--page-accent-hover); color:var(--page-on-hover); border-color:var(--page-accent-hover);
+}
+
+/* Status is a surface panel, so it uses surface text rather than button text. */
+.launch-status { color:var(--text); }
+.launch-status h2 { color:var(--text); }
+.launch-status .ritual-label { color:var(--text-muted); }
+.launch-status .ritual-link { color:var(--council); }
+.launch-status .launch-chip { color:var(--council); border-color:var(--border-input); }
+
+/* UX follow-up: resilient text sizing and discoverable keyboard/mobile navigation. */
+.skip-link { position:fixed; inset-block-start:.5rem; inset-inline-start:1rem; z-index:100; padding:.75rem 1rem; background:var(--text); color:var(--bg); border-radius:8px; transform:translateY(-200%); }
+.skip-link:focus { transform:translateY(0); }
+#main-content { scroll-margin-top:11rem; min-width:0; }
+.mobile-nav-frame { min-width:0; }
+.mobile-nav-hint { display:block; padding:0 var(--gutter) .4rem; color:var(--text-muted); font-size:.7rem; }
+.trade-mode-button { min-height:44px; min-width:44px; }
+.trade-estimates { display:grid; gap:.65rem; }
+.trade-estimates>div { display:flex; flex-wrap:wrap; justify-content:space-between; gap:.35rem 1rem; }
+.trade-estimates dt { color:var(--text-muted); }.trade-estimates dd { margin:0; overflow-wrap:anywhere; }
+.resolution-record { overflow-wrap:anywhere; }
+.initiation-hero>* { min-width:0; }
+.initiation-copy h1,.membership-overview h2 { overflow-wrap:anywhere; }
+.initiation-copy .ritual-button { max-width:100%; white-space:normal; overflow-wrap:anywhere; }
+.membership-overview { min-width:0; }
+.membership-overview dl>div>* { min-width:0; overflow-wrap:anywhere; }
+.launch-status>* { min-width:0; }.launch-status>div:last-child { flex-shrink:1; }
+.launch-chip { overflow-wrap:anywhere; }
+@media(max-width:1023px) { .initiation-hero { grid-template-columns:minmax(0,1fr); }.mobile-site-nav { scrollbar-width:thin; scrollbar-color:var(--border-input) transparent; } }
+@media(max-width:620px) { .membership-overview dl>div { flex-direction:column; gap:.25rem; }.launch-status { padding:1rem; } }
+
+/* Amount focus stays within its existing border, without an outer ring or glow. */
+.trade-amount-field,.trade-amount-field:focus-within { outline:none; box-shadow:none; }
+.trade-amount-field #amount:focus { outline:none; box-shadow:none; }
+.trade-amount-field:has(#amount:focus-visible) { border-color:var(--text); }

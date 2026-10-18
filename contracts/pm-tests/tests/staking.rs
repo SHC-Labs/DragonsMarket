@@ -154,23 +154,20 @@ async fn requesting_an_unstake_twice_is_refused() -> anyhow::Result<()> {
 async fn a_drawn_seat_cannot_leave_until_its_case_is_final() -> anyhow::Result<()> {
     let w = setup().await?;
     let id = disputed(&w).await?;
-    // Everyone asks to leave before the draw. A seat in its cooldown can still be drawn.
-    for j in &w.jurors {
-        request_unstake(&w, j, tok(j)).await?;
-    }
     let jury = draw_jury(&w, id).await?;
     for j in &jury {
         assert_eq!(stake_of(&w, tok(j)).await["serving"], json!(id.to_string()));
+        refused(request_unstake(&w, j, tok(j)).await, "this seat is serving on an open case");
     }
     for j in &jury[..2] {
         commit(&w, j, id, "no", "s").await?;
     }
-    skip_secs(&w.worker, COOLDOWN_SECS + 1).await;
 
-    let outsider = w.jurors.iter().find(|j| !jury.iter().any(|p| p.id() == j.id())).unwrap();
-    unstake(&w, outsider, tok(outsider)).await?;
+    // The seats that were not drawn leave while the case runs.
+    let outsiders: Vec<&Account> = w.jurors.iter().filter(|j| !jury.iter().any(|p| p.id() == j.id())).collect();
+    assert_eq!(outsiders.len(), 2);
+    leave(&w, &outsiders).await?;
     for j in &jury {
-        refused(unstake(&w, j, tok(j)).await, "this seat is serving on an open case");
         assert_eq!(nft_owner(&w, tok(j)).await, w.council.id().as_str());
     }
 
@@ -179,21 +176,20 @@ async fn a_drawn_seat_cannot_leave_until_its_case_is_final() -> anyhow::Result<(
         reveal(&w, j, id, "no", "s", "The source says no.").await?;
     }
     assert_eq!(case_json(&w, id).await["stage"], "final");
+    leave(&w, &jury.iter().collect::<Vec<_>>()).await?;
     for j in &jury {
-        assert_eq!(event_names(&unstake(&w, j, tok(j)).await?), vec!["nft_transfer", "unstaked"]);
         assert_eq!(nft_owner(&w, tok(j)).await, j.id().as_str());
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn a_draw_picks_only_staked_seats_that_are_not_serving() -> anyhow::Result<()> {
+async fn a_draw_picks_only_staked_seats_that_are_not_serving_or_leaving() -> anyhow::Result<()> {
     let w = setup().await?;
     let j = &w.jurors;
-    // j1 and j2 leave for good. j0 asks to leave and is still in its cooldown when the jury is drawn.
+    // j1 and j2 leave for good, so exactly three seats are left.
     leave(&w, &[&j[1], &j[2]]).await?;
     let first = disputed(&w).await?;
-    request_unstake(&w, &j[0], tok(&j[0])).await?;
     let jury = draw_jury(&w, first).await?;
     assert_eq!(sorted(&jury.iter().collect::<Vec<_>>()), sorted(&[&j[0], &j[3], &j[4]]));
     for who in &jury[..2] {
@@ -209,13 +205,50 @@ async fn a_draw_picks_only_staked_seats_that_are_not_serving() -> anyhow::Result
     wait_for_draw(&w, second).await;
     assert_eq!(event_names(&resolve_draw(&w, second).await?), vec!["draw_failed"]);
 
-    // The first case settles and frees its jury for the second.
+    // The first case settles and frees its jury. j0 asks to leave straight away, so it is not available to
+    // serve, and two seats are not enough for a jury of three.
     for who in &jury[..2] {
         reveal(&w, who, first, "no", "s", "The source says no.").await?;
     }
     assert_eq!(case_json(&w, first).await["stage"], "final");
+    request_unstake(&w, &j[0], tok(&j[0])).await?;
+    assert_eq!(event_names(&resolve_draw(&w, second).await?), vec!["draw_failed"]);
+
+    // A new seat makes up the numbers, and the seat on its way out is still not drawn.
+    mint_nft(&w, &w.alice, "alice-seat").await?;
+    stake(&w, &w.alice, "alice-seat").await?;
     assert_eq!(event_names(&resolve_draw(&w, second).await?), vec!["jury_drawn"]);
-    assert_eq!(sorted(&panel(&w, second).await.iter().collect::<Vec<_>>()), sorted(&[&j[0], &j[3], &j[4]]));
+    assert_eq!(sorted(&panel(&w, second).await.iter().collect::<Vec<_>>()), sorted(&[&j[3], &j[4], &w.alice]));
+    Ok(())
+}
+
+// One wallet cannot gather more seats than the cap, so it cannot gather more of the jury draw and the revenue share.
+#[tokio::test]
+async fn an_account_cannot_stake_more_seats_than_the_cap_and_the_token_comes_back() -> anyhow::Result<()> {
+    let w = setup().await?;
+    refused(
+        w.alice.call(w.council.id(), "set_max_seats_per_account").args_json(json!({ "max_seats_per_account": 2 })).transact().await?.into_result(),
+        "owner only",
+    );
+    w.owner.call(w.council.id(), "set_max_seats_per_account").args_json(json!({ "max_seats_per_account": 2 })).transact().await?.into_result()?;
+    assert_eq!(config(&w.council).await["max_seats_per_account"], 2);
+
+    for id in ["a1", "a2", "a3"] {
+        mint_nft(&w, &w.alice, id).await?;
+    }
+    stake(&w, &w.alice, "a1").await?;
+    stake(&w, &w.alice, "a2").await?;
+    refused(stake(&w, &w.alice, "a3").await, "that account already holds the most seats allowed");
+    assert_eq!(nft_owner(&w, "a3").await, w.alice.id().as_str(), "the token came back");
+    assert!(stake_of(&w, "a3").await.is_null());
+
+    // Another account is not held back, and a seat that leaves makes room.
+    mint_nft(&w, &w.bob, "b1").await?;
+    stake(&w, &w.bob, "b1").await?;
+    request_unstake(&w, &w.alice, "a1").await?;
+    skip_secs(&w.worker, COOLDOWN_SECS + 1).await;
+    unstake(&w, &w.alice, "a1").await?;
+    stake(&w, &w.alice, "a3").await?;
     Ok(())
 }
 

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useRef } from "react";
 import { ThemeToggle } from "./ThemeToggle";
 import { usePathname } from "next/navigation";
 import { useWallet } from "./WalletProvider";
@@ -16,6 +17,12 @@ function Mark() {
 export function Header() {
   const { account, walletAvailable, openConnect, disconnect } = useWallet();
   const pathname = usePathname();
+  const mobileNav = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const nav = mobileNav.current;
+    const active = nav?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (nav && active) nav.scrollLeft = active.offsetLeft - nav.offsetLeft - Math.max(0, (nav.clientWidth - active.offsetWidth) / 2);
+  }, [pathname]);
   const links = [{ href: "/", label: "Markets" }, { href: "/watchlist", label: "Watchlist" }, { href: "/council", label: "Council" }, { href: "/membership", label: "Membership" }, { href: "/partnerships", label: "Partnerships" }, { href: "/portfolio", label: "Portfolio" }];
   const navigation = links.map(({ href, label }) => (
     <Link key={href} href={href} aria-current={pathname === href || (href === "/" && pathname === "/market") ? "page" : undefined} className="site-nav-link">{label}</Link>
@@ -45,7 +52,7 @@ export function Header() {
             )}
           </div>
         </div>
-        <nav className="mobile-site-nav lg:hidden" aria-label="Main">{navigation}</nav>
+        <div className="mobile-nav-frame lg:hidden"><nav ref={mobileNav} className="mobile-site-nav lg:hidden" aria-label="Main">{navigation}</nav><span className="mobile-nav-hint">Swipe for more navigation ↔</span></div>
       </header>
     </>
   );

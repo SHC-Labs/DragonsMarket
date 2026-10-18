@@ -7,3 +7,4 @@
 cc 4d6d093afcbba9a22ddcbc858b7fbda33028d4fe4f1a00ec0972fd8958896b76 # shrinks to ops = [(0, 0, 0, 1000000, 1)], outcomes = [0, 0]
 cc f110ce5678b6c13a7dbaa8dfc0dea343e8b5359b302aa95e41276fa3fa922b83 # shrinks to ops = [(0, 0, 0, 1000000, 1)], outcomes = [0, 0]
 cc c23a1227ba7e820373b68ae5b136705f3b9e97787b5d474a19564c1d4d2861b8 # shrinks to ops = [(4, 0, 0, 26037374, 1)], outcomes = [2, 0], claim_first = true
+cc ba6d92fbb1ac411b1a7e0219d3b6026de5d0a401a35137e6c6d172ce5f75b337 # shrinks to raw = [(30, 0), (31, 0)], close = 1

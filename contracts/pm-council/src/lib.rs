@@ -15,9 +15,6 @@ use near_sdk::{
 };
 
 const MAX_SEATS: u32 = 1_000;
-// ponytail: 60 seconds so the sandbox tests can cross it. The real cooldown is chosen later and must be at
-// least as long as the longest dispute.
-const COOLDOWN_NS: u64 = 60_000_000_000;
 // Revenue per seat is kept in units of 1e-12 of a token unit, so splitting a small amount over many seats
 // loses less than one unit per seat over a trillion revenue events. The total ever received times this must
 // stay under u128::MAX: about 3.4e26 units, 3.4e20 tokens at 6 decimals.
@@ -44,8 +41,12 @@ pub struct Stake {
     owner: AccountId,
     staked_at: U64,
     unlock_requested_at: Option<U64>,
-    // The case this seat was drawn for. It cannot leave, or be drawn again, until the oracle releases that case.
+    // The case this seat was drawn for. It cannot leave, claim, or be drawn again, until the oracle releases that case.
     serving: Option<U64>,
+    // acc_per_seat when the seat was drawn. What it earns after that, while serving, is forfeited if the juror
+    // never votes (see unlock_case).
+    #[serde(skip)]
+    serving_since_acc: u128,
     // Where the token sits in `staked`, so unstaking does not scan the list.
     #[serde(skip)]
     index: u32,
@@ -68,6 +69,14 @@ pub struct PmCouncil {
     oracle: AccountId,
     nft_contract: AccountId,
     collateral: AccountId,
+    // How long a seat waits between asking to unstake and leaving. The council cannot see the oracle's settings, so
+    // whoever sets this must keep it at least as long as the oracle's challenge window plus panel deadline, and long
+    // enough that staking just before a sweep to catch its revenue, then leaving, is not worth the wait.
+    cooldown_ns: u64,
+    // The most seats one account can hold. It limits how much of the jury draw and the revenue share one buyer can
+    // gather in a single wallet, and nothing more: one person can still use many wallets. Lowering it does not
+    // remove seats an account already holds.
+    max_seats_per_account: u32,
     // Every staked token, in a stable order for the draw.
     staked: Vector<TokenId>,
     stakes: LookupMap<TokenId, Stake>,
@@ -76,7 +85,8 @@ pub struct PmCouncil {
     juries: LookupMap<u64, Vec<TokenId>>,
     // Revenue per staked seat since the start, times PRECISION.
     acc_per_seat: u128,
-    // Revenue that arrived while no seat was staked. The next revenue to arrive with seats staked carries it in.
+    // Revenue that arrived while no seat was staked, and revenue forfeited by jurors who never voted. The next revenue
+    // to arrive with seats staked carries it in.
     waiting: u128,
 }
 
@@ -115,13 +125,24 @@ fn pick(mut candidates: Vec<(TokenId, AccountId)>, seed: &[u8], case_key: u64, n
 #[near]
 impl PmCouncil {
     #[init]
-    pub fn new(owner_id: AccountId, oracle_id: AccountId, nft_contract: AccountId, collateral_token: AccountId) -> Self {
+    pub fn new(
+        owner_id: AccountId,
+        oracle_id: AccountId,
+        nft_contract: AccountId,
+        collateral_token: AccountId,
+        cooldown_ns: U64,
+        max_seats_per_account: u32,
+    ) -> Self {
+        require!(cooldown_ns.0 > 0, "the cooldown must be positive");
+        require!(max_seats_per_account > 0, "an account must be allowed at least one seat");
         Self {
             owner: owner_id,
             pending_owner: None,
             oracle: oracle_id,
             nft_contract,
             collateral: collateral_token,
+            cooldown_ns: cooldown_ns.0,
+            max_seats_per_account,
             staked: Vector::new(Key::Staked),
             stakes: LookupMap::new(Key::Stakes),
             seats_of: LookupMap::new(Key::SeatsOf),
@@ -146,6 +167,21 @@ impl PmCouncil {
         self.pending_owner = None;
     }
 
+    // Applies to every unstake from now on, including ones already requested, which wait out the new length.
+    pub fn set_cooldown_ns(&mut self, cooldown_ns: U64) {
+        require!(env::predecessor_account_id() == self.owner, "owner only");
+        require!(cooldown_ns.0 > 0, "the cooldown must be positive");
+        emit("cooldown_set", json!({ "cooldown_ns": cooldown_ns.0.to_string() }));
+        self.cooldown_ns = cooldown_ns.0;
+    }
+
+    pub fn set_max_seats_per_account(&mut self, max_seats_per_account: u32) {
+        require!(env::predecessor_account_id() == self.owner, "owner only");
+        require!(max_seats_per_account > 0, "an account must be allowed at least one seat");
+        emit("max_seats_per_account_set", json!({ "max_seats_per_account": max_seats_per_account }));
+        self.max_seats_per_account = max_seats_per_account;
+    }
+
     // Stakes are keyed by token id alone, so the collection can only change while nothing is staked.
     pub fn set_nft_contract(&mut self, nft_contract: AccountId) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
@@ -165,24 +201,38 @@ impl PmCouncil {
             .iter()
             .filter_map(|t| {
                 let s = &self.stakes[t];
-                (s.serving.is_none() && !exclude.contains(&s.owner)).then(|| (t.clone(), s.owner.clone()))
+                // A seat on its way out is not available to serve, so it cannot be drawn and then be stuck waiting.
+                (s.serving.is_none() && s.unlock_requested_at.is_none() && !exclude.contains(&s.owner))
+                    .then(|| (t.clone(), s.owner.clone()))
             })
             .collect();
         let jury = pick(candidates, &seed, case_key.0, n);
+        let acc = self.acc_per_seat;
         for (t, _) in &jury {
-            self.stakes.get_mut(t).unwrap().serving = Some(case_key);
+            let stake = self.stakes.get_mut(t).unwrap();
+            stake.serving = Some(case_key);
+            stake.serving_since_acc = acc;
         }
         self.juries.insert(case_key.0, jury.iter().map(|(t, _)| t.clone()).collect());
         jury.into_iter().map(|(_, a)| a).collect()
     }
 
-    // Called by the oracle once a case is final.
-    pub fn unlock_case(&mut self, case_key: U64) {
+    // Called by the oracle once a case is final, with the jurors who never voted. A juror on that list loses the
+    // revenue their seat earned while serving: it goes back into the pool for the next revenue to share among the
+    // seats. Claims are refused while a seat serves, so that revenue is still pending and cannot be dodged by
+    // claiming it first. A second call for the same case does nothing, so nobody is penalised twice.
+    pub fn unlock_case(&mut self, case_key: U64, delinquent: Vec<AccountId>) {
         require!(env::predecessor_account_id() == self.oracle, "oracle only");
+        let acc = self.acc_per_seat;
         for t in self.juries.remove(&case_key.0).unwrap_or_default() {
-            if let Some(s) = self.stakes.get_mut(&t) {
-                s.serving = None;
+            let Some(s) = self.stakes.get_mut(&t) else { continue };
+            if delinquent.contains(&s.owner) {
+                let forfeited = (acc - s.serving_since_acc) / PRECISION;
+                s.reward_debt += forfeited * PRECISION;
+                self.waiting += forfeited;
+                emit("revenue_forfeited", json!({ "token_id": t, "owner": s.owner, "amount": forfeited.to_string(), "case": case_key }));
             }
+            s.serving = None;
         }
     }
 
@@ -195,7 +245,7 @@ impl PmCouncil {
         let owner = stake.owner.clone();
         emit(
             "unstake_requested",
-            json!({ "token_id": token_id, "owner": owner, "unlock_at": (now + COOLDOWN_NS).to_string() }),
+            json!({ "token_id": token_id, "owner": owner, "unlock_at": (now + self.cooldown_ns).to_string() }),
         );
     }
 
@@ -204,7 +254,7 @@ impl PmCouncil {
         assert_one_yocto();
         let stake = self.callers_stake(&token_id).clone();
         let requested = stake.unlock_requested_at.unwrap_or_else(|| env::panic_str("request an unstake first"));
-        require!(env::block_timestamp() >= requested.0 + COOLDOWN_NS, "the cooldown has not passed");
+        require!(env::block_timestamp() >= requested.0 + self.cooldown_ns, "the cooldown has not passed");
         require!(stake.serving.is_none(), "this seat is serving on an open case");
         // Remove it before any transfer; restore it in a callback if one fails. What the seat earned is paid
         // first, so the NFT leaves carrying nothing.
@@ -268,6 +318,7 @@ impl PmCouncil {
         assert_one_yocto();
         let acc = self.acc_per_seat;
         let stake = self.callers_stake(&token_id);
+        require!(stake.serving.is_none(), "this seat is serving on an open case, claim after it is final");
         require!(stake.unlock_requested_at.is_none(), "an unstake is requested, and unstaking pays what the seat earned");
         let amount = (acc - stake.reward_debt) / PRECISION;
         require!(amount > 0, "nothing to claim");
@@ -325,6 +376,12 @@ impl PmCouncil {
         self.staked.len()
     }
 
+    // The seats still held for a case. Empty once the oracle has released it, so a settled dispute that still lists
+    // seats here is one whose unlock failed and needs retry_unlock.
+    pub fn jury_of(&self, case_key: U64) -> Vec<TokenId> {
+        self.juries.get(&case_key.0).cloned().unwrap_or_default()
+    }
+
     pub fn is_seat(&self, account_id: AccountId) -> bool {
         self.seats_of.contains_key(&account_id)
     }
@@ -344,7 +401,8 @@ impl PmCouncil {
 
     pub fn config(&self) -> near_sdk::serde_json::Value {
         json!({ "owner": self.owner, "pending_owner": self.pending_owner, "oracle": self.oracle, "nft_contract": self.nft_contract,
-                "collateral": self.collateral, "cooldown_ns": COOLDOWN_NS.to_string(),
+                "collateral": self.collateral, "cooldown_ns": self.cooldown_ns.to_string(),
+                "max_seats_per_account": self.max_seats_per_account,
                 "waiting_revenue": self.waiting.to_string() })
     }
 }
@@ -364,6 +422,8 @@ impl NonFungibleTokenReceiver for PmCouncil {
         require!(env::predecessor_account_id() == self.nft_contract, "wrong NFT contract");
         require!(!self.stakes.contains_key(&token_id), "already staked");
         require!(self.staked.len() < MAX_SEATS, "the council is full");
+        let held = self.seats_of.get(&previous_owner_id).copied().unwrap_or(0);
+        require!(held < self.max_seats_per_account, "that account already holds the most seats allowed");
         let now = U64(env::block_timestamp());
         emit("staked", json!({ "token_id": token_id, "owner": previous_owner_id }));
         let stake = Stake {
@@ -371,6 +431,7 @@ impl NonFungibleTokenReceiver for PmCouncil {
             staked_at: now,
             unlock_requested_at: None,
             serving: None,
+            serving_since_acc: 0,
             index: 0,
             reward_debt: self.acc_per_seat,
         };
@@ -435,6 +496,7 @@ mod tests {
     const ORACLE: &str = "oracle.near";
     const NFT: &str = "nft.near";
     const TOKEN: &str = "usd.near";
+    const COOLDOWN_NS: u64 = 60_000_000_000;
 
     fn acct(name: &str) -> AccountId {
         name.parse().unwrap()
@@ -458,7 +520,7 @@ mod tests {
             let _ = b.take_storage();
         });
         act_as(OWNER);
-        PmCouncil::new(acct(OWNER), acct(ORACLE), acct(NFT), acct(TOKEN))
+        PmCouncil::new(acct(OWNER), acct(ORACLE), acct(NFT), acct(TOKEN), U64(COOLDOWN_NS), MAX_SEATS)
     }
 
     fn revenue(c: &mut PmCouncil, amount: u128) {
@@ -586,10 +648,382 @@ mod tests {
         assert!(second.iter().all(|a| !first.contains(a)), "a serving seat is not drawn again");
         let serving = |c: &PmCouncil| (0..6).filter(|i| c.stake_of(i.to_string()).unwrap().serving.is_some()).count();
         assert_eq!(serving(&c), 6);
-        c.unlock_case(U64(7));
+        c.unlock_case(U64(7), vec![]);
         assert_eq!(serving(&c), 3);
-        c.unlock_case(U64(7));
+        c.unlock_case(U64(7), vec![]);
         assert_eq!(serving(&c), 3);
+    }
+
+    // Four seats, token "i" held by seat{i}.near. Each seat has earned 100 before a jury of three is drawn, and earns
+    // another 100 while it serves. Returns the token ids of the jury.
+    fn serving_case_with_revenue() -> (PmCouncil, Vec<String>) {
+        let mut c = council();
+        for i in 0..4 {
+            stake(&mut c, &i.to_string(), &format!("seat{i}.near"));
+        }
+        revenue(&mut c, 400);
+        act_as(ORACLE);
+        let jury = c.draw(U64(1), vec![3; 32], 3, vec![]);
+        let tokens: Vec<String> = jury.iter().map(|a| a.as_str().trim_start_matches("seat").trim_end_matches(".near").to_string()).collect();
+        revenue(&mut c, 400);
+        (c, tokens)
+    }
+
+    fn unlock(c: &mut PmCouncil, delinquent: Vec<AccountId>) {
+        act_as(ORACLE);
+        c.unlock_case(U64(1), delinquent);
+    }
+
+    #[test]
+    fn a_juror_who_never_voted_forfeits_what_the_seat_earned_while_serving_and_keeps_the_rest() {
+        let (mut c, jury) = serving_case_with_revenue();
+        let silent = &jury[0];
+        assert_eq!(pending(&c, silent), 200);
+        unlock(&mut c, vec![acct(&format!("seat{silent}.near"))]);
+        assert_eq!(pending(&c, silent), 100, "the 100 earned before the draw stays, the 100 earned while serving is gone");
+        for t in &jury[1..] {
+            assert_eq!(pending(&c, t), 200, "a juror who voted keeps everything");
+        }
+        assert_eq!(c.waiting, 100);
+
+        // The forfeit is shared with the next revenue: 100 waiting plus 400 new is 125 for each of the four seats.
+        revenue(&mut c, 400);
+        assert_eq!(c.waiting, 0);
+        assert_eq!(pending(&c, silent), 225);
+        let total: u128 = (0..4).map(|i| pending(&c, &i.to_string())).sum();
+        assert_eq!(total, 1_200, "every token received is still owed to a seat: nothing created or lost");
+    }
+
+    // ---- attacks: economics -------------------------------------------------------------------------
+
+    // Revenue goes to the seats staked at the moment a sweep lands, and a sweep can be called by anyone. So a buyer who
+    // stakes many NFTs just before a sweep takes a share of everything gathered since the last one, then leaves after
+    // the cooldown. This test pins down how much, so that a fix (earning only after a minimum time staked, or sweeping
+    // so often that the bucket is small) shows up as a change here.
+    #[test]
+    fn staking_just_before_a_sweep_captures_a_share_of_everything_gathered_since_the_last_one() {
+        let mut c = council();
+        for i in 0..5 {
+            stake(&mut c, &format!("honest{i}"), &format!("honest{i}.near"));
+        }
+        // A month of fees has gathered. Ten NFTs are staked a moment before the sweep lands.
+        for i in 0..10 {
+            stake(&mut c, &format!("sniper{i}"), "sniper.near");
+        }
+        revenue(&mut c, 3_000_000);
+        let sniper: u128 = (0..10).map(|i| pending(&c, &format!("sniper{i}"))).sum();
+        let honest: u128 = (0..5).map(|i| pending(&c, &format!("honest{i}"))).sum();
+        assert_eq!(sniper + honest, 3_000_000);
+        assert_eq!(sniper, 2_000_000, "ten seats staked for the length of one block took two thirds of the month's revenue");
+
+        // The cooldown is the only thing that costs them: they must wait it out before the NFTs are theirs again, and
+        // unstaking pays out what the seats earned.
+        let mut t = 1;
+        let mut taken = 0;
+        for i in 0..10 {
+            taken += leave(&mut c, &format!("sniper{i}"), "sniper.near", &mut t);
+        }
+        assert_eq!(taken, 2_000_000);
+    }
+
+    // The jury is drawn per seat, so the chance that an attacker controls a majority of it depends on the share of seats
+    // they hold and on how many jurors there are. Measured by drawing 150 juries from a council of 1,000 honest seats plus
+    // the attacker's, held 10 to a wallet (the most one account may hold). Smaller than the real odds are precise, but
+    // the shape is what matters: a bigger jury makes capture far harder than a bigger council does.
+    #[test]
+    fn the_chance_an_attacker_controls_a_jury_by_how_many_seats_they_hold() {
+        const TRIALS: u32 = 150;
+        let honest_seats = 1_000u32;
+        let mut report = String::from("\nchance an attacker holds a majority of the jury, 150 draws, 10 seats per attacker wallet\n  attacker seats | jury of 3 | jury of 11 | jury of 21\n");
+        let mut previous = [0.0f64; 3];
+        for attacker_seats in [0u32, 100, 300, 500] {
+            let total = honest_seats + attacker_seats;
+            let candidates: Vec<(TokenId, AccountId)> = (0..total)
+                .map(|i| {
+                    if i < honest_seats {
+                        (format!("h{i}"), acct(&format!("honest{i}.near")))
+                    } else {
+                        (format!("a{i}"), acct(&format!("attacker{}.near", (i - honest_seats) / 10)))
+                    }
+                })
+                .collect();
+            let mut rows = [0.0f64; 3];
+            for (column, jury_size) in [3u32, 11, 21].into_iter().enumerate() {
+                let mut captured = 0u32;
+                for trial in 0..TRIALS {
+                    // The mock chain meters gas over a whole test, so start each draw with a fresh allowance.
+                    act_as(OWNER);
+                    let seed = env::sha256(trial.to_le_bytes());
+                    let jury = pick(candidates.clone(), &seed, trial as u64, jury_size);
+                    let attackers = jury.iter().filter(|(_, a)| a.as_str().starts_with("attacker")).count() as u32;
+                    if attackers > jury_size / 2 {
+                        captured += 1;
+                    }
+                }
+                rows[column] = captured as f64 / TRIALS as f64;
+            }
+            report.push_str(&format!(
+                "  {attacker_seats:>6} ({:>4.1}%) | {:>8.2}% | {:>9.2}% | {:>9.2}%\n",
+                attacker_seats as f64 * 100.0 / total as f64, rows[0] * 100.0, rows[1] * 100.0, rows[2] * 100.0
+            ));
+            for column in 0..3 {
+                assert!(rows[column] + 0.06 >= previous[column], "more seats should not make capture less likely");
+            }
+            previous = rows;
+            if attacker_seats == 0 {
+                assert!(rows.iter().all(|r| *r == 0.0), "an attacker with no seats never sits on a jury");
+            }
+            if attacker_seats == 100 {
+                assert!(rows[2] < 0.01, "9% of the seats captured {:.2}% of juries of 21", rows[2] * 100.0);
+            }
+            if attacker_seats == 500 {
+                assert!(rows[2] < rows[0], "a jury of 21 is harder to capture than a jury of 3: {rows:?}");
+            }
+        }
+        println!("{report}");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(60))]
+
+        // Money received as revenue is always either owed to a seat, waiting in the pool, or already claimed, whatever
+        // order stakes, revenue, jury draws, forfeits and claims come in. Nothing is created and nothing is lost beyond
+        // a unit of rounding dust per seat.
+        #[test]
+        fn revenue_is_never_created_or_lost_through_draws_forfeits_and_claims(
+            ops in prop::collection::vec((0u8..5, 0u32..16, 1u128..5_000_000), 1..70),
+        ) {
+            let mut c = council();
+            let (mut total_in, mut claimed, mut tokens, mut next_case) = (0u128, 0u128, 0u32, 0u64);
+            let mut open_cases: Vec<(u64, Vec<AccountId>)> = vec![];
+            for (op, pick, amount) in ops {
+                match op {
+                    0 => {
+                        stake(&mut c, &tokens.to_string(), &format!("o{}.near", pick % 6));
+                        tokens += 1;
+                    }
+                    1 => {
+                        revenue(&mut c, amount);
+                        total_in += amount;
+                    }
+                    2 => {
+                        act_as(ORACLE);
+                        let n = 1 + pick % 3;
+                        let seed = vec![pick as u8; 32];
+                        let case = next_case;
+                        if let Ok(jury) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.draw(U64(case), seed, n, vec![]))) {
+                            open_cases.push((case, jury));
+                            next_case += 1;
+                        }
+                    }
+                    3 if !open_cases.is_empty() => {
+                        let (case, jury) = open_cases.remove(pick as usize % open_cases.len());
+                        let delinquent: Vec<AccountId> = jury.iter().enumerate().filter(|(i, _)| (pick >> i) & 1 == 1).map(|(_, a)| a.clone()).collect();
+                        act_as(ORACLE);
+                        c.unlock_case(U64(case), delinquent);
+                    }
+                    4 if tokens > 0 => {
+                        let token = (pick % tokens).to_string();
+                        let stake = c.stake_of(token.clone()).unwrap();
+                        if stake.serving.is_none() && pending(&c, &token) > 0 {
+                            claimed += claim(&mut c, &token, stake.owner.as_str());
+                        }
+                    }
+                    _ => {}
+                }
+                let owed: u128 = (0..tokens).map(|t| pending(&c, &t.to_string())).sum();
+                let accounted = owed + c.waiting + claimed;
+                prop_assert!(accounted <= total_in, "more is owed than was ever received: {} against {}", accounted, total_in);
+                prop_assert!(total_in - accounted <= tokens as u128 + 1, "revenue was lost: {} of {} unaccounted", total_in - accounted, total_in);
+            }
+        }
+    }
+
+    #[test]
+    fn jury_of_lists_a_cases_seats_until_it_is_released() {
+        let (mut c, jury) = serving_case_with_revenue();
+        let mut listed = c.jury_of(U64(1));
+        listed.sort();
+        let mut expected = jury.clone();
+        expected.sort();
+        assert_eq!(listed, expected);
+        assert!(c.jury_of(U64(2)).is_empty(), "no such case");
+        unlock(&mut c, vec![]);
+        assert!(c.jury_of(U64(1)).is_empty());
+    }
+
+    #[test]
+    fn nothing_is_forfeited_when_every_juror_voted() {
+        let (mut c, jury) = serving_case_with_revenue();
+        unlock(&mut c, vec![]);
+        for t in &jury {
+            assert_eq!(pending(&c, t), 200);
+        }
+        assert_eq!(c.waiting, 0);
+    }
+
+    #[test]
+    fn a_second_unlock_does_not_penalise_anyone_twice() {
+        let (mut c, jury) = serving_case_with_revenue();
+        let silent = vec![acct(&format!("seat{}.near", jury[0]))];
+        unlock(&mut c, silent.clone());
+        unlock(&mut c, silent);
+        assert_eq!((pending(&c, &jury[0]), c.waiting), (100, 100));
+    }
+
+    #[test]
+    fn naming_an_account_that_was_not_on_the_jury_changes_nothing() {
+        let (mut c, jury) = serving_case_with_revenue();
+        let outsider = (0..4).map(|i| i.to_string()).find(|t| !jury.contains(t)).unwrap();
+        unlock(&mut c, vec![acct(&format!("seat{outsider}.near"))]);
+        assert_eq!(pending(&c, &outsider), 200);
+        assert_eq!(c.waiting, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "this seat is serving on an open case, claim after it is final")]
+    fn a_serving_seat_cannot_claim_so_it_cannot_dodge_the_forfeit() {
+        let (mut c, jury) = serving_case_with_revenue();
+        claim(&mut c, &jury[0], &format!("seat{}.near", jury[0]));
+    }
+
+    #[test]
+    fn a_seat_claims_again_once_its_case_is_released() {
+        let (mut c, jury) = serving_case_with_revenue();
+        unlock(&mut c, vec![]);
+        assert_eq!(claim(&mut c, &jury[0], &format!("seat{}.near", jury[0])), 200);
+    }
+
+    #[test]
+    #[should_panic(expected = "that account already holds the most seats allowed")]
+    fn an_account_cannot_stake_past_its_cap() {
+        let mut c = council();
+        act_as(OWNER);
+        c.set_max_seats_per_account(2);
+        stake(&mut c, "t1", "a.near");
+        stake(&mut c, "t2", "a.near");
+        stake(&mut c, "t3", "a.near");
+    }
+
+    #[test]
+    fn the_cap_is_per_account_and_frees_up_when_a_seat_leaves() {
+        let mut c = council();
+        act_as(OWNER);
+        c.set_max_seats_per_account(1);
+        stake(&mut c, "t1", "a.near");
+        stake(&mut c, "t2", "b.near");
+        assert_eq!(c.seat_count(), 2, "a second account is not held back by the first");
+
+        let mut t = 1;
+        let _ = leave(&mut c, "t1", "a.near", &mut t);
+        stake(&mut c, "t3", "a.near");
+        assert!(c.is_seat(acct("a.near")));
+    }
+
+    #[test]
+    fn lowering_the_cap_does_not_remove_seats_already_held() {
+        let mut c = council();
+        for i in 0..3 {
+            stake(&mut c, &i.to_string(), "a.near");
+        }
+        act_as(OWNER);
+        c.set_max_seats_per_account(1);
+        assert_eq!(c.seat_count(), 3);
+        assert_eq!(c.config()["max_seats_per_account"], 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn a_stranger_cannot_change_the_cap() {
+        let mut c = council();
+        act_as("a.near");
+        c.set_max_seats_per_account(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "an account must be allowed at least one seat")]
+    fn a_cap_of_zero_is_refused() {
+        let mut c = council();
+        act_as(OWNER);
+        c.set_max_seats_per_account(0);
+    }
+
+    #[test]
+    fn a_seat_that_asked_to_unstake_is_never_drawn() {
+        let mut c = council();
+        for i in 0..4 {
+            stake(&mut c, &i.to_string(), &format!("seat{i}.near"));
+        }
+        act_at("seat0.near", 1);
+        c.request_unstake("0".into());
+        // Three of the four seats are drawn each time, so one draw could miss the seat by luck. Twenty cannot.
+        act_as(ORACLE);
+        for case in 0..20u64 {
+            let jury = c.draw(U64(case), vec![case as u8; 32], 3, vec![]);
+            assert!(!jury.contains(&acct("seat0.near")), "the seat on its way out is left out of case {case}");
+            assert_eq!(jury.len(), 3);
+            c.unlock_case(U64(case), vec![]);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "not enough seat holders to draw a jury: 3 eligible, 4 needed")]
+    fn a_seat_on_its_way_out_does_not_count_towards_a_full_jury() {
+        let mut c = council();
+        for i in 0..4 {
+            stake(&mut c, &i.to_string(), &format!("seat{i}.near"));
+        }
+        act_at("seat0.near", 1);
+        c.request_unstake("0".into());
+        act_as(ORACLE);
+        c.draw(U64(1), vec![1; 32], 4, vec![]);
+    }
+
+    #[test]
+    #[should_panic(expected = "the cooldown has not passed")]
+    fn an_unstake_waits_the_full_cooldown() {
+        let mut c = council();
+        stake(&mut c, "t1", "a.near");
+        act_at("a.near", 1);
+        c.request_unstake("t1".into());
+        act_at("a.near", 1 + COOLDOWN_NS - 1);
+        let _ = c.unstake("t1".into());
+    }
+
+    #[test]
+    fn the_owner_changes_the_cooldown_and_it_applies_to_a_request_already_made() {
+        let mut c = council();
+        stake(&mut c, "t1", "a.near");
+        act_at("a.near", 1);
+        c.request_unstake("t1".into());
+        act_as(OWNER);
+        c.set_cooldown_ns(U64(3 * COOLDOWN_NS));
+        assert_eq!(c.config()["cooldown_ns"], (3 * COOLDOWN_NS).to_string());
+        // The old length no longer frees the seat, the new one does.
+        act_at("a.near", 1 + COOLDOWN_NS);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = c.unstake("t1".into());
+        }))
+        .is_err());
+        act_at("a.near", 1 + 3 * COOLDOWN_NS);
+        let _ = c.unstake("t1".into());
+        assert_eq!(c.seat_count(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "owner only")]
+    fn a_stranger_cannot_change_the_cooldown() {
+        let mut c = council();
+        act_as("a.near");
+        c.set_cooldown_ns(U64(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "the cooldown must be positive")]
+    fn a_zero_cooldown_is_refused() {
+        let mut c = council();
+        act_as(OWNER);
+        c.set_cooldown_ns(U64(0));
     }
 
     #[test]

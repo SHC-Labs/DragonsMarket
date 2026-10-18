@@ -13,6 +13,12 @@ pub const PANEL_MS: u64 = 120_000;
 pub const SEED: u128 = 100 * USD;
 pub const JURY: u32 = 3;
 pub const DRAW_DELAY_BLOCKS: u64 = 2;
+// With the 60s window, 120s panel and the oracle's 30s apply buffer, a market needs 270s between close and resolve_by.
+pub const MIN_PROPOSAL_MS: u64 = 60_000;
+pub const MIN_RESOLVE_GAP_SECS: u64 = 270;
+pub const NETWORK: &str = "sandbox";
+pub const PRICE_THRESHOLD: u32 = 2;
+pub const MAX_SEATS_PER_ACCOUNT: u32 = 10;
 pub const COOLDOWN_SECS: u64 = 60;
 pub const CREATE_FEE: u128 = USD;
 
@@ -34,7 +40,7 @@ pub struct World {
     pub jurors: Vec<Account>,
 }
 
-fn wasm(name: &str) -> Vec<u8> {
+pub fn wasm(name: &str) -> Vec<u8> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../target/near/{0}/{0}.wasm", name));
     std::fs::read(&p).unwrap_or_else(|e| panic!("run contracts/build.sh first ({p:?}): {e}"))
 }
@@ -95,7 +101,10 @@ async fn build(
     nft.call("new").args_json(json!({ "owner_id": owner.id() })).transact().await?.into_result()?;
     council
         .call("new")
-        .args_json(json!({ "owner_id": owner_id, "oracle_id": oracle.id(), "nft_contract": nft.id(), "collateral_token": ft.id() }))
+        .args_json(json!({
+            "owner_id": owner_id, "oracle_id": oracle.id(), "nft_contract": nft.id(), "collateral_token": ft.id(),
+            "cooldown_ns": (COOLDOWN_SECS * 1_000_000_000).to_string(), "max_seats_per_account": MAX_SEATS_PER_ACCOUNT
+        }))
         .transact()
         .await?
         .into_result()?;
@@ -104,7 +113,9 @@ async fn build(
         .args_json(json!({
             "owner_id": owner_id, "market_contract": market.id(), "bond_token": ft.id(),
             "bond": BOND.to_string(), "window_ms": window_ms.to_string(), "panel_deadline_ms": panel_ms.to_string(),
-            "council": council.id(), "jury_size": JURY, "draw_delay_blocks": draw_delay_blocks.to_string()
+            "council": council.id(), "jury_size": JURY, "draw_delay_blocks": draw_delay_blocks.to_string(),
+            "min_proposal_ms": MIN_PROPOSAL_MS.to_string(), "operator_id": owner.id(), "network": NETWORK,
+            "price_threshold": PRICE_THRESHOLD
         }))
         .transact()
         .await?
@@ -481,6 +492,7 @@ pub async fn register_ft(w: &World, who: &AccountId) -> anyhow::Result<()> {
 
 pub const VOTING_SECS: u64 = 600;
 pub const TIMELOCK_SECS: u64 = 120;
+pub const EXECUTION_WINDOW_SECS: u64 = 600;
 pub const THRESHOLD: u32 = 3;
 
 pub struct Governance {
@@ -500,7 +512,8 @@ pub async fn deploy_governance(worker: &Worker<Sandbox>) -> anyhow::Result<Gover
         .args_json(json!({
             "members": members.iter().map(|m| m.id()).collect::<Vec<_>>(), "threshold": THRESHOLD,
             "voting_period_ns": (VOTING_SECS * 1_000_000_000).to_string(),
-            "timelock_ns": (TIMELOCK_SECS * 1_000_000_000).to_string()
+            "timelock_ns": (TIMELOCK_SECS * 1_000_000_000).to_string(),
+            "execution_window_ns": (EXECUTION_WINDOW_SECS * 1_000_000_000).to_string()
         }))
         .transact()
         .await?
@@ -568,4 +581,35 @@ pub async fn gov_proposal(g: &Governance, id: u64) -> serde_json::Value {
 
 pub async fn config(c: &Contract) -> serde_json::Value {
     c.view("config").await.unwrap().json().unwrap()
+}
+
+// borsh of a String: a u32 length, then the bytes.
+pub fn borsh_string(s: &str) -> Vec<u8> {
+    let mut v = (s.len() as u32).to_le_bytes().to_vec();
+    v.extend_from_slice(s.as_bytes());
+    v
+}
+
+// Puts a seat back in the state a failed unlock_case would have left it in: marked as serving `case`, and the case's
+// jury list still holding it. Storage keys are the enum prefix (Stakes = 1, Juries = 3) then the borsh key.
+pub async fn relock_seat(w: &World, token_id: &str, case: u64) -> anyhow::Result<()> {
+    let state = w.worker.view_state(w.council.id()).await?;
+    let stake_key = [vec![1u8], borsh_string(token_id)].concat();
+    let old = state.get(&stake_key).expect("the staked seat is stored under the key this test expects").clone();
+    // Stake = owner: String, staked_at: u64, unlock_requested_at: Option<u64>, serving: Option<u64>, index: u32, reward_debt: u128
+    let owner_len = u32::from_le_bytes(old[..4].try_into()?) as usize;
+    let mut at = 4 + owner_len + 8;
+    let mut new = old[..at].to_vec();
+    assert_eq!(old[at], 0, "the seat has not asked to unstake");
+    new.push(0);
+    at += 1;
+    assert_eq!(old[at], 0, "the first unlock freed the seat");
+    new.push(1);
+    new.extend_from_slice(&case.to_le_bytes());
+    new.extend_from_slice(&old[at + 1..]);
+    w.worker.patch_state(w.council.id(), &stake_key, &new).await?;
+    let jury_key = [vec![3u8], case.to_le_bytes().to_vec()].concat();
+    let jury = [1u32.to_le_bytes().to_vec(), borsh_string(token_id)].concat();
+    w.worker.patch_state(w.council.id(), &jury_key, &jury).await?;
+    Ok(())
 }

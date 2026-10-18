@@ -79,6 +79,107 @@ async fn governance_changes_the_councils_nft_contract_once_nothing_is_staked() -
 }
 
 #[tokio::test]
+async fn governance_changes_the_councils_unstake_cooldown_and_an_unstake_waits_the_new_length() -> anyhow::Result<()> {
+    let (w, g) = setup_governed().await?;
+    let longer = 10 * COOLDOWN_SECS * 1_000_000_000;
+    refused(
+        w.owner.call(w.council.id(), "set_cooldown_ns").args_json(json!({ "cooldown_ns": longer.to_string() })).transact().await?.into_result(),
+        "owner only",
+    );
+
+    let id = gov_pass(&g, function_call(w.council.id(), "set_cooldown_ns", json!({ "cooldown_ns": longer.to_string() }), 20)).await?;
+    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
+    assert_eq!(event_names(&gov_execute(&g, &w.carol, id).await?), vec!["call_sent", "cooldown_set", "executed"]);
+    assert_eq!(config(&w.council).await["cooldown_ns"], longer.to_string());
+
+    // The old 60s no longer frees a seat.
+    let seat = w.jurors[0].id().to_string();
+    request_unstake(&w, &w.jurors[0], &seat).await?;
+    skip_secs(&w.worker, COOLDOWN_SECS + 1).await;
+    refused(unstake(&w, &w.jurors[0], &seat).await, "the cooldown has not passed");
+    Ok(())
+}
+
+// An approval does not stay armed for ever: anyone can execute, so an old one could otherwise be fired months later.
+#[tokio::test]
+async fn an_approved_change_nobody_executed_in_time_can_no_longer_be_executed() -> anyhow::Result<()> {
+    let (w, g) = setup_governed().await?;
+    let id = gov_pass(&g, function_call(w.oracle.id(), "set_jury_size", json!({ "jury_size": 5 }), 20)).await?;
+    skip_secs(&w.worker, TIMELOCK_SECS + EXECUTION_WINDOW_SECS + 30).await;
+    assert_eq!(gov_proposal(&g, id).await["stage"], "expired");
+    refused(gov_execute(&g, &w.carol, id).await, "the execution window has passed");
+    assert_eq!(config(&w.oracle).await["jury_size"], JURY, "the old approval changed nothing");
+
+    // A fresh proposal inside its window still executes.
+    let fresh = gov_pass(&g, function_call(w.oracle.id(), "set_jury_size", json!({ "jury_size": 5 }), 20)).await?;
+    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
+    gov_execute(&g, &w.carol, fresh).await?;
+    assert_eq!(config(&w.oracle).await["jury_size"], 5);
+    Ok(())
+}
+
+// Governance can change the fees, but never above the ceilings written in the contract: a vote that tries is
+// recorded as failed and changes nothing.
+#[tokio::test]
+async fn governance_changes_the_trade_fee_but_not_above_the_ceiling() -> anyhow::Result<()> {
+    let (w, g) = setup_governed().await?;
+    refused(w.owner.call(w.market.id(), "set_fee_rate_bps").args_json(json!({ "fee_rate_bps": 100 })).transact().await?.into_result(), "owner only");
+    let id = create_seeded_market(&w, 3_000).await?;
+    let (_, fee_at_200) = quote_buy(&w, id, "yes", 10 * USD).await;
+
+    let too_high = gov_pass(&g, function_call(w.market.id(), "set_fee_rate_bps", json!({ "fee_rate_bps": 501 }), 20)).await?;
+    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
+    assert_eq!(event_names(&gov_execute(&g, &w.carol, too_high).await?), vec!["call_sent", "execution_failed"]);
+    assert_eq!(config(&w.market).await["fee_rate_bps"], 200);
+    assert_eq!(gov_proposal(&g, too_high).await["stage"], "execution_failed");
+
+    let doubled = gov_pass(&g, function_call(w.market.id(), "set_fee_rate_bps", json!({ "fee_rate_bps": 400 }), 20)).await?;
+    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
+    assert_eq!(event_names(&gov_execute(&g, &w.carol, doubled).await?), vec!["call_sent", "fee_rate_set", "executed"]);
+    assert_eq!(config(&w.market).await["fee_rate_bps"], 400);
+    let (_, fee_at_400) = quote_buy(&w, id, "yes", 10 * USD).await;
+    assert!(fee_at_400 > fee_at_200 * 19 / 10 && fee_at_400 < fee_at_200 * 21 / 10, "twice the rate, about twice the fee: {fee_at_200} then {fee_at_400}");
+
+    // And the trade is charged what was quoted.
+    let before = fees(&w).await.0;
+    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    assert_eq!(fees(&w).await.0 - before, fee_at_400);
+    Ok(())
+}
+
+// The timelock lets everyone see a change coming. Members can use it: enough of them cancel an approved change
+// before it takes effect, and it never does.
+#[tokio::test]
+async fn members_cancel_an_approved_change_during_its_timelock_and_it_never_takes_effect() -> anyhow::Result<()> {
+    let (w, g) = setup_governed().await?;
+    let id = gov_pass(&g, function_call(w.oracle.id(), "set_jury_size", json!({ "jury_size": 5 }), 20)).await?;
+    let cancel = |m: &near_workspaces::Account| m.call(g.contract.id(), "cancel").args_json(json!({ "proposal_id": id.to_string() })).transact();
+
+    refused(cancel(&w.alice).await?.into_result(), "members only");
+    cancel(&g.members[3]).await?.into_result()?;
+    cancel(&g.members[4]).await?.into_result()?;
+    assert_eq!(gov_proposal(&g, id).await["stage"], "approved", "two of the three that are needed");
+    refused(cancel(&g.members[3]).await?.into_result(), "already voted to cancel");
+    cancel(&g.members[0]).await?.into_result()?;
+    assert_eq!(gov_proposal(&g, id).await["stage"], "cancelled");
+
+    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
+    refused(gov_execute(&g, &w.carol, id).await, "this proposal was cancelled");
+    assert_eq!(config(&w.oracle).await["jury_size"], JURY);
+    refused(
+        g.members[1].call(g.contract.id(), "vote").args_json(json!({ "proposal_id": id.to_string(), "approve": true })).transact().await?.into_result(),
+        "this proposal was cancelled",
+    );
+
+    // Other changes are untouched.
+    let other = gov_pass(&g, function_call(w.oracle.id(), "set_jury_size", json!({ "jury_size": 7 }), 20)).await?;
+    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
+    gov_execute(&g, &w.carol, other).await?;
+    assert_eq!(config(&w.oracle).await["jury_size"], 7);
+    Ok(())
+}
+
+#[tokio::test]
 async fn governance_changes_the_oracles_jury_size() -> anyhow::Result<()> {
     let (w, g) = setup_governed().await?;
     refused(
@@ -132,10 +233,14 @@ async fn ownership_moves_to_governance_only_when_it_accepts_and_the_old_key_is_l
         // set_paused is not here: it is now an operator-or-owner method, and the old owner key is still the
         // market's operator by default, so it keeps that narrower access on purpose. set_operator is owner only.
         (&w.market, "set_operator", json!({ "operator_id": w.alice.id() })),
+        (&w.market, "set_fee_rate_bps", json!({ "fee_rate_bps": 1 })),
+        (&w.market, "set_create_fee", json!({ "create_fee": "1" })),
         (&w.market, "propose_owner", json!({ "new_owner": w.owner.id() })),
         (&w.oracle, "set_jury_size", json!({ "jury_size": 7 })),
         (&w.oracle, "propose_owner", json!({ "new_owner": w.owner.id() })),
         (&w.council, "set_nft_contract", json!({ "nft_contract": w.owner.id() })),
+        (&w.council, "set_cooldown_ns", json!({ "cooldown_ns": "1" })),
+        (&w.council, "set_max_seats_per_account", json!({ "max_seats_per_account": 1 })),
         (&w.council, "propose_owner", json!({ "new_owner": w.owner.id() })),
     ];
     for (c, method, args) in calls {

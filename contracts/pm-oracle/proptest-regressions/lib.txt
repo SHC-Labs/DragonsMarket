@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3092e30387d064da85b0632f405044e8958dffe67630687813728e92b355102a # shrinks to bond = 5676268, jury_size = 3, behaviour = [(0, 0, false), (2, 2, false), (2, 2, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false)], proposed = 0, after_deadline = false
+cc ae7889731b5cb9d7f3ee783558c609374504183d428070f5854cbbc63d306dd9 # shrinks to bond = 1, jury_size = 3, behaviour = [(0, 0, false), (0, 0, false), (2, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false), (0, 0, false)], proposed = 0, after_deadline = true

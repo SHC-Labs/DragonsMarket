@@ -153,10 +153,14 @@ async fn unchallenged_answer_becomes_final_and_pays_out_with_no_deadline() -> an
     assert_eq!(r.json::<String>()?, "0", "bob held No and lost");
     assert!(invariant(&w, id).await);
 
-    // The owner takes the pool's leftover. Everything owed to users stays reserved.
+    // The pool's leftover goes to the business wallet, not the owner. Everything owed to users stays reserved.
+    let leftover = u(&market_json(&w, id).await["locked"]);
+    assert!(leftover > 0);
     w.owner.call(w.market.id(), "claim_residual").args_json(json!({ "market_id": id.to_string() })).transact().await?.into_result()?;
     assert!(invariant(&w, id).await);
     assert_eq!(market_json(&w, id).await["locked"], "0");
+    assert_eq!(market_balance(&w, w.business.id()).await, leftover);
+    assert_eq!(market_balance(&w, w.owner.id()).await, 0);
 
     // Carol's bond comes back.
     assert_eq!(claimable(&w, w.carol.id()).await, BOND);
@@ -204,9 +208,12 @@ async fn a_challenge_goes_to_the_panel_and_the_majority_decides() -> anyhow::Res
     assert_eq!(case["applied"], true);
     assert_eq!(market_json(&w, id).await["outcome"], "no");
 
-    // The challenger was right and takes both bonds. The proposer loses theirs.
-    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND);
+    // The challenger was right. The proposer loses their bond: a quarter is split between the two jurors who revealed
+    // with the majority, and the challenger takes their own bond back and the rest.
+    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND - BOND / 4);
     assert_eq!(claimable(&w, w.carol.id()).await, 0);
+    assert_eq!((claimable(&w, jury[0].id()).await, claimable(&w, jury[1].id()).await), (BOND / 8, BOND / 8));
+    assert_eq!(claimable(&w, jury[2].id()).await, 0);
 
     let (_, bob_no) = shares(&w, id, w.bob.id()).await;
     w.bob.call(w.market.id(), "redeem").args_json(json!({ "market_id": id.to_string() })).transact().await?.into_result()?;
@@ -244,11 +251,69 @@ async fn a_dispute_the_panel_does_not_settle_resolves_void_and_returns_both_bond
     assert_eq!(claimable(&w, w.carol.id()).await, BOND);
     assert_eq!(claimable(&w, w.dave.id()).await, BOND);
 
-    // Void: every share is worth half a dollar, and the invariant covers it.
+    // Void: each share is paid at the market's closing price, a Yes share at the Yes price and a No share at the rest,
+    // and the invariant covers it.
+    let price = u(&market_json(&w, id).await["void_price_yes"]);
+    assert!(price > 0 && price < 1_000_000, "a price the market actually traded at: {price}");
     w.alice.call(w.market.id(), "redeem").args_json(json!({ "market_id": id.to_string() })).transact().await?.into_result()?;
     w.bob.call(w.market.id(), "redeem").args_json(json!({ "market_id": id.to_string() })).transact().await?.into_result()?;
-    assert_eq!(market_balance(&w, w.alice.id()).await, ay / 2);
-    assert_eq!(market_balance(&w, w.bob.id()).await, bn / 2);
+    assert_eq!(market_balance(&w, w.alice.id()).await, ay * price / 1_000_000);
+    assert_eq!(market_balance(&w, w.bob.id()).await, bn * (1_000_000 - price) / 1_000_000);
     assert!(invariant(&w, id).await);
+    Ok(())
+}
+
+// A market opened at 25% Yes. The seeder keeps the No shares the No pool does not hold, and everything still balances
+// through trading, resolution and redemption.
+#[tokio::test]
+async fn a_market_seeded_at_a_chosen_price_opens_there_and_settles_cleanly() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let t = now(&w.worker).await;
+    let close_at = t + 120 * 1_000_000_000;
+    let id: String = w
+        .owner
+        .call(w.market.id(), "create_market")
+        .args_json(json!({
+            "title": "Will it happen?", "rule_text": "Resolves Yes if it does.", "resolution_source": "https://example.com",
+            "void_policy": "Void if cancelled.", "category": "world", "subcategory": "science",
+            "close_at": close_at.to_string(), "resolve_by": (close_at + 3_600_000_000_000u64).to_string()
+        }))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?
+        .into_result()?
+        .json()?;
+    let id: u64 = id.parse()?;
+
+    // Outside 1% to 99% the seed is refused and the money comes back.
+    let before = ft_balance(&w, w.owner.id()).await;
+    ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{id}:5000")).await?;
+    assert_eq!(ft_balance(&w, w.owner.id()).await, before);
+    assert_eq!(u(&market_json(&w, id).await["locked"]), 0);
+
+    ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{id}:250000")).await?;
+    let price = u(&market_json(&w, id).await["price_yes"]);
+    assert!((249_999..=250_000).contains(&price), "{price}");
+    let (_, owner_no) = shares(&w, id, w.owner.id()).await;
+    assert!(owner_no > 0, "the seeder holds the No shares the pool does not");
+    assert!(invariant(&w, id).await);
+
+    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    buy(&w, &w.bob, id, "no", 10 * USD).await?;
+    assert!(invariant(&w, id).await);
+
+    skip_secs(&w.worker, 130).await;
+    propose(&w, &w.carol, id, "no").await?;
+    skip_secs(&w.worker, 70).await;
+    finalize(&w, id).await?;
+    assert_eq!(market_json(&w, id).await["outcome"], "no");
+    for who in [&w.owner, &w.bob] {
+        who.call(w.market.id(), "redeem").args_json(json!({ "market_id": id.to_string() })).transact().await?.into_result()?;
+    }
+    w.alice.call(w.market.id(), "redeem").args_json(json!({ "market_id": id.to_string() })).transact().await?.into_result()?;
+    w.owner.call(w.market.id(), "claim_residual").args_json(json!({ "market_id": id.to_string() })).transact().await?.into_result()?;
+    assert!(invariant(&w, id).await);
+    assert_eq!(market_json(&w, id).await["locked"], "0", "nothing stranded");
+    assert!(market_balance(&w, w.owner.id()).await >= owner_no, "the seeder redeemed its No shares at one unit each");
     Ok(())
 }

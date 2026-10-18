@@ -37,9 +37,9 @@ pub enum Action {
     SetThreshold { threshold: u32 },
     SetVotingPeriod { voting_period_ns: U64 },
     SetTimelock { timelock_ns: U64 },
+    SetExecutionWindow { execution_window_ns: U64 },
 }
 
-// Expired is never stored: an Open proposal whose vote ended without approval reads as Expired.
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +51,8 @@ pub enum Stage {
     Executing,
     Executed,
     ExecutionFailed,
+    // Stopped by enough members during its timelock. Never executes.
+    Cancelled,
 }
 
 #[near(serializers=[borsh, json])]
@@ -71,6 +73,8 @@ pub struct Proposal {
     votes: Vec<Vote>,
     // Set once, the moment the yes votes reach the threshold. Nothing after that changes it.
     approved_at: Option<U64>,
+    // Members who have voted to cancel it once approved. As with yes votes, only current members count.
+    cancel_votes: Vec<AccountId>,
     stage: Stage,
 }
 
@@ -81,6 +85,9 @@ pub struct PmGovernance {
     threshold: u32,
     voting_period_ns: u64,
     timelock_ns: u64,
+    // How long after its timelock ends an approved proposal can still be executed. Without it an old approval stays
+    // armed for ever, and since anyone can execute, it could be fired months later at a bad moment.
+    execution_window_ns: u64,
     proposals: LookupMap<u64, Proposal>,
     next_proposal_id: u64,
 }
@@ -99,19 +106,29 @@ fn valid_threshold(threshold: u32, members: usize) -> bool {
 #[near]
 impl PmGovernance {
     #[init]
-    pub fn new(members: Vec<AccountId>, threshold: u32, voting_period_ns: U64, timelock_ns: U64) -> Self {
+    pub fn new(
+        members: Vec<AccountId>,
+        threshold: u32,
+        voting_period_ns: U64,
+        timelock_ns: U64,
+        execution_window_ns: U64,
+    ) -> Self {
         require!(!members.is_empty() && members.len() <= MAX_MEMBERS, "there must be 1 to 5 members");
         let mut distinct = members.clone();
         distinct.sort();
         distinct.dedup();
         require!(distinct.len() == members.len(), "members must be different accounts");
         require!(valid_threshold(threshold, members.len()), "threshold must be between 1 and the number of members");
-        require!(voting_period_ns.0 > 0 && timelock_ns.0 > 0, "periods must be positive");
+        require!(
+            voting_period_ns.0 > 0 && timelock_ns.0 > 0 && execution_window_ns.0 > 0,
+            "periods must be positive"
+        );
         Self {
             members,
             threshold,
             voting_period_ns: voting_period_ns.0,
             timelock_ns: timelock_ns.0,
+            execution_window_ns: execution_window_ns.0,
             proposals: LookupMap::new(Key::Proposals),
             next_proposal_id: 0,
         }
@@ -140,6 +157,7 @@ impl PmGovernance {
                 action,
                 votes: vec![],
                 approved_at: None,
+                cancel_votes: vec![],
                 stage: Stage::Open,
             },
         );
@@ -152,6 +170,7 @@ impl PmGovernance {
         let member = self.only_member();
         let mut p = self.proposal(proposal_id.0);
         let now = env::block_timestamp();
+        require!(p.stage != Stage::Cancelled, "this proposal was cancelled");
         require!(matches!(p.stage, Stage::Open | Stage::Approved), "already executed");
         require!(now < p.voting_ends_at.0, "voting has ended");
         require!(!p.votes.iter().any(|v| v.member == member), "already voted");
@@ -163,23 +182,46 @@ impl PmGovernance {
             p.approved_at = Some(U64(now));
             emit(
                 "approved",
-                json!({ "proposal_id": proposal_id.0.to_string(), "executable_at": (now + self.timelock_ns).to_string() }),
+                json!({ "proposal_id": proposal_id.0.to_string(), "executable_at": (now + self.timelock_ns).to_string(),
+                        "expires_at": self.executable_until(now).to_string() }),
             );
         }
         self.proposals.insert(proposal_id.0, p);
     }
 
-    // Anyone can call this once an approved proposal's timelock has passed. It runs at most once: a call that
-    // fails stays failed, and the proposal must be made again from scratch.
+    // The timelock gives everyone a window to see a change coming. This is what the members can do with it: once
+    // as many current members as the threshold have called it, an approved proposal that has not been executed is
+    // cancelled for good. It is a defence against a mistake or a change that turned out to be wrong, not against a
+    // captured majority: members who approved something bad will not cancel it.
+    pub fn cancel(&mut self, proposal_id: U64) {
+        let member = self.only_member();
+        let mut p = self.proposal(proposal_id.0);
+        require!(p.stage == Stage::Approved, "only an approved proposal can be cancelled");
+        require!(!p.cancel_votes.contains(&member), "already voted to cancel");
+        p.cancel_votes.push(member.clone());
+        emit("cancel_voted", json!({ "proposal_id": proposal_id.0.to_string(), "member": member }));
+        let votes = p.cancel_votes.iter().filter(|m| self.members.contains(m)).count();
+        if votes >= self.threshold as usize {
+            p.stage = Stage::Cancelled;
+            emit("cancelled", json!({ "proposal_id": proposal_id.0.to_string() }));
+        }
+        self.proposals.insert(proposal_id.0, p);
+    }
+
+    // Anyone can call this once an approved proposal's timelock has passed and until its execution window ends. It
+    // runs at most once: a call that fails stays failed, and the proposal must be made again from scratch.
     pub fn execute(&mut self, proposal_id: U64) -> PromiseOrValue<()> {
         let mut p = self.proposal(proposal_id.0);
         match p.stage {
             Stage::Approved => {}
+            Stage::Cancelled => env::panic_str("this proposal was cancelled"),
             Stage::Open | Stage::Expired => env::panic_str("not approved"),
             Stage::Executing | Stage::Executed | Stage::ExecutionFailed => env::panic_str("already executed"),
         }
         let approved_at = p.approved_at.unwrap_or_else(|| env::panic_str("not approved"));
-        require!(env::block_timestamp() >= approved_at.0 + self.timelock_ns, "the timelock has not passed");
+        let now = env::block_timestamp();
+        require!(now >= approved_at.0 + self.timelock_ns, "the timelock has not passed");
+        require!(now <= self.executable_until(approved_at.0), "the execution window has passed");
         self.check(&p.action);
         let id = proposal_id.0.to_string();
         match p.action.clone() {
@@ -219,6 +261,11 @@ impl PmGovernance {
                 self.timelock_ns = timelock_ns.0;
                 self.mark_executed(p)
             }
+            Action::SetExecutionWindow { execution_window_ns } => {
+                emit("execution_window_changed", json!({ "proposal_id": id, "execution_window_ns": execution_window_ns }));
+                self.execution_window_ns = execution_window_ns.0;
+                self.mark_executed(p)
+            }
         }
     }
 
@@ -251,7 +298,8 @@ impl PmGovernance {
 
     pub fn config(&self) -> near_sdk::serde_json::Value {
         json!({ "threshold": self.threshold, "voting_period_ns": self.voting_period_ns.to_string(),
-                "timelock_ns": self.timelock_ns.to_string(), "members": self.members.len(),
+                "timelock_ns": self.timelock_ns.to_string(), "execution_window_ns": self.execution_window_ns.to_string(),
+                "members": self.members.len(),
                 "proposals": self.next_proposal_id.to_string() })
     }
 }
@@ -269,9 +317,17 @@ impl PmGovernance {
         self.proposals.get(&id).cloned().unwrap_or_else(|| env::panic_str("no such proposal"))
     }
 
+    // The last moment a proposal approved at `approved_at` can be executed.
+    fn executable_until(&self, approved_at: u64) -> u64 {
+        approved_at.saturating_add(self.timelock_ns).saturating_add(self.execution_window_ns)
+    }
+
+    // Expired is never stored: a proposal left open past its vote, or approved and not executed in time, reads as Expired.
     fn view(&self, p: &Proposal) -> Proposal {
         let mut p = p.clone();
-        if p.stage == Stage::Open && env::block_timestamp() >= p.voting_ends_at.0 {
+        let now = env::block_timestamp();
+        let unexecuted_too_long = p.stage == Stage::Approved && p.approved_at.is_some_and(|t| now > self.executable_until(t.0));
+        if (p.stage == Stage::Open && now >= p.voting_ends_at.0) || unexecuted_too_long {
             p.stage = Stage::Expired;
         }
         p
@@ -304,7 +360,9 @@ impl PmGovernance {
             Action::SetThreshold { threshold } => {
                 require!(valid_threshold(*threshold, members), "threshold must be between 1 and the number of members");
             }
-            Action::SetVotingPeriod { voting_period_ns: period } | Action::SetTimelock { timelock_ns: period } => {
+            Action::SetVotingPeriod { voting_period_ns: period }
+            | Action::SetTimelock { timelock_ns: period }
+            | Action::SetExecutionWindow { execution_window_ns: period } => {
                 require!(period.0 > 0, "periods must be positive");
             }
         }
@@ -320,6 +378,7 @@ mod tests {
     const SELF: &str = "gov.near";
     const VOTING: u64 = 1_000;
     const TIMELOCK: u64 = 500;
+    const WINDOW: u64 = 2_000;
     const MEMBERS: [&str; 5] = ["m0.near", "m1.near", "m2.near", "m3.near", "m4.near"];
 
     fn acct(name: &str) -> AccountId {
@@ -340,7 +399,7 @@ mod tests {
             let _ = b.take_storage();
         });
         act_at(MEMBERS[0], 0);
-        PmGovernance::new(MEMBERS[..members].iter().map(|m| acct(m)).collect(), threshold, U64(VOTING), U64(TIMELOCK))
+        PmGovernance::new(MEMBERS[..members].iter().map(|m| acct(m)).collect(), threshold, U64(VOTING), U64(TIMELOCK), U64(WINDOW))
     }
 
     fn propose(g: &mut PmGovernance, t: u64, action: Action) -> U64 {
@@ -396,7 +455,7 @@ mod tests {
         let p = g.proposal(id.0);
         assert_eq!((p.stage, p.approved_at, p.votes.len()), (Stage::Approved, Some(U64(20)), 5), "three no votes change nothing");
         act_at("anyone.near", VOTING + 1);
-        assert_eq!(stage(&g, id), Stage::Approved, "an approved proposal does not expire");
+        assert_eq!(stage(&g, id), Stage::Approved, "the end of voting does not expire an approved proposal");
         execute(&mut g, 20 + TIMELOCK, id);
         assert_eq!((stage(&g, id), g.timelock_ns), (Stage::Executed, 7));
     }
@@ -415,6 +474,137 @@ mod tests {
         let id = approved(&mut g, 100, Action::SetThreshold { threshold: 3 });
         execute(&mut g, 100 + TIMELOCK, id);
         assert_eq!((stage(&g, id), g.threshold), (Stage::Executed, 3));
+    }
+
+    #[test]
+    fn execute_still_works_in_the_last_nanosecond_of_the_window() {
+        let mut g = gov(3, 2);
+        let id = approved(&mut g, 100, Action::SetThreshold { threshold: 3 });
+        act_at("anyone.near", 100 + TIMELOCK + WINDOW);
+        assert_eq!(stage(&g, id), Stage::Approved);
+        execute(&mut g, 100 + TIMELOCK + WINDOW, id);
+        assert_eq!((stage(&g, id), g.threshold), (Stage::Executed, 3));
+    }
+
+    #[test]
+    #[should_panic(expected = "the execution window has passed")]
+    fn execute_is_refused_one_nanosecond_after_the_window() {
+        let mut g = gov(3, 2);
+        let id = approved(&mut g, 100, Action::SetThreshold { threshold: 3 });
+        execute(&mut g, 100 + TIMELOCK + WINDOW + 1, id);
+    }
+
+    #[test]
+    fn an_approved_proposal_nobody_executed_in_time_reads_as_expired_and_changes_nothing() {
+        let mut g = gov(3, 2);
+        let id = approved(&mut g, 100, Action::SetThreshold { threshold: 3 });
+        act_at("anyone.near", 100 + TIMELOCK + WINDOW + 1);
+        assert_eq!(stage(&g, id), Stage::Expired);
+        assert_eq!(g.threshold, 2);
+    }
+
+    #[test]
+    fn the_window_is_changed_by_a_vote_like_any_other_setting() {
+        let mut g = gov(3, 2);
+        let id = approved(&mut g, 0, Action::SetExecutionWindow { execution_window_ns: U64(50) });
+        execute(&mut g, TIMELOCK, id);
+        assert_eq!(g.config()["execution_window_ns"], "50");
+        let late = approved(&mut g, 10_000, Action::SetThreshold { threshold: 3 });
+        act_at("anyone.near", 10_000 + TIMELOCK + 51);
+        assert_eq!(stage(&g, late), Stage::Expired, "the new, shorter window applies to proposals approved afterwards");
+    }
+
+    #[test]
+    #[should_panic(expected = "periods must be positive")]
+    fn a_window_of_zero_is_refused() {
+        let mut g = gov(3, 2);
+        propose(&mut g, 0, Action::SetExecutionWindow { execution_window_ns: U64(0) });
+    }
+
+    fn cancel(g: &mut PmGovernance, member: &str, t: u64, id: U64) {
+        act_at(member, t);
+        g.cancel(id);
+    }
+
+    #[test]
+    #[should_panic(expected = "this proposal was cancelled")]
+    fn as_many_members_as_the_threshold_cancel_an_approved_proposal_and_it_never_executes() {
+        let mut g = gov(3, 2);
+        let id = approved(&mut g, 100, Action::SetThreshold { threshold: 3 });
+        cancel(&mut g, MEMBERS[0], 200, id);
+        assert_eq!(stage(&g, id), Stage::Approved, "one member is short of the threshold");
+        cancel(&mut g, MEMBERS[1], 201, id);
+        assert_eq!(stage(&g, id), Stage::Cancelled);
+        assert_eq!(g.threshold, 2, "nothing changed");
+        execute(&mut g, 100 + TIMELOCK, id);
+    }
+
+    #[test]
+    fn a_cancelled_proposal_leaves_others_alone() {
+        let mut g = gov(3, 2);
+        let doomed = approved(&mut g, 100, Action::SetThreshold { threshold: 3 });
+        let fine = approved(&mut g, 100, Action::SetTimelock { timelock_ns: U64(7) });
+        cancel(&mut g, MEMBERS[0], 200, doomed);
+        cancel(&mut g, MEMBERS[1], 200, doomed);
+        execute(&mut g, 100 + TIMELOCK, fine);
+        assert_eq!((stage(&g, fine), g.timelock_ns, g.threshold), (Stage::Executed, 7, 2));
+    }
+
+    #[test]
+    #[should_panic(expected = "only an approved proposal can be cancelled")]
+    fn a_proposal_still_being_voted_on_cannot_be_cancelled() {
+        let mut g = gov(3, 2);
+        let id = propose(&mut g, 0, call());
+        cancel(&mut g, MEMBERS[0], 1, id);
+    }
+
+    #[test]
+    #[should_panic(expected = "only an approved proposal can be cancelled")]
+    fn an_executed_proposal_cannot_be_cancelled() {
+        let mut g = gov(3, 2);
+        let id = approved(&mut g, 100, Action::SetThreshold { threshold: 3 });
+        execute(&mut g, 100 + TIMELOCK, id);
+        cancel(&mut g, MEMBERS[0], 100 + TIMELOCK + 1, id);
+    }
+
+    #[test]
+    #[should_panic(expected = "members only")]
+    fn a_non_member_cannot_cancel() {
+        let mut g = gov(3, 2);
+        let id = approved(&mut g, 100, call());
+        cancel(&mut g, "stranger.near", 200, id);
+    }
+
+    #[test]
+    #[should_panic(expected = "already voted to cancel")]
+    fn a_member_cannot_cancel_twice_to_reach_the_threshold_alone() {
+        let mut g = gov(3, 2);
+        let id = approved(&mut g, 100, call());
+        cancel(&mut g, MEMBERS[0], 200, id);
+        cancel(&mut g, MEMBERS[0], 201, id);
+    }
+
+    #[test]
+    fn a_removed_members_earlier_cancel_vote_no_longer_counts() {
+        let mut g = gov(4, 2);
+        let id = approved(&mut g, 100, call());
+        cancel(&mut g, MEMBERS[3], 101, id);
+        let remove = approved(&mut g, 102, Action::RemoveMember { account: acct(MEMBERS[3]) });
+        execute(&mut g, 102 + TIMELOCK, remove);
+        cancel(&mut g, MEMBERS[0], 103 + TIMELOCK, id);
+        assert_eq!(stage(&g, id), Stage::Approved, "one current member voted to cancel, the threshold is two");
+        cancel(&mut g, MEMBERS[1], 104 + TIMELOCK, id);
+        assert_eq!(stage(&g, id), Stage::Cancelled);
+    }
+
+    #[test]
+    #[should_panic(expected = "this proposal was cancelled")]
+    fn nobody_can_vote_on_a_cancelled_proposal() {
+        let mut g = gov(5, 2);
+        let id = approved(&mut g, 100, call());
+        cancel(&mut g, MEMBERS[0], 200, id);
+        cancel(&mut g, MEMBERS[1], 200, id);
+        vote(&mut g, MEMBERS[2], 300, id, true);
     }
 
     #[test]
@@ -561,6 +751,6 @@ mod tests {
             let _ = b.take_storage();
         });
         act_at(MEMBERS[0], 0);
-        PmGovernance::new(vec![acct(MEMBERS[0]), acct(MEMBERS[0])], 1, U64(VOTING), U64(TIMELOCK));
+        PmGovernance::new(vec![acct(MEMBERS[0]), acct(MEMBERS[0])], 1, U64(VOTING), U64(TIMELOCK), U64(WINDOW));
     }
 }
