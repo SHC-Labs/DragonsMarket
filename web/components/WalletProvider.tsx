@@ -2,8 +2,11 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { NearConnector } from "@hot-labs/near-connect";
+import { usePathname } from "next/navigation";
 import { config } from "@/lib/config";
 import type { FunctionCall } from "@/lib/market";
+import { createLegalAcceptance, legalAcceptanceKey, parseLegalAcceptance, readLegalAcceptance, saveLegalAcceptance } from "@/lib/legal";
+import { TermsAcceptanceDialog } from "./TermsAcceptanceDialog";
 
 // NEAR Connect, the connector NEAR's docs recommend. Keys stay in the user's wallet; this app only asks it to sign.
 // Not verified with a real wallet yet: the sandbox has no wallet, so that check waits for the testnet deploy.
@@ -27,6 +30,14 @@ export const useWallet = () => useContext(Ctx);
 
 const noSubscription = () => () => {};
 const nobody = () => null;
+const subscribeToLegalAcceptance = (notify: () => void) => {
+  window.addEventListener("storage", notify);
+  window.addEventListener("legal-acceptance-change", notify);
+  return () => {
+    window.removeEventListener("storage", notify);
+    window.removeEventListener("legal-acceptance-change", notify);
+  };
+};
 
 // The local test chain has no wallet. To look at account views, the page can pretend to be an account:
 // open any page with ?as=<account id> once and it is remembered. Reads only; sending is refused.
@@ -41,11 +52,18 @@ function readDevAccount(): string | null {
 }
 
 export function WalletProvider({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
+  const readingPolicy = /^\/(privacy|terms)(\/|$)/.test(pathname);
   const connector = useRef<NearConnector | null>(null);
   const [walletAccount, setAccount] = useState<string | null>(null);
   const walletAvailable = config.network !== "sandbox";
   const devAccount = useSyncExternalStore(noSubscription, walletAvailable ? nobody : readDevAccount, nobody);
-  const account = walletAvailable ? walletAccount : devAccount;
+  const acceptanceRaw = useSyncExternalStore(subscribeToLegalAcceptance, () => {
+    try { return walletAccount ? localStorage.getItem(legalAcceptanceKey(walletAccount, config.network)) : null; }
+    catch { return null; }
+  }, nobody);
+  const accepted = walletAccount ? parseLegalAcceptance(acceptanceRaw, walletAccount, config.network) !== null : false;
+  const account = walletAvailable ? (accepted ? walletAccount : null) : devAccount;
 
   useEffect(() => {
     if (!walletAvailable) return;
@@ -85,14 +103,25 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const disconnect = useCallback(() => {
+    setAccount(null);
     connector.current?.disconnect().catch(() => {});
   }, []);
+
+  const acceptPolicies = () => {
+    if (!walletAccount || !walletAvailable) throw new Error("Connect a wallet first.");
+    saveLegalAcceptance(window.localStorage, createLegalAcceptance(walletAccount, config.network));
+    window.dispatchEvent(new Event("legal-acceptance-change"));
+  };
 
   const send = useCallback(async (call: FunctionCall) => {
     const c = connector.current;
     if (!c) throw new Error("wallet not ready");
+    if (!walletAccount || !readLegalAcceptance(window.localStorage, walletAccount, config.network)) throw new Error("Review and accept the current policies before continuing.");
     const wallet = await c.wallet();
+    const connected = await wallet.getAccounts();
+    if (connected[0]?.accountId !== walletAccount) throw new Error("Your wallet account changed. Connect again before continuing.");
     const result = await wallet.signAndSendTransaction({
+      signerId: walletAccount,
       receiverId: call.receiverId,
       actions: [
         {
@@ -102,11 +131,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       ],
     });
     return result.transaction.hash;
-  }, []);
+  }, [walletAccount]);
 
   const value = useMemo(
     () => ({ account, walletAvailable, openConnect, disconnect, send }),
     [account, walletAvailable, openConnect, disconnect, send],
   );
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={value}>{children}{!readingPolicy && walletAvailable && walletAccount && !accepted && <TermsAcceptanceDialog key={walletAccount} account={walletAccount} onAccept={acceptPolicies} onDismiss={disconnect} />}</Ctx.Provider>;
 }

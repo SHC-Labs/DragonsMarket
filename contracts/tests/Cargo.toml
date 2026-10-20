@@ -1,0 +1,15 @@
+[package]
+name = "tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+near-workspaces = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+sha2 = "0.10"
+base64 = "0.22"
+ed25519-dalek = "2"
+bs58 = "0.5"

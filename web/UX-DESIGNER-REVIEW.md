@@ -1,5 +1,7 @@
 # UX Designer review: The Council
 
+Status note, 2026-10-19: this is a dated review, not the current design source. Council and membership now share `/council` and one mint/forest accent. Shared venue surfaces remain purple/light; the canonical palette is [design/palette.json](design/palette.json). See [WEBSITE-REVIEW-RESPONSE.md](WEBSITE-REVIEW-RESPONSE.md) for the outside review's item-by-item status. Older sage, separate-page and reference-palette descriptions below are historical.
+
 Date: 2026-10-18. Skill: https://github.com/szilu/ux-designer-skill, installed at `/home/nameless/.agents/skills/ux-designer/`. Applied its review workflow and accessibility, mobile and writing references.
 
 ## Context and scope
@@ -12,7 +14,7 @@ This is an assessment, not a redesign or implementation pass. Application files 
 
 ### [Blocker] Buy quote response no longer matches frontend assumptions
 
-Where: `components/TradeTicket.tsx:59`, `lib/market.ts:72`, `contracts/pm-market/src/lib.rs:750`.
+Where: `components/TradeTicket.tsx:59`, `lib/market.ts:72`, `contracts/market/src/lib.rs:750`.
 
 Observed: opening market 0 as the seeded Alice account, with 3,038 mUSD balance, and entering 10 produces blank share/price estimates and “This trade is not possible right now.” The contract returns `{shares_out, fee}`. The frontend declares a string result and tries `BigInt(response)`, catches the error, and treats the trade as impossible.
 
@@ -20,7 +22,7 @@ Fix: align the frontend quote type and decoding with the current contract, use t
 
 ### [Blocker] Disputed market crashes instead of showing its jury
 
-Where: `components/Resolution.tsx:163`, `lib/market.ts:51`, `app/council/view.tsx:12`; `contracts/pm-oracle/src/lib.rs:566`.
+Where: `components/Resolution.tsx:163`, `lib/market.ts:51`, `app/council/view.tsx:12`; `contracts/oracle/src/lib.rs:566`.
 
 Observed: `/market?id=2` raises “Cannot read properties of undefined (reading length)” at `cfg.panel.length`. Current oracle configuration has `jury_size` and `council`, not a global `panel`. The actual drawn panel belongs to each case. Council's overview silently shows an empty roster for the same stale assumption.
 

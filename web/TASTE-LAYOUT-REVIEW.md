@@ -1,5 +1,7 @@
 # Taste layout review
 
+Status note, 2026-10-19: this is a dated review, not the current design source. Council and membership now share `/council` and one mint/forest accent. Shared venue surfaces remain purple/light; the canonical palette is [design/palette.json](design/palette.json). See [WEBSITE-REVIEW-RESPONSE.md](WEBSITE-REVIEW-RESPONSE.md) for the outside review's item-by-item status. Older sage, separate-page and reference-palette descriptions below are historical.
+
 Applied the installed redesign-existing-projects and minimalist-ui guidance from https://github.com/Leonxlnx/taste-skill. The default Taste skill is also installed for future use. This was an existing-project layout pass, not the default v2 art-direction generation workflow.
 
 ## Constraints retained

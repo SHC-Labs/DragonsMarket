@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the static site against the local dev chain written by contracts/pm-tests/tests/dev_chain.rs.
+# Builds the static site against the local dev chain written by contracts/tests/tests/dev_chain.rs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 chain=../contracts/dev-chain.json

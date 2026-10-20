@@ -1,0 +1,116 @@
+name: contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: contracts
+
+jobs:
+  fmt:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: clippy-${{ runner.os }}-${{ hashFiles('contracts/Cargo.lock', 'contracts/rust-toolchain.toml') }}
+          restore-keys: clippy-${{ runner.os }}-
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Contracts for wasm
+        run: >
+          cargo clippy -p governance -p oracle -p council -p market -p upgrade -p mock-ft -p mock-nft
+          --target wasm32-unknown-unknown -- -D warnings
+      - name: Everything, tests included
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: unit-${{ runner.os }}-${{ hashFiles('contracts/Cargo.lock', 'contracts/rust-toolchain.toml') }}
+          restore-keys: unit-${{ runner.os }}-
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo test -p market -p oracle -p council -p governance -p upgrade
+
+  sandbox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: 22
+      - uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: sandbox-${{ runner.os }}-${{ hashFiles('contracts/Cargo.lock', 'contracts/rust-toolchain.toml') }}
+          restore-keys: sandbox-${{ runner.os }}-
+      - uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: ~/.cargo/bin/cargo-near
+          key: cargo-near-0.22.0-${{ runner.os }}
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install cargo-near
+        run: cargo near --version 2>/dev/null | grep -q 0.22.0 || cargo install cargo-near --version 0.22.0 --locked
+      - name: Build the wasm the sandbox tests load
+        run: ./build.sh
+      - name: Sandbox tests
+        # near-workspaces downloads the nearcore sandbox binary itself the first time it runs.
+        run: cargo test -p tests
+      - name: Record the sha256 of each wasm
+        run: sha256sum target/near/*/*.wasm | tee wasm-sha256.txt
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: wasm-sha256-sandbox-build
+          path: contracts/wasm-sha256.txt
+
+  keeper:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: 22
+      - run: node --test keeper/keeper.test.mjs

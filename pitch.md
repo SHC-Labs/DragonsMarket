@@ -1,14 +1,16 @@
-Prediction market on NEAR: pitch and first test
+Dragons Market: prediction markets with NEAR Intents
+
+Updated 2026-10-19. The accepted custody direction is in [intents-architecture.md](intents-architecture.md). Product goals below are not claims of an already deployed Intents integration. The existing local contract prototype is described in `README.md`; the current delivery scope is in `hackathon-plan.md`.
 
 What it is
 
-A prediction market built on NEAR. You pick a question, say "Will X happen by date Y", and buy Yes or No shares priced between 1 and 99 cents. When the question resolves, each winning share pays $1 and the losing side pays nothing. You can sell any time before that. People join from any chain through NEAR Intents, so a user holding Solana USDC or Bitcoin does not have to bridge anything by hand.
+A prediction market built on NEAR. Pick a question, buy Yes or No, and sell while trading is open or redeem after the result is final. A winning share pays one collateral unit; it represents $1 only when the chosen collateral and its value support that statement. Users fund through supported cross-chain routes into NEAR Intents, which holds their tokens. Trading commits backing inside Intents under the market's rules, and eligible payouts return to an available Intents balance before withdrawal. Supported assets, conversion, minimums, and fees are shown before funding.
 
 Why anyone would use ours over Kalshi or Polymarket
 
 Both of them work. People use them every day. We read 1,000 recent App Store reviews of the two apps (500 each, from the last 3 to 4 weeks) to see what people actually complain about. Two things stand out, and we can address both because we own the venue.
 
-Slow withdrawals. On Polymarket this is the biggest complaint: 201 of 500 reviews, 40%, and a typical one says it takes days to get winnings out. On Kalshi it is much smaller, 32 of 499, 6%. Ours pays out to your wallet on any chain in minutes through NEAR Intents, shows the status of every withdrawal, and publishes the times it really takes. One honest limit: most of those complaints are about card and bank holds, which a crypto payout does not remove. What we know is that people hate waiting. Crypto-side users complain about something a bit different, covered below.
+Slow withdrawals. The earlier review sample recorded 201 of 500 Polymarket reviews and 32 of 499 Kalshi reviews mentioning this problem; those are historical research counts, not a current market-wide measurement. Our target is a visible, recoverable withdrawal through a supported Intents route, with measured completion times. We have not established a minutes-based guarantee. Card and bank holds are separate problems that a crypto payout does not remove.
 
 Rules nobody can read before they bet. 42 Polymarket and 13 Kalshi reviews are about a market settled in a way the user did not expect, from sports bets that were not voided when a player was hurt to price markets with an unclear start date. On ours, the exact rule, the deciding source and what counts as void are written in plain words and locked on-chain before the market opens, so nobody can reword the question after the money is in. Disputes go to the Council, a small jury drawn at random that may not trade that market, with a deadline, and every case is public. The much-discussed UMA token-holder complaint appears only in a few Hacker News comments, not in the app reviews, so we treat it as a supporting point and not the headline.
 
@@ -18,28 +20,28 @@ What we do not claim. Accepting many chains is not special, both rivals already 
 
 The Council
 
-The plan, if this pans out, is that the Council is made of holders of an NFT collection whose art already exists and has a dark, cult-like vibe. Jurors are drawn at random for each dispute from active members who have put up a bond, and nobody can buy a seat in the middle of a case. The rules for it are in spec.md section 9. Nothing is minted or sold now, and nothing would be sold until the product runs and the legal questions are answered. When the time comes, the role is announced before any mint and no profit from holding is promised.
+Dragon NFTs become Council seats when staked. Eligible seats can be drawn to resolve disputes and accrue the defined share of platform revenue; unstaked NFTs do not earn or serve. The intended payout cadence is quarterly, with accrual, streaming, and claim eligibility specified separately. Intents will hold the corresponding fungible bonds and reward funds in the target design, while the Council keeps staking, eligibility, and reward obligations. The existing code and remaining migration are distinguished in `intents-architecture.md`.
 
-The design follows from this. The venue itself stays dark and sober, because what we sell is trust in the referee. The Council gets its own look, a muted violet and a serif face for its seal, juror cards and verdict line, so it reads as a dark order inside the product. Each name has a plain label beside it, so the lore never hides what happened.
+The site uses the professional minimal studio direction, with light/dark themes, shared purple surfaces and mint/forest accents for Council and Membership. Rules, costs, balance states, and dispute progress stay explicit. The four displayed Dragon artworks are a selection from the wider collection, not its total supply.
 
-The small test
+The existing local test and the next complete demo
 
-Before anything bigger, one cheap build that shows the core loop works end to end:
+The original local prototype exercised a pricing curve and oracle with NEP-141 test collateral. It did not prove Intents custody. The next demo must show:
 
-1. One market contract on NEAR. It creates a market, lets people buy and sell Yes and No shares against a built-in price curve (so there is always a price, with no order book and no server), and pays out after resolution.
+1. Funding from a supported external chain into a verified Intents balance, then a funded position whose backing remains controlled inside Intents.
 
-2. A small oracle contract. Someone proposes the outcome with a bond, there is a challenge window, and if nobody challenges it the outcome stands. If someone does, it goes to a test Council of a few accounts we control, shown with the same juror cards the real Council would use. For the test the windows are minutes, not hours.
+2. A market with a fixed rule and source, an optimistic proposal, a challenge, and NFT jurors using commit/reveal to decide. Short demo windows are labeled as demo configuration.
 
-3. A simple website. It lists markets, shows the rule and the resolution status, connects a NEAR wallet, buys and sells, and redeems winnings.
+3. A usable website showing actual quotes, positions, fees, available/committed/pending balances, and recoverable transaction status.
 
-4. A few NEAR. The test runs on NEAR testnet, which is free. To try it with real money we deploy to mainnet. A contract has to hold NEAR in storage at about 1 NEAR per 100 KB, so a contract of a few hundred KB costs a few NEAR, plus tiny fees. Then a handful of friends trade a market with a few dollars each.
+4. Redemption, Council fee/reward attribution inside Intents, and a confirmed supported external-chain withdrawal. Simulations and any separately authorized real routing experiments must be identified clearly.
 
 What the test tells us
 
-Whether the market flow works, whether the resolution process is clear to people who have never seen it, and whether the website is something a person can use without help. It does not test the order book, deposits from other chains, or any licence question. Those come after.
+Whether Intents-held backing and market liabilities reconcile end to end, whether resolution is understandable, and whether users can fund, trade, and exit without hidden balance transitions. Cross-chain funding/custody is now core scope. A new order book and the licensing route remain separate work.
 
 We also read 30 posts and issues from crypto-side users (Reddit, Polymarket's own GitHub, Hacker News). The sample is small and developer-heavy, but it points the same way with a twist: about 16 of 26 describe money that is stuck, late or missing, and most of that is deposits that never arrive and wallet layers that trap funds, not slow withdrawals. So the promise we make is that nothing gets stuck without a visible status and a way out, with fast payouts as one proof of it.
 
 What it costs
 
-Testnet: nothing. Mainnet test: a few NEAR for the contract plus a few dollars of play money per tester. The build itself is done here on the machine we already have. The full plan for going further is in spec.md, and the tools we would use are in stack.md.
+Local sandbox tests use test assets. An actual supported bridge/Intents route can require real funds, provider minimums, fees, and deployment/storage costs; testnet does not establish that such a route works. Record measured costs and obtain the product owner's approval before spending or deploying. Delivery milestones and evidence gates are in `hackathon-plan.md`.

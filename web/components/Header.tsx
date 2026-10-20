@@ -2,17 +2,13 @@
 
 import Link from "next/link";
 import { useEffect, useRef } from "react";
+import { Brand } from "./Brand";
+import { HowItWorksDialog } from "./HowItWorksDialog";
 import { ThemeToggle } from "./ThemeToggle";
 import { usePathname } from "next/navigation";
 import { useWallet } from "./WalletProvider";
 import { Button } from "./ui";
 import { shortAccount } from "@/lib/format";
-
-function Mark() {
-  return (
-    <span className="flex h-7 w-7 items-center justify-center rounded-full border border-input text-sm text-council" aria-hidden="true">C</span>
-  );
-}
 
 export function Header() {
   const { account, walletAvailable, openConnect, disconnect } = useWallet();
@@ -23,7 +19,7 @@ export function Header() {
     const active = nav?.querySelector<HTMLElement>('[aria-current="page"]');
     if (nav && active) nav.scrollLeft = active.offsetLeft - nav.offsetLeft - Math.max(0, (nav.clientWidth - active.offsetWidth) / 2);
   }, [pathname]);
-  const links = [{ href: "/", label: "Markets" }, { href: "/watchlist", label: "Watchlist" }, { href: "/council", label: "Council" }, { href: "/membership", label: "Membership" }, { href: "/partnerships", label: "Partnerships" }, { href: "/portfolio", label: "Portfolio" }];
+  const links = [{ href: "/", label: "Markets" }, { href: "/watchlist", label: "Watchlist" }, { href: "/council", label: "Council" }, { href: "/partnerships", label: "Partnerships" }, { href: "/portfolio", label: "Portfolio" }];
   const navigation = links.map(({ href, label }) => (
     <Link key={href} href={href} aria-current={pathname === href || (href === "/" && pathname === "/market") ? "page" : undefined} className="site-nav-link">{label}</Link>
   ));
@@ -32,13 +28,11 @@ export function Header() {
       <header className="sticky top-0 z-30 border-b border-border bg-canvas/75 backdrop-blur-md">
         <div className="site-header-row mx-auto flex h-16 max-w-[var(--page-max)] items-center justify-between gap-4 px-[var(--gutter)]">
           <div className="flex shrink-0 items-center gap-8">
-            <Link href="/" className="flex items-center gap-2 text-fg no-underline">
-              <Mark />
-              <span className="brand-wordmark text-[1.1rem] leading-none">The Council</span>
-            </Link>
+            <Brand />
             <nav className="hidden gap-4 lg:flex" aria-label="Main">{navigation}</nav>
           </div>
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="site-header-actions flex min-w-0 items-center gap-3">
+            <HowItWorksDialog />
             <ThemeToggle />
             {account ? (
               <Button variant="secondary" size="sm" onClick={disconnect} aria-label={`Connected as ${account}. Disconnect`}>

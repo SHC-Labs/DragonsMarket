@@ -33,7 +33,7 @@ export function RulesBlock({ market }: { market: MarketView }) {
 
   return (
     <section aria-labelledby="rules-h">
-      <h2 id="rules-h" className="mb-3 mt-8 border-b border-border pb-2 text-xs font-medium uppercase tracking-[0.12em] text-muted">
+      <h2 id="rules-h" className="section-title mb-4 mt-10 border-b border-border pb-4">
         How this market resolves
       </h2>
       <dl className="m-0 border-t border-border">

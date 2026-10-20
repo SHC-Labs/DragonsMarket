@@ -32,7 +32,7 @@ type Tone = "info" | "warning" | "danger";
 const TONE: Record<Tone, string> = {
   info: "bg-info-soft border-info",
   warning: "bg-warning-soft border-warning",
-  danger: "bg-no-soft border-no",
+  danger: "bg-danger-soft border-danger",
 };
 
 export function Notice({ tone = "info", children }: { tone?: Tone; children: ReactNode }) {
@@ -43,7 +43,7 @@ export function Notice({ tone = "info", children }: { tone?: Tone; children: Rea
   );
 }
 
-const BADGE_TONE = { neutral: "border-input text-fg", attention: "border-warning text-warning", paused: "border-no text-no" };
+const BADGE_TONE = { neutral: "border-input text-fg", attention: "border-warning text-warning", paused: "border-warning text-warning", council: "border-council text-council" };
 
 export function StateBadge({ status, caseStage }: { status: string; caseStage?: string | null }) {
   let label = "Open";
@@ -55,7 +55,7 @@ export function StateBadge({ status, caseStage }: { status: string; caseStage?: 
     label = "Final";
   } else if (status === "closed") {
     label = caseStage === "disputed" ? "Challenged" : caseStage === "proposed" ? "Answer proposed" : "Closed";
-    if (caseStage) tone = "attention";
+    if (caseStage) tone = caseStage === "disputed" ? "council" : "attention";
   }
   return <span className={`inline-block whitespace-nowrap rounded-sm border px-2 text-xs font-medium ${BADGE_TONE[tone]}`}>{label}</span>;
 }
@@ -75,7 +75,7 @@ export function PageLink({ href, children }: { href: string; children: ReactNode
 }
 
 export function SectionTitle({ children }: { children: ReactNode }) {
-  return <h2 className="mb-3 mt-12 border-b border-border pb-2 text-xs font-medium uppercase tracking-[0.12em] text-muted">{children}</h2>;
+  return <h2 className="section-title mb-4 mt-10 border-b border-border pb-4">{children}</h2>;
 }
 
 export function LinkButton({ href, variant = "primary", children }: { href: string; variant?: "primary" | "secondary"; children: ReactNode }) {

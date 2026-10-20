@@ -1,11 +1,35 @@
-import Link from "next/link";
 import { CollectionGallery } from "./CollectionGallery";
+
 export function Membership() {
-  return <div className="initiation-page">
-    <section className="initiation-hero"><div className="initiation-copy"><p className="ritual-label">The collection</p><h1>NFT membership.</h1><p>We plan to sell an NFT collection to help fund the platform. Holders would get a share of platform revenue each quarter. Nothing is for sale yet, and the price, supply and date are not set.</p><a href="#membership" className="ritual-button">What holders would get ↘</a></div><aside className="membership-overview" aria-label="Membership launch details"><h2>Before the launch</h2><dl><div><dt>Mint</dt><dd>Not open yet</dd></div><div><dt>Revenue share</dt><dd>Proposed quarterly</dd></div><div><dt>Dispute model</dt><dd>Still being decided</dd></div></dl><p>Supply, price and holder terms will be published before anything goes on sale.</p></aside></section>
-    <CollectionGallery />
-    <section id="membership" className="membership-terms"><div className="terms-heading"><p className="ritual-label">Holder benefits</p><h2>What holders<br /><span>would get.</span></h2></div><div className="terms-list">{[["01","Quarterly revenue share","Eligible holders would get a share of platform revenue every three months. The percentage and the rules for who qualifies are not set, and no amount is promised."],["02","A say in disputes, maybe","The plan is open. Either holders sit on dispute juries, or AI agents decide and the sale only funds the project. We will settle it before any launch."],["03","How to join","Buy an NFT when the launch opens. Price, supply and date have not been announced."]].map(([n,title,text]) => <article key={n}><span className="num">{n}</span><div><h3>{title}</h3><p>{text}</p></div></article>)}</div></section>
-    <section className="launch-status"><div><p className="ritual-label">Status</p><h2>Minting is not open.</h2><p>Before anything goes on sale we will publish the supply, the price, who decides disputes and the payout rules.</p></div><div><span className="launch-chip">Launch date not set</span><Link href="/council" className="ritual-link">How disputes work ↗</Link></div></section>
-    <section className="membership-faq" aria-label="Membership questions"><h2>Questions</h2>{[["Is this the whole collection?","No. The gallery shows part of it. Gallery numbers are not token IDs."],["Can I mint now?","No. There is no mint on this site yet."],["Who decides disputes?","Not settled. The two options are holders on juries or AI agents."],["How much would holders earn?","We don't know yet and we aren't promising anything. The share and the eligibility rules are not set."]].map(([q,a]) => <details key={q}><summary>{q}</summary><p>{a}</p></details>)}</section>
-  </div>;
+  return (
+    <section id="membership" className="council-membership" aria-labelledby="membership-title">
+      <div className="council-membership-intro">
+        <div>
+          <h2 id="membership-title">Join the Council</h2>
+          <p>Stake a Dragon NFT to join the Council. Staked seats can be drawn for dispute juries and earn a share of platform fees. Holding an unstaked NFT does not make you eligible for either.</p>
+          <a href="#process" className="ritual-link">See how disputes work ↘</a>
+        </div>
+        <aside className="membership-overview" aria-labelledby="membership-launch-title">
+          <h3 id="membership-launch-title">Before you join</h3>
+          <dl>
+            <div><dt>Mint</dt><dd>Not open yet</dd></div>
+            <div><dt>Council access</dt><dd>Stake a Dragon NFT</dd></div>
+            <div><dt>Fee distributions</dt><dd>Quarterly planned</dd></div>
+          </dl>
+          <p>Supply, price, launch date and final participation terms will be published before the mint opens.</p>
+        </aside>
+      </div>
+      <div id="collection"><CollectionGallery /></div>
+      <div className="membership-terms">
+        <div className="terms-heading"><h2>Membership terms</h2></div>
+        <div className="terms-list">
+          {[
+            ["Help resolve disputes", "When drawn, read the market rule and evidence, commit your vote, then reveal it before the deadline. Your vote and reason become part of the public case record."],
+            ["Share in platform fees", "The Council allocation is 25% of collected platform fees, shared among eligible staked seats. Earnings depend on fees and time staked; there is no fixed payout. Quarterly payouts are planned, with claim terms published before launch."],
+            ["Stake with a commitment", "Only staked NFTs earn and can be drawn. A seat serving on a case cannot leave until it is released. Unstaking also has a cooldown, so check the published terms before joining."],
+          ].map(([title, text]) => <article key={title}><div><h3>{title}</h3><p>{text}</p></div></article>)}
+        </div>
+      </div>
+    </section>
+  );
 }

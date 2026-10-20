@@ -36,7 +36,7 @@ export function TradeTicket({ market, initialSide = "yes" }: { market: MarketVie
       <input id="amount" inputMode="decimal" autoComplete="off" value={input} placeholder="0.00" onChange={e => setInput(e.target.value)} aria-invalid={invalid || undefined} aria-describedby={invalid ? "amount-error trading-status" : "trading-status"} className="num min-w-0 flex-1 bg-transparent py-2 text-xl text-fg outline-none placeholder:text-muted" />
       <span className="text-sm text-muted">{unit}</span>
     </div>
-    {invalid && <p id="amount-error" role="alert" className="mt-2 text-sm text-no">Enter a positive number with up to six decimal places.</p>}
+    {invalid && <p id="amount-error" role="alert" className="mt-2 text-sm text-danger">Enter a positive number with up to six decimal places.</p>}
     <dl className="trade-estimates my-4 text-sm">
       <div><dt>{mode === "buy" ? "Amount entered" : "Shares entered"}</dt><dd className="num">{input.trim() ? amount : "Not entered"}</dd></div>
       <div><dt>{mode === "buy" ? "Estimated shares" : "Estimated return"}</dt><dd>Unavailable</dd></div>

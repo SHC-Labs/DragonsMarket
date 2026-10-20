@@ -1,12 +1,22 @@
 "use client";
-import { useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
+import { usePathname } from "next/navigation";
+import palette from "@/design/palette.json";
 import { Moon, Sun } from "@/components/icons";
 const subscribe = (notify: () => void) => {
   window.addEventListener("theme-change", notify);
   return () => window.removeEventListener("theme-change", notify);
 };
 export function ThemeToggle() {
+  const pathname = usePathname();
   const theme = useSyncExternalStore(subscribe, () => document.documentElement.dataset.theme || "dark", () => "dark");
+  useEffect(() => {
+    const section = /^\/(council|membership)(\/|$)/.test(pathname) ? "council" : /^\/watchlist(\/|$)/.test(pathname) ? "watchlist" : "venue";
+    document.documentElement.dataset.palette = section;
+    const colors = section === "venue" ? palette.themes : palette.sections[section];
+    const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+    if (meta) meta.content = theme === "light" ? colors.light.bg : colors.dark.bg;
+  }, [theme, pathname]);
   const toggle = () => {
     const next = theme === "dark" ? "light" : "dark";
     document.documentElement.dataset.theme = next;

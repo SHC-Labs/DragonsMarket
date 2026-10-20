@@ -58,12 +58,12 @@ describe("slippage", () => {
 
 describe("friendlyError", () => {
   it("explains known failures in plain words", () => {
-    expect(friendlyError("market is closed", "abc123")).toBe("This market stopped trading.");
+    expect(friendlyError("market is closed", "abc123")).toBe("Trading has closed on this market.");
     expect(friendlyError("price moved, you would get fewer shares than your minimum", "abc123")).toMatch(/price moved/i);
     expect(friendlyError("do the storage deposit first", "abc123")).toBe("Do the one-time storage step first.");
   });
   it("never leaves a person without a reference", () => {
-    expect(friendlyError(null, "abc123")).toBe("Something went wrong. Nothing was taken. Reference abc123.");
+    expect(friendlyError(null, "abc123")).toBe("The transaction could not be confirmed. Check its final status before trying again. Reference abc123.");
     expect(friendlyError("some new panic", "abc123")).toContain("abc123");
   });
 });

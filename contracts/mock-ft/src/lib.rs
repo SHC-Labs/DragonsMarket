@@ -1,9 +1,10 @@
 // Test-only NEP-141 token. Owner can mint. Never deploy this on mainnet.
+use near_contract_standards::fungible_token::core::FungibleTokenCore;
 use near_contract_standards::fungible_token::metadata::{
     FungibleTokenMetadata, FungibleTokenMetadataProvider, FT_METADATA_SPEC,
 };
+use near_contract_standards::fungible_token::resolver::FungibleTokenResolver;
 use near_contract_standards::fungible_token::FungibleToken;
-use near_contract_standards::impl_fungible_token_core;
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds, StorageManagement};
 use near_sdk::borsh::BorshSerialize;
 use near_sdk::collections::LazyOption;
@@ -16,6 +17,9 @@ pub struct MockFt {
     owner: AccountId,
     token: FungibleToken,
     metadata: LazyOption<FungibleTokenMetadata>,
+    // Test switch: while on, ft_transfer_call moves the tokens and then its resolve step panics, so the caller sees a
+    // failure although the tokens are with the receiver.
+    fail_resolve: bool,
 }
 
 #[derive(BorshSerialize, BorshStorageKey)]
@@ -42,6 +46,7 @@ impl MockFt {
             owner: owner_id,
             token: FungibleToken::new(StorageKey::Token),
             metadata: LazyOption::new(StorageKey::Metadata, Some(&metadata)),
+            fail_resolve: false,
         }
     }
 
@@ -57,6 +62,11 @@ impl MockFt {
         self.token.internal_deposit(&who, 100_000_000);
     }
 
+    pub fn set_fail_resolve(&mut self, fail: bool) {
+        require!(env::predecessor_account_id() == self.owner, "owner only");
+        self.fail_resolve = fail;
+    }
+
     pub fn mint(&mut self, account_id: AccountId, amount: U128) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
         if !self.token.accounts.contains_key(&account_id) {
@@ -66,7 +76,44 @@ impl MockFt {
     }
 }
 
-impl_fungible_token_core!(MockFt, token);
+#[near]
+impl FungibleTokenCore for MockFt {
+    #[payable]
+    fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>) {
+        self.token.ft_transfer(receiver_id, amount, memo)
+    }
+
+    #[payable]
+    fn ft_transfer_call(
+        &mut self,
+        receiver_id: AccountId,
+        amount: U128,
+        memo: Option<String>,
+        msg: String,
+    ) -> PromiseOrValue<U128> {
+        self.token.ft_transfer_call(receiver_id, amount, memo, msg)
+    }
+
+    fn ft_total_supply(&self) -> U128 {
+        self.token.ft_total_supply()
+    }
+
+    fn ft_balance_of(&self, account_id: AccountId) -> U128 {
+        self.token.ft_balance_of(account_id)
+    }
+}
+
+#[near]
+impl FungibleTokenResolver for MockFt {
+    #[private]
+    fn ft_resolve_transfer(&mut self, sender_id: AccountId, receiver_id: AccountId, amount: U128) -> U128 {
+        require!(!self.fail_resolve, "the resolve step is set to fail");
+        self.token
+            .internal_ft_resolve_transfer(&sender_id, receiver_id, amount)
+            .0
+            .into()
+    }
+}
 
 // The impl_fungible_token_storage! macro in near-contract-standards 5.29.1 declares storage_withdraw
 // with U128 where the trait wants NearToken, so it does not compile. Delegate by hand.

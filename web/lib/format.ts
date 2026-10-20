@@ -56,5 +56,9 @@ export function timeLeft(ns: string | bigint, nowMs: number): string {
 }
 
 // Slippage in basis points. The buyer accepts a bit fewer shares; the seller a few more.
-export const minSharesWithSlippage = (shares: bigint, bps = 100n) => (shares * (10_000n - bps)) / 10_000n;
+export const minSharesWithSlippage = (shares: bigint, bps = 100n) => {
+  if (shares <= 0n) return 0n;
+  const minimum = (shares * (10_000n - bps)) / 10_000n;
+  return minimum < 1n ? 1n : minimum;
+};
 export const maxSharesWithSlippage = (shares: bigint, bps = 100n) => (shares * (10_000n + bps) + 9_999n) / 10_000n;

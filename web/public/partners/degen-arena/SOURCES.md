@@ -6,3 +6,5 @@ Retrieved 2026-10-16 from the partner’s official website for its Council partn
 - https://degenarena.gg/games/plinko/card.webp
 
 Descriptions checked against https://degenarena.gg/how-it-works and individual game guides. Partnership announced as upcoming per user instruction. No shared rewards, wallet integration, or launch date asserted.
+
+Official partner logo retrieved 2026-10-19 from https://degenarena.gg/brand/degen-arena-logo.webp, the logo used by their website header. Stored unchanged as `logo.webp`. Displayed alongside the Dragons Market crest in the partnership heading.

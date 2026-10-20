@@ -18,11 +18,9 @@ function reset(event: PointerEvent<HTMLElement>) {
 }
 export function CollectionGallery() {
   return <section className="collection-gallery" aria-label="NFT collection">
-    <div className="collection-gallery-heading"><div><p className="ritual-label">NFT artwork</p><h2>Part of the collection.</h2></div><p>Four pieces from the wider collection.</p></div>
+    <div className="collection-gallery-heading"><h2>The Dragons</h2><p>Selected artwork from the collection.</p></div>
     <div className="collection-art-row">{DESCRIPTIONS.map((description,i)=><figure key={description} className="collection-tilt-card" onPointerMove={tilt} onPointerLeave={reset} onPointerCancel={reset}>
       <div className="collection-tilt-image"><Image src={`/collection/council-${String(i+1).padStart(2,"0")}.jpg`} alt={description} width={1600} height={1600} unoptimized /></div>
-      <figcaption className="num">ARTWORK {String(i+1).padStart(2,"0")}</figcaption>
     </figure>)}</div>
-    <p className="collection-note">Artwork numbers are gallery labels, not NFT token IDs.</p>
   </section>;
 }

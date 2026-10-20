@@ -1,6 +1,6 @@
 import { defineConfig } from "@playwright/test";
 
-// Runs against the exported site (npm run build:dev first) and the local dev chain (see contracts/pm-tests/tests/dev_chain.rs).
+// Runs against the exported site (npm run build:dev first) and the local dev chain (see contracts/tests/tests/dev_chain.rs).
 export default defineConfig({
   testDir: "e2e",
   fullyParallel: false,

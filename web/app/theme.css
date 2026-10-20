@@ -20,6 +20,8 @@
   --color-warning-soft: var(--warning-soft);
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
+  --color-brand: var(--brand);
+  --color-danger-soft: var(--danger-soft);
   --color-council: var(--council);
   --color-council-soft: var(--council-soft);
   --font-sans: var(--font-sans-stack);

@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "hashAlgorithm": "SHA-256",
+  "format": "standalone-html",
+  "current": {
+    "terms": "2026-10-19.3",
+    "privacy": "2026-10-19.3"
+  },
+  "documents": [
+    {
+      "document": "terms",
+      "version": "2026-10-19.1",
+      "path": "/legal/2026-10-19.1/terms.html",
+      "sha256": "dea7e71db06aaff5485de6b8cbffbf914f872e236a8b0d2699107d9cb75af7ab"
+    },
+    {
+      "document": "privacy",
+      "version": "2026-10-19.1",
+      "path": "/legal/2026-10-19.1/privacy.html",
+      "sha256": "7d55ae503f7ca92f0e151ed85333ecc0ef78084bbdafae56731dddf2a40ad9c5"
+    },
+    {
+      "document": "terms",
+      "version": "2026-10-19.2",
+      "path": "/legal/2026-10-19.2/terms.html",
+      "sha256": "6a8564d9b0b94d508e4fcd9a6e6333d8cfa45736bd514550db960ca9e4e86d9a"
+    },
+    {
+      "document": "privacy",
+      "version": "2026-10-19.2",
+      "path": "/legal/2026-10-19.2/privacy.html",
+      "sha256": "30de7a8a6d279730f52723c70c55764a87cd8808e7bbbaca4d5aee5079f74dd2"
+    },
+    {
+      "document": "terms",
+      "version": "2026-10-19.3",
+      "path": "/legal/2026-10-19.3/terms.html",
+      "sha256": "78bf6472c6f08469b96f7b894175dcec878e5ccea65264c3c8be7ec6b3f0248e"
+    },
+    {
+      "document": "privacy",
+      "version": "2026-10-19.3",
+      "path": "/legal/2026-10-19.3/privacy.html",
+      "sha256": "558b8020cd2eebd263d640fa04293562cd5ddd0d25bf1dbfa4983937e51420da"
+    }
+  ]
+}

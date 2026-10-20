@@ -49,7 +49,13 @@ impl MockNft {
 #[near]
 impl NonFungibleTokenCore for MockNft {
     #[payable]
-    fn nft_transfer(&mut self, receiver_id: AccountId, token_id: TokenId, approval_id: Option<u64>, memo: Option<String>) {
+    fn nft_transfer(
+        &mut self,
+        receiver_id: AccountId,
+        token_id: TokenId,
+        approval_id: Option<u64>,
+        memo: Option<String>,
+    ) {
         self.tokens.nft_transfer(receiver_id, token_id, approval_id, memo)
     }
 
@@ -62,7 +68,8 @@ impl NonFungibleTokenCore for MockNft {
         memo: Option<String>,
         msg: String,
     ) -> PromiseOrValue<bool> {
-        self.tokens.nft_transfer_call(receiver_id, token_id, approval_id, memo, msg)
+        self.tokens
+            .nft_transfer_call(receiver_id, token_id, approval_id, memo, msg)
     }
 
     fn nft_token(&self, token_id: TokenId) -> Option<Token> {
@@ -80,6 +87,7 @@ impl NonFungibleTokenResolver for MockNft {
         token_id: TokenId,
         approved_account_ids: Option<HashMap<AccountId, u64>>,
     ) -> bool {
-        self.tokens.nft_resolve_transfer(previous_owner_id, receiver_id, token_id, approved_account_ids)
+        self.tokens
+            .nft_resolve_transfer(previous_owner_id, receiver_id, token_id, approved_account_ids)
     }
 }

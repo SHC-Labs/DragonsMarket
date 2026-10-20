@@ -1,19 +1,18 @@
-const STEPS = [
-  { n: "01", title: "Find your question", text: "Pick an event you follow. Check the closing time, result source and rules before taking a position." },
-  { n: "02", title: "Buy Yes or No", text: "Shares cost between 1 and 99 cents. The price is the market's chance. Sell any time before it closes." },
-  { n: "03", title: "Follow it to the finish", text: "Track your position in Portfolio. After a final result, redeem winning shares for 1 token each. Losing shares pay nothing." },
-];
+import { config } from "@/lib/config";
+import { Search, ArrowUpDown, Trophy } from "./icons";
 
-export function HowItWorks() {
-  return (
-    <section aria-label="How it works" className="mt-6 grid grid-cols-1 gap-px overflow-hidden rounded-xl border border-border bg-border lg:grid-cols-3">
-      {STEPS.map((s) => (
-        <div key={s.n} className="bg-canvas/90 p-6">
-          <div className="num text-xs text-muted">{s.n}</div>
-          <h3 className="display mb-2 mt-3 text-[1.75rem] leading-8">{s.title}</h3>
-          <p className="m-0 text-sm leading-6 text-muted">{s.text}</p>
-        </div>
-      ))}
-    </section>
-  );
+export const GUIDE_STEPS = [
+  { title: "Choose a market", text: "Find a question you follow. Read its rules, closing time and result source before taking a position." },
+  { title: "Buy Yes or No", text: "Buy Yes if you think it will happen, No if you don’t. A Yes share at 40¢ reflects a 40% chance." },
+  { title: "Follow the result", text: `After the result is final, winning shares pay 1 ${config.tokenSymbol} each. Losing shares pay nothing. Each market’s rules explain what happens if it is cancelled.` },
+];
+const STEP_ICONS = [Search, ArrowUpDown, Trophy];
+
+export function HowItWorks({ step }: { step: number }) {
+  const content = GUIDE_STEPS[step];
+  const Icon = STEP_ICONS[step];
+  return <div key={step} className="guide-stage">
+    <span className="guide-stage-icon" aria-hidden="true"><Icon size={40} variant="Bulk" /></span>
+    <div className="guide-stage-copy"><h3 data-guide-heading tabIndex={-1}>{content.title}</h3><p>{content.text}</p>{step === 1 && <div className="guide-outcomes" aria-hidden="true"><span>Yes</span><span>No</span></div>}</div>
+  </div>;
 }

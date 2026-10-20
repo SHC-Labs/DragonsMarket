@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "tokens": "cp ../replica/design/tokens.css app/tokens.css && grep -v '@import' ../replica/design/tailwind-theme.css > app/theme.css",
+    "tokens": "node scripts/generate-tokens.mjs",
     "test": "vitest run",
     "e2e": "playwright test",
     "serve": "node scripts/serve.mjs",

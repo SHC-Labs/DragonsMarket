@@ -13,8 +13,8 @@ export interface SigilSpec {
   glow: { x: number; y: number };
 }
 
-const PRIMARY = ["#4fc3d4", "#b9abf2", "#e5a93c"];
-const SECONDARY = ["#b9abf2", "#ece8df", "#4fc3d4"];
+const PRIMARY = ["var(--brand)", "var(--yes)", "var(--no)"];
+const SECONDARY = ["var(--no)", "var(--text-muted)", "var(--brand)"];
 
 // cyrb53: a small, well-mixed 53-bit string hash. Good enough to spread similar ids (same prefix) across a sigil.
 function cyrb53(str: string, seed: number): number {

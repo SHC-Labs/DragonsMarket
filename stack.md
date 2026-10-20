@@ -1,6 +1,6 @@
 # Stack on NEAR: oracle, servers, indexer, contracts
 
-Date: 2026-10-08. Companion to `pitch.md`. This is a technology map for the Phase 1 build on testnet, not an architecture. `/replica-architect` turns it into a design.
+Original research: 2026-10-08. Custody update: 2026-10-19. [intents-architecture.md](intents-architecture.md) defines the accepted target: platform tokens remain in NEAR Intents, including controlled market backing. The NEP-141 contracts are the existing prototype; the Intents settlement migration is pending. Vendor facts and resource/cost estimates below retain their original dates and are not refreshed by this documentation edit.
 
 Evidence key: V = read this session. S = search summary only. M = from memory or local notes, not re-checked. E = my estimate, no source.
 
@@ -9,9 +9,9 @@ Evidence key: V = read this session. S = search summary only. M = from memory or
 | question | answer |
 | --- | --- |
 | Which oracle? | Two separate jobs, and no off-the-shelf answer for the hard one. Price feeds: Pyth Core dropped NEAR, RedStone has a NEAR connector to verify. Event outcomes (the trust layer): nothing found on NEAR, so we write an optimistic oracle contract ourselves |
-| Do we need a server? | Yes, one. Matching has to be off-chain, the same as Polymarket. It is also the part a regulator and a user will question most |
+| Do we need a server? | The curve-market hackathon slice needs routing/status, relay and reconciliation services, not an order-book matcher. The later order-book design adds matching. Backend state must not create spendable credit. |
 | Minimum server spec? | Play-money phase: 4 vCPU, 8 GB RAM, 100 GB SSD (E). A NEAR RPC node we do not need to run; if we did, the official minimum is 16 GB RAM and 2.5 TB SSD (V) |
-| Do we need an indexer? | A small one. The matcher already records orders and trades. We only need to watch the chain for deposits, withdrawals and settlement. Hosted indexer, not self-run. NEAR Lake is dead, so avoid anything that says "Lake" |
+| Do we need an indexer? | Yes: observe verifier token balances/transfers and Dragons Market positions, liabilities and outcomes. Reconcile both authorities using verified receipts/events; the database is a projection. Re-evaluate hosted options before selecting one. |
 
 ## Two setups: test and full product
 
@@ -67,7 +67,7 @@ Honest limits:
 
 ## Server layer
 
-Matching must be off-chain. Polymarket matches off-chain and settles on-chain, with a 250 ms delay on crypto and finance markets (V). On NEAR, every resting order on-chain would cost storage: 1E19 yoctoNEAR per byte, so 100 KB per NEAR staked (V). Orderly Network does run an on-chain orderbook on NEAR (S), so the other design is possible, but I have no data on its cost at our scale.
+For the future order-book proposal, matching is planned off-chain with contract-enforced settlement. The hackathon retains curve pricing. Its services request supported Intents routes, relay authorized operations, observe final receipts, and reconcile controlled verifier balances against market liabilities. Persist in-flight operations and recovery state across restarts; do not use the backend as a second money ledger. The infrastructure sizes below are historical estimates for the earlier order-book plan, not measured requirements for this slice.
 
 | component | what it does | spec for play-money phase (E) | spec for real launch (E) |
 | --- | --- | --- | --- |
@@ -97,7 +97,7 @@ Whether the existing homelab could host the play-money phase is plausible but un
 
 Warning: my own local NEAR notes (RAR) still describe NEAR Lake and QueryAPI as the way to index. That note is stale. Do not build from it.
 
-Recommendation: start with the matcher's own database as the source of truth, and use Neardata or Goldsky for the on-chain events (deposits, withdrawals, settlement). We do not need our own archive of the chain.
+Recommendation: use verifier records as the token-custody authority and Dragons Market contracts as the positions/liabilities/outcomes authority. A hosted stream or RPC-backed observer feeds the operation journal and read projections. Provider webhooks and the matching database are not independent proof of final settlement. Test indexing options before choosing one.
 
 ## Contracts and chain facts
 
@@ -107,13 +107,13 @@ Recommendation: start with the matcher's own database as the source of truth, an
 | Fee per transaction | about $0.001 | S |
 | Storage | 100 KB per NEAR staked; a new account gets 770 bytes free | V |
 | Language | Rust with near-sdk; testing with the NEAR sandbox | M |
-| Collateral | USDC bridged through Intents (`nep141:...` token ids); which exact token and its issuer risk is not checked | M |
-| Share tokens | NEP-245 multi-token for Yes/No positions is the natural fit; not verified | M, E |
-| Deposit and withdrawal | 1Click API quotes and the verifier contract `intents.near`; the `referral` field and app fees are the only fee lever I know of for Intents | M |
-| Cross-chain custody | Chain Signatures: an MPC network of about 8 independent nodes, threshold signing | S |
+| Collateral | Target one supported stable asset held inside Intents; verify exact token ID, underlying issuer/contract, decimals and supported routes before selecting it | decision 2026-10-19; token OPEN |
+| Position accounting | Existing Yes/No positions are internal to market. Intents uses NEP-245 for deposited asset balances; this does not automatically provide prediction-share tokens | current code and official verifier docs checked 2026-10-19 |
+| Deposit and withdrawal | Verifier-held balance plus supported bridge/routing paths. 1Click is a candidate whose supported balance modes and schemas require verification; not an established provider choice | target; provider OPEN |
+| Token custody | NEAR Intents verifier holds tokens. Account control, escrow enforcement, signing/delegation and recovery require a concrete settlement design; Chain Signatures is not assumed necessary | accepted 2026-10-19; integration pending |
 | Private trading | Confidential Intents launched Feb or Mar 2026 (sources differ) | S |
 
-Contracts to write: market factory, collateral vault, position tokens, settlement and redemption, fee collector, oracle. Plus a security audit before any real money; I estimated $50K to $200K in `pitch.md` (E).
+Current contracts: market, oracle, council and governance. Required migration: authenticated Intents-held backing, positions/payout settlement, bonds, fees and rewards, plus failure recovery and reconciliation. A separate token-holding collateral vault is superseded. The longer-term order-book modules remain proposed; earlier audit cost figures are unverified estimates.
 
 ## Cheapest test stack: $0 cash
 
@@ -133,7 +133,7 @@ Everything for Phase 1 can run on the machine you already have. Checked just now
 
 What this cannot test:
 
-- **Intents deposit and withdrawal.** The sandbox has no Intents. My local notes list `intents.testnet`, but I have not verified it is live. The cheap way is one tiny real mainnet deposit and withdrawal (a few dollars) to time them. That is the only step in Phase 1 that touches real money.
+- **Intents custody and settlement.** Local fixtures can test logic but are not evidence of a real bridge/verifier integration. Verify the selected environment and provider routes rather than assuming `intents.testnet` exists. Any real routing experiment needs explicit funding/deployment authorization and recorded minimums, fees and receipts. Prove backing remains controlled inside Intents through trade and payout, not merely deposit/withdraw timing.
 - **Free RPC under load.** Public endpoints rate-limit, so this stack proves the logic, not the scale.
 - **Another thing running on this box.** About 36 of 60 GB RAM is already in use. A play-money matcher is small, but watch it.
 
@@ -144,8 +144,8 @@ Setup is one step: install Rust and the wasm target (free, about 10 minutes, E).
 1. **The server is the weak point.** An off-chain matcher is a single operator. Users and regulators will ask what stops it reordering trades or halting withdrawals. A TEE or a second-party signer could reduce this; I have not researched either.
 2. **No battle-tested oracle for our hardest job.** We write a contract that holds user money and decides outcomes. It is the most audit-heavy part.
 3. **The oracle market is shifting.** Pyth left NEAR in August and Switchboard shut down in September 2026. Anything we pick can disappear within months.
-4. **Intents is a dependency.** It is the deposit and withdrawal path, and the withdrawal-speed pain point depends on it. I have not tested its real payout times.
-5. **Custody is still open.** Who holds the money decides the vault design (`requirements.md`).
+4. **Intents is a core dependency.** It holds platform tokens and supports funding/exits. Account authorization, controlled backing, callback/recovery behavior, provider availability and measured payout times all matter.
+5. **Custody location is decided; enforcement is pending.** Tokens remain in Intents. Prove how the settlement account prevents withdrawal of backing, how position issuance follows funded settlement, and how operators are restricted. See `intents-architecture.md`.
 
 ## What I could not verify
 
@@ -158,7 +158,8 @@ Setup is one step: install Rust and the wasm target (free, about 10 minutes, E).
 
 ## Next steps, in order
 
-1. Check RedStone on NEAR (docs, last release, any price). About 1 hour.
-2. Test Neardata and Goldsky against a testnet contract to see which is simpler. About half a day.
-3. Pick the oracle design parameters (bond size, challenge window, panel size) with `/replica-architect`.
-4. Time a real Intents deposit and withdrawal on small funds. About 1 hour.
+1. Specify Intents account control, wallet identity binding, collateral and supported provider routes. Token custody in Intents is already accepted; the concrete mechanism is not implemented.
+2. Claude defines the settlement interface and proves controlled backing, funded position issuance, refunds/recovery, and isolation of bonds/fees/rewards inside Intents.
+3. Adapt the observer and operation store for event-level idempotency, final receipt verification, restart recovery and reconciliation of backing against liabilities.
+4. Codex integrates the reviewed ABI into deposit, trade, Council, redemption and withdrawal flows. Keep unfinished writes disabled until the relevant checks pass.
+5. Complete the funded-position-to-exit experiment and record actual amounts, network/provider limitations, receipts and timings. Broader oracle/vendor and order-book choices remain separately scoped work.

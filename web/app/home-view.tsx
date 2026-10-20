@@ -6,11 +6,10 @@ import Link from "next/link";
 import { useWallet } from "@/components/WalletProvider";
 import { useWatchlist } from "@/lib/watchlist";
 import { RecentPrices } from "@/components/RecentPrices";
-import { Threshold } from "@/components/Threshold";
+import { AccountEmptyState, PageLandmark } from "@/components/PageHeader";
 import { Controls } from "@/components/Controls";
 import { FeaturedCarousel } from "@/components/FeaturedCarousel";
 import { Trending } from "@/components/Featured";
-import { HowItWorks } from "@/components/HowItWorks";
 import { MarketGrid } from "@/components/MarketGrid";
 import type { Pt } from "@/components/PriceChart";
 import { Button, Notice } from "@/components/ui";
@@ -19,30 +18,46 @@ import { config, isConfigured } from "@/lib/config";
 import { filterMarkets, filtersFromQuery, sortMarkets, statusOf, type Status } from "@/lib/filters";
 import { formatMoney, nsToMs } from "@/lib/format";
 import { usePoll } from "@/lib/hooks";
-import { getCase, getHistory, listMarkets } from "@/lib/market";
+import { getCase, getHistory, listMarkets, isMarketListed } from "@/lib/market";
 
-async function load() {
-  const markets = await listMarkets();
+// Share in-flight reads (including React development remounts) and recent history.
+const historyReads = new Map<string, { expires: number; promise: Promise<Pt[]> }>();
+function featuredHistory(id: string): Promise<Pt[]> {
+  const key = `${config.rpcUrl}:${config.marketId}:${id}`;
+  const cached = historyReads.get(key);
+  if (cached && cached.expires > Date.now()) return cached.promise;
+  const promise = getHistory(id).then(rows => rows.map(h => ({ at: nsToMs(h.at), p: h.price_yes / 10_000 })));
+  historyReads.set(key, { expires: Date.now() + 30000, promise });
+  promise.catch(() => historyReads.delete(key));
+  if (historyReads.size > 100) historyReads.delete(historyReads.keys().next().value!);
+  return promise;
+}
+
+async function load(category: string, subcategory: string) {
+  const markets = (await listMarkets()).filter(isMarketListed);
   const stages: Record<string, string | null> = {};
   const histories: Record<string, Pt[]> = {};
-  await Promise.all(
-    markets.map(async (m) => {
-      if (m.status === "closed") stages[m.id] = (await getCase(m.id))?.stage ?? null;
-      histories[m.id] = (await getHistory(m.id)).map((h) => ({ at: nsToMs(h.at), p: h.price_yes / 10_000 }));
+  const scope = markets.filter(m => m.status === "open" && (!category || m.category === category) && (!subcategory || m.subcategory === subcategory));
+  const featured = sortMarkets(scope, "volume").slice(0, 5);
+  await Promise.all([
+    ...markets.filter(m => m.status === "closed").map(async m => { stages[m.id] = (await getCase(m.id))?.stage ?? null; }),
+    ...featured.map(async m => {
+      try { histories[m.id] = await featuredHistory(m.id); }
+      catch { histories[m.id] = []; } // A chart failure must not hide the market list.
     }),
-  );
+  ]);
   return { markets, stages, histories };
 }
 
 export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean }) {
   const { account, walletAvailable, openConnect } = useWallet();
-  const { data, error, loading, reload } = usePoll(load, [], 8000);
   const params = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
   const { ids: watchedIds } = useWatchlist();
   const watching = watchlistOnly || params.get("watching") === "true";
   const f = filtersFromQuery((k) => params.get(k));
+  const { data, error, loading, reload } = usePoll(() => load(f.cat, f.sub), [f.cat, f.sub], 30000);
 
   // The URL holds the filters, so a filtered view can be shared, bookmarked and refreshed.
   const update = (patch: Record<string, string | null>) => {
@@ -85,13 +100,14 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
 
   const shown = useMemo(() => sortMarkets(filterMarkets(data?.markets ?? [], { ...f, q: typed }).filter(m => !watching || watchedIds.includes(m.id)), f.sort), [data, f.cat, f.sub, f.status, f.sort, typed, watching, watchedIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (watching && !account) return <section className="py-10"><p className="ritual-label">Watchlist</p><h1 className="text-3xl">Keep an eye on your markets.</h1><p className="my-4 max-w-xl text-muted">Connect your wallet to save markets and find them here. Each wallet has its own list on this browser.</p><Button onClick={openConnect} disabled={!walletAvailable}>Connect wallet</Button><Link href="/" className="ml-5 text-council">Browse markets</Link></section>;
-  if (!isConfigured) return <Threshold />;
-  if (loading && !data) return <><Threshold /><p role="status" className="text-muted">Loading markets</p><div className="market-loading" aria-hidden="true"><div /><div /><div /></div></>;
+  if (watching && !account) return <div className="page-content"><PageLandmark title="Watchlist" /><AccountEmptyState title="Save markets with your wallet" description="Connect your wallet, then select Watch on a market. Your list is saved for that wallet on this browser." actions={<><Button onClick={openConnect} disabled={!walletAvailable}>Connect wallet</Button><Link href="/">Browse markets</Link></>} /></div>;
+  const intro = <PageLandmark title={watching ? "Watchlist" : "Prediction markets"} />;
+  if (!isConfigured) return <div className="page-content">{intro}</div>;
+  if (loading && !data) return <div className="page-content">{intro}<p role="status" className="text-muted">Loading markets</p><div className="market-loading" aria-hidden="true"><div /><div /><div /></div></div>;
   if (error && !data) {
     return (
-      <div className="mt-10">
-        <Threshold />
+      <div className="page-content">
+        {intro}
         <Notice tone="danger">
           <span>Could not load markets. Check your connection. </span>
           <Button variant="ghost" size="sm" onClick={reload}>Retry</Button>
@@ -109,8 +125,8 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
   const filtered = Boolean(f.cat || f.sub || typed.trim() || f.status !== "all");
 
   return (
-    <>
-      {watching ? <section className="workspace-intro"><div><p className="ritual-label">Watchlist</p><h1 className="text-3xl">Markets you’re following.</h1><p>Saved for <span className="break-all">{account}</span> on this browser. Switch wallets to see a different list.</p></div></section> : <><h1 className="sr-only">Prediction markets</h1><Threshold /></>}
+    <div className="page-content">
+      {intro}
 
 
       {browsing && featuredMarkets.length>0 && (
@@ -133,7 +149,7 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
 
       <div className="market-list-tabs" role="group" aria-label="Market list"><button type="button" aria-pressed={!watching} onClick={()=>watchlistOnly ? router.push("/") : update({watching:null})}>All markets</button><button type="button" aria-pressed={watching} onClick={()=>router.push("/watchlist")}>Watchlist <span className="num">{data.markets.filter(m=>watchedIds.includes(m.id)).length}</span></button>{watching && <span>Saved for your connected wallet on this browser.</span>}</div>
       <section id="markets" className="mt-10 scroll-mt-32" aria-label="Markets">
-        <h2 className="display m-0 text-[2rem] leading-9">
+        <h2 className="section-title m-0">
           {filtered ? `${shown.length} ${shown.length === 1 ? "market" : "markets"}${where ? ` in ${where}` : ""}` : watching ? "Your watchlist" : "Find a market"}
         </h2>
 
@@ -150,7 +166,6 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
       </section>
 
       {!watching && <RecentPrices markets={data.markets} histories={data.histories} />}
-      <div className="mt-10"><HowItWorks /></div>
-    </>
+    </div>
   );
 }

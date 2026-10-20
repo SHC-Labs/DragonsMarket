@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stops the local dev chain started by `cargo test -p pm-tests --test dev_chain -- --ignored`.
+# Stops the local dev chain started by `cargo test -p tests --test dev_chain -- --ignored`.
 # Matches by process name and by the executable living under this project, so it cannot touch anything else.
 here="$(cd "$(dirname "$0")" && pwd)"
 ps -eo pid=,comm= | awk '$2 ~ /^(dev_chain|near-sandbox|cargo)/ {print $1}' | while read -r pid; do

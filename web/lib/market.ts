@@ -17,6 +17,8 @@ export interface MarketView {
   resolve_by: string;
   status: "open" | "closed" | "halted" | "resolved";
   registered: boolean;
+  seeded?: boolean;
+  void_price_yes?: string | null;
   outcome: Outcome | null;
   price_yes: string;
   price_no: string;
@@ -37,6 +39,12 @@ export interface Case {
   window_ends_at: string;
   challenger: string | null;
   panel_deadline: string;
+  panel?: string[];
+  commits?: { juror: string; commitment: string }[];
+  commit_ends_at?: string;
+  challenged_at?: string;
+  draw_after_height?: string;
+  delinquent?: string[];
   votes: Vote[];
   final_outcome: Outcome | null;
   applied: boolean;
@@ -51,7 +59,9 @@ export interface OracleConfig {
   bond: string;
   window_ns: string;
   panel_deadline_ns: string;
-  panel: string[];
+  council?: string;
+  jury_size?: number;
+  draw_delay_blocks?: string;
 }
 
 const market = () => config.marketId;
@@ -59,7 +69,26 @@ const oracle = () => config.oracleId;
 
 // ---- reads --------------------------------------------------------------------------------
 
-export const listMarkets = () => view<MarketView[]>(market(), "list_markets", { from_index: "0", limit: "50" });
+// Fetch every page: positions can belong to markets beyond the first 50.
+export async function listMarkets(): Promise<MarketView[]> {
+  const all: MarketView[] = [];
+  const seen = new Set<string>();
+  for (let from = 0; ; from += 50) {
+    const page = await view<MarketView[]>(market(), "list_markets", { from_index: String(from), limit: "50" });
+    for (const item of page) {
+      if (seen.has(item.id)) throw new Error("Market pagination repeated a record. Please retry.");
+      seen.add(item.id);
+      all.push(item);
+    }
+    if (page.length < 50) return all;
+  }
+}
+
+// Unknown seeding state remains a pending contract field; explicit false is never tradable.
+export const isMarketListed = (m: MarketView) => m.registered && m.seeded !== false;
+export interface BuyQuote { shares_out: string; fee: string }
+export interface SellQuote { collateral_out: string; shares_in: string; fee: string }
+
 export const getMarket = (id: string) => view<MarketView | null>(market(), "get_market", { market_id: id });
 export const getHistory = (id: string) => view<PricePoint[]>(market(), "get_history", { market_id: id });
 export const getCase = (id: string) => view<Case | null>(oracle(), "get_case", { market_id: id });
@@ -71,9 +100,9 @@ export const isRegistered = (account: string) => view<boolean>(market(), "is_reg
 export const tokenBalance = (account: string) => view<string>(config.tokenId, "ft_balance_of", { account_id: account });
 export const claimableBond = (account: string) => view<string>(oracle(), "claimable_of", { account_id: account });
 export const quoteBuy = (id: string, side: Side, amount: bigint) =>
-  view<string>(market(), "quote_buy", { market_id: id, side, amount: amount.toString() });
+  view<BuyQuote>(market(), "quote_buy", { market_id: id, side, amount: amount.toString() });
 export const quoteSell = (id: string, side: Side, shares: bigint) =>
-  view<{ collateral_out: string; shares_in: string }>(market(), "quote_sell", {
+  view<SellQuote>(market(), "quote_sell", {
     market_id: id,
     side,
     shares: shares.toString(),
@@ -92,7 +121,7 @@ export interface FunctionCall {
 
 const GAS = "100000000000000"; // 100 TGas
 const ONE_YOCTO = "1";
-const STORAGE_DEPOSIT = "50000000000000000000000"; // 0.05 NEAR, what pm-market asks for
+const STORAGE_DEPOSIT = "50000000000000000000000"; // 0.05 NEAR, what market asks for
 
 const tokenTransfer = (to: string, amount: bigint, msg: string): FunctionCall => ({
   receiverId: config.tokenId,
@@ -142,13 +171,8 @@ export const proposeCall = (id: string, outcome: Outcome, evidence: string, bond
 
 export const challengeCall = (id: string, bond: bigint) => tokenTransfer(oracle(), bond, `challenge:${id}`);
 
-export const voteCall = (id: string, outcome: Outcome, reason: string): FunctionCall => ({
-  receiverId: oracle(),
-  methodName: "panel_vote",
-  args: { market_id: id, outcome, reason },
-  gas: GAS,
-  deposit: "0",
-});
+// Voting integration intentionally pending: commit/reveal and durable salt recovery
+// must be designed against the final ABI. There is no panel_vote adapter.
 
 export const finalizeCall = (id: string): FunctionCall => ({
   receiverId: oracle(),

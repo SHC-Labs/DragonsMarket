@@ -2,18 +2,19 @@
 
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { PageHeader } from "@/components/PageHeader";
 import { Notice, StateBadge } from "@/components/ui";
 import type { Pt } from "@/components/PriceChart";
 import { MarketOutcomeChart } from "@/components/MarketOutcomeChart";
 import { ProbBar } from "@/components/MarketCard";
 import { RulesBlock } from "@/components/RulesBlock";
 import { Resolution } from "@/components/Resolution";
-import { Sigil } from "@/components/Sigil";
+import { MarketIcon } from "@/components/MarketIcon";
 import { TradeTicket } from "@/components/TradeTicket";
 import { config } from "@/lib/config";
 import { formatDateTime, formatMoney, nsToMs } from "@/lib/format";
 import { usePoll } from "@/lib/hooks";
-import { getCase, getHistory, getMarket } from "@/lib/market";
+import { getCase, getHistory, getMarket, isMarketListed } from "@/lib/market";
 import { pct, resultWord } from "@/lib/probability";
 import { categoryOf, labelOf } from "@/lib/categories";
 
@@ -33,19 +34,20 @@ export function MarketView() {
     5000,
   );
 
-  if (!/^\d+$/.test(id)) return <p className="mt-10">This market does not exist. <Link href="/">All markets</Link></p>;
-  if (loading && !data) return <p className="mt-10 text-muted">Loading market</p>;
-  if (error && !data) return <Notice tone="danger">Could not load this market. Check your connection.</Notice>;
-  if (!data?.market) return <p className="mt-10">This market does not exist. <Link href="/">All markets</Link></p>;
+  if (!/^\d+$/.test(id)) return <PageHeader title="Market unavailable" description="This market does not exist." actions={<Link href="/">Browse markets</Link>} />;
+  if (loading && !data) return <><PageHeader title="Market" /><p role="status" className="text-muted">Loading market</p></>;
+  if (error && !data) return <><PageHeader title="Market unavailable" actions={<Link href="/">Browse markets</Link>} /><Notice tone="danger">Could not load this market. Check your connection.</Notice></>;
+  if (!data?.market) return <PageHeader title="Market unavailable" description="This market does not exist." actions={<Link href="/">Browse markets</Link>} />;
 
   const m = data.market;
+  if (!isMarketListed(m)) return <PageHeader title="Market unavailable" description="This market is not ready for trading." actions={<Link href="/">Browse available markets</Link>} />;
   const done = m.status === "resolved";
   const yes = pct(m.price_yes);
   const first = data.points[0]?.p;
   const delta = first === undefined ? 0 : Math.round(yes - first);
 
   return (
-    <div className="pt-8">
+    <div className="market-detail-page">
       <nav aria-label="Breadcrumb" className="flex flex-wrap items-center gap-2 text-sm text-muted">
         <Link href="/" className="no-underline hover:text-fg">Markets</Link>
         <span aria-hidden="true">/</span>
@@ -55,8 +57,8 @@ export function MarketView() {
       </nav>
       <div className="market-detail-layout mt-5 grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_24rem] lg:items-start">
         <div className="min-w-0 [overflow-wrap:anywhere]">
-          <header className="rise flex items-start gap-5">
-            <Sigil hash={m.rule_hash} className="hidden h-24 w-24 shrink-0 rounded-lg border border-border bg-canvas sm:block" />
+          <header className="market-detail-header flex items-start gap-4">
+            <div className="hidden shrink-0 sm:block"><MarketIcon category={m.category} sub={m.subcategory} /></div>
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-3 text-sm text-muted">
                 <StateBadge status={m.status} caseStage={data.stage} />
@@ -64,7 +66,7 @@ export function MarketView() {
                 <span><span className="num">{formatMoney(m.locked)}</span> {config.tokenSymbol} in play</span>
                 {m.outcome && <span className="text-fg">Result: {resultWord(m)}</span>}
               </div>
-              <h1 className="display mb-0 mt-4 text-[2.5rem] leading-[2.625rem] sm:text-[3.5rem] sm:leading-[3.5rem]">{m.title}</h1>
+              <h1 className="page-title mb-0 mt-4">{m.title}</h1>
             </div>
           </header>
 
@@ -84,7 +86,7 @@ export function MarketView() {
               {!done && data.points.length > 1 && (
                 <div className={`num pb-2 text-sm ${delta >= 0 ? "text-yes" : "text-no"}`}>
                   {delta >= 0 ? "+" : ""}
-                  {delta} pts since the market opened
+                  {delta} pts over the available history
                 </div>
               )}
             </div>
