@@ -1,5 +1,5 @@
 [workspace]
-members = ["mock-ft", "mock-nft", "council", "governance", "market", "oracle", "tests", "upgrade"]
+members = ["mock-ft", "mock-nft", "mock-mt-receiver", "council", "governance", "market", "oracle", "tests", "upgrade"]
 resolver = "2"
 
 [workspace.dependencies]
