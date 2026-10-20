@@ -2,7 +2,7 @@
 
 Custody decision, 2026-10-19: the accepted target in [intents-architecture.md](../intents-architecture.md) keeps platform tokens in Intents. This manual remains a description of current governance methods. Authority over future settlement accounts, escrow and delegated signing must be specified and reviewed; existing owner/timelock controls alone do not establish those Intents permissions.
 
-Source: `governance/src/lib.rs`, with the shared upgrade helpers in `upgrade/src/lib.rs`. Written 2026-10-18 from the code as it stands, upgrade path added 2026-10-19. When this file and the code disagree, the code is right.
+Source: `governance/src/lib.rs`, with the shared upgrade helpers in `upgrade/src/lib.rs`. Written 2026-10-18 from the code as it stands, upgrade path added 2026-10-19, floors and the upgrade mark added 2026-10-20. When this file and the code disagree, the code is right.
 
 ## What it is
 
@@ -40,17 +40,19 @@ Called once, at deploy. Only the contract's own account can call it: `new` is `#
 | Argument | Meaning | Refused when |
 |---|---|---|
 | `members` | The member accounts | Empty, more than 5, or any account listed twice (`there must be 1 to 5 members`, `members must be different accounts`) |
-| `threshold` | How many yes votes approve a proposal, and how many cancel votes cancel one | Below 1 or above the number of members (`threshold must be between 1 and the number of members`) |
+| `threshold` | How many yes votes approve a proposal, and how many cancel votes cancel one | Not a majority of the members, or above their number (`the threshold must be a majority of the members`) |
 | `voting_period_ns` | How long a proposal is open for votes, in nanoseconds | Zero (`periods must be positive`) |
-| `timelock_ns` | The wait between approval and the first moment it can be executed | Zero |
+| `timelock_ns` | The wait between approval and the first moment it can be executed | Under 72 hours (`the timelock is the users' exit window and cannot be under 72 hours`) |
 | `execution_window_ns` | How long after the timelock ends it can still be executed | Zero |
 
-The periods are chosen at deploy and are not set in the code. Times are nanoseconds since the Unix epoch, and `U64` and `U128` travel as strings in JSON.
+The voting period and the execution window are chosen at deploy and are not set in the code. The timelock is chosen at deploy too, but it can never be under `MIN_TIMELOCK_NS`, 72 hours, and the threshold can never be below a majority: both floors are constants in the code, so lowering one is itself a code upgrade that waits out the timelock in force. A majority is more than half of the members: 1 of 1, 2 of 2, 2 or 3 of 3, 3 or more of 4, 3 or more of 5. Times are nanoseconds since the Unix epoch, and `U64` and `U128` travel as strings in JSON.
 
 ## Limits written into the code
 
 | Limit | Value | Why |
 |---|---|---|
+| Timelock | At least 72 hours | It is the only window in which users can see a code change coming and leave. `new` and `set_timelock` refuse less. |
+| Threshold | A majority of the members | A minority of the members cannot approve a change, an upgrade included. `new`, `set_threshold` and `add_member` keep it so. |
 | Members | 5 | Keeps votes cheap and the member list short. |
 | Call arguments | 4,096 bytes | Each proposal is stored and paid for from this contract's own balance, so a record needs a ceiling. 4,096 bytes is enough for `create_market` at its own text limits. |
 | Method name | 256 bytes | The protocol's own limit on a method name. |
@@ -99,7 +101,7 @@ Votes keep being accepted after approval until `voting_ends_at`, so the record s
 | `execute(proposal_id)` | Anyone | Runs an Approved proposal whose timelock has passed and whose window has not closed. |
 | `on_executed(proposal_id)` | The contract itself | Callback after a function call, an upgrade or a key deletion. Marks it Executed or ExecutionFailed. |
 | `stage_code()` | Anyone, payable | Stores the call input as a wasm under its own sha256 and returns the hash. The deposit pays for the storage and the surplus is refunded. |
-| `migrate()` | The contract itself | Runs in the new code in the same batch as the deploy. Reads the one state layout it knows, sets `upgrade_proven`, returns the state. |
+| `migrate()` | The contract itself | Runs in the new code in the same batch as the deploy. Refuses unless an `upgrade_self` marked the upgrade in flight. Reads the one state layout it knows, clears the mark, sets `upgrade_proven`, returns the state. |
 | `is_staged(code_hash)` | Anyone, view | Whether a wasm with that sha256 is staged here. |
 
 ### Refusals
@@ -126,6 +128,7 @@ Votes keep being accepted after approval until `voting_ends_at`, so the record s
 | `stage_code` | `attach at least <amount> to pay for the storage` | The deposit is below the storage cost of the wasm. |
 | `stage_code` | `the wasm goes in the call input` | The call carried no input. |
 | `migrate` | `migrate expects version 1` | The stored state starts with another version number. |
+| `migrate` | `migrate runs only inside an upgrade` | `upgrade_in_flight` is not set: nobody has executed an `upgrade_self`, so a direct call proves nothing. |
 | `on_executed` | `no call in flight for this proposal` | Nothing is Executing. |
 | `on_executed` | `Method on_executed is private` | Called from outside. |
 
@@ -170,10 +173,12 @@ The checks run when a proposal is created, and again at execution, because membe
 | `function_call` | `gas` from 5 to 250 TGas, both included | `the call's gas must be between 5 and 250 TGas` |
 | `add_member` | Not already a member | `already a member` |
 | `add_member` | Fewer than 5 members | `there can be at most 5 members` |
+| `add_member` | The present threshold is still a majority of the members with one more | `raise the threshold first, it would not be a majority of the new members` |
 | `remove_member` | Is a member | `not a member` |
 | `remove_member` | More members than the threshold | `removing a member would leave fewer members than the threshold` |
-| `set_threshold` | Between 1 and the number of members | `threshold must be between 1 and the number of members` |
-| the three period actions | Above zero | `periods must be positive` |
+| `set_threshold` | A majority of the members and not above their number | `the threshold must be a majority of the members` |
+| `set_timelock` | At least 72 hours | `the timelock is the users' exit window and cannot be under 72 hours` |
+| `set_voting_period`, `set_execution_window` | Above zero | `periods must be positive` |
 | `upgrade_self` | The wasm is staged here now | `stage the code first, nothing is staged under that hash` |
 | `seal` | `upgrade_proven` is true | `prove the upgrade path before deleting keys` |
 
@@ -215,9 +220,9 @@ How a failed self-upgrade is recorded. `execute` marks the proposal Executing, r
 
 The third row is why this contract's own state layout has to stay compatible across its own upgrade. A new version that changes the stored layout of `GovernanceContract`, `Proposal` or `Action` must read the old layout in `migrate`. Before voting for an `upgrade_self`, check that the wasm exports `migrate` and `on_executed`.
 
-How `migrate` works. The state struct starts with `state_version: u16`, 1 today. `migrate` reads the first two bytes of the stored state and refuses anything other than 1 (`migrate expects version 1`), then reads the state as the version 1 struct, sets `upgrade_proven` and returns it. It never guesses a layout from bytes. A version 2 build keeps a frozen copy of the version 1 struct as `StateV1`, reads that, builds its own state from it, writes `state_version: 2` and sets `upgrade_proven`. The unit test `migrate_keeps_the_state_and_marks_the_upgrade_proven` shows the pattern. The version check does not tell contracts apart: another contract's wasm with the same version number gets past it and fails when it cannot read the state.
+How `migrate` works. The state struct starts with `state_version: u16`, 1 today. `migrate` reads the first two bytes of the stored state and refuses anything other than 1 (`migrate expects version 1`), then reads the state as the version 1 struct, refuses unless `upgrade_in_flight` is set, clears it, sets `upgrade_proven` and returns it. It never guesses a layout from bytes. A version 2 build keeps a frozen copy of the version 1 struct as `StateV1`, reads that, builds its own state from it, writes `state_version: 2` and sets `upgrade_proven`. The unit test `migrate_keeps_the_state_and_marks_the_upgrade_proven` shows the pattern. The version check does not tell contracts apart: another contract's wasm with the same version number gets past it and fails when it cannot read the state.
 
-`upgrade_proven` is false at deploy and true after the first upgrade that went through `migrate`. It is the gate on `seal`, so keys are deleted only after the path has been shown to work on this chain. The first upgrade can deploy the same code again with a changed hash, which proves the path without changing behaviour.
+`upgrade_proven` is false at deploy and true after the first upgrade that went through `migrate`. It is the gate on `seal`, so keys are deleted only after the path has been shown to work on this chain. `upgrade_in_flight` is what stops a hand-called `migrate` from faking that proof: `execute` sets it just before it sends the deploy and migrate batch, and `migrate` refuses to run without it and clears it. When the batch fails, the old code keeps the mark set, and the next `upgrade_self` sets it again. A set mark is also what lets someone holding the account's key call `migrate` by hand in the old code, so after a failed upgrade, run the next one before sealing. Both flags show in `config`. The first upgrade can deploy the same code again with a changed hash, which proves the path without changing behaviour.
 
 #### How to upgrade a contract safely
 
@@ -231,7 +236,7 @@ How `migrate` works. The state struct starts with `state_version: u16`, 1 today.
 
 ### Changing governance itself
 
-Members, threshold and the three periods change only through the five non-call actions. A `function_call` aimed at this contract is refused, so there is no second route around the checks above. A removal cannot leave fewer members than the threshold. A threshold change cannot exceed the member count. Every settings change goes through the same vote and timelock as any other.
+Members, threshold and the three periods change only through the five non-call actions. A `function_call` aimed at this contract is refused, so there is no second route around the checks above. A removal cannot leave fewer members than the threshold. A threshold change must be a majority of the members and cannot exceed their number. An added member needs the threshold raised first when it would stop being a majority (3 members with a threshold of 2 cannot grow to 4 until the threshold is 3). The timelock cannot be set under 72 hours. Every settings change goes through the same vote and timelock as any other.
 
 ## Views
 
@@ -242,7 +247,7 @@ Members, threshold and the three periods change only through the five non-call a
 
 Both views return the stored record with one more field, `execute_gas`: the gas an `execute` must carry. For a `function_call` it is the call's gas plus 14 TGas, for an `upgrade_self` it is 110 TGas, and for the other actions it is `null`, since any gas that fits the transaction will do.
 | `get_members()` | The member accounts. |
-| `config()` | state_version, upgrade_proven, threshold, voting_period_ns, timelock_ns, execution_window_ns, number of members, number of proposals. |
+| `config()` | state_version, upgrade_proven, upgrade_in_flight, threshold, voting_period_ns, timelock_ns, execution_window_ns, number of members, number of proposals. |
 | `is_staged(code_hash)` | Whether that wasm is staged here. |
 
 A proposal record holds: id, proposer, created_at, voting_ends_at, the action, every vote (member and yes or no), approved_at, the cancel votes, and the stage, with `execute_gas` beside them.
@@ -273,7 +278,7 @@ Each logs `EVENT_JSON:` and JSON of the form `{"standard":"governance","version"
 
 ## Security properties checked by tests
 
-Only members can propose, vote or cancel; a stranger can execute but only an approved proposal past its timelock; nothing runs twice, including a second `execute` while the first call is in flight; the callback refuses a direct call; a removed member's earlier yes vote stops counting; a proposal approved by the threshold cannot be executed early or after its window; cancelling needs the threshold and only current members count; every action's checks run again at execution; a call's gas outside 5 to 250 TGas is refused when proposed, and when executed if the range ever changes; `execute` refuses less than a call's gas plus 14 TGas and works with exactly that; a stranger cannot initialise a deployed governance contract; settings changes and member changes are only reachable through proposals; an upgrade of this contract is recorded as failed when the batch fails and as executed when the new code answers; seal and upgrade are refused when they should be. See `AUDIT.md` for the measured attack runs.
+Only members can propose, vote or cancel; a stranger can execute but only an approved proposal past its timelock; nothing runs twice, including a second `execute` while the first call is in flight; the callback refuses a direct call; a removed member's earlier yes vote stops counting; a proposal approved by the threshold cannot be executed early or after its window; cancelling needs the threshold and only current members count; every action's checks run again at execution; a call's gas outside 5 to 250 TGas is refused when proposed, and when executed if the range ever changes; `execute` refuses less than a call's gas plus 14 TGas and works with exactly that; a stranger cannot initialise a deployed governance contract; settings changes and member changes are only reachable through proposals; a timelock under 72 hours and a threshold that is not a majority are refused at creation and at every change; a hand-called `migrate` is refused and proves nothing; an upgrade of this contract is recorded as failed when the batch fails and as executed when the new code answers; seal and upgrade are refused when they should be. See `AUDIT.md` for the measured attack runs.
 
 ## Things to know
 
@@ -284,6 +289,7 @@ Only members can propose, vote or cancel; a stranger can execute but only an app
 | Timelock and window changes reach old proposals | They are read at execution time. A change that executes while another proposal waits applies to that one too. |
 | Failed calls are final | A target that rejects the call (wrong argument, wrong state) leaves ExecutionFailed. Re-propose. |
 | Deposit comes from here | A call that attaches NEAR draws on this contract's own balance. |
+| Selling during an upgrade is not guaranteed | The timelock guarantees an exit for free balances (`withdraw`) and resolved positions (`redeem`). A user holding a position in an open market can leave at a fair price only by `sell`ing, and the market's operator can pause that. Nothing in the code keeps `sell` open while an upgrade waits out its timelock, and the market does not know a proposal is pending. This is a known limitation, left for the owner to decide: the options are a market that refuses to pause while an upgrade is approved, or a statement of the limit in the Terms. |
 | Whole-system trust | Everything the owner can do on market, oracle and council is controlled by whoever holds a threshold of member keys. The member count and threshold are the real security setting. |
 | Access keys are a deployment matter | A full-access key on any of the four accounts bypasses every rule here, code upgrades included. Delete it with `seal` after the first upgrade has gone through, then check the account has no keys (`view_access_key_list` returns nothing). Until then the key is the weakest part of the system. |
 | The order of the deployment steps | `DEPLOY.md` has the checklist: build and hashes, deploy and init in one batch, ownership handover, one proven upgrade on each account, then seal and a check that `view_access_key_list` is empty on all four. |

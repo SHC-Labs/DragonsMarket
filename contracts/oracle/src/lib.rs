@@ -62,7 +62,8 @@ const MAX_PUBLISHERS: usize = 10;
 // The rest goes to the winner.
 const JUROR_SHARE_BPS: u128 = 2_500;
 // Of the challenger's bond when neither jury decided, the share the jurors who revealed split. The rest goes to the
-// proposer. With no juror having revealed, this share goes to the owner instead, so it always leaves the two parties.
+// proposer. With no juror having revealed, this share goes to the no-decision recipient instead, so it always leaves the
+// two parties.
 const NO_DECISION_JUROR_SHARE_BPS: u128 = 5_000;
 
 #[near(serializers=[borsh])]
@@ -213,6 +214,10 @@ pub struct OracleContract {
     state_version: u16,
     // Set by migrate, so it is true only once an upgrade has gone through. seal refuses until then.
     upgrade_proven: bool,
+    // Set by upgrade just before it sends the deploy and migrate batch, cleared by migrate. migrate refuses to run when it
+    // is not set, so the proof cannot come from calling migrate by hand. A batch that fails leaves it set in the old code,
+    // and the next upgrade sets it again.
+    upgrade_in_flight: bool,
     owner: AccountId,
     // Set by propose_owner. Ownership moves only when this account calls accept_owner.
     pending_owner: Option<AccountId>,
@@ -238,6 +243,9 @@ pub struct OracleContract {
     // The keys that sign prices, and how many of them must sign the same price for it to count.
     publishers: Vec<PublicKey>,
     price_threshold: u32,
+    // Where the challenger's half bond goes when neither jury decided and no juror revealed. The owner is governance, which
+    // has no use for a token flow, so this is normally the business wallet.
+    no_decision_recipient: AccountId,
     markets: LookupMap<u64, MarketInfo>,
     cases: LookupMap<u64, Case>,
     // Bonds waiting to be withdrawn, by account.
@@ -375,6 +383,7 @@ impl OracleContract {
         operator_id: AccountId,
         network: String,
         price_threshold: u32,
+        no_decision_recipient: AccountId,
     ) -> Self {
         require!(bond.0 > 0, "bond must be positive");
         require!(
@@ -390,6 +399,7 @@ impl OracleContract {
         Self {
             state_version: STATE_VERSION,
             upgrade_proven: false,
+            upgrade_in_flight: false,
             owner: owner_id,
             pending_owner: None,
             operator: operator_id,
@@ -406,6 +416,7 @@ impl OracleContract {
             network,
             publishers: vec![],
             price_threshold,
+            no_decision_recipient,
             markets: LookupMap::new(Key::Markets),
             cases: LookupMap::new(Key::Cases),
             claimable: LookupMap::new(Key::Claimable),
@@ -429,6 +440,7 @@ impl OracleContract {
         upgrade::require_upgrade_gas();
         self.only_owner();
         let code = upgrade::take_staged(code_hash);
+        self.upgrade_in_flight = true;
         emit("upgrade_sent", json!({ "code_hash": code_hash }));
         upgrade::deploy_and_migrate(code)
     }
@@ -440,6 +452,8 @@ impl OracleContract {
     pub fn migrate() -> Self {
         upgrade::require_state_version(STATE_VERSION);
         let mut state: Self = env::state_read().unwrap_or_else(|| env::panic_str("there is no state to migrate"));
+        require!(state.upgrade_in_flight, "migrate runs only inside an upgrade");
+        state.upgrade_in_flight = false;
         state.upgrade_proven = true;
         emit("migrated", json!({ "state_version": state.state_version }));
         state
@@ -524,6 +538,12 @@ impl OracleContract {
         require!(env::predecessor_account_id() == self.owner, "owner only");
         emit("operator_set", json!({ "operator": operator_id }));
         self.operator = operator_id;
+    }
+
+    pub fn set_no_decision_recipient(&mut self, recipient: AccountId) {
+        require!(env::predecessor_account_id() == self.owner, "owner only");
+        emit("no_decision_recipient_set", json!({ "recipient": recipient }));
+        self.no_decision_recipient = recipient;
     }
 
     // Adding a publisher grants power over prices, so it is the owner's (a governance vote and its timelock).
@@ -830,7 +850,9 @@ impl OracleContract {
 
     // Anyone can call this once the market's resolve_by has passed. It settles whatever is settleable: an unchallenged
     // proposal whose window ended, a dispute whose jury ran out of time, or a final answer the market has not received.
-    // Otherwise the market gets Void. The market's own void_if_unresolved is only for an oracle that is gone.
+    // A market nobody answered gets Void. A case that still has time is refused: the timing rules in propose and
+    // close_round leave none at this point, and voiding the market under it would leave the case to settle an answer that
+    // can no longer be applied. The market's own void_if_unresolved is only for an oracle that is gone.
     pub fn resolve_by_deadline(&mut self, market_id: U64) {
         upgrade::require_gas(GAS_SETTLE_FLOOR, SETTLE_REASON);
         let info = self.market_info(market_id.0);
@@ -847,10 +869,7 @@ impl OracleContract {
             Stage::Disputed if round_is_over(&case, now) => self.close_round(market_id.0, case),
             Stage::Final if !case.applied => self.apply(market_id.0, case.final_outcome.unwrap_or(Outcome::Void)),
             Stage::Final => env::panic_str("already resolved"),
-            _ => {
-                emit("deadline_void", json!({ "market_id": market_id.0.to_string() }));
-                self.apply(market_id.0, Outcome::Void)
-            }
+            _ => env::panic_str("the case still has time; finalize it when its round is over"),
         }
     }
 
@@ -942,7 +961,7 @@ impl OracleContract {
     }
 
     pub fn config(&self) -> near_sdk::serde_json::Value {
-        json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven,
+        json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
                 "owner": self.owner, "pending_owner": self.pending_owner, "market": self.market, "bond_token": self.bond_token,
                 "bond": self.bond.to_string(), "window_ns": self.window_ns.to_string(),
                 "panel_deadline_ns": self.panel_deadline_ns.to_string(),
@@ -950,7 +969,8 @@ impl OracleContract {
                 "jury_size": self.jury_size, "draw_delay_blocks": self.draw_delay_blocks.to_string(),
                 "min_proposal_ns": self.min_proposal_ns.to_string(),
                 "min_resolve_gap_ns": self.min_resolve_gap_ns().to_string(), "operator": self.operator,
-                "network": self.network, "publishers": self.publishers, "price_threshold": self.price_threshold })
+                "network": self.network, "publishers": self.publishers, "price_threshold": self.price_threshold,
+                "no_decision_recipient": self.no_decision_recipient })
     }
 }
 
@@ -1198,12 +1218,12 @@ impl OracleContract {
             (Some(_), Ruling::NoDecision) => {
                 // Nobody won, so the proposer gets their own bond back. The challenger put a case in front of two juries
                 // and neither found for them: half of their bond goes to the jurors who revealed, the rest to the
-                // proposer. With no juror having revealed, the owner holds that half, so a pair of accounts that
-                // propose and challenge each other loses it whatever the juries do.
+                // proposer. With no juror having revealed, the no-decision recipient holds that half, so a pair of accounts
+                // that propose and challenge each other loses it whatever the juries do.
                 let pool = bond * NO_DECISION_JUROR_SHARE_BPS / 10_000;
                 if revealed.is_empty() {
-                    let owner = self.owner.clone();
-                    self.add_claimable(&owner, pool);
+                    let recipient = self.no_decision_recipient.clone();
+                    self.add_claimable(&recipient, pool);
                     self.add_claimable(&proposer, 2 * bond - pool);
                 } else {
                     juror_pay = pool / revealed.len() as u128;
@@ -1268,6 +1288,7 @@ mod tests {
     const MARKET: &str = "market.near";
     const TOKEN: &str = "token.near";
     const COUNCIL: &str = "council.near";
+    const RECIPIENT: &str = "biz.near";
     const NETWORK: &str = "testnet";
 
     fn acct(name: &str) -> AccountId {
@@ -1330,6 +1351,7 @@ mod tests {
             acct(OPERATOR),
             NETWORK.to_string(),
             price_threshold,
+            acct(RECIPIENT),
         )
     }
 
@@ -1577,8 +1599,9 @@ mod tests {
             o.settle(0, outcome, ruling);
 
             let paid_jurors: u128 = jurors.iter().map(|j| owed(&o, j)).sum();
-            let (carol, dave, owner) = (owed(&o, "carol.near"), owed(&o, "dave.near"), owed(&o, OWNER));
-            prop_assert_eq!(paid_jurors + carol + dave + owner, 2 * bond, "the two bonds are paid out exactly");
+            let (carol, dave, recipient) = (owed(&o, "carol.near"), owed(&o, "dave.near"), owed(&o, RECIPIENT));
+            prop_assert_eq!(paid_jurors + carol + dave + recipient, 2 * bond, "the two bonds are paid out exactly");
+            prop_assert_eq!(owed(&o, OWNER), 0, "the owner is never paid");
 
             let case = o.case(0);
             let revealed = |j: &String| votes.iter().any(|(v, _)| v == j);
@@ -1602,7 +1625,7 @@ mod tests {
             if ruling == Ruling::NoDecision {
                 prop_assert_eq!(dave, 0, "the challenger's bond is not returned when nobody decided");
                 prop_assert!(carol >= bond, "the proposer's own bond comes back");
-                prop_assert_eq!(owner, if votes.is_empty() { pool } else { 0 }, "the owner holds the jurors' half only when none revealed");
+                prop_assert_eq!(recipient, if votes.is_empty() { pool } else { 0 }, "the recipient holds the jurors' half only when none revealed");
             }
             // Delinquent means did not vote: never a juror who revealed.
             for d in &case.delinquent {
@@ -1803,20 +1826,53 @@ mod tests {
             (1_250_000, 1_250_000, 0)
         );
         assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (BOND + BOND / 2, 0));
-        assert_eq!(owed(&o, OWNER), 0);
+        assert_eq!((owed(&o, OWNER), owed(&o, RECIPIENT)), (0, 0));
     }
 
-    // With nobody having revealed, the jurors' half is held by the owner, so it still leaves the two parties.
+    // With nobody having revealed, the jurors' half is held by the no-decision recipient, so it still leaves the two
+    // parties, and it does not land in the owner's claimable, which is governance's.
     #[test]
-    fn when_no_juror_revealed_the_owner_holds_the_jurors_half() {
+    fn when_no_juror_revealed_the_no_decision_recipient_holds_the_jurors_half() {
         let mut o = oracle_with_bond(BOND);
         disputed_case(&mut o, Outcome::Void, &[], &[]);
         act_as("anyone.near", DEADLINE + 1);
         o.settle(0, Outcome::Void, Ruling::NoDecision);
         assert_eq!(
-            (owed(&o, "carol.near"), owed(&o, "dave.near"), owed(&o, OWNER)),
-            (BOND + BOND / 2, 0, BOND / 2)
+            (
+                owed(&o, "carol.near"),
+                owed(&o, "dave.near"),
+                owed(&o, RECIPIENT),
+                owed(&o, OWNER)
+            ),
+            (BOND + BOND / 2, 0, BOND / 2, 0)
         );
+    }
+
+    #[test]
+    fn a_recipient_the_owner_set_receives_the_half_instead_of_the_one_given_at_deploy() {
+        let mut o = oracle_with_bond(BOND);
+        act_unpaid(OWNER, 1);
+        o.set_no_decision_recipient(acct("council-revenue.near"));
+        disputed_case(&mut o, Outcome::Void, &[], &[]);
+        act_as("anyone.near", DEADLINE + 1);
+        o.settle(0, Outcome::Void, Ruling::NoDecision);
+        assert_eq!((owed(&o, "council-revenue.near"), owed(&o, RECIPIENT)), (BOND / 2, 0));
+    }
+
+    #[test]
+    fn only_the_owner_sets_the_recipient_and_the_change_is_logged_and_shown() {
+        let mut o = fresh_oracle();
+        assert_eq!(o.config()["no_decision_recipient"], RECIPIENT);
+        for who in ["stranger.near", OPERATOR] {
+            act_unpaid(who, 5);
+            assert!(refusal(|| o.set_no_decision_recipient(acct("x.near"))).contains("owner only"));
+        }
+        act_unpaid(OWNER, 5);
+        o.set_no_decision_recipient(acct("x.near"));
+        assert_eq!(o.config()["no_decision_recipient"], "x.near");
+        assert!(near_sdk::test_utils::get_logs()
+            .iter()
+            .any(|l| l.contains("no_decision_recipient_set") && l.contains("x.near")));
     }
 
     // Carol proposed Void herself and nobody decided. She must not win both bonds just because the answer is the one she
@@ -2530,6 +2586,148 @@ mod tests {
         assert!(again.is_err());
     }
 
+    // The timing rules leave no case with time at resolve_by. If a later change ever does, the deadline call refuses
+    // instead of voiding the market under a case that would settle an answer nobody can apply.
+    #[test]
+    fn a_proposal_whose_window_is_still_open_at_the_deadline_is_refused_not_voided() {
+        let mut o = oracle_with_bond(BOND);
+        o.markets.insert(
+            0,
+            MarketInfo {
+                resolve_by: U64(MARKET_DEADLINE),
+                ..base_info()
+            },
+        );
+        act_as(TOKEN, SECOND);
+        let _ = o.ft_on_transfer(acct("carol.near"), U128(BOND), "propose:0:yes:https://x".to_string());
+        o.markets.insert(
+            0,
+            MarketInfo {
+                resolve_by: U64(10 * SECOND),
+                ..base_info()
+            },
+        );
+        act_as("anyone.near", 10 * SECOND);
+        assert!(refusal(|| o.resolve_by_deadline(U64(0))).contains("the case still has time"));
+        assert!(calls_to("set_outcome").is_empty(), "the market was not told anything");
+        assert_eq!(o.case(0).stage, Stage::Proposed);
+    }
+
+    #[test]
+    fn a_dispute_whose_jury_still_has_time_at_the_deadline_is_refused_not_voided() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        seat(&mut o, DRAW_BY, &names(3, "j"));
+        let panel_deadline = o.case(0).panel_deadline.0;
+        o.markets.insert(
+            0,
+            MarketInfo {
+                resolve_by: U64(panel_deadline),
+                ..o.get_market_info(U64(0)).unwrap()
+            },
+        );
+        act_as("anyone.near", panel_deadline);
+        assert!(refusal(|| o.resolve_by_deadline(U64(0))).contains("the case still has time"));
+        assert!(calls_to("set_outcome").is_empty());
+        assert_eq!(o.case(0).stage, Stage::Disputed);
+        act_as("anyone.near", panel_deadline + 1);
+        o.resolve_by_deadline(U64(0));
+        assert_eq!(
+            o.case(0).stage,
+            Stage::Final,
+            "one nanosecond later the round is over and it settles"
+        );
+    }
+
+    // The most a jury can be seated after the last block a draw is allowed in: a few blocks.
+    const SEAT_LAG: u64 = 10 * SECOND;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(300))]
+
+        // Whatever the windows, whenever the answer is proposed and challenged, whenever the juries are seated (up to a few
+        // blocks after the last allowed moment) and whenever, if ever, someone finalizes, a market that registered is never
+        // at resolve_by with a case that still has time. Nobody ever has to act: the deadline call alone settles it.
+        #[test]
+        fn no_registered_market_reaches_its_deadline_with_a_case_that_still_has_time(
+            window in 1u64..300,
+            draw_window in 1u64..300,
+            panel in 2u64..300,
+            min_proposal in 1u64..300,
+            extra in 0u64..600,
+            propose_at in 0u64..=1000,
+            challenge_at in proptest::option::of(0u64..1000),
+            seat_at in proptest::collection::vec(
+                proptest::option::of((prop_oneof![Just(1000), 0u64..=1000], prop_oneof![Just(SEAT_LAG), 0..=SEAT_LAG])),
+                2,
+            ),
+            finalize_after in proptest::collection::vec(proptest::option::of(0u64..=1000), 2),
+            at_the_limit in proptest::collection::vec(proptest::option::of(prop_oneof![Just(35), 0u64..=35]), 2),
+        ) {
+            let mut o = oracle_with_bond(BOND);
+            o.window_ns = window * SECOND;
+            o.draw_window_ns = draw_window * SECOND;
+            o.panel_deadline_ns = panel * SECOND;
+            o.min_proposal_ns = min_proposal * SECOND;
+            let close = 1_000 * SECOND;
+            let deadline = close + o.min_resolve_gap_ns() + extra * SECOND;
+            act_as(MARKET, 0);
+            o.register_market(U64(0), U64(close), U64(deadline), "hash".to_string(), None);
+            let round = o.draw_window_ns + o.panel_deadline_ns;
+            let span = case_span_ns(o.window_ns, o.draw_window_ns, o.panel_deadline_ns);
+            // Proposals are tried up to the last moment a case could finish by the deadline with no buffer at all. The
+            // buffered moment is the last one that has to be accepted. Any between is accepted or refused, never unsafe.
+            let latest_proposal = deadline - span - APPLY_BUFFER_NS;
+            let proposed = close + (latest_proposal + APPLY_BUFFER_NS - close) * propose_at / 1000;
+            act_as(TOKEN, proposed);
+            let accepted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = o.ft_on_transfer(acct("carol.near"), U128(BOND), "propose:0:yes:https://x".to_string());
+            }))
+            .is_ok();
+            prop_assert!(accepted || proposed > latest_proposal, "a proposal in time was refused");
+            if !accepted {
+                return Ok(());
+            }
+            if let Some(at) = challenge_at {
+                let challenged_at = proposed + (o.window_ns - 1) * at / 1000;
+                act_as(TOKEN, challenged_at);
+                let _ = o.ft_on_transfer(acct("dave.near"), U128(BOND), "challenge:0:no".to_string());
+                let mut round_started = challenged_at;
+                for turn in 0..2 {
+                    let case = o.case(0);
+                    if let Some((at, lag)) = seat_at[turn] {
+                        let seated = round_started + (case.draw_by.0 - round_started) * at / 1000 + lag;
+                        seat(&mut o, seated, &names(case.jury_size as usize, "j"));
+                    }
+                    let case = o.case(0);
+                    let over = if case.panel.is_empty() { case.draw_by.0 } else { case.panel_deadline.0 } + 1;
+                    let Some(after) = finalize_after[turn] else { break };
+                    let at = match at_the_limit[turn] {
+                        Some(offset) => (deadline - round - APPLY_BUFFER_NS + offset * SECOND).saturating_sub(5 * SECOND).max(over),
+                        None => over + deadline.saturating_sub(over) * after / 1000,
+                    };
+                    if at >= deadline {
+                        break;
+                    }
+                    act_as("anyone.near", at);
+                    o.finalize(U64(0));
+                    if o.case(0).stage == Stage::Final {
+                        break;
+                    }
+                    round_started = at;
+                }
+            }
+            let case = o.case(0);
+            match case.stage {
+                Stage::Proposed => prop_assert!(deadline >= case.window_ends_at.0, "the challenge window is still open"),
+                Stage::Disputed => prop_assert!(round_is_over(&case, deadline), "the round is not over"),
+                Stage::Final => {}
+            }
+            act_as("anyone.near", deadline);
+            o.resolve_by_deadline(U64(0));
+            prop_assert_eq!(o.case(0).stage, Stage::Final);
+        }
+    }
+
     // ---- the juror methods need exactly one yocto -----------------------------------------------------------
 
     #[test]
@@ -3123,15 +3321,49 @@ mod tests {
 
     #[test]
     fn migrate_keeps_markets_and_cases_and_marks_the_upgrade_proven() {
-        let o = challenged(Outcome::Yes, Outcome::No);
+        let mut o = challenged(Outcome::Yes, Outcome::No);
         assert!(!o.upgrade_proven);
+        o.upgrade_in_flight = true;
         env::state_write(&o);
         drop(o);
         act_unpaid(SELF, 5);
         let migrated = OracleContract::migrate();
-        assert_eq!((migrated.upgrade_proven, migrated.state_version), (true, 1));
+        assert_eq!(
+            (
+                migrated.upgrade_proven,
+                migrated.upgrade_in_flight,
+                migrated.state_version
+            ),
+            (true, false, 1)
+        );
         assert_eq!(migrated.case(0).stage, Stage::Disputed);
         assert_eq!(migrated.config()["upgrade_proven"], true);
+    }
+
+    #[test]
+    #[should_panic(expected = "migrate runs only inside an upgrade")]
+    fn migrate_called_by_hand_is_refused_and_proves_nothing() {
+        let o = fresh_oracle();
+        env::state_write(&o);
+        drop(o);
+        act_unpaid(SELF, 5);
+        OracleContract::migrate();
+    }
+
+    #[test]
+    fn upgrade_marks_the_upgrade_in_flight_and_a_second_one_sets_it_again() {
+        let mut o = fresh_oracle();
+        let hash = staged(&mut o);
+        assert!(!o.upgrade_in_flight);
+        act_unpaid(OWNER, 5);
+        let _ = o.upgrade(hash);
+        assert!(o.upgrade_in_flight);
+        assert_eq!(o.config()["upgrade_in_flight"], true);
+        o.upgrade_in_flight = false;
+        let again = staged(&mut o);
+        act_unpaid(OWNER, 6);
+        let _ = o.upgrade(again);
+        assert!(o.upgrade_in_flight, "the next upgrade sets it again");
     }
 
     #[test]

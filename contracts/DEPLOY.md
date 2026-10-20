@@ -48,6 +48,8 @@ near contract deploy <account> use-file market.wasm \
 
 The collateral token for market, oracle and council is native USDC, contract `17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1` (6 decimals, decided 2026-10-19; its Intents token ID is `nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`). Deposits in any other asset are converted to USDC at the Intents edge before they reach the contracts. Withdrawals always pay USDC, and the user bears the withdrawal fee and any swap fee. The conversion cost, the refund path for a failed conversion and the `ft_transfer_call` deposit route have not been measured; do that on mainnet with small funds before raising any cap. The arguments of each `new` are in the "Starting it up" section of its manual. Read them back with `config` straight after, and check the owner, the oracle and market links, that the collateral token is exactly that contract on all three, and the network word (`network` must be `mainnet`, since a price signed for one network is useless on another).
 
+Two arguments are checked by the contracts and cannot be chosen freely. The oracle's `no_decision_recipient` is where a challenger's half bond goes when no jury decided and no juror revealed: give it the business wallet, which has to be registered with the token (step 4), and read it back in `config`. Governance refuses a `timelock_ns` under 72 hours and a `threshold` that is not a majority of the members (3 of 5 at least), so a deploy with weaker values fails in `new`.
+
 ## 4. Register the accounts with the collateral token
 
 The token has to know every account that will receive it before it can pay it. Call the token's `storage_deposit` with `registration_only` for market, oracle, council and the business wallet, and for governance if it will ever hold tokens. A missing registration makes sweeps and withdrawals fail and the amount come back as owed.
@@ -117,9 +119,11 @@ Read back all three. Check that governance's own member list and threshold are w
 
 1. Build a second version of the code whose hash differs (a version bump is enough) and stage it with `stage_code`, attaching 100 TGas and the deposit for its size. Confirm with `is_staged`.
 2. Propose a `function_call` to `upgrade` with `{"code_hash": "<base58>"}`, 100 TGas or more, or an `upgrade_self` for governance itself. Vote, wait out the timelock, execute.
-3. Check `config`: `upgrade_proven` is true, `state_version` is right, and the `migrated` event is in the transaction. If the upgrade failed, the old code is still there and the staged copy is gone, so stage again.
+3. Check `config`: `upgrade_proven` is true, `upgrade_in_flight` is false, `state_version` is right, and the `migrated` event is in the transaction. If the upgrade failed, the old code is still there, the staged copy is gone and `upgrade_in_flight` stays true until the next upgrade, so stage again. Never call `migrate` by hand: it refuses unless an upgrade sent the batch, so it proves nothing.
 
-The timelock is the users' exit window: `withdraw`, `redeem`, `unstake` and `claim` never pause. Set it to at least 72 hours before real money is in.
+The timelock is the users' exit window: `withdraw`, `redeem`, `unstake` and `claim` never pause. The code refuses a governance timelock under 72 hours. The window does not cover selling an open position: a holder can leave an open market at a fair price only by `sell`ing, the operator can pause that, and nothing holds `sell` open while an upgrade waits. That limitation is documented in `governance.md` and `market.md` and the owner has not decided how to close it. Say so in the Terms.
+
+Release gate for the upgrade gas: `GAS_UPGRADE` (`upgrade/src/lib.rs`) is 100 TGas, documented for a wasm of about 300 KB, and `market.wasm` is already 307 KB. The sandbox upgrade tests (`cargo test -p tests --test upgrade`) assert that staging, upgrading, migrating and sealing each burn under 100 TGas. Run them on the release build of every contract, and raise `GAS_UPGRADE` in the same release as any growth in code size, such as the Intents receiver. A build that does not pass the gas test does not ship.
 
 ## 10. Seal
 
@@ -174,8 +178,9 @@ Starting values for the owner to argue with. They come from section 6.3 of the 2
 | Bond | At least a floor, and scaled with the market size cap | One fixed bond cannot scale with market size. The review cites about 750 USD as a typical proposal bond elsewhere. |
 | Unstake cooldown | At least the case span, or 7 days | About 102 hours with the values above. |
 | Seat cap per account | 5 | Limits revenue concentration only. |
-| Code upgrade timelock | At least 72 hours | The users' exit window. |
-| Governance threshold | At least 3 of 5 | A threshold of 1 is a single key with more steps. |
+| Code upgrade timelock | At least 72 hours | The users' exit window. Enforced by governance (`MIN_TIMELOCK_NS`). |
+| Governance threshold | At least 3 of 5 | Enforced as a majority of the members. A threshold of 1 is a single key with more steps. |
+| No-decision recipient | The business wallet | Set in the oracle's `new`, owner-changeable. Where the challenger's half bond goes when no juror revealed. |
 | Fee rate, creation fee | 2%, 1 token | The code's own starting values. The ceilings are 5% and 10 tokens. |
 
 ## Publisher key hygiene

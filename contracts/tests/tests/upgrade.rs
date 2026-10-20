@@ -85,7 +85,9 @@ async fn vote_and_execute(w: &World, g: &Governance, action: serde_json::Value) 
 
 async fn config_without_proof(c: &Contract) -> serde_json::Value {
     let mut v = config(c).await;
-    v.as_object_mut().unwrap().remove("upgrade_proven");
+    for flag in ["upgrade_proven", "upgrade_in_flight"] {
+        v.as_object_mut().unwrap().remove(flag);
+    }
     v
 }
 
@@ -132,6 +134,7 @@ async fn the_market_the_oracle_and_the_council_upgrade_through_a_vote_and_keep_t
             (json!(false), json!(1)),
             "{label}"
         );
+        assert_eq!(config(target).await["upgrade_in_flight"], false, "{label}");
         let code = rebuilt(wasm_name, "v2");
         refused(
             w.bob
@@ -174,9 +177,9 @@ async fn the_market_the_oracle_and_the_council_upgrade_through_a_vote_and_keep_t
         assert!(!is_staged(target, &hash).await, "{label}: the staged copy is removed");
         let c = config(target).await;
         assert_eq!(
-            (&c["upgrade_proven"], &c["state_version"]),
-            (&json!(true), &json!(1)),
-            "{label}"
+            (&c["upgrade_proven"], &c["upgrade_in_flight"], &c["state_version"]),
+            (&json!(true), &json!(false), &json!(1)),
+            "{label}: migrate proved the path and cleared the mark"
         );
     }
 
@@ -215,7 +218,12 @@ async fn an_upgrade_that_cannot_finish_leaves_the_old_code_in_place_and_the_stat
             !is_staged(target, &hash).await,
             "{label}: a failed upgrade has to stage its code again"
         );
-        assert_eq!(config(target).await["upgrade_proven"], false, "{label}");
+        let c = config(target).await;
+        assert_eq!(
+            (&c["upgrade_proven"], &c["upgrade_in_flight"]),
+            (&json!(false), &json!(true)),
+            "{label}: the old code keeps the mark of the batch that failed"
+        );
 
         // Too little gas is refused at the top, before the staged copy is touched.
         let good = rebuilt(wasm_name, "v2");
@@ -225,8 +233,45 @@ async fn an_upgrade_that_cannot_finish_leaves_the_old_code_in_place_and_the_stat
         assert_eq!(gov_proposal(&g, p).await["stage"], "execution_failed");
         assert!(is_staged(target, &hash).await, "{label}: the copy is still there");
         assert_eq!(deployed_hash(target).await, old, "{label}");
+
+        // The next upgrade marks it again, goes through and clears the mark.
+        let (p, logs) = vote_and_execute(&w, &g, upgrade_call(target, &hash, UPGRADE_CALL_TGAS)).await?;
+        assert_eq!(
+            event_names(&logs),
+            vec!["call_sent", "upgrade_sent", "migrated", "executed"],
+            "{label}"
+        );
+        assert_eq!(gov_proposal(&g, p).await["stage"], "executed");
+        let c = config(target).await;
+        assert_eq!(
+            (&c["upgrade_proven"], &c["upgrade_in_flight"]),
+            (&json!(true), &json!(false)),
+            "{label}"
+        );
     }
     assert_eq!(snapshot(&w, id).await, before);
+    Ok(())
+}
+
+// migrate is private, so the account itself, or anyone holding its key, can call it. Without an upgrade having sent the
+// batch, that used to set upgrade_proven and let seal delete the keys of an account whose upgrade path never ran.
+#[tokio::test]
+async fn migrate_called_by_hand_is_refused_on_all_four_and_proves_nothing() -> anyhow::Result<()> {
+    let (w, g) = setup_governed().await?;
+    let mut targets = governed_contracts(&w);
+    targets.push(("governance", "governance", &g.contract));
+    for (_, label, target) in targets {
+        refused(
+            target.call("migrate").max_gas().transact().await?.into_result(),
+            "migrate runs only inside an upgrade",
+        );
+        let c = config(target).await;
+        assert_eq!(
+            (&c["upgrade_proven"], &c["upgrade_in_flight"]),
+            (&json!(false), &json!(false)),
+            "{label}"
+        );
+    }
     Ok(())
 }
 
@@ -424,8 +469,13 @@ async fn governance_upgrades_itself_through_its_own_vote_and_keeps_its_proposals
     );
     let c = config(&g.contract).await;
     assert_eq!(
-        (&c["upgrade_proven"], &c["state_version"], &c["proposals"]),
-        (&json!(true), &json!(1), &json!("2"))
+        (
+            &c["upgrade_proven"],
+            &c["upgrade_in_flight"],
+            &c["state_version"],
+            &c["proposals"]
+        ),
+        (&json!(true), &json!(false), &json!(1), &json!("2"))
     );
     assert_eq!(
         g.contract.view("get_members").await?.json::<Vec<String>>()?,
@@ -473,7 +523,12 @@ async fn a_failed_governance_self_upgrade_is_recorded_as_failed_and_changes_noth
     assert_eq!(deployed_hash(&g.contract).await, old_code);
     let mut after = config(&g.contract).await;
     assert_eq!(after["proposals"], "1");
+    assert_eq!(
+        after["upgrade_in_flight"], true,
+        "the old code keeps the mark of the batch that failed"
+    );
     after["proposals"] = before["proposals"].clone();
+    after["upgrade_in_flight"] = before["upgrade_in_flight"].clone();
     assert_eq!(after, before);
     assert_eq!(config(&g.contract).await["upgrade_proven"], false);
 
@@ -489,6 +544,11 @@ async fn a_failed_governance_self_upgrade_is_recorded_as_failed_and_changes_noth
     let (ok, logs) = vote_and_execute(&w, &g, json!({ "upgrade_self": { "code_hash": good } })).await?;
     assert_eq!(event_names(&logs), vec!["upgrade_sent", "migrated", "executed"]);
     assert_eq!(gov_proposal(&g, ok).await["stage"], "executed");
+    let c = config(&g.contract).await;
+    assert_eq!(
+        (&c["upgrade_proven"], &c["upgrade_in_flight"]),
+        (&json!(true), &json!(false))
+    );
     assert_eq!(
         gov_proposal(&g, bad).await["stage"],
         "execution_failed",

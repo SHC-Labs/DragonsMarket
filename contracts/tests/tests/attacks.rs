@@ -971,12 +971,13 @@ async fn a_bogus_challenge_costs_the_attacker_and_pays_the_jurors() -> anyhow::R
 // ---- compromised keys ------------------------------------------------------------------------------------------------
 
 // What a thief holding the operator key can and cannot do. They can be a nuisance: halt trading, pause deposits. They
-// cannot take anyone's money, redirect fees, or install themselves for good, and users can still get out.
+// cannot take anyone's money, redirect fees, or install themselves for good, and users can still get out. The market
+// here closes in two days, so the halt is outside the last day, which the operator cannot halt in.
 #[tokio::test]
 async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_the_key() -> anyhow::Result<()> {
     let (w, g) = setup_governed().await?;
     let thief = &w.owner; // the harness operator
-    let id = create_seeded_market(&w, 3_000).await?;
+    let id = create_seeded_market(&w, 2 * 86_400).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     ft_call(&w, &w.bob, w.market.id(), 5 * USD, "deposit").await?;
 
@@ -1132,12 +1133,19 @@ async fn a_minority_of_members_cannot_approve_or_execute_anything() -> anyhow::R
     refused(gov_execute(&g, &w.dave, id).await, "not approved");
     assert_eq!(config(&w.market).await["business_wallet"], json!(w.business.id()));
 
-    // Nor can they make the bar lower for themselves: lowering the threshold is itself a vote that needs the threshold.
-    let lower = gov_propose(&g, &g.members[0], json!({ "set_threshold": { "threshold": 1 } })).await?;
-    gov_vote(&g, &g.members[0], lower, true).await?;
-    gov_vote(&g, &g.members[1], lower, true).await?;
-    assert_eq!(gov_proposal(&g, lower).await["stage"], "open");
-    refused(gov_execute(&g, &w.dave, lower).await, "not approved");
+    // Nor can they make the bar lower for themselves: the contract refuses a threshold that is not a majority of the
+    // members, so there is no vote that would lower it to a minority.
+    for minority in [1, 2] {
+        refused(
+            g.members[0]
+                .call(g.contract.id(), "propose")
+                .args_json(json!({ "action": { "set_threshold": { "threshold": minority } } }))
+                .transact()
+                .await?
+                .into_result(),
+            "the threshold must be a majority of the members",
+        );
+    }
     Ok(())
 }
 
@@ -1273,20 +1281,21 @@ async fn two_colluding_accounts_cannot_stall_a_case_for_free() -> anyhow::Result
         (&case["stage"], &case["final_outcome"]),
         (&json!("final"), &json!("void"))
     );
-    let (carol, dave, owner) = (
+    let (carol, dave, recipient) = (
         claimable(&w, w.carol.id()).await,
         claimable(&w, w.dave.id()).await,
-        claimable(&w, w.owner.id()).await,
+        claimable(&w, w.business.id()).await,
     );
+    assert_eq!(claimable(&w, w.owner.id()).await, 0, "the owner is not paid");
     assert_eq!(
         carol + dave,
         2 * BOND - BOND / 2,
         "the pair put in two bonds and gets back a bond and a half"
     );
     assert_eq!(
-        owner,
+        recipient,
         BOND / 2,
-        "with no juror having revealed, the owner holds the jurors' half"
+        "with no juror having revealed, the no-decision recipient holds the jurors' half"
     );
     assert_eq!(
         case["delinquent"].as_array().unwrap().len(),
@@ -1425,6 +1434,25 @@ async fn staking_one_block_before_a_sweep_earns_one_blocks_share_of_the_stream()
         taken < 10_000 * USD / 100,
         "five seats staked for about a minute took {taken} of 10,000 USD"
     );
+    Ok(())
+}
+
+// A halt held to close takes the last day out of the average a Void pays, so in that day only the owner can halt: the
+// operator, whose key is the one a thief is likeliest to hold, is refused. The owner is governance here.
+#[tokio::test]
+async fn the_operator_cannot_halt_in_the_last_day_before_close() -> anyhow::Result<()> {
+    let (w, _g) = setup_governed().await?;
+    let id = create_seeded_market(&w, 3_000).await?;
+    refused(
+        w.owner
+            .call(w.market.id(), "halt")
+            .args_json(json!({ "market_id": id.to_string(), "reason": "late" }))
+            .transact()
+            .await?
+            .into_result(),
+        "a halt in the last day before close is a governance action",
+    );
+    assert_eq!(market_json(&w, id).await["status"], "open");
     Ok(())
 }
 

@@ -260,7 +260,7 @@ async fn revealed_votes_settle_early_and_a_silent_juror_does_not_block() -> anyh
 
 // Nobody draws the first jury before draw_by, so it counts as a jury that did not decide and a second one is called for.
 // Only five accounts hold seats, which is too few for a jury of seven, so the second draw fails too and the case ends
-// with no decision. The challenger's bond is not returned: with no juror having revealed, half goes to the owner and
+// with no decision. The challenger's bond is not returned: with no juror having revealed, half goes to the no-decision recipient (the business wallet in these tests) and
 // half to the proposer.
 #[tokio::test]
 async fn a_case_whose_jury_is_never_drawn_is_a_no_decision_twice_and_ends_void() -> anyhow::Result<()> {
@@ -290,6 +290,17 @@ async fn a_case_whose_jury_is_never_drawn_is_a_no_decision_twice_and_ends_void()
     assert_eq!(market_json(&w, id).await["outcome"], "void");
     assert_eq!(claimable(&w, w.carol.id()).await, 2 * BOND - BOND / 2);
     assert_eq!(claimable(&w, w.dave.id()).await, 0);
-    assert_eq!(claimable(&w, w.owner.id()).await, BOND / 2);
+    assert_eq!(claimable(&w, w.business.id()).await, BOND / 2);
+    assert_eq!(claimable(&w, w.owner.id()).await, 0, "the owner is not paid");
+
+    let before = ft_balance(&w, w.business.id()).await;
+    w.business
+        .call(w.oracle.id(), "withdraw_bond")
+        .deposit(near_workspaces::types::NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?
+        .into_result()?;
+    assert_eq!(ft_balance(&w, w.business.id()).await - before, BOND / 2);
     Ok(())
 }

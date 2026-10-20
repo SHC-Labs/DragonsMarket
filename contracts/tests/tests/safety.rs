@@ -243,7 +243,8 @@ async fn a_keeper_outage_through_a_dispute_ends_in_a_void_at_the_deadline_not_in
     );
     assert_eq!(claimable(&w, w.carol.id()).await, BOND + BOND / 2);
     assert_eq!(claimable(&w, w.dave.id()).await, 0);
-    assert_eq!(claimable(&w, w.owner.id()).await, BOND / 2);
+    assert_eq!(claimable(&w, w.business.id()).await, BOND / 2);
+    assert_eq!(claimable(&w, w.owner.id()).await, 0);
     assert!(invariant(&w, id).await);
     Ok(())
 }
@@ -369,7 +370,8 @@ async fn a_jury_must_be_an_odd_size_of_at_most_21() -> anyhow::Result<()> {
             "owner_id": w.owner.id(), "market_contract": w.market.id(), "bond_token": w.ft.id(), "bond": BOND.to_string(),
             "window_ms": WINDOW_MS.to_string(), "panel_deadline_ms": PANEL_MS.to_string(), "draw_window_ms": DRAW_WINDOW_MS.to_string(),
             "council": w.council.id(), "jury_size": 4, "draw_delay_blocks": "2", "min_proposal_ms": "60000",
-            "operator_id": w.owner.id(), "network": "sandbox", "price_threshold": 2
+            "operator_id": w.owner.id(), "network": "sandbox", "price_threshold": 2,
+            "no_decision_recipient": w.business.id()
         }))
         .transact()
         .await?

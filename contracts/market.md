@@ -2,7 +2,7 @@
 
 Custody decision, 2026-10-19: this manual describes the existing NEP-141 prototype. Its token custody, deposits, withdrawals and fee transfers are current-code behavior, not the accepted target. [intents-architecture.md](../intents-architecture.md) requires tokens and controlled market backing to remain inside Intents. Authenticated settlement and the state migration are pending; none of the future interfaces are implemented by this documentation update.
 
-Source: `market/src/lib.rs` (the contract) and `market/src/curve.rs` (the pricing maths). Written 2026-10-18 from the code as it stands, including everything added that day. The upgrade path was added 2026-10-19 and the shared helpers are in `upgrade/src/lib.rs`. When this file and the code disagree, the code is right.
+Source: `market/src/lib.rs` (the contract) and `market/src/curve.rs` (the pricing maths). Written 2026-10-18 from the code as it stands, including everything added that day. The upgrade path was added 2026-10-19 and the shared helpers are in `upgrade/src/lib.rs`. The halt rule, the Void price fallback, `seeded` and the new statuses, and the upgrade mark were added 2026-10-20. When this file and the code disagree, the code is right.
 
 ## What it is
 
@@ -30,7 +30,7 @@ There are four kinds of caller. The first three are stored accounts, the fourth 
 | Role | Set by | Can do |
 |---|---|---|
 | Owner | `new`, then `propose_owner` and `accept_owner` | Everything the operator can, plus `set_operator`, `propose_owner`, `set_fee_recipients`, `set_fee_rate_bps`, `set_create_fee`, `reconcile_revenue`, `upgrade` and `seal`. In a real deployment this is the governance contract, so each of these needs a member vote and a timelock. |
-| Operator | `new`, then `set_operator` (owner only) | Routine running: `create_market`, `retry_register`, `halt`, `resume`, `set_paused`, `claim_residual`, and seeding a market. Cannot move fees, change owner, change the operator, or touch user money. |
+| Operator | `new`, then `set_operator` (owner only) | Routine running: `create_market`, `retry_register`, `halt` (but not in the last 24 hours before a market closes, see "Void"), `resume`, `set_paused`, `claim_residual`, and seeding a market. Cannot move fees, change owner, change the operator, or touch user money. |
 | Oracle | `new` (fixed, no setter) | Only `set_outcome`. |
 | Anyone | n/a | Trade, deposit, withdraw, redeem, register for storage (for themselves or for someone else) and unregister, `void_if_unresolved` (a grace period after `resolve_by`), `sweep_fees`, `stage_code` (paying for the storage), and every view. |
 
@@ -75,7 +75,7 @@ Deploy and initialise in one batch signed by the contract account, and check aft
 5. After close, someone proposes an outcome through oracle. Once the oracle has a final answer it calls `set_outcome`. If nothing has resolved the market by `resolve_by`, anyone asks the oracle for its deadline answer (`resolve_by_deadline`), which settles what can be settled and voids the rest. `void_if_unresolved` on this contract opens 7 days after `resolve_by`, for an oracle that is gone.
 6. Holders call `redeem` to turn shares into balance, and `withdraw` to take the balance out as tokens. The operator or owner calls `claim_residual` to move whatever the pool still holds to the business wallet.
 
-The `status` shown by the views is, in this order of precedence: `resolved` if an outcome is set, otherwise `halted` if halted, otherwise `closed` if the time has passed `close_at`, otherwise `open`. A market that is created but not yet registered or seeded shows `open` before its close time even though it cannot trade; check `registered` and the pool size to tell.
+The `status` shown by the views is, in this order of precedence: `resolved` if an outcome is set, otherwise `halted` if halted, otherwise `closed` if the time has passed `close_at`, otherwise `unregistered` if the oracle has not confirmed the market, otherwise `unseeded` if it has no liquidity, otherwise `open`. Only `open` can trade. `registered` and `seeded` are in the view as well.
 
 ## What a market stores
 
@@ -148,7 +148,7 @@ The ceilings (5% and 10 units) are written into the code, so even a captured gov
 | Method | Who | What it does |
 |---|---|---|
 | `stage_code()` (payable) | Anyone | The call input is a wasm. It is stored under its own sha256, which is returned. The deposit pays for the storage (1 NEAR per 100 KB) and the surplus is refunded. Staging code someone else staged costs nothing and changes nothing. Attach 100 TGas, because 250 KB burns about 31. |
-| `migrate()` | The contract itself | Runs in the new code in the same batch as the deploy. Reads the state as the one layout it knows, sets `upgrade_proven`, returns the state. |
+| `migrate()` | The contract itself | Runs in the new code in the same batch as the deploy. Refuses unless `upgrade` marked the upgrade in flight. Reads the state as the one layout it knows, clears the mark, sets `upgrade_proven`, returns the state. |
 | `is_staged(code_hash)` (view) | Anyone | Whether a wasm with that sha256 is staged. |
 
 ### Running markets
@@ -157,7 +157,7 @@ The ceilings (5% and 10 units) are written into the code, so even a captured gov
 |---|---|---|---|
 | `create_market(title, rule_text, resolution_source, void_policy, category, subcategory, close_at, resolve_by, price_rule)` | Operator or owner | Creates a market, returns its id, and asks the oracle to register it. `price_rule` is optional. | Not operator or owner; contract paused; any of the four text fields empty; text over its limit; bad category slugs; `close_at` not in the future; `resolve_by` not after `close_at`; for a price rule: observation time before `close_at` or not before `resolve_by`, strike zero, or more than 18 decimals. |
 | `retry_register(market_id)` | Operator or owner | Sends the oracle registration again. | Already registered. |
-| `halt(market_id, reason)` | Operator or owner | Stops trading in one market, with a recorded reason. Redemption after resolution still works. Brings the closing-price average up to date before halting. | Not operator or owner; market already resolved. |
+| `halt(market_id, reason)` | Operator or owner | Stops trading in one market, with a recorded reason. Redemption after resolution still works. Brings the closing-price average up to date before halting. | Not operator or owner; market already resolved; the caller is the operator and the market closes within 24 hours or has closed (`a halt in the last day before close is a governance action`). The owner can halt at any time. |
 | `resume(market_id)` | Operator or owner | Lifts a halt. Brings the closing-price average up to date first, so the halted time counts for nothing. | Not operator or owner; market already resolved. |
 | `set_paused(paused)` | Operator or owner | Stops all new trades, deposits and seeding in every market. Withdrawals and redemptions keep working. | Not operator or owner. |
 | `claim_residual(market_id)` | Operator or owner | After resolution, moves what the pool holds beyond what holders are owed into the business wallet's balance inside this contract. Can be done once per market, before or after holders redeem. | Not resolved; already claimed. |
@@ -205,8 +205,8 @@ No access key can replace this code outside a vote, and no deleted key can freez
 |---|---|
 | Stage | Anyone calls `stage_code` with the wasm as the input. The contract answers with the sha256. Different code cannot overwrite it because the key is the hash. |
 | Vote | Members propose a `function_call` to `upgrade` with `{"code_hash":"<base58>"}`. It waits out the governance timelock, which is the users' exit window. |
-| Execute | `upgrade` checks the caller is the owner and that 100 TGas are attached (`attach at least 100 TGas to upgrade`), takes the staged wasm out of storage, and sends one batch to this account: deploy, then `migrate`. A `migrate` that panics reverts the deploy and the old code stays. The staged copy is gone either way, so a failed upgrade stages the code again. |
-| Prove | `migrate` sets `upgrade_proven`. `config` shows it with `state_version`. |
+| Execute | `upgrade` checks the caller is the owner and that 100 TGas are attached (`attach at least 100 TGas to upgrade`), takes the staged wasm out of storage, sets `upgrade_in_flight`, and sends one batch to this account: deploy, then `migrate`. A `migrate` that panics reverts the deploy and the old code stays. The staged copy is gone either way, so a failed upgrade stages the code again. |
+| Prove | `migrate` refuses to run unless `upgrade_in_flight` is set (`migrate runs only inside an upgrade`), then clears it and sets `upgrade_proven`. A hand-called `migrate` therefore proves nothing. When the batch fails, the old code keeps the mark set and the next `upgrade` sets it again. `config` shows both flags with `state_version`. |
 | Seal | `seal(public_key)` deletes an access key. It is refused until `upgrade_proven` is true (`prove the upgrade path before deleting keys`), so keys are deleted only after one upgrade has worked on this chain. |
 
 The state struct starts with `state_version: u16`, 1 today. `migrate` reads the first two bytes of the stored state and refuses anything but 1 (`migrate expects version 1`), then reads the version 1 struct. It never guesses a layout from bytes. A version 2 build keeps the version 1 struct as `StateV1`, reads that, builds its state and writes `state_version: 2`.
@@ -270,7 +270,7 @@ The owner settles it with `reconcile_revenue(amount, arrived)` after comparing t
 
 A market becomes Void when the oracle says so, including through `resolve_by_deadline`, or when `void_if_unresolved` is called 7 days after `resolve_by`.
 
-A Void pays each Yes share the market's closing Yes price and each No share the rest, so a pair of one Yes and one No share always pays exactly 1. The closing price is the Yes price averaged over trading time across the last 24 hours before `close_at`, or since the market opened if that was later. Time while the market is halted does not count, in the price or in the time it is divided by, so halting a market right after a pump does not leave the pumped price holding the average. A market with no trading time in that window pays its last price. It is fixed at the moment the market becomes Void.
+A Void pays each Yes share the market's closing Yes price and each No share the rest, so a pair of one Yes and one No share always pays exactly 1. The closing price is the Yes price averaged over trading time across the last 24 hours before `close_at`, or since the market opened if that was later. Time while the market is halted does not count, in the price or in the time it is divided by, so halting a market right after a pump does not leave the pumped price holding the average. A market with no trading time in that window, for example one halted for its whole last day, pays the average over all its trading time instead, so a pump followed by a halt that is held to close cannot make the Void pay the pumped price. Only a market that never traded at all pays its last price. The operator cannot halt in the last 24 hours before close (`a halt in the last day before close is a governance action`), only the owner can, so the window itself cannot be emptied by the fast key. It is fixed at the moment the market becomes Void.
 
 The average is kept in a running time-weighted accumulator, not read from the 120-point chart log, so no number of trades can change how long a price held. An earlier version averaged the log and could be flooded; that was fixed after an attack test showed it.
 
@@ -319,8 +319,8 @@ While a market is open, collateral held must equal shares outstanding on each si
 
 | View | Returns |
 |---|---|
-| `config()` | state version, upgrade proven, owner, pending owner, operator, oracle, collateral token, paused, number of markets, storage deposit, position cap, fee rate, creation fee, revenue pool, business wallet, revenue unresolved |
-| `get_market(market_id)` | One market: id, title, rule text, source, void policy, category, subcategory, rule hash, price rule, close and resolve times, status, registered, outcome, void price, Yes and No price, locked |
+| `config()` | state version, upgrade proven, upgrade in flight, owner, pending owner, operator, oracle, collateral token, paused, number of markets, storage deposit, position cap, fee rate, creation fee, revenue pool, business wallet, revenue unresolved |
+| `get_market(market_id)` | One market: id, title, rule text, source, void policy, category, subcategory, rule hash, price rule, close and resolve times, status, registered, seeded, outcome, void price, Yes and No price, locked |
 | `list_markets(from_index, limit)` | A page of markets (limit capped at 50) |
 | `get_history(market_id)` | The price log: time and Yes price for each point |
 | `get_balance(account_id)` | An account's withdrawable balance |
@@ -416,6 +416,8 @@ All big numbers in event data are strings.
 | `attach at least <amount> to pay for the storage` / `the wasm goes in the call input` | `stage_code` with too little deposit or no input. |
 | `prove the upgrade path before deleting keys` | `seal` before an upgrade has gone through `migrate`. |
 | `migrate expects version 1` | `migrate` found state written by another version. |
+| `migrate runs only inside an upgrade` | `migrate` called without `upgrade` having sent the batch. |
+| `a halt in the last day before close is a governance action` | The operator tried to halt a market that closes within 24 hours, or has closed. |
 | `Method <name> is private` | An internal callback, or `new`, was called by anyone but the contract's own account. |
 
 ## Gas the contract reserves for its own calls
@@ -433,7 +435,7 @@ A caller of `sweep_fees` must attach at least 95 TGas: the 85 it reserves plus 1
 
 ## Security properties checked by tests
 
-Every restricted method refuses a stranger; every callback refuses a direct call; `ft_on_transfer` refuses any token but the collateral; malformed messages bounce with the money back; a second withdrawal, sweep or redeem sent while the first is in flight pays once; starving a transfer of gas never loses the sender's tokens; trading stops at the exact moment of close; buy and sell refuse a call with no deposit; a halt cannot pin the void price at a pumped price, and a resume counts trading time again from the resume; the emergency void stays shut for 7 days after the deadline; 25 skewed seeds by the operator all succeed while an ordinary trader stops at 20 positions; a seed after close is refused; a stranger and the operator cannot upgrade or seal, an unknown hash and too little gas or deposit are refused, seal waits for `upgrade_proven`, and `migrate` refuses another state version; withdraw and redeem work on a paused contract; a stranger cannot initialise a deployed contract; storage registers for a third party, refunds the surplus to the payer, and unregisters only an empty account; a revenue transfer with no report is parked and not paid again, and the owner can return it to due or settle it, with the books adding up under random sequences; `sweep_fees` refuses less than its gas floor; the operator key cannot take money; random trade sequences never break the invariant or create money. Details and the measured economic attacks are in `AUDIT.md`.
+Every restricted method refuses a stranger; every callback refuses a direct call; `ft_on_transfer` refuses any token but the collateral; malformed messages bounce with the money back; a second withdrawal, sweep or redeem sent while the first is in flight pays once; starving a transfer of gas never loses the sender's tokens; trading stops at the exact moment of close; buy and sell refuse a call with no deposit; a halt cannot pin the void price at a pumped price, not even one held through the whole last day (the second review's proof of concept), the operator cannot halt in the last day and the owner can, and a resume counts trading time again from the resume; a hand-called `migrate` is refused; a market reports `unregistered`, `unseeded` and `open` in turn; the emergency void stays shut for 7 days after the deadline; 25 skewed seeds by the operator all succeed while an ordinary trader stops at 20 positions; a seed after close is refused; a stranger and the operator cannot upgrade or seal, an unknown hash and too little gas or deposit are refused, seal waits for `upgrade_proven`, and `migrate` refuses another state version; withdraw and redeem work on a paused contract; a stranger cannot initialise a deployed contract; storage registers for a third party, refunds the surplus to the payer, and unregisters only an empty account; a revenue transfer with no report is parked and not paid again, and the owner can return it to due or settle it, with the books adding up under random sequences; `sweep_fees` refuses less than its gas floor; the operator key cannot take money; random trade sequences never break the invariant or create money. Details and the measured economic attacks are in `AUDIT.md`.
 
 ## Things to know
 
@@ -446,7 +448,9 @@ Every restricted method refuses a stranger; every callback refuses a direct call
 | The seed is a subsidy | A constant-product seeder loses to informed traders by design. The pool's winning-side shares go to the business wallet at resolution, but that does not make the seed back. Budget the seed as a cost of opening the market, not as an investment. |
 | Positions are not transferable | There is no NEP-245 multi-token interface, so a position cannot be sent, lent or used as collateral, and there is no secondary market. The 20-position cap binds ordinary accounts for that reason. |
 | Nothing caps a market | Apart from the size of a pool, no code limits how much a market can hold. The most one market can hold is set by what the operator seeds and by the deposit limits at launch. That is the lever against the cost of corrupting a market (see "One bond cannot scale with market size" in `oracle.md`). |
-| Halting is a grievance risk | A stolen operator key can halt trading before close. Users are not locked in after close, and the owner can replace the operator. |
+| Halting is a grievance risk | A stolen operator key can halt trading until 24 hours before close, and only the owner can halt after that. Users are not locked in after close, and the owner can replace the operator. |
+| Selling during an upgrade is not guaranteed | The upgrade timelock guarantees an exit for a balance (`withdraw`) and for a resolved position (`redeem`). A holder of an open position can leave at a fair price only by `sell`ing, and the operator can pause that (`set_paused`, `halt`). The market does not know an upgrade is pending and nothing holds `sell` open during the timelock. This is a known limitation, left for the owner to decide. |
+| Website, 2026-10-20 | `get_market` and `list_markets` now return `seeded`, and `status` can be `unregistered` or `unseeded` before `open`. In `web/lib/market.ts` the `status` type admits `open`, `closed`, `halted` and `resolved` only, so it needs the two new values, and so does any code that switches on `status`. `isMarketListed` already reads `seeded !== false`, which passed every market while the field was never sent. It now drops unseeded markets, as that line intends. `config` gained `upgrade_in_flight`. |
 | Website | The website still tells users a Void pays half in three places (the Council page FAQ and the portfolio payout calculation and its comment). The contract now pays the closing price. The website also has to attach 1 yoctoNEAR to `buy` and `sell`, and the keeper-facing void now goes through the oracle's `resolve_by_deadline`. |
 | Keys | Until `seal` has run, the deploy key can replace this code outside every vote. After it, only a governance upgrade can. A sealed contract with a broken upgrade path cannot be fixed, so prove one upgrade first. |
 | Keeper | The keeper script sweeps fees: when `collected` plus `revenue_due` plus `business_due` reaches its minimum (`--min-sweep`, 10 tokens at 6 decimals by default) it calls `sweep_fees` with 100 TGas, over the 95 TGas floor. It needs only a function-call key limited to this contract and that one method. |

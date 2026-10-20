@@ -19,6 +19,7 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
     ];
     let other = stranger.id().clone();
     let day = (24 * 3600 * 1_000_000_000u64).to_string();
+    let three_days = (72 * 3600 * 1_000_000_000u64).to_string();
     let contracts = [
         (
             "market",
@@ -30,7 +31,7 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
             json!({ "owner_id": other, "market_contract": other, "bond_token": other, "bond": "1", "window_ms": "1000",
                     "panel_deadline_ms": "1000", "draw_window_ms": "1000", "council": other, "jury_size": 3,
                     "draw_delay_blocks": "1", "min_proposal_ms": "1000", "operator_id": other, "network": NETWORK,
-                    "price_threshold": 1 }),
+                    "price_threshold": 1, "no_decision_recipient": other }),
         ),
         (
             "council",
@@ -40,7 +41,7 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
         (
             "governance",
             json!({ "members": members.iter().map(|m| m.id()).collect::<Vec<_>>(), "threshold": 2,
-                    "voting_period_ns": day, "timelock_ns": day, "execution_window_ns": day }),
+                    "voting_period_ns": day, "timelock_ns": three_days, "execution_window_ns": day }),
         ),
     ];
     for (name, args) in contracts {
@@ -348,6 +349,56 @@ async fn a_council_built_with_no_setting_stakes_only_what_the_owner_allows() -> 
         council.view("seat_count").await?.json::<u32>()?,
         4,
         "switching it on again unstakes nobody"
+    );
+    Ok(())
+}
+
+// An id allowed for one collection says nothing about the next: after a change of collection the old entries match
+// nothing, and the owner names the new collection's tokens again.
+#[tokio::test]
+async fn the_allowlist_belongs_to_the_collection_it_was_made_for() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let council = council_with_default_allowlist(&w).await?;
+    owner_calls(&w, &council, "allow_tokens", json!({ "token_ids": ["1"] }))
+        .await?
+        .into_result()?;
+    owner_calls(&w, &council, "set_token_range", json!({ "first": "5", "last": "9" }))
+        .await?
+        .into_result()?;
+    let is_allowed = |token: &'static str| {
+        let council = council.clone();
+        async move {
+            council
+                .view("is_allowed")
+                .args_json(json!({ "token_id": token }))
+                .await
+                .unwrap()
+                .json::<bool>()
+                .unwrap()
+        }
+    };
+    assert!(is_allowed("1").await && is_allowed("7").await);
+
+    owner_calls(
+        &w,
+        &council,
+        "set_nft_contract",
+        json!({ "nft_contract": w.alice.id() }),
+    )
+    .await?
+    .into_result()?;
+    assert!(
+        !is_allowed("1").await && !is_allowed("7").await,
+        "the old collection's entries are not the new collection's"
+    );
+    assert_eq!(config(&council).await["allowed_range"], json!(null));
+
+    owner_calls(&w, &council, "set_nft_contract", json!({ "nft_contract": w.nft.id() }))
+        .await?
+        .into_result()?;
+    assert!(
+        is_allowed("1").await && is_allowed("7").await,
+        "back on the collection they were made for"
     );
     Ok(())
 }

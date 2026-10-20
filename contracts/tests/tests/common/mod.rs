@@ -126,7 +126,7 @@ async fn build(
             "bond": BOND.to_string(), "window_ms": window_ms.to_string(), "panel_deadline_ms": panel_ms.to_string(),
             "draw_window_ms": DRAW_WINDOW_MS.to_string(), "council": council.id(), "jury_size": JURY, "draw_delay_blocks": draw_delay_blocks.to_string(),
             "min_proposal_ms": MIN_PROPOSAL_MS.to_string(), "operator_id": owner.id(), "network": NETWORK,
-            "price_threshold": PRICE_THRESHOLD
+            "price_threshold": PRICE_THRESHOLD, "no_decision_recipient": business.id()
         }))
         .transact()
         .await?
@@ -736,13 +736,39 @@ pub async fn register_ft(w: &World, who: &AccountId) -> anyhow::Result<()> {
 }
 
 pub const VOTING_SECS: u64 = 600;
+// The timelock the governance tests run with. The contract refuses anything under MIN_TIMELOCK_SECS, and fast-forwarding
+// 72 hours of sandbox blocks takes longer than the whole suite, so deploy_governance writes this into the stored state.
 pub const TIMELOCK_SECS: u64 = 120;
+pub const MIN_TIMELOCK_SECS: u64 = 72 * 3_600;
 pub const EXECUTION_WINDOW_SECS: u64 = 600;
 pub const THRESHOLD: u32 = 3;
 
 pub struct Governance {
     pub contract: Contract,
     pub members: Vec<Account>,
+}
+
+// Writes a timelock of `secs` into the stored state of a deployed governance contract. Only a sandbox can do this, so
+// the deployed wasm keeps its 72 hour floor and has no way in for a short one. The state is the version number, two
+// flags, the members (a count, then each account as a length and its bytes), the threshold, the voting period and then
+// the timelock.
+async fn set_stored_timelock(worker: &Worker<Sandbox>, governance: &Contract, secs: u64) -> anyhow::Result<()> {
+    const KEY: &[u8] = b"STATE";
+    const BEFORE_MEMBERS: usize = 2 + 1 + 1;
+    let state = worker.view_state(governance.id()).await?;
+    let mut bytes = state
+        .get(KEY)
+        .expect("the contract's state is stored under STATE")
+        .clone();
+    let members = u32::from_le_bytes(bytes[BEFORE_MEMBERS..BEFORE_MEMBERS + 4].try_into()?) as usize;
+    let mut at = BEFORE_MEMBERS + 4;
+    for _ in 0..members {
+        at += 4 + u32::from_le_bytes(bytes[at..at + 4].try_into()?) as usize;
+    }
+    let timelock_at = at + 4 + 8;
+    bytes[timelock_at..timelock_at + 8].copy_from_slice(&(secs * 1_000_000_000).to_le_bytes());
+    worker.patch_state(governance.id(), KEY, &bytes).await?;
+    Ok(())
 }
 
 // Five members, three yes votes to approve.
@@ -757,12 +783,18 @@ pub async fn deploy_governance(worker: &Worker<Sandbox>) -> anyhow::Result<Gover
         .args_json(json!({
             "members": members.iter().map(|m| m.id()).collect::<Vec<_>>(), "threshold": THRESHOLD,
             "voting_period_ns": (VOTING_SECS * 1_000_000_000).to_string(),
-            "timelock_ns": (TIMELOCK_SECS * 1_000_000_000).to_string(),
+            "timelock_ns": (MIN_TIMELOCK_SECS * 1_000_000_000).to_string(),
             "execution_window_ns": (EXECUTION_WINDOW_SECS * 1_000_000_000).to_string()
         }))
         .transact()
         .await?
         .into_result()?;
+    set_stored_timelock(worker, &contract, TIMELOCK_SECS).await?;
+    assert_eq!(
+        config(&contract).await["timelock_ns"],
+        (TIMELOCK_SECS * 1_000_000_000).to_string(),
+        "the stored timelock was rewritten where the contract reads it"
+    );
     Ok(Governance { contract, members })
 }
 

@@ -2,7 +2,7 @@
 
 Custody decision, 2026-10-19: this manual describes the existing contract. Under [intents-architecture.md](../intents-architecture.md), fungible fee/reward balances and claims must settle inside Intents. NEP-141 receipt/payment methods below need migration. NEP-171 NFT staking, eligibility and reward-liability accounting remain Council responsibilities. A quarterly claim gate is not implied by the current streamed-accrual implementation.
 
-Source: `council/src/lib.rs`, with the shared upgrade helpers in `upgrade/src/lib.rs`. Written 2026-10-18 from the code as it stands, upgrade path added 2026-10-19. When this file and the code disagree, the code is right.
+Source: `council/src/lib.rs`, with the shared upgrade helpers in `upgrade/src/lib.rs`. Written 2026-10-18 from the code as it stands, upgrade path added 2026-10-19, the per-collection allowlist and the upgrade mark added 2026-10-20. When this file and the code disagree, the code is right.
 
 ## What it is
 
@@ -117,19 +117,19 @@ The cooldown is a deploy setting and the owner can change it with `set_cooldown_
 
 ### The allowlist
 
-Anyone who can mint a token of the collection could otherwise stake it and take a seat, so the council only takes tokens the owner has named. The list is on when the council is made unless the deployer passes `allowlist_enabled: false`, so by default nothing stakes until the owner has allowed tokens. A token is allowed when it is named, or when its id is a whole number inside the allowed range. A refused token goes back to its holder through the collection's own resolve step, like any other refusal.
+Anyone who can mint a token of the collection could otherwise stake it and take a seat, so the council only takes tokens the owner has named. The list is on when the council is made unless the deployer passes `allowlist_enabled: false`, so by default nothing stakes until the owner has allowed tokens. A token is allowed when it is named, or when its id is a whole number inside the allowed range. Every name and the range belong to the collection that was current when the owner made them, so they never carry over to another collection. A refused token goes back to its holder through the collection's own resolve step, like any other refusal.
 
 | Method | What it does |
 |---|---|
-| `allow_tokens(token_ids)` | Names tokens. At most 100 ids in a call, and at least one (`at most 100 tokens in one call`, `name at least one token`). Naming a token twice changes nothing. Event `tokens_allowed` with the ids. A call with 100 ids of 63 bytes burned 13 TGas. When the owner is governance the ids ride in the proposal's arguments, which governance caps at 4,096 bytes, so a batch of long ids is smaller than 100 there. |
-| `set_token_range(first, last)` | For a collection whose ids are decimal numbers. Allows every id from `first` to `last`, both included, and replaces any earlier range. Refused if `first` is above `last`. Event `token_range_set`. |
+| `allow_tokens(token_ids)` | Names tokens of the current collection. At most 100 ids in a call, and at least one (`at most 100 tokens in one call`, `name at least one token`). Naming a token twice changes nothing. Event `tokens_allowed` with the collection and the ids. A call with 100 ids of 63 bytes burned 13 TGas. When the owner is governance the ids ride in the proposal's arguments, which governance caps at 4,096 bytes, so a batch of long ids is smaller than 100 there. |
+| `set_token_range(first, last)` | For a collection whose ids are decimal numbers. Allows every id from `first` to `last`, both included, in the current collection, and replaces any earlier range. Refused if `first` is above `last`. Event `token_range_set` with the collection. |
 | `clear_token_range()` | Removes the range. Event `token_range_cleared`. |
 | `set_allowlist_enabled(enabled)` | Off lets any token of the collection stake. On again unstakes nobody. Event `allowlist_set`. |
 | `is_allowed(token_id)` (view) | Whether the token could be staked now. |
 
 An id counts as a number only in its plain decimal form. `007`, `+7`, a space, or a number past the largest 64 bit value are not in any range, so a collection that mints such ids cannot use the range to sneak a token in.
 
-Deployment requirement: the collection must have a fixed supply, with minting closed and its code hash published, before staking opens. The list names which tokens may stake, and it cannot tell a real seat from one minted afterwards. With minting open, the owner who allows a range or a name allows whatever anyone later mints under it. The checklist is to close minting, publish the code hash of the collection, set the range or name the tokens, and only then tell holders they can stake. Changing the collection with `set_nft_contract` leaves the old names and range in place, so set them again for the new collection.
+Deployment requirement: the collection must have a fixed supply, with minting closed and its code hash published, before staking opens. The list names which tokens may stake, and it cannot tell a real seat from one minted afterwards. With minting open, the owner who allows a range or a name allows whatever anyone later mints under it. The checklist is to close minting, publish the code hash of the collection, set the range or name the tokens, and only then tell holders they can stake. Changing the collection with `set_nft_contract` leaves the old names and range stored, but they apply only to the collection they were made for, so nothing the old list allowed (ids 1 to 1,000 under a range, for example) is allowed for the new collection. Name the new collection's tokens again. Changing back brings the old collection's names and range back into force. `config` shows the range only while it belongs to the current collection.
 
 ### Changing the collection
 
@@ -203,11 +203,11 @@ The revenue their seat earned during the case, between the draw and the release.
 | `accept_owner()` | The proposed account | Completes it. Two steps so a typo cannot lock the contract. |
 | `set_cooldown_ns(cooldown_ns)` | Owner | Changes the unstake wait. Above zero. |
 | `set_max_seats_per_account(n)` | Owner | Changes the per-account cap. At least 1. |
-| `set_nft_contract(nft_contract)` | Owner | Changes the collection. Only while nothing is staked. Logs no event. |
+| `set_nft_contract(nft_contract)` | Owner | Changes the collection. Only while nothing is staked. The allowlist stays stored and applies to the old collection only. Logs no event. |
 | `allow_tokens(token_ids)`, `set_token_range(first, last)`, `clear_token_range()`, `set_allowlist_enabled(enabled)` | Owner | The allowlist, above. |
 | `stage_code()` (payable) | Anyone | The call input is a wasm. It is stored under its own sha256, which is returned. The deposit pays for the storage (1 NEAR per 100 KB) and the surplus is refunded. Attach 100 TGas, because 250 KB burns about 31. |
 | `upgrade(code_hash)` | Owner | Deploys the staged wasm with that sha256 and runs its `migrate`, in one batch. Needs at least 100 TGas attached. |
-| `migrate()` | The contract itself | Runs in the new code in the same batch as the deploy. Reads the state as the one layout it knows, sets `upgrade_proven`, returns the state. |
+| `migrate()` | The contract itself | Runs in the new code in the same batch as the deploy. Refuses unless `upgrade` marked the upgrade in flight. Reads the state as the one layout it knows, clears the mark, sets `upgrade_proven`, returns the state. |
 | `seal(public_key)` | Owner | Deletes that access key from this account. Refused until an upgrade has gone through `migrate`. |
 | `nft_on_transfer(sender_id, previous_owner_id, token_id, msg)` | The NFT collection only | Stakes a seat. |
 | `ft_on_transfer(sender_id, amount, msg)` | The collateral token only | Receives revenue (`msg` must be `revenue`). |
@@ -222,7 +222,7 @@ The revenue their seat earned during the case, between the draw and the release.
 
 No access key can replace this code outside a vote, and no deleted key can freeze it. The owner (governance) calls `upgrade` with the hash of a build that anyone staged with `stage_code`. The call needs at least 100 TGas (`attach at least 100 TGas to upgrade`), takes the staged wasm out of storage and sends one batch to this account: deploy, then `migrate`. A `migrate` that panics reverts the deploy and the old code stays. The staged copy is gone either way, so a failed upgrade stages the code again.
 
-`migrate` sets `upgrade_proven`, shown in `config` next to `state_version`. `seal` is refused until it is true (`prove the upgrade path before deleting keys`). The state struct starts with `state_version: u16`, 1 today. `migrate` reads the first two bytes of the stored state and refuses anything but 1 (`migrate expects version 1`), then reads the version 1 struct. It never guesses a layout from bytes. A version 2 build keeps the version 1 struct as `StateV1`, reads that, builds its state and writes `state_version: 2`.
+`upgrade` sets `upgrade_in_flight` just before it sends the batch. `migrate` refuses to run without it (`migrate runs only inside an upgrade`), clears it and sets `upgrade_proven`, so a hand-called `migrate` proves nothing. When the batch fails, the old code keeps the mark and the next `upgrade` sets it again. Both flags are shown in `config` next to `state_version`. `seal` is refused until it is true (`prove the upgrade path before deleting keys`). The state struct starts with `state_version: u16`, 1 today. `migrate` reads the first two bytes of the stored state and refuses anything but 1 (`migrate expects version 1`), then reads the version 1 struct. It never guesses a layout from bytes. A version 2 build keeps the version 1 struct as `StateV1`, reads that, builds its state and writes `state_version: 2`.
 
 The governance timelock on an upgrade is the stakers' exit window. This contract has no pause, so `request_unstake`, `unstake` and `claim` work at all times except for a seat serving on an open case, and an upgrade does not touch them. The staked seats and their revenue accounting are in the state that `migrate` reads, and the sandbox test checks that a seat's record and the seat count are identical after an upgrade.
 
@@ -241,7 +241,7 @@ Measured in the sandbox for a 249 KB build: `upgrade` burns 30 TGas in all, 17 o
 | `is_allowed(token_id)` | Whether the token could be staked now. |
 | `jury_of(case_key)` | The tokens still held for a case. Empty once released. |
 | `is_staged(code_hash)` | Whether a wasm with that sha256 is staged. |
-| `config()` | state version, upgrade proven, owner, pending owner, oracle, NFT collection, collateral token, cooldown, seat cap, allowlist on or off, the allowed range, `total_received`, `stream_ns` (30 days), `stream_remaining` (the revenue still to be released, in token units, as of now) and `stream_ends_at`. |
+| `config()` | state version, upgrade proven, upgrade in flight, owner, pending owner, oracle, NFT collection, collateral token, cooldown, seat cap, allowlist on or off, the allowed range, `total_received`, `stream_ns` (30 days), `stream_remaining` (the revenue still to be released, in token units, as of now) and `stream_ends_at`. |
 
 ## Events
 
@@ -252,8 +252,8 @@ Each logs `EVENT_JSON:` and JSON of the form `{"standard":"council","version":"1
 | `owner_proposed`, `owner_changed` | Handover | owner and proposed, or from and to |
 | `cooldown_set` | `set_cooldown_ns` | cooldown_ns |
 | `max_seats_per_account_set` | `set_max_seats_per_account` | max_seats_per_account |
-| `tokens_allowed` | `allow_tokens` | token_ids |
-| `token_range_set` | `set_token_range` | first, last |
+| `tokens_allowed` | `allow_tokens` | nft_contract, token_ids |
+| `token_range_set` | `set_token_range` | nft_contract, first, last |
 | `token_range_cleared` | `clear_token_range` | none |
 | `allowlist_set` | `set_allowlist_enabled` | enabled |
 | `staked` | A seat is staked | token_id, owner |
@@ -291,6 +291,7 @@ Each logs `EVENT_JSON:` and JSON of the form `{"standard":"council","version":"1
 | `attach at least <amount> to pay for the storage` / `the wasm goes in the call input` | `stage_code` with too little deposit or no input. |
 | `prove the upgrade path before deleting keys` | `seal` before an upgrade has gone through `migrate`. |
 | `migrate expects version 1` | `migrate` found state written by another version. |
+| `migrate runs only inside an upgrade` | `migrate` called without `upgrade` having sent the batch. |
 | `Method <name> is private` | A callback called from outside. |
 
 ## Gas
@@ -308,7 +309,7 @@ Each logs `EVENT_JSON:` and JSON of the form `{"standard":"council","version":"1
 
 ## Security properties checked by tests
 
-Every restricted method refuses a stranger and every callback refuses a direct call; a stranger cannot initialise a deployed council; with the allowlist on, only named tokens and plain numbers inside the range stake, and `007` and `+7` do not; `unstake` and `claim` refuse less than their gas floors; `total_received` counts every revenue arrival and no forfeit; a fake NFT collection cannot stake seats and a call to `nft_on_transfer` made directly is refused; a fake token cannot add revenue; a seat staked by an approved relayer belongs to its real owner; two claims or two unstakes sent at once pay once; a failed NFT return restores the seat; a seat that asked to leave is never drawn; a serving seat cannot leave or claim; a silent juror forfeits exactly what the seat earned while serving and a juror who voted keeps everything; the draw depends only on the block seed, the seat set and the case key; a seat staked one block before a large arrival earns about one block of 30 days; equal time staked earns equally whatever the arrival time; a dust arrival cannot slow a stream; a seat's earnings match an exact model of the stream over random sequences of staking, claiming and time passing; and, over 60 random sequences of stakes, revenue, time, draws, forfeits and claims, no unit of revenue is created or lost beyond dust. A stranger cannot upgrade or seal, an unknown hash and too little gas or deposit are refused, `seal` waits for `upgrade_proven`, `migrate` refuses another state version, and the seats survive an upgrade unchanged. See `AUDIT.md`.
+Every restricted method refuses a stranger and every callback refuses a direct call; a stranger cannot initialise a deployed council; with the allowlist on, only named tokens and plain numbers inside the range stake, and `007` and `+7` do not; names and a range made for one collection allow nothing in the next; a hand-called `migrate` is refused; `unstake` and `claim` refuse less than their gas floors; `total_received` counts every revenue arrival and no forfeit; a fake NFT collection cannot stake seats and a call to `nft_on_transfer` made directly is refused; a fake token cannot add revenue; a seat staked by an approved relayer belongs to its real owner; two claims or two unstakes sent at once pay once; a failed NFT return restores the seat; a seat that asked to leave is never drawn; a serving seat cannot leave or claim; a silent juror forfeits exactly what the seat earned while serving and a juror who voted keeps everything; the draw depends only on the block seed, the seat set and the case key; a seat staked one block before a large arrival earns about one block of 30 days; equal time staked earns equally whatever the arrival time; a dust arrival cannot slow a stream; a seat's earnings match an exact model of the stream over random sequences of staking, claiming and time passing; and, over 60 random sequences of stakes, revenue, time, draws, forfeits and claims, no unit of revenue is created or lost beyond dust. A stranger cannot upgrade or seal, an unknown hash and too little gas or deposit are refused, `seal` waits for `upgrade_proven`, `migrate` refuses another state version, and the seats survive an upgrade unchanged. See `AUDIT.md`.
 
 ## Things to know
 

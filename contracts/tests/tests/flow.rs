@@ -489,3 +489,18 @@ async fn a_market_seeded_at_a_chosen_price_opens_there_and_settles_cleanly() -> 
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_registered_market_says_unseeded_until_it_is_seeded() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let id = create_market(&w, 600, 3_600).await?;
+    let m = market_json(&w, id).await;
+    assert_eq!(
+        (&m["status"], &m["registered"], &m["seeded"]),
+        (&json!("unseeded"), &json!(true), &json!(false))
+    );
+    ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{id}")).await?;
+    let m = market_json(&w, id).await;
+    assert_eq!((&m["status"], &m["seeded"]), (&json!("open"), &json!(true)));
+    Ok(())
+}

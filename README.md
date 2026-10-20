@@ -26,12 +26,12 @@ Not done: the Intents-held custody/settlement migration and final frontend finan
 cd contracts
 ./build.sh                        # builds all six wasm files with the pinned toolchain (rust-toolchain.toml)
 ./build.sh --reproducible         # the four deployed contracts in the pinned docker image; needs docker and a clean commit; writes target/near/HASHES.txt
-cargo test -p market            # 118 unit tests
-cargo test -p oracle            # 96 unit tests
-cargo test -p council           # 74 unit tests
-cargo test -p governance        # 49 unit tests
+cargo test -p market            # 128 unit tests
+cargo test -p oracle            # 103 unit tests
+cargo test -p council           # 79 unit tests
+cargo test -p governance        # 60 unit tests
 cargo test -p upgrade           # 11 unit tests of the shared upgrade and gas floor helpers
-cargo test -p tests             # sandbox integration tests (near-workspaces), 123 tests plus 1 ignored long run
+cargo test -p tests             # sandbox integration tests (near-workspaces), 129 tests plus 1 ignored long run
 node --test keeper/keeper.test.mjs # the keeper's decision, key and cursor logic, 17 tests
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings

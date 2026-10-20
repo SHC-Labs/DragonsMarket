@@ -453,3 +453,5 @@ F17 (I-01 to I-07). Documented, not coded: the seat cap does not stop juror capt
 Parameters (not code, for the deployment): jury 11 at launch and 21 later, challenge window 2 hours for events and 30 to 60 minutes for prices, commit and reveal 24 hours each from the draw, draw window 2 hours, draw delay 3 to 5 blocks, code upgrade timelock at least 72 hours, governance threshold at least 3 of 5, seat cap 5 per account. These are starting values for the owner to argue with.
 
 Order: Phase 1, then 2, then 3, then 4, with the full suites and a dated AUDIT.md section after each. Every contracts/pm-*.md is updated in the same change that changes the behaviour it describes.
+
+Status, 2026-10-20: the findings of the second outside review (N-01 to N-10) are recorded with their fixes and open items in contracts/AUDIT.md, section "Second review fixes, 2026-10-20".

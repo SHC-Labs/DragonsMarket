@@ -155,6 +155,10 @@ pub struct CouncilContract {
     state_version: u16,
     // Set by migrate, so it is true only once an upgrade has gone through. seal refuses until then.
     upgrade_proven: bool,
+    // Set by upgrade just before it sends the deploy and migrate batch, cleared by migrate. migrate refuses to run when it
+    // is not set, so the proof cannot come from calling migrate by hand. A batch that fails leaves it set in the old code,
+    // and the next upgrade sets it again.
+    upgrade_in_flight: bool,
     owner: AccountId,
     // Set by propose_owner. Ownership moves only when this account calls accept_owner.
     pending_owner: Option<AccountId>,
@@ -170,10 +174,11 @@ pub struct CouncilContract {
     max_seats_per_account: u32,
     // While on, only a token on the allowlist can be staked. A token is on it when the owner named it with allow_tokens,
     // or when its id is the decimal form of a number inside allowed_range. The collection must have a fixed supply
-    // with minting closed before staking opens, or anyone could mint their way onto the list.
+    // with minting closed before staking opens, or anyone could mint their way onto the list. Every entry belongs to the
+    // collection that was current when it was made, so changing the collection leaves the old entries matching nothing.
     allowlist_enabled: bool,
-    allowed_tokens: LookupSet<TokenId>,
-    allowed_range: Option<(u64, u64)>,
+    allowed_tokens: LookupSet<(AccountId, TokenId)>,
+    allowed_range: Option<(AccountId, u64, u64)>,
     // Every staked token, in a stable order for the draw.
     staked: Vector<TokenId>,
     stakes: LookupMap<TokenId, Stake>,
@@ -247,6 +252,7 @@ impl CouncilContract {
         Self {
             state_version: STATE_VERSION,
             upgrade_proven: false,
+            upgrade_in_flight: false,
             owner: owner_id,
             pending_owner: None,
             oracle: oracle_id,
@@ -289,6 +295,7 @@ impl CouncilContract {
         upgrade::require_upgrade_gas();
         self.only_owner();
         let code = upgrade::take_staged(code_hash);
+        self.upgrade_in_flight = true;
         emit("upgrade_sent", json!({ "code_hash": code_hash }));
         upgrade::deploy_and_migrate(code)
     }
@@ -300,6 +307,8 @@ impl CouncilContract {
     pub fn migrate() -> Self {
         upgrade::require_state_version(STATE_VERSION);
         let mut state: Self = env::state_read().unwrap_or_else(|| env::panic_str("there is no state to migrate"));
+        require!(state.upgrade_in_flight, "migrate runs only inside an upgrade");
+        state.upgrade_in_flight = false;
         state.upgrade_proven = true;
         emit("migrated", json!({ "state_version": state.state_version }));
         state
@@ -349,7 +358,8 @@ impl CouncilContract {
         self.max_seats_per_account = max_seats_per_account;
     }
 
-    // Stakes are keyed by token id alone, so the collection can only change while nothing is staked.
+    // Stakes are keyed by token id alone, so the collection can only change while nothing is staked. The allowlist stays
+    // as it is and applies only to the collection it was made for: the owner names the new collection's tokens again.
     pub fn set_nft_contract(&mut self, nft_contract: AccountId) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
         require!(
@@ -366,20 +376,24 @@ impl CouncilContract {
         require!(!token_ids.is_empty(), "name at least one token");
         require!(token_ids.len() <= MAX_ALLOW_BATCH, "at most 100 tokens in one call");
         for token_id in &token_ids {
-            self.allowed_tokens.insert(token_id.clone());
+            self.allowed_tokens
+                .insert((self.nft_contract.clone(), token_id.clone()));
         }
-        emit("tokens_allowed", json!({ "token_ids": token_ids }));
+        emit(
+            "tokens_allowed",
+            json!({ "nft_contract": self.nft_contract, "token_ids": token_ids }),
+        );
     }
 
     // For a collection whose ids are decimal numbers: every id from `first` to `last`, both included, is allowed. It
-    // replaces any earlier range.
+    // is for the current collection and replaces any earlier range.
     pub fn set_token_range(&mut self, first: U64, last: U64) {
         self.only_owner();
         require!(first.0 <= last.0, "the first id must not be above the last");
-        self.allowed_range = Some((first.0, last.0));
+        self.allowed_range = Some((self.nft_contract.clone(), first.0, last.0));
         emit(
             "token_range_set",
-            json!({ "first": first.0.to_string(), "last": last.0.to_string() }),
+            json!({ "nft_contract": self.nft_contract, "first": first.0.to_string(), "last": last.0.to_string() }),
         );
     }
 
@@ -669,11 +683,11 @@ impl CouncilContract {
     // stream_remaining is the revenue still to be released, in token units, as of now.
     pub fn config(&self) -> near_sdk::serde_json::Value {
         let (stream, _) = self.stream.advanced(env::block_timestamp(), self.staked.len() as u128);
-        json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven,
+        json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
                 "owner": self.owner, "pending_owner": self.pending_owner, "oracle": self.oracle, "nft_contract": self.nft_contract,
                 "collateral": self.collateral, "cooldown_ns": self.cooldown_ns.to_string(),
                 "max_seats_per_account": self.max_seats_per_account, "allowlist_enabled": self.allowlist_enabled,
-                "allowed_range": self.allowed_range.map(|(first, last)| json!({ "first": first.to_string(), "last": last.to_string() })),
+                "allowed_range": self.current_range().map(|(first, last)| json!({ "first": first.to_string(), "last": last.to_string() })),
                 "total_received": self.total_received.to_string(), "stream_ns": STREAM_NS.to_string(), "stream_remaining": (stream.remaining / PRECISION).to_string(),
                 "stream_ends_at": stream.ends_at.to_string() })
     }
@@ -725,11 +739,21 @@ impl CouncilContract {
     // An id counts as a number only in its plain decimal form, so "007" and "+7" are not the token "7".
     fn on_allowlist(&self, token_id: &TokenId) -> bool {
         let in_range = || {
-            let (first, last) = self.allowed_range?;
+            let (first, last) = self.current_range()?;
             let n: u64 = token_id.parse().ok()?;
             (n.to_string() == *token_id && (first..=last).contains(&n)).then_some(())
         };
-        self.allowed_tokens.contains(token_id) || in_range().is_some()
+        self.allowed_tokens
+            .contains(&(self.nft_contract.clone(), token_id.clone()))
+            || in_range().is_some()
+    }
+
+    // The range, if it was set for the collection that is current now.
+    fn current_range(&self) -> Option<(u64, u64)> {
+        self.allowed_range
+            .as_ref()
+            .filter(|(collection, ..)| *collection == self.nft_contract)
+            .map(|(_, first, last)| (*first, *last))
     }
 
     fn callers_stake(&mut self, token_id: &TokenId) -> &mut Stake {
@@ -1945,6 +1969,65 @@ mod tests {
         assert!(c.stake_of("anything".into()).is_some(), "the seat that was in stays in");
     }
 
+    fn switch_collection(c: &mut CouncilContract, to: &str) {
+        act_as(OWNER);
+        c.set_nft_contract(acct(to));
+    }
+
+    fn stake_from(c: &mut CouncilContract, collection: &str, token: &str) {
+        act_as(collection);
+        let _ = c.nft_on_transfer(acct("market.near"), acct("a.near"), token.to_string(), String::new());
+    }
+
+    #[test]
+    fn named_tokens_allowed_for_one_collection_are_not_allowed_for_the_next() {
+        let mut c = guarded_council();
+        act_as(OWNER);
+        c.allow_tokens(vec!["alpha".into()]);
+        assert!(c.is_allowed("alpha".into()));
+        switch_collection(&mut c, "other-nft.near");
+        assert!(!c.is_allowed("alpha".into()));
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stake_from(&mut c, "other-nft.near", "alpha");
+        }));
+        assert!(
+            caught.is_err(),
+            "an id allowed for the old collection must not stake from the new one"
+        );
+        act_as(OWNER);
+        c.allow_tokens(vec!["beta".into()]);
+        stake_from(&mut c, "other-nft.near", "beta");
+        assert_eq!(c.seat_count(), 1);
+    }
+
+    #[test]
+    fn a_range_set_for_one_collection_is_not_in_force_for_the_next_and_shows_so() {
+        let mut c = guarded_council();
+        act_as(OWNER);
+        c.set_token_range(U64(1), U64(1_000));
+        assert!(c.is_allowed("500".into()));
+        switch_collection(&mut c, "other-nft.near");
+        assert!(!c.is_allowed("500".into()));
+        assert_eq!(c.config()["allowed_range"], near_sdk::serde_json::Value::Null);
+        act_as(OWNER);
+        c.set_token_range(U64(5), U64(6));
+        assert!(c.is_allowed("5".into()) && !c.is_allowed("500".into()));
+        assert_eq!(
+            c.config()["allowed_range"],
+            near_sdk::serde_json::json!({ "first": "5", "last": "6" })
+        );
+    }
+
+    #[test]
+    fn going_back_to_a_collection_brings_its_own_entries_back() {
+        let mut c = guarded_council();
+        act_as(OWNER);
+        c.allow_tokens(vec!["alpha".into()]);
+        switch_collection(&mut c, "other-nft.near");
+        switch_collection(&mut c, NFT);
+        assert!(c.is_allowed("alpha".into()));
+    }
+
     #[test]
     fn a_batch_is_capped_and_must_name_something() {
         let mut c = guarded_council();
@@ -1965,8 +2048,11 @@ mod tests {
         c.allow_tokens(vec!["a".into(), "b".into()]);
         let e = last_event();
         assert_eq!(
-            (e["event"].as_str(), e["data"]["token_ids"].clone()),
-            (Some("tokens_allowed"), near_sdk::serde_json::json!(["a", "b"]))
+            (e["event"].as_str(), e["data"].clone()),
+            (
+                Some("tokens_allowed"),
+                near_sdk::serde_json::json!({ "nft_contract": NFT, "token_ids": ["a", "b"] })
+            )
         );
         act_as(OWNER);
         c.set_token_range(U64(3), U64(9));
@@ -1975,7 +2061,7 @@ mod tests {
             (e["event"].as_str(), e["data"].clone()),
             (
                 Some("token_range_set"),
-                near_sdk::serde_json::json!({ "first": "3", "last": "9" })
+                near_sdk::serde_json::json!({ "nft_contract": NFT, "first": "3", "last": "9" })
             )
         );
         act_as(OWNER);
@@ -2186,15 +2272,46 @@ mod tests {
         let mut c = council();
         stake(&mut c, "7", "o0.near");
         assert!(!c.upgrade_proven);
+        c.upgrade_in_flight = true;
         env::state_write(&c);
         drop(c);
         testing_env!(context("alice.near").build());
         let migrated = CouncilContract::migrate();
         assert_eq!(
-            (migrated.upgrade_proven, migrated.state_version, migrated.seat_count()),
-            (true, 1, 1)
+            (
+                (migrated.upgrade_proven, migrated.upgrade_in_flight),
+                migrated.state_version,
+                migrated.seat_count()
+            ),
+            ((true, false), 1, 1)
         );
         assert_eq!(migrated.config()["upgrade_proven"], true);
+    }
+
+    #[test]
+    #[should_panic(expected = "migrate runs only inside an upgrade")]
+    fn migrate_called_by_hand_is_refused_and_proves_nothing() {
+        let c = council();
+        env::state_write(&c);
+        drop(c);
+        testing_env!(context("alice.near").build());
+        CouncilContract::migrate();
+    }
+
+    #[test]
+    fn upgrade_marks_the_upgrade_in_flight_and_a_second_one_sets_it_again() {
+        let mut c = council();
+        let hash = staged(&mut c);
+        assert!(!c.upgrade_in_flight);
+        act_as(OWNER);
+        let _ = c.upgrade(hash);
+        assert!(c.upgrade_in_flight);
+        assert_eq!(c.config()["upgrade_in_flight"], true);
+        c.upgrade_in_flight = false;
+        let again = staged(&mut c);
+        act_as(OWNER);
+        let _ = c.upgrade(again);
+        assert!(c.upgrade_in_flight, "the next upgrade sets it again");
     }
 
     #[test]

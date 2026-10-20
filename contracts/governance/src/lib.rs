@@ -14,6 +14,9 @@ use near_sdk::{
 };
 
 const MAX_MEMBERS: usize = 5;
+// The timelock is the users' only window to see a code change coming and leave, so it cannot be set below this.
+// Changing the floor is itself a code upgrade and waits out the timelock in force.
+const MIN_TIMELOCK_NS: u64 = 72 * 3_600 * 1_000_000_000;
 // Records are paid for out of this contract's own balance, so they must be bounded. 4,096 bytes covers
 // create_market at its own text limits. 256 is the protocol's own limit on a method name.
 const MAX_ARGS: usize = 4096;
@@ -133,6 +136,10 @@ pub struct GovernanceContract {
     state_version: u16,
     // Set by migrate, so it is true only once an upgrade has gone through. seal refuses until then.
     upgrade_proven: bool,
+    // Set by execute just before it sends the deploy and migrate batch, cleared by migrate. migrate refuses to run when it
+    // is not set, so the proof cannot come from calling migrate by hand. A batch that fails leaves it set in the old code,
+    // and the next upgrade sets it again.
+    upgrade_in_flight: bool,
     members: Vec<AccountId>,
     threshold: u32,
     voting_period_ns: u64,
@@ -144,6 +151,9 @@ pub struct GovernanceContract {
     next_proposal_id: u64,
 }
 
+const THRESHOLD_RULE: &str = "the threshold must be a majority of the members";
+const TIMELOCK_RULE: &str = "the timelock is the users' exit window and cannot be under 72 hours";
+
 fn emit(event: &str, data: near_sdk::serde_json::Value) {
     env::log_str(&format!(
         "EVENT_JSON:{}",
@@ -151,8 +161,11 @@ fn emit(event: &str, data: near_sdk::serde_json::Value) {
     ));
 }
 
+// A majority of the members. For one member that is 1, for two it is 2, and from three up it is at least 2, so no
+// smaller floor is needed.
 fn valid_threshold(threshold: u32, members: usize) -> bool {
-    threshold >= 1 && threshold as usize <= members
+    let threshold = threshold as usize;
+    threshold <= members && threshold * 2 > members
 }
 
 #[near]
@@ -175,17 +188,16 @@ impl GovernanceContract {
         distinct.sort();
         distinct.dedup();
         require!(distinct.len() == members.len(), "members must be different accounts");
+        require!(valid_threshold(threshold, members.len()), THRESHOLD_RULE);
         require!(
-            valid_threshold(threshold, members.len()),
-            "threshold must be between 1 and the number of members"
-        );
-        require!(
-            voting_period_ns.0 > 0 && timelock_ns.0 > 0 && execution_window_ns.0 > 0,
+            voting_period_ns.0 > 0 && execution_window_ns.0 > 0,
             "periods must be positive"
         );
+        require!(timelock_ns.0 >= MIN_TIMELOCK_NS, TIMELOCK_RULE);
         Self {
             state_version: STATE_VERSION,
             upgrade_proven: false,
+            upgrade_in_flight: false,
             members,
             threshold,
             voting_period_ns: voting_period_ns.0,
@@ -216,6 +228,8 @@ impl GovernanceContract {
     pub fn migrate() -> Self {
         upgrade::require_state_version(STATE_VERSION);
         let mut state: Self = env::state_read().unwrap_or_else(|| env::panic_str("there is no state to migrate"));
+        require!(state.upgrade_in_flight, "migrate runs only inside an upgrade");
+        state.upgrade_in_flight = false;
         state.upgrade_proven = true;
         emit("migrated", json!({ "state_version": state.state_version }));
         state
@@ -373,6 +387,7 @@ impl GovernanceContract {
                     )
                 );
                 let code = upgrade::take_staged(code_hash);
+                self.upgrade_in_flight = true;
                 p.stage = Stage::Executing;
                 self.proposals.insert(proposal_id.0, p);
                 emit("upgrade_sent", json!({ "proposal_id": id, "code_hash": code_hash }));
@@ -486,7 +501,7 @@ impl GovernanceContract {
     }
 
     pub fn config(&self) -> near_sdk::serde_json::Value {
-        json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven,
+        json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
                 "threshold": self.threshold, "voting_period_ns": self.voting_period_ns.to_string(),
                 "timelock_ns": self.timelock_ns.to_string(), "execution_window_ns": self.execution_window_ns.to_string(),
                 "members": self.members.len(),
@@ -577,6 +592,10 @@ impl GovernanceContract {
             Action::AddMember { account } => {
                 require!(!self.members.contains(account), "already a member");
                 require!(members < MAX_MEMBERS, "there can be at most 5 members");
+                require!(
+                    valid_threshold(self.threshold, members + 1),
+                    "raise the threshold first, it would not be a majority of the new members"
+                );
             }
             Action::RemoveMember { account } => {
                 require!(self.members.contains(account), "not a member");
@@ -587,10 +606,7 @@ impl GovernanceContract {
                 );
             }
             Action::SetThreshold { threshold } => {
-                require!(
-                    valid_threshold(*threshold, members),
-                    "threshold must be between 1 and the number of members"
-                );
+                require!(valid_threshold(*threshold, members), THRESHOLD_RULE);
             }
             Action::UpgradeSelf { code_hash } => {
                 require!(
@@ -601,10 +617,12 @@ impl GovernanceContract {
             Action::Seal { .. } => {
                 require!(self.upgrade_proven, "prove the upgrade path before deleting keys");
             }
+            Action::SetTimelock { timelock_ns } => {
+                require!(timelock_ns.0 >= MIN_TIMELOCK_NS, TIMELOCK_RULE);
+            }
             Action::SetVotingPeriod {
                 voting_period_ns: period,
             }
-            | Action::SetTimelock { timelock_ns: period }
             | Action::SetExecutionWindow {
                 execution_window_ns: period,
             } => {
@@ -621,8 +639,9 @@ mod tests {
     use near_sdk::testing_env;
 
     const SELF: &str = "gov.near";
-    const VOTING: u64 = 1_000;
-    const TIMELOCK: u64 = 500;
+    const VOTING: u64 = MIN_TIMELOCK_NS + 1_000;
+    const TIMELOCK: u64 = MIN_TIMELOCK_NS;
+    const NEW_TIMELOCK: u64 = MIN_TIMELOCK_NS + 7;
     const WINDOW: u64 = 2_000;
     const MEMBERS: [&str; 5] = ["m0.near", "m1.near", "m2.near", "m3.near", "m4.near"];
 
@@ -694,20 +713,27 @@ mod tests {
 
     #[test]
     fn reaching_the_threshold_locks_in_approval_whatever_votes_come_after() {
-        let mut g = gov(5, 2);
-        let id = propose(&mut g, 0, Action::SetTimelock { timelock_ns: U64(7) });
+        let mut g = gov(5, 3);
+        let id = propose(
+            &mut g,
+            0,
+            Action::SetTimelock {
+                timelock_ns: U64(NEW_TIMELOCK),
+            },
+        );
         vote(&mut g, MEMBERS[0], 10, id, true);
-        assert_eq!(g.proposal(id.0).approved_at, None);
         vote(&mut g, MEMBERS[1], 20, id, true);
-        assert_eq!(g.proposal(id.0).approved_at, Some(U64(20)));
-        for (i, m) in MEMBERS[2..].iter().enumerate() {
-            vote(&mut g, m, 30 + i as u64, id, false);
+        assert_eq!(g.proposal(id.0).approved_at, None);
+        vote(&mut g, MEMBERS[2], 30, id, true);
+        assert_eq!(g.proposal(id.0).approved_at, Some(U64(30)));
+        for (i, m) in MEMBERS[3..].iter().enumerate() {
+            vote(&mut g, m, 40 + i as u64, id, false);
         }
         let p = g.proposal(id.0);
         assert_eq!(
             (p.stage, p.approved_at, p.votes.len()),
-            (Stage::Approved, Some(U64(20)), 5),
-            "three no votes change nothing"
+            (Stage::Approved, Some(U64(30)), 5),
+            "two no votes change nothing"
         );
         act_at("anyone.near", VOTING + 1);
         assert_eq!(
@@ -715,8 +741,8 @@ mod tests {
             Stage::Approved,
             "the end of voting does not expire an approved proposal"
         );
-        execute(&mut g, 20 + TIMELOCK, id);
-        assert_eq!((stage(&g, id), g.timelock_ns), (Stage::Executed, 7));
+        execute(&mut g, 30 + TIMELOCK, id);
+        assert_eq!((stage(&g, id), g.timelock_ns), (Stage::Executed, NEW_TIMELOCK));
     }
 
     #[test]
@@ -818,11 +844,20 @@ mod tests {
     fn a_cancelled_proposal_leaves_others_alone() {
         let mut g = gov(3, 2);
         let doomed = approved(&mut g, 100, Action::SetThreshold { threshold: 3 });
-        let fine = approved(&mut g, 100, Action::SetTimelock { timelock_ns: U64(7) });
+        let fine = approved(
+            &mut g,
+            100,
+            Action::SetTimelock {
+                timelock_ns: U64(NEW_TIMELOCK),
+            },
+        );
         cancel(&mut g, MEMBERS[0], 200, doomed);
         cancel(&mut g, MEMBERS[1], 200, doomed);
         execute(&mut g, 100 + TIMELOCK, fine);
-        assert_eq!((stage(&g, fine), g.timelock_ns, g.threshold), (Stage::Executed, 7, 2));
+        assert_eq!(
+            (stage(&g, fine), g.timelock_ns, g.threshold),
+            (Stage::Executed, NEW_TIMELOCK, 2)
+        );
     }
 
     #[test]
@@ -861,7 +896,7 @@ mod tests {
 
     #[test]
     fn a_removed_members_earlier_cancel_vote_no_longer_counts() {
-        let mut g = gov(4, 2);
+        let mut g = gov(4, 3);
         let id = approved(&mut g, 100, call());
         cancel(&mut g, MEMBERS[3], 101, id);
         let remove = approved(
@@ -873,30 +908,32 @@ mod tests {
         );
         execute(&mut g, 102 + TIMELOCK, remove);
         cancel(&mut g, MEMBERS[0], 103 + TIMELOCK, id);
+        cancel(&mut g, MEMBERS[1], 104 + TIMELOCK, id);
         assert_eq!(
             stage(&g, id),
             Stage::Approved,
-            "one current member voted to cancel, the threshold is two"
+            "two current members voted to cancel, the threshold is three"
         );
-        cancel(&mut g, MEMBERS[1], 104 + TIMELOCK, id);
+        cancel(&mut g, MEMBERS[2], 105 + TIMELOCK, id);
         assert_eq!(stage(&g, id), Stage::Cancelled);
     }
 
     #[test]
     #[should_panic(expected = "this proposal was cancelled")]
     fn nobody_can_vote_on_a_cancelled_proposal() {
-        let mut g = gov(5, 2);
+        let mut g = gov(5, 3);
         let id = approved(&mut g, 100, call());
         cancel(&mut g, MEMBERS[0], 200, id);
         cancel(&mut g, MEMBERS[1], 200, id);
-        vote(&mut g, MEMBERS[2], 300, id, true);
+        cancel(&mut g, MEMBERS[2], 200, id);
+        vote(&mut g, MEMBERS[3], 300, id, true);
     }
 
     #[test]
     #[should_panic(expected = "not approved")]
     fn a_proposal_short_of_the_threshold_expires_and_never_executes() {
         let mut g = gov(5, 3);
-        let id = propose(&mut g, 0, Action::SetThreshold { threshold: 1 });
+        let id = propose(&mut g, 0, Action::SetThreshold { threshold: 4 });
         vote(&mut g, MEMBERS[0], 1, id, true);
         vote(&mut g, MEMBERS[1], 2, id, true);
         vote(&mut g, MEMBERS[2], 3, id, false);
@@ -911,7 +948,7 @@ mod tests {
     #[should_panic(expected = "voting has ended")]
     fn nobody_can_vote_an_expired_proposal_into_approval() {
         let mut g = gov(5, 3);
-        let id = propose(&mut g, 0, Action::SetThreshold { threshold: 1 });
+        let id = propose(&mut g, 0, Action::SetThreshold { threshold: 4 });
         vote(&mut g, MEMBERS[0], 1, id, true);
         vote(&mut g, MEMBERS[1], 2, id, true);
         vote(&mut g, MEMBERS[2], VOTING, id, true);
@@ -945,8 +982,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "there can be at most 5 members")]
     fn members_can_be_added_up_to_five_and_no_more() {
-        let mut g = gov(2, 2);
-        for (i, m) in MEMBERS[2..].iter().enumerate() {
+        let mut g = gov(4, 3);
+        for (i, m) in MEMBERS[4..].iter().enumerate() {
             let t = i as u64 * 10_000;
             let id = approved(&mut g, t, Action::AddMember { account: acct(m) });
             execute(&mut g, t + TIMELOCK, id);
@@ -965,7 +1002,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "there can be at most 5 members")]
     fn a_sixth_member_approved_while_there_was_room_is_refused_at_execution() {
-        let mut g = gov(4, 2);
+        let mut g = gov(4, 3);
         let a = approved(
             &mut g,
             0,
@@ -1015,14 +1052,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "threshold must be between 1 and the number of members")]
+    #[should_panic(expected = "the threshold must be a majority of the members")]
     fn a_threshold_of_zero_is_refused() {
         let mut g = gov(3, 2);
         propose(&mut g, 0, Action::SetThreshold { threshold: 0 });
     }
 
     #[test]
-    #[should_panic(expected = "threshold must be between 1 and the number of members")]
+    #[should_panic(expected = "the threshold must be a majority of the members")]
     fn a_threshold_above_the_member_count_is_refused() {
         let mut g = gov(3, 2);
         propose(&mut g, 0, Action::SetThreshold { threshold: 4 });
@@ -1030,7 +1067,7 @@ mod tests {
 
     #[test]
     fn a_removed_members_earlier_yes_vote_no_longer_counts() {
-        let mut g = gov(4, 2);
+        let mut g = gov(4, 3);
         let id = propose(&mut g, 0, call());
         vote(&mut g, MEMBERS[3], 1, id, true);
         let remove = approved(
@@ -1042,13 +1079,14 @@ mod tests {
         );
         execute(&mut g, 2 + TIMELOCK, remove);
         vote(&mut g, MEMBERS[0], 3 + TIMELOCK, id, true);
+        vote(&mut g, MEMBERS[1], 4 + TIMELOCK, id, true);
         assert_eq!(
             g.proposal(id.0).approved_at,
             None,
-            "one current member voted yes, the threshold is two"
+            "two current members voted yes, the threshold is three"
         );
-        vote(&mut g, MEMBERS[1], 4 + TIMELOCK, id, true);
-        assert_eq!(g.proposal(id.0).approved_at, Some(U64(4 + TIMELOCK)));
+        vote(&mut g, MEMBERS[2], 5 + TIMELOCK, id, true);
+        assert_eq!(g.proposal(id.0).approved_at, Some(U64(5 + TIMELOCK)));
     }
 
     #[test]
@@ -1398,24 +1436,58 @@ mod tests {
     #[test]
     fn migrate_keeps_the_state_and_marks_the_upgrade_proven() {
         let mut g = gov(3, 2);
-        let id = approved(&mut g, 0, Action::SetTimelock { timelock_ns: U64(7) });
+        let id = approved(
+            &mut g,
+            0,
+            Action::SetTimelock {
+                timelock_ns: U64(NEW_TIMELOCK),
+            },
+        );
         execute(&mut g, TIMELOCK, id);
         assert!(!g.upgrade_proven);
+        g.upgrade_in_flight = true;
         env::state_write(&g);
         drop(g);
         act_at(SELF, TIMELOCK + 1);
         let migrated = GovernanceContract::migrate();
         assert_eq!(
             (
-                migrated.upgrade_proven,
+                (migrated.upgrade_proven, migrated.upgrade_in_flight),
                 migrated.state_version,
                 migrated.timelock_ns,
                 migrated.members.len()
             ),
-            (true, 1, 7, 3)
+            ((true, false), 1, NEW_TIMELOCK, 3)
         );
         assert_eq!(stage(&migrated, id), Stage::Executed, "the proposals are still there");
         assert_eq!(migrated.config()["upgrade_proven"], true);
+    }
+
+    #[test]
+    #[should_panic(expected = "migrate runs only inside an upgrade")]
+    fn migrate_called_by_hand_is_refused_and_proves_nothing() {
+        let g = gov(3, 2);
+        env::state_write(&g);
+        drop(g);
+        act_at(SELF, 1);
+        GovernanceContract::migrate();
+    }
+
+    #[test]
+    fn executing_a_self_upgrade_marks_it_in_flight_and_a_failed_batch_leaves_the_mark() {
+        let mut g = gov(3, 2);
+        let (first, second) = (stage_wasm(&mut g, WASM), stage_wasm(&mut g, &[1, 2, 3]));
+        let a = approved(&mut g, 0, upgrade_action(first));
+        let b = approved(&mut g, 0, upgrade_action(second));
+        assert!(!g.upgrade_in_flight);
+        execute(&mut g, TIMELOCK, a);
+        assert!(g.upgrade_in_flight);
+        assert_eq!(g.config()["upgrade_in_flight"], true);
+        promise_failed(true);
+        g.on_executed(a);
+        assert!(g.upgrade_in_flight, "the old code keeps the mark after a failed batch");
+        execute(&mut g, TIMELOCK, b);
+        assert!(g.upgrade_in_flight, "the next upgrade sets it again");
     }
 
     #[test]
@@ -1427,6 +1499,140 @@ mod tests {
         drop(g);
         act_at(SELF, 1);
         GovernanceContract::migrate();
+    }
+
+    fn new_with(members: usize, threshold: u32, timelock_ns: u64) -> GovernanceContract {
+        near_sdk::mock::with_mocked_blockchain(|b| {
+            let _ = b.take_storage();
+        });
+        act_at(MEMBERS[0], 0);
+        GovernanceContract::new(
+            MEMBERS[..members].iter().map(|m| acct(m)).collect(),
+            threshold,
+            U64(VOTING),
+            U64(timelock_ns),
+            U64(WINDOW),
+        )
+    }
+
+    fn refused(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
+        std::panic::catch_unwind(f).is_err()
+    }
+
+    #[test]
+    fn a_timelock_of_exactly_72_hours_is_accepted() {
+        assert_eq!(MIN_TIMELOCK_NS, 259_200_000_000_000);
+        assert_eq!(new_with(3, 2, MIN_TIMELOCK_NS).timelock_ns, MIN_TIMELOCK_NS);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot be under 72 hours")]
+    fn a_new_governance_with_a_timelock_one_nanosecond_short_is_refused() {
+        new_with(3, 2, MIN_TIMELOCK_NS - 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot be under 72 hours")]
+    fn a_timelock_change_below_72_hours_is_refused_at_propose() {
+        let mut g = gov(3, 2);
+        propose(
+            &mut g,
+            0,
+            Action::SetTimelock {
+                timelock_ns: U64(MIN_TIMELOCK_NS - 1),
+            },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot be under 72 hours")]
+    fn a_timelock_change_below_72_hours_is_refused_again_at_execution() {
+        let mut g = gov(3, 2);
+        let id = approved(
+            &mut g,
+            0,
+            Action::SetTimelock {
+                timelock_ns: U64(MIN_TIMELOCK_NS),
+            },
+        );
+        let mut p = g.proposal(id.0);
+        p.action = Action::SetTimelock { timelock_ns: U64(1) };
+        g.proposals.insert(id.0, p);
+        execute(&mut g, TIMELOCK, id);
+    }
+
+    #[test]
+    fn a_timelock_change_to_exactly_72_hours_goes_through() {
+        let mut g = gov(3, 2);
+        let id = approved(
+            &mut g,
+            0,
+            Action::SetTimelock {
+                timelock_ns: U64(MIN_TIMELOCK_NS),
+            },
+        );
+        execute(&mut g, TIMELOCK, id);
+        assert_eq!(g.timelock_ns, MIN_TIMELOCK_NS);
+    }
+
+    #[test]
+    fn the_threshold_must_be_a_majority_for_every_member_count() {
+        for (members, smallest) in [(1, 1), (2, 2), (3, 2), (4, 3), (5, 3)] {
+            for threshold in 0..=members as u32 + 1 {
+                let accepted = !refused(|| {
+                    new_with(members, threshold, MIN_TIMELOCK_NS);
+                });
+                assert_eq!(
+                    accepted,
+                    (smallest..=members as u32).contains(&threshold),
+                    "{threshold} of {members}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn set_threshold_refuses_one_and_any_minority_for_three_four_and_five_members() {
+        for (members, minority) in [(3, 1), (4, 1), (4, 2), (5, 1), (5, 2)] {
+            let mut g = gov(members, members as u32);
+            assert!(
+                refused(std::panic::AssertUnwindSafe(|| {
+                    propose(&mut g, 0, Action::SetThreshold { threshold: minority });
+                })),
+                "{minority} of {members}"
+            );
+        }
+        let mut g = gov(5, 5);
+        propose(&mut g, 0, Action::SetThreshold { threshold: 3 });
+    }
+
+    #[test]
+    #[should_panic(expected = "raise the threshold first")]
+    fn a_member_cannot_be_added_when_the_threshold_would_stop_being_a_majority() {
+        let mut g = gov(3, 2);
+        propose(
+            &mut g,
+            0,
+            Action::AddMember {
+                account: acct(MEMBERS[3]),
+            },
+        );
+    }
+
+    #[test]
+    fn a_member_can_be_added_after_the_threshold_is_raised() {
+        let mut g = gov(3, 2);
+        let raise = approved(&mut g, 0, Action::SetThreshold { threshold: 3 });
+        execute(&mut g, TIMELOCK, raise);
+        let add = approved(
+            &mut g,
+            TIMELOCK + 1,
+            Action::AddMember {
+                account: acct(MEMBERS[3]),
+            },
+        );
+        execute(&mut g, 2 * TIMELOCK + 1, add);
+        assert_eq!((g.members.len(), g.threshold), (4, 3));
     }
 
     #[test]

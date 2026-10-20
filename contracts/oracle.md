@@ -2,7 +2,7 @@
 
 Custody decision, 2026-10-19: this is an implementation manual for the existing contract. The target [Intents-held custody](../intents-architecture.md) also covers dispute bonds and juror payments. The NEP-141 bond/payment methods below remain current-code behavior and need explicit settlement migration; outcome and voting rules are not replaced by Intents.
 
-Source: `oracle/src/lib.rs`, with the shared upgrade helpers in `upgrade/src/lib.rs`. Written 2026-10-18 from the code as it stands, upgrade path and owner settings added 2026-10-19. When this file and the code disagree, the code is right.
+Source: `oracle/src/lib.rs`, with the shared upgrade helpers in `upgrade/src/lib.rs`. Written 2026-10-18 from the code as it stands, upgrade path and owner settings added 2026-10-19, the no-decision recipient, the deadline refusal and the upgrade mark added 2026-10-20. When this file and the code disagree, the code is right.
 
 ## What it is
 
@@ -30,7 +30,7 @@ It also holds the bonds, and pays them out, together with the jurors' pay, when 
 
 | Role | Set by | Can do |
 |---|---|---|
-| Owner | `new`, then `propose_owner` and `accept_owner` | `set_jury_size`, `set_bond`, `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms`, `set_draw_delay_blocks`, `set_operator`, `add_publisher`, `set_price_threshold`, `propose_owner`, `upgrade`, `seal`, and everything the operator can do. Normally the governance contract. |
+| Owner | `new`, then `propose_owner` and `accept_owner` | `set_jury_size`, `set_bond`, `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms`, `set_draw_delay_blocks`, `set_operator`, `set_no_decision_recipient`, `add_publisher`, `set_price_threshold`, `propose_owner`, `upgrade`, `seal`, and everything the operator can do. Normally the governance contract. |
 | Operator | `new`, then `set_operator` (owner only) | Only `remove_publisher`. It exists so a leaked price-signing key can be cut off in one call instead of waiting out a vote. |
 | Market contract | `new` (fixed) | Only `register_market`. |
 | Bond token | `new` (fixed) | Only `ft_on_transfer`, which is how bonds arrive. |
@@ -57,6 +57,7 @@ Called once, at deploy. It cannot be called again. Only the contract's own accou
 | `operator_id` | The operator. |
 | `network` | A word naming the network, such as `mainnet`. Signed into every price so a testnet signature is useless on mainnet. Must not be empty or contain a colon. |
 | `price_threshold` | How many publishers must sign the same price. At least 1. |
+| `no_decision_recipient` | The account credited with the challenger's half bond when neither jury decided and no juror revealed. Normally the business wallet the market knows, which can differ from the owner. The owner changes it with `set_no_decision_recipient`. It has to be able to receive the bond token to withdraw it. |
 
 The bond, the windows and the draw delay are set here and changed later by the owner (see "The owner's settings"). The tests use a 60 second window, a 60 second draw window and a 120 second panel; the design proposes 2 hours, 2 hours and 48 hours for mainnet.
 
@@ -131,7 +132,7 @@ If the second round also ends with no majority, or the first round ends too late
 
 ### 8. No decision
 
-A case that settles with no decision resolves a price market to the answer its publishers signed, and an event market to Void. The bonds are paid as in "Who gets paid what": the proposer gets their bond back, and half the challenger's bond goes to the jurors who revealed, in either round, split equally, and half to the proposer. With no juror having revealed, the jurors' half goes to the owner.
+A case that settles with no decision resolves a price market to the answer its publishers signed, and an event market to Void. The bonds are paid as in "Who gets paid what": the proposer gets their bond back, and half the challenger's bond goes to the jurors who revealed, in either round, split equally, and half to the proposer. With no juror having revealed, the jurors' half goes to the no-decision recipient, set in `new` and changed by the owner. It used to go to the owner, which is governance, and governance can use it only through a further proposal that calls `withdraw_bond`.
 
 ### 9. Settling
 
@@ -151,7 +152,7 @@ Let B be the bond.
 
 In a decided dispute the jurors' share is 25% of one bond, split equally among the jurors who revealed and sat with the final outcome, in either round. It is rounded down per juror and the winner keeps the remainder, so exactly two bonds are paid out. A juror who revealed with the minority, or did not reveal, gets nothing.
 
-When nobody decided, the challenger's half-bond split among the jurors who revealed is rounded down per juror and the proposer keeps the remainder. All jurors of both rounds who revealed share it, whichever answer they voted for, because they all did the work. The owner holds the jurors' half when no one revealed so that it leaves the two parties whatever the juries do: two accounts that propose and challenge each other to stall a market end down by at least the jurors' share, a quarter of a bond when a jury decides and half a bond when none does.
+When nobody decided, the challenger's half-bond split among the jurors who revealed is rounded down per juror and the proposer keeps the remainder. All jurors of both rounds who revealed share it, whichever answer they voted for, because they all did the work. The no-decision recipient holds the jurors' half when no one revealed so that it leaves the two parties whatever the juries do: two accounts that propose and challenge each other to stall a market end down by at least the jurors' share, a quarter of a bond when a jury decides and half a bond when none does.
 
 Money is credited to a per-account balance (`claimable_of`) and taken out with `withdraw_bond`, which sends it as tokens. The balance is zeroed before the transfer and restored if the transfer fails. The recipient must be registered with the token.
 
@@ -174,7 +175,7 @@ A draw that is in flight when its round ends can land after the oracle has relea
 
 ### The deadline answer
 
-If nothing has resolved a market by its `resolve_by`, anyone calls `resolve_by_deadline(market_id)` on this contract. It settles whatever is settleable: an unchallenged proposal whose window ended, a dispute whose round is over (settled with no decision, with no second round because there is no time left), or a final answer that was never applied, which it sends again. If there is no case, or nothing can be settled yet, it tells the market to resolve Void. The market's own `void_if_unresolved` is only for an oracle that is gone: it stays shut for 7 days after `resolve_by`. This closes the race where a permissionless void landed on a market whose proposal was a moment from final.
+If nothing has resolved a market by its `resolve_by`, anyone calls `resolve_by_deadline(market_id)` on this contract. It settles whatever is settleable: an unchallenged proposal whose window ended, a dispute whose round is over (settled with no decision, with no second round because there is no time left), or a final answer that was never applied, which it sends again. If there is no case, it tells the market to resolve Void. If there is a case that still has time, a proposal whose window is open or a jury still inside its deadline, it refuses (`the case still has time; finalize it when its round is over`) instead of voiding the market under it. The timing rules leave no such case at `resolve_by`: a proposal must fit the window, two rounds and a 30 second buffer before it, and a second round only starts if it fits. A randomized test over windows, proposal times, challenge times, seating times (up to 10 seconds after the last allowed block) and finalize times checks that no registered market reaches `resolve_by` with a case that is not settleable. The market's own `void_if_unresolved` is only for an oracle that is gone: it stays shut for 7 days after `resolve_by`. This closes the race where a permissionless void landed on a market whose proposal was a moment from final.
 
 ## The minimum gap
 
@@ -236,7 +237,7 @@ Everything that needs a bond is a `ft_transfer_call` of exactly `bond` tokens to
 | `set_draw_delay_blocks(blocks)` | Owner | Applies to challenges and second rounds from now on. Zero is allowed, as in `new`. |
 | `stage_code()` (payable) | Anyone | The call input is a wasm. It is stored under its own sha256, which is returned. The deposit pays for the storage (1 NEAR per 100 KB) and the surplus is refunded. Attach 100 TGas, because 250 KB burns about 31. |
 | `upgrade(code_hash)` | Owner | Deploys the staged wasm with that sha256 and runs its `migrate`, in one batch. Needs at least 100 TGas attached. |
-| `migrate()` | The contract itself | Runs in the new code in the same batch as the deploy. Reads the state as the one layout it knows, sets `upgrade_proven`, returns the state. |
+| `migrate()` | The contract itself | Runs in the new code in the same batch as the deploy. Refuses unless `upgrade` marked the upgrade in flight. Reads the state as the one layout it knows, clears the mark, sets `upgrade_proven`, returns the state. |
 | `seal(public_key)` | Owner | Deletes that access key from this account. Refused until an upgrade has gone through `migrate`. |
 | `set_operator(operator_id)` | Owner | Replaces the operator. |
 | `add_publisher(key)` | Owner | See above. |
@@ -248,7 +249,7 @@ Everything that needs a bond is a `ft_transfer_call` of exactly `bond` tokens to
 | `commit_vote(market_id, commitment)` (payable, 1 yocto) | A juror on that case | Commits a hidden vote, once, during the commit phase. |
 | `reveal_vote(market_id, outcome, salt, reason)` (payable, 1 yocto) | A juror who committed | Reveals the vote during the reveal phase, for the proposed answer or the challenger's. May settle the case, so it refuses less than 80 TGas at the top, even for a reveal that will not settle. |
 | `finalize(market_id)` | Anyone | Settles an unchallenged proposal after its window. For a disputed case whose round is over, calls for the second jury, or settles with no decision. Refuses less than 80 TGas. |
-| `resolve_by_deadline(market_id)` | Anyone, once `resolve_by` has passed | Settles whatever is settleable, or has the market resolve Void. Refuses less than 80 TGas. |
+| `resolve_by_deadline(market_id)` | Anyone, once `resolve_by` has passed | Settles whatever is settleable, or has the market resolve Void when there is no case. Refuses a case that still has time. Refuses less than 80 TGas. |
 | `retry_apply(market_id)` | Anyone | Sends the final outcome to the market again. |
 | `retry_unlock(market_id)` | Anyone | Tells council to release the juries again. Refuses less than 35 TGas. |
 | `withdraw_bond()` (payable, 1 yocto) | Anyone, for their own balance | Sends the caller's whole claimable balance as tokens. |
@@ -256,7 +257,7 @@ Everything that needs a bond is a `ft_transfer_call` of exactly `bond` tokens to
 
 ## The owner's settings
 
-Six settings can be changed by the owner, which in a real deployment means a governance vote and its timelock. Each has the same check as `new` (above zero) and each logs an event.
+Six settings can be changed by the owner, which in a real deployment means a governance vote and its timelock. Each has the same check as `new` (above zero) and each logs an event. A seventh, `set_no_decision_recipient(recipient)`, takes an account, applies to cases that settle from then on, and logs `no_decision_recipient_set`.
 
 | Setting | Method | Event | Reaches |
 |---|---|---|---|
@@ -273,7 +274,7 @@ A market keeps the windows it was registered with. They are stored in its regist
 
 No access key can replace this code outside a vote, and no deleted key can freeze it. The owner (governance) calls `upgrade` with the hash of a build that anyone staged with `stage_code`. The call needs at least 100 TGas (`attach at least 100 TGas to upgrade`), takes the staged wasm out of storage and sends one batch to this account: deploy, then `migrate`. A `migrate` that panics reverts the deploy and the old code stays. The staged copy is gone either way, so a failed upgrade stages the code again.
 
-`migrate` sets `upgrade_proven`, shown in `config` next to `state_version`. `seal` is refused until it is true (`prove the upgrade path before deleting keys`). The state struct starts with `state_version: u16`, 1 today. `migrate` reads the first two bytes of the stored state and refuses anything but 1 (`migrate expects version 1`), then reads the version 1 struct. It never guesses a layout from bytes. A version 2 build keeps the version 1 struct as `StateV1`, reads that, builds its state and writes `state_version: 2`. A new stored field, such as the per-market windows and the per-case bond added here, is a layout change and so needs a version bump and a `StateV1` once anything is deployed.
+`upgrade` sets `upgrade_in_flight` just before it sends the batch. `migrate` refuses to run without it (`migrate runs only inside an upgrade`), clears it and sets `upgrade_proven`, so a hand-called `migrate` proves nothing. When the batch fails, the old code keeps the mark and the next `upgrade` sets it again. Both flags are shown in `config` next to `state_version`. `seal` is refused until it is true (`prove the upgrade path before deleting keys`). The state struct starts with `state_version: u16`, 1 today. `migrate` reads the first two bytes of the stored state and refuses anything but 1 (`migrate expects version 1`), then reads the version 1 struct. It never guesses a layout from bytes. A version 2 build keeps the version 1 struct as `StateV1`, reads that, builds its state and writes `state_version: 2`. A new stored field, such as the per-market windows and the per-case bond added here, is a layout change and so needs a version bump and a `StateV1` once anything is deployed.
 
 Open cases and registered markets are part of the state `migrate` reads, so they survive an upgrade unchanged. The sandbox test checks that a case is identical before and after. Bonds waiting in `claimable` stay withdrawable: `withdraw_bond` is not paused by anything and is not touched by an upgrade.
 
@@ -287,7 +288,7 @@ Measured in the sandbox for a 281 KB build: `upgrade` burns 33 TGas in all, 19 o
 | `get_case(market_id)` | The case, or nothing. Fields below. |
 | `get_market_info(market_id)` | What was registered: close, resolve_by, rule hash, price rule, and the three windows the market was registered with. |
 | `claimable_of(account_id)` | An account's withdrawable bonds and juror pay. |
-| `config()` | state version, upgrade proven, owner, pending owner, market, bond token, bond, window, panel deadline, draw window, council, jury size, draw delay, minimum proposal time, minimum gap, operator, network, the publisher keys, and the threshold. |
+| `config()` | state version, upgrade proven, upgrade in flight, owner, pending owner, market, bond token, bond, window, panel deadline, draw window, council, jury size, draw delay, minimum proposal time, minimum gap, operator, network, the publisher keys, the threshold, and the no-decision recipient. |
 
 ### The case record
 
@@ -332,6 +333,7 @@ Each logs `EVENT_JSON:` and JSON of the form `{"standard":"oracle","version":"1.
 | `code_staged` | `stage_code` | code_hash, bytes, by |
 | `upgrade_sent` | `upgrade` | code_hash |
 | `migrated` | `migrate`, in the new code | state_version |
+| `no_decision_recipient_set` | `set_no_decision_recipient` | recipient |
 | `seal_sent` | `seal` | public_key |
 | `market_registered` | `register_market` | market_id |
 | `proposed` | A proposal or price | market_id, proposer, outcome, evidence, window_ends_at, signers (the verified publisher keys of a price answer, otherwise empty) |
@@ -342,7 +344,7 @@ Each logs `EVENT_JSON:` and JSON of the form `{"standard":"oracle","version":"1.
 | `vote_committed` | A commitment | market_id, juror, commitment |
 | `vote_revealed` | A reveal | market_id, juror, outcome, reason |
 | `final` | A case settled | market_id, outcome, ruling (`unchallenged`, `decided` or `no_decision`), juror_pay_each, paid_jurors, delinquent |
-| `deadline_void` | `resolve_by_deadline` had the market resolve Void | market_id |
+| `deadline_void` | `resolve_by_deadline` had the market resolve Void, which it does only for a market with no case | market_id |
 | `outcome_applied` | The market received the outcome | market_id |
 
 ## What can go wrong, and the message you will see
@@ -384,6 +386,8 @@ Each logs `EVENT_JSON:` and JSON of the form `{"standard":"oracle","version":"1.
 | `attach at least <amount> to pay for the storage` / `the wasm goes in the call input` | `stage_code` with too little deposit or no input. |
 | `prove the upgrade path before deleting keys` | `seal` before an upgrade has gone through `migrate`. |
 | `migrate expects version 1` | `migrate` found state written by another version. |
+| `migrate runs only inside an upgrade` | `migrate` called without `upgrade` having sent the batch. |
+| `the case still has time; finalize it when its round is over` | `resolve_by_deadline` for a case whose window is open or whose round is not over. The timing rules leave none today. |
 | `Method <name> is private` | A callback, or `new`, called by anyone but the contract's own account. |
 | `attach at least 80 TGas: a call that settles a case sends the answer to the market and releases the juries` | `reveal_vote`, `finalize` or `resolve_by_deadline` with less than the settling floor. |
 | `attach at least 275 TGas: the jury draw reads every staked seat` | `resolve_draw` with less than the draw floor. |
@@ -415,7 +419,7 @@ A reveal that does not settle burns about 4 TGas and still has to meet the 80 fl
 
 ## Security properties checked by tests
 
-Every restricted method refuses a stranger; every callback refuses a direct call; a token other than the bond token cannot bond; malformed messages bounce with the money back; a copied commitment cannot be revealed by the copier; a challenge that names the proposed answer is refused and a vote for a third outcome is refused; a bogus challenge costs the attacker the whole bond; a no-decision escalates exactly once to a larger, disjoint jury and a second no-decision pays as stated; two accounts that stall a case end down by at least the jurors' share whatever the juries do; a full binary ballot always settles (randomized); starving the settling call of gas cannot half-settle a case; a settled dispute always pays out exactly two bonds (randomized over 400 cases) and only to jurors who earned it; a jury drawn at the last allowed moment still gets its full time; a limited-access key cannot commit or reveal; and a signature is good for exactly one price of one market, network and contract, with each field of the signed text checked by changing it. Every owner setting refuses a stranger, the operator and a zero; a market registered before a setting change keeps its windows for the proposal, the draw and the panel deadline, including the second round; a new bond reaches only new cases, and a settled case pays the bond it was proposed with; a stranger and the operator cannot upgrade or seal, `seal` waits for `upgrade_proven`, and `migrate` refuses another state version; a stranger cannot initialise a deployed oracle; the `proposed` event of a price answer names the publishers in submission order; every method with a gas floor refuses one TGas less and works at the floor, in the largest case the suite can build. See `AUDIT.md`.
+Every restricted method refuses a stranger; every callback refuses a direct call; a token other than the bond token cannot bond; malformed messages bounce with the money back; a copied commitment cannot be revealed by the copier; a challenge that names the proposed answer is refused and a vote for a third outcome is refused; a bogus challenge costs the attacker the whole bond; a no-decision with no juror revealing pays the recipient and never the owner; a market never reaches its deadline with a case that still has time (randomized); the deadline call refuses a case that still has time and does not void its market; a hand-called `migrate` is refused; a no-decision escalates exactly once to a larger, disjoint jury and a second no-decision pays as stated; two accounts that stall a case end down by at least the jurors' share whatever the juries do; a full binary ballot always settles (randomized); starving the settling call of gas cannot half-settle a case; a settled dispute always pays out exactly two bonds (randomized over 400 cases) and only to jurors who earned it; a jury drawn at the last allowed moment still gets its full time; a limited-access key cannot commit or reveal; and a signature is good for exactly one price of one market, network and contract, with each field of the signed text checked by changing it. Every owner setting refuses a stranger, the operator and a zero; a market registered before a setting change keeps its windows for the proposal, the draw and the panel deadline, including the second round; a new bond reaches only new cases, and a settled case pays the bond it was proposed with; a stranger and the operator cannot upgrade or seal, `seal` waits for `upgrade_proven`, and `migrate` refuses another state version; a stranger cannot initialise a deployed oracle; the `proposed` event of a price answer names the publishers in submission order; every method with a gas floor refuses one TGas less and works at the floor, in the largest case the suite can build. See `AUDIT.md`.
 
 ## Things to know
 
@@ -431,5 +435,6 @@ Every restricted method refuses a stranger; every callback refuses a direct call
 | A keeper outage is tested for two cases | Nobody calls anything from a proposal to a second past `resolve_by`. An unchallenged proposal is then applied as the answer by the first `resolve_by_deadline`, the proposer's bond is back, winners redeem, and the market's own void stays shut. A dispute nobody drew a jury for ends in a Void at the same call, with the bonds split as a no-decision splits them. Other outages are not tested: for example a jury that is seated and silent when the deadline passes. |
 | What the tests do not cover | The sandbox is a single shard, so receipt ordering across shards, cross-shard latency and gas under congestion are untested. There has been no testnet soak. |
 | Keys | Until `seal` has run, the deploy key can replace this code outside every vote. After it, only a governance upgrade can. A sealed contract with a broken upgrade path cannot be fixed, so prove one upgrade first. |
+| A challenged price market keeps the signed price when no jury decides | After two rounds without a majority an event market resolves Void, and a price market resolves to the price the publishers signed, because a signed price from `price_threshold` publishers is objective evidence. The consequence: if `price_threshold` publishers are compromised together and sign a wrong price, an honest challenger needs an active jury majority to overturn it. Juror apathy is enough for the wrong price to stand, where before it produced a Void. The assumption is a design choice. Keep it explicit and watch it: put it in the Terms' risk section, alert on every `challenged` event of a price market, and keep `price_threshold` at 2 or more with the publishers on different operators and infrastructure. Making a price market Void in that case is a one-line change in `close_round`, at the cost of bringing back the cheap Void for price markets. |
 | Website | A challenge has to send the case's own `bond`, not the bond in `config()`, once the owner has changed it. |
 | No outside audit | The only review is the self-review in `AUDIT.md`. |

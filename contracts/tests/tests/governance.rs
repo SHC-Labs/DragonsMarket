@@ -2,7 +2,7 @@
 mod common;
 use common::*;
 use near_workspaces::types::Gas;
-use near_workspaces::{AccountId, Contract};
+use near_workspaces::{Account, AccountId, Contract};
 use serde_json::json;
 
 // create_market arguments for a market that closes a day from `t`.
@@ -578,5 +578,92 @@ async fn a_new_oracle_window_and_bond_apply_to_new_markets_and_cases_only() -> a
         window_ends > now(&w.worker).await,
         "the new case is open for the new, longer window"
     );
+    Ok(())
+}
+
+fn governance_args(members: &[Account], threshold: u32, timelock_secs: u64) -> serde_json::Value {
+    json!({
+        "members": members.iter().map(|m| m.id()).collect::<Vec<_>>(), "threshold": threshold,
+        "voting_period_ns": (VOTING_SECS * 1_000_000_000).to_string(),
+        "timelock_ns": (timelock_secs * 1_000_000_000).to_string(),
+        "execution_window_ns": (EXECUTION_WINDOW_SECS * 1_000_000_000).to_string()
+    })
+}
+
+// The floors are in the deployed wasm itself: a timelock under 72 hours and a threshold that is not a majority are refused
+// when governance is created.
+#[tokio::test]
+async fn a_new_governance_refuses_a_timelock_under_72_hours_and_a_minority_threshold() -> anyhow::Result<()> {
+    let worker = near_workspaces::sandbox().await?;
+    let contract = worker.dev_deploy(&wasm("governance")).await?;
+    let mut members = vec![];
+    for _ in 0..5 {
+        members.push(worker.dev_create_account().await?);
+    }
+    let new = |args: serde_json::Value| contract.call("new").args_json(args).transact();
+    refused(
+        new(governance_args(&members, 3, MIN_TIMELOCK_SECS - 1))
+            .await?
+            .into_result(),
+        "cannot be under 72 hours",
+    );
+    refused(
+        new(governance_args(&members, 2, MIN_TIMELOCK_SECS))
+            .await?
+            .into_result(),
+        "the threshold must be a majority of the members",
+    );
+    refused(
+        new(governance_args(&members, 1, MIN_TIMELOCK_SECS))
+            .await?
+            .into_result(),
+        "the threshold must be a majority of the members",
+    );
+    new(governance_args(&members, 3, MIN_TIMELOCK_SECS))
+        .await?
+        .into_result()?;
+    let c = config(&contract).await;
+    assert_eq!(
+        (&c["threshold"], &c["timelock_ns"]),
+        (&json!(3), &json!((MIN_TIMELOCK_SECS * 1_000_000_000).to_string()))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_timelock_or_threshold_change_below_the_floor_is_refused_when_proposed() -> anyhow::Result<()> {
+    let (w, g) = setup_governed().await?;
+    let member = &g.members[0];
+    let propose = |action: serde_json::Value| {
+        member
+            .call(g.contract.id(), "propose")
+            .args_json(json!({ "action": action }))
+            .transact()
+    };
+    for short in [1, TIMELOCK_SECS, MIN_TIMELOCK_SECS - 1] {
+        refused(
+            propose(json!({ "set_timelock": { "timelock_ns": (short * 1_000_000_000).to_string() } }))
+                .await?
+                .into_result(),
+            "cannot be under 72 hours",
+        );
+    }
+    for minority in [1, 2] {
+        refused(
+            propose(json!({ "set_threshold": { "threshold": minority } }))
+                .await?
+                .into_result(),
+            "the threshold must be a majority of the members",
+        );
+    }
+
+    // At the floor and at a majority they pass, and the threshold change takes effect after its vote and timelock.
+    propose(json!({ "set_timelock": { "timelock_ns": (MIN_TIMELOCK_SECS * 1_000_000_000).to_string() } }))
+        .await?
+        .into_result()?;
+    let id = gov_pass(&g, json!({ "set_threshold": { "threshold": 4 } })).await?;
+    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
+    gov_execute(&g, &w.carol, id).await?;
+    assert_eq!(config(&g.contract).await["threshold"], 4);
     Ok(())
 }

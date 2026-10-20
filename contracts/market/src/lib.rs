@@ -177,8 +177,11 @@ pub struct MarketView {
     price_rule: Option<PriceRule>,
     close_at: U64,
     resolve_by: U64,
+    // resolved, halted, closed, then while trading has not opened unregistered (the oracle has not confirmed the market) or
+    // unseeded (it has no liquidity), and open once it can be traded.
     status: String,
     registered: bool,
+    seeded: bool,
     outcome: Option<Outcome>,
     void_price_yes: Option<U128>,
     price_yes: U128,
@@ -237,6 +240,10 @@ pub struct MarketContract {
     state_version: u16,
     // Set by migrate, so it is true only once an upgrade has gone through. seal refuses until then.
     upgrade_proven: bool,
+    // Set by upgrade just before it sends the deploy and migrate batch, cleared by migrate. migrate refuses to run when it
+    // is not set, so the proof cannot come from calling migrate by hand. A batch that fails leaves it set in the old code,
+    // and the next upgrade sets it again.
+    upgrade_in_flight: bool,
     // Only the owner can change the operator, add a fee recipient, or hand off ownership. Everything else
     // routine (create a market, seed it, pause, halt, claim a residual) also takes the operator, so day to
     // day running does not need to wait on a governance vote.
@@ -331,6 +338,7 @@ impl MarketContract {
         Self {
             state_version: STATE_VERSION,
             upgrade_proven: false,
+            upgrade_in_flight: false,
             owner: owner_id,
             pending_owner: None,
             operator: operator_id,
@@ -374,6 +382,7 @@ impl MarketContract {
         upgrade::require_upgrade_gas();
         self.only_owner();
         let code = upgrade::take_staged(code_hash);
+        self.upgrade_in_flight = true;
         emit("upgrade_sent", json!({ "code_hash": code_hash }));
         upgrade::deploy_and_migrate(code)
     }
@@ -385,6 +394,8 @@ impl MarketContract {
     pub fn migrate() -> Self {
         upgrade::require_state_version(STATE_VERSION);
         let mut state: Self = env::state_read().unwrap_or_else(|| env::panic_str("there is no state to migrate"));
+        require!(state.upgrade_in_flight, "migrate runs only inside an upgrade");
+        state.upgrade_in_flight = false;
         state.upgrade_proven = true;
         emit("migrated", json!({ "state_version": state.state_version }));
         state
@@ -538,10 +549,17 @@ impl MarketContract {
         }
     }
 
+    // In the last day before close the operator cannot halt, only the owner can: a halt held to close takes that time out
+    // of the average a Void pays.
     pub fn halt(&mut self, market_id: U64, reason: String) {
         self.only_operator_or_owner();
         let mut m = self.market(market_id.0);
         require!(m.outcome.is_none(), "already resolved");
+        require!(
+            env::predecessor_account_id() == self.owner
+                || env::block_timestamp().saturating_add(VOID_PRICE_WINDOW_NS) < m.close_at,
+            "a halt in the last day before close is a governance action"
+        );
         m.advance_twap(env::block_timestamp());
         m.halted = true;
         self.markets.insert(market_id.0, m);
@@ -951,7 +969,7 @@ impl MarketContract {
     }
 
     pub fn config(&self) -> near_sdk::serde_json::Value {
-        json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven,
+        json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
                 "owner": self.owner, "pending_owner": self.pending_owner, "operator": self.operator, "oracle": self.oracle, "collateral": self.collateral,
                 "paused": self.paused, "markets": self.next_market_id.to_string(), "storage_deposit": STORAGE_DEPOSIT.as_yoctonear().to_string(),
                 "max_positions": MAX_POSITIONS, "fee_rate_bps": self.fee_rate_bps as u32, "create_fee": self.create_fee.to_string(),
@@ -1169,7 +1187,9 @@ impl Market {
 
     // The Yes price a Void pays: its time-weighted average over the trading time in the last VOID_PRICE_WINDOW_NS before
     // close_at, or since the market opened if that was later. Nothing trades after close, so the price in force at close
-    // holds to the end. A market with no trading time in the window pays its last price.
+    // holds to the end. A market with no trading time in the window pays the average over all its trading time, so a halt
+    // that covers the whole window cannot leave the last traded price to set it. Only a market that never traded at all
+    // falls back to its last price.
     fn closing_price(&self) -> u128 {
         let Some(mut twap) = self.twap.clone() else { return HALF };
         twap.advance(self.close_at, self.close_at, !self.halted);
@@ -1177,6 +1197,7 @@ impl Market {
             Some((acc_from, weight_from)) if twap.weight > weight_from => {
                 (twap.acc - acc_from) / (twap.weight - weight_from)
             }
+            _ if twap.weight > 0 => twap.acc / twap.weight,
             _ => twap.price,
         }
     }
@@ -1407,6 +1428,10 @@ impl MarketContract {
             "halted"
         } else if env::block_timestamp() >= m.close_at {
             "closed"
+        } else if !m.registered {
+            "unregistered"
+        } else if !m.seeded {
+            "unseeded"
         } else {
             "open"
         };
@@ -1425,6 +1450,7 @@ impl MarketContract {
             resolve_by: U64(m.resolve_by),
             status: status.to_string(),
             registered: m.registered,
+            seeded: m.seeded,
             outcome: m.outcome,
             void_price_yes: m.void_price_yes.map(U128),
             price_yes: U128(price_yes),
@@ -2584,8 +2610,8 @@ mod tests {
             "v".into(),
             "sports".into(),
             "nfl".into(),
-            U64(CLOSE),
-            U64(RESOLVE_BY),
+            U64(CLOSE + 2 * W),
+            U64(RESOLVE_BY + 2 * W),
             None,
         );
         c.halt(id, "checking something".into());
@@ -2658,7 +2684,7 @@ mod tests {
     }
 
     #[test]
-    fn a_market_with_no_trading_time_in_the_window_pays_its_last_price() {
+    fn a_market_with_no_trading_time_in_the_window_pays_the_average_over_all_its_trading_time() {
         let close = 2 * W;
         let mut m = blank();
         m.close_at = close;
@@ -2666,7 +2692,18 @@ mod tests {
         m.record_price_at(0, 100_000);
         m.record_price_at(close - W, 200_000);
         m.halted = true;
-        assert_eq!(m.closing_price(), 200_000);
+        assert_eq!(m.closing_price(), 100_000);
+    }
+
+    #[test]
+    fn a_market_that_never_traded_before_it_was_halted_pays_its_last_price() {
+        let close = 2 * W;
+        let mut m = blank();
+        m.close_at = close;
+        m.twap = None;
+        m.record_price_at(0, 300_000);
+        m.halted = true;
+        assert_eq!(m.closing_price(), 300_000);
     }
 
     // The attack: pump the price late, halt, and let the market void. The average used to go on counting the pumped
@@ -2722,6 +2759,197 @@ mod tests {
         c.void_if_unresolved(U64(0));
         let expected = (500_000 * 4_998 + pumped * 3_000) / 7_998;
         assert_eq!(c.market(0).void_price_yes, Some(expected));
+    }
+
+    // ---- a halt cannot take the last day out of a Void's price -------------------------------------------
+
+    const HOUR: u64 = 3_600_000_000_000;
+
+    // The scenario of the second review's proof of concept: 50% for 75 hours, then one 400 unit buy that moves the price
+    // to 96%, a halt a minute later by the operator and no resume until the market closes at 100 hours. The last 25
+    // hours hold no trading time, so the Void used to pay the pumped price itself.
+    fn pumped_then_halted(halt_after_pump: bool) -> (u128, u128) {
+        near_sdk::mock::with_mocked_blockchain(|b| {
+            let _ = b.take_storage();
+        });
+        act_as("op.near", 1);
+        let mut c = MarketContract::new(
+            acct("gov.near"),
+            acct("op.near"),
+            acct(ORACLE),
+            acct(TOKEN),
+            acct(COUNCIL),
+            acct(BUSINESS),
+        );
+        let close = 100 * HOUR;
+        let id = c
+            .create_market(
+                "t".into(),
+                "r".into(),
+                "s".into(),
+                "v".into(),
+                "crypto".into(),
+                "btc".into(),
+                U64(close),
+                U64(close + 200 * HOUR),
+                None,
+            )
+            .0;
+        let mut m = c.market(id);
+        m.registered = true;
+        c.markets.insert(id, m);
+        act_unpaid(TOKEN, 2);
+        let _ = c.ft_on_transfer(acct("op.near"), U128(100_000_000), format!("seed:{id}"));
+        c.accounts.insert(acct("pumper.near"), 0);
+        c.balances.insert(acct("pumper.near"), 400_000_000);
+        act_as("pumper.near", 75 * HOUR);
+        c.buy(U64(id), "yes".into(), U128(400_000_000), U128(1));
+        let pumped = c.get_market(U64(id)).unwrap().price_yes.0;
+        if halt_after_pump {
+            act_unpaid("op.near", 75 * HOUR + 60_000_000_000);
+            c.halt(U64(id), "maintenance".into());
+        }
+        act_unpaid(ORACLE, close + HOUR);
+        c.set_outcome(U64(id), Outcome::Void);
+        (pumped, c.get_market(U64(id)).unwrap().void_price_yes.unwrap().0)
+    }
+
+    #[test]
+    fn a_halt_held_through_the_last_day_leaves_the_void_price_near_the_long_run_average() {
+        let (pumped, halted_price) = pumped_then_halted(true);
+        assert!(pumped > 900_000, "the buy moved the price to {pumped}");
+        assert!(
+            halted_price.abs_diff(500_000) < 1_000,
+            "the pumped price held for one minute of 75 hours, yet the void pays {halted_price}"
+        );
+    }
+
+    fn late_market() -> (MarketContract, u64) {
+        let (mut c, _) = world();
+        act_as(OWNER, 5);
+        c.set_operator(acct("ops.near"));
+        let close = CLOSE + 3 * W;
+        let id = c
+            .create_market(
+                "t".into(),
+                "r".into(),
+                "s".into(),
+                "v".into(),
+                "sports".into(),
+                "nfl".into(),
+                U64(close),
+                U64(close + CLOSE),
+                None,
+            )
+            .0;
+        (c, id)
+    }
+
+    #[test]
+    fn the_operator_can_halt_until_the_last_day_starts_and_the_owner_can_halt_any_time() {
+        let (mut c, id) = late_market();
+        let close = c.market(id).close_at;
+        act_as("ops.near", close - W - 1);
+        c.halt(U64(id), "early".into());
+        act_as(OWNER, close - W);
+        c.halt(U64(id), "owner inside the last day".into());
+        act_as(OWNER, close - 1);
+        c.resume(U64(id));
+        c.halt(U64(id), "owner a nanosecond before close".into());
+        assert!(c.market(id).halted);
+    }
+
+    #[test]
+    #[should_panic(expected = "a halt in the last day before close is a governance action")]
+    fn the_operator_cannot_halt_in_the_first_nanosecond_of_the_last_day() {
+        let (mut c, id) = late_market();
+        let close = c.market(id).close_at;
+        act_as("ops.near", close - W);
+        c.halt(U64(id), "late".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "a halt in the last day before close is a governance action")]
+    fn the_operator_cannot_halt_after_close_either() {
+        let (mut c, id) = late_market();
+        let close = c.market(id).close_at;
+        act_as("ops.near", close + 1);
+        c.halt(U64(id), "late".into());
+    }
+
+    #[test]
+    fn the_operator_can_still_resume_inside_the_last_day() {
+        let (mut c, id) = late_market();
+        let close = c.market(id).close_at;
+        act_as("ops.near", close - 2 * W);
+        c.halt(U64(id), "early".into());
+        act_as("ops.near", close - 10);
+        c.resume(U64(id));
+        assert!(!c.market(id).halted);
+    }
+
+    // ---- what the view says about a market that cannot trade yet ---------------------------------------------
+
+    fn status_and_seeded(c: &MarketContract, id: u64) -> (String, bool) {
+        let v = c.get_market(U64(id)).unwrap();
+        (v.status.clone(), v.seeded)
+    }
+
+    #[test]
+    fn a_market_says_unregistered_then_unseeded_then_open_and_shows_whether_it_is_seeded() {
+        let (mut c, _) = world();
+        act_as(OWNER, 5);
+        let id = c
+            .create_market(
+                "t".into(),
+                "r".into(),
+                "s".into(),
+                "v".into(),
+                "sports".into(),
+                "nfl".into(),
+                U64(CLOSE),
+                U64(RESOLVE_BY),
+                None,
+            )
+            .0;
+        assert_eq!(status_and_seeded(&c, id), ("unregistered".into(), false));
+        let mut m = c.market(id);
+        m.registered = true;
+        c.markets.insert(id, m);
+        assert_eq!(status_and_seeded(&c, id), ("unseeded".into(), false));
+        act_unpaid(TOKEN, 6);
+        let _ = c.ft_on_transfer(acct(OWNER), U128(SEED_UNITS), format!("seed:{id}"));
+        assert_eq!(status_and_seeded(&c, id), ("open".into(), true));
+        assert!(c.list_markets(U64(id), U64(1))[0].seeded);
+    }
+
+    #[test]
+    fn resolved_halted_and_closed_come_before_unregistered_and_unseeded() {
+        let (mut c, _) = world();
+        act_as(OWNER, 5);
+        let id = c
+            .create_market(
+                "t".into(),
+                "r".into(),
+                "s".into(),
+                "v".into(),
+                "sports".into(),
+                "nfl".into(),
+                U64(CLOSE + 3 * W),
+                U64(RESOLVE_BY + 3 * W),
+                None,
+            )
+            .0;
+        c.halt(U64(id), "x".into());
+        assert_eq!(status_and_seeded(&c, id).0, "halted");
+        act_unpaid(OWNER, CLOSE + 3 * W);
+        assert_eq!(status_and_seeded(&c, id).0, "halted");
+        c.resume(U64(id));
+        assert_eq!(status_and_seeded(&c, id).0, "closed");
+        let mut m = c.market(id);
+        m.outcome = Some(Outcome::No);
+        c.markets.insert(id, m);
+        assert_eq!(status_and_seeded(&c, id).0, "resolved");
     }
 
     // ---- buy, sell, the position cap, resume and seed --------------------------------------------------
@@ -3185,8 +3413,9 @@ mod tests {
 
     #[test]
     fn migrate_keeps_the_markets_and_balances_and_marks_the_upgrade_proven() {
-        let (c, _) = world();
+        let (mut c, _) = world();
         assert!(!c.upgrade_proven);
+        c.upgrade_in_flight = true;
         let locked = c.market(0).locked;
         env::state_write(&c);
         drop(c);
@@ -3194,14 +3423,40 @@ mod tests {
         let migrated = MarketContract::migrate();
         assert_eq!(
             (
-                migrated.upgrade_proven,
+                (migrated.upgrade_proven, migrated.upgrade_in_flight),
                 migrated.state_version,
                 migrated.market(0).locked
             ),
-            (true, 1, locked)
+            ((true, false), 1, locked)
         );
         assert_eq!(migrated.config()["upgrade_proven"], true);
         assert!(migrated.check_invariant(U64(0)));
+    }
+
+    #[test]
+    #[should_panic(expected = "migrate runs only inside an upgrade")]
+    fn migrate_called_by_hand_is_refused_and_proves_nothing() {
+        let (c, _) = world();
+        env::state_write(&c);
+        drop(c);
+        act_unpaid(SELF, 5);
+        MarketContract::migrate();
+    }
+
+    #[test]
+    fn upgrade_marks_the_upgrade_in_flight_and_a_second_one_sets_it_again() {
+        let (mut c, _) = world();
+        let hash = staged(&mut c);
+        assert!(!c.upgrade_in_flight);
+        act_unpaid(OWNER, 5);
+        let _ = c.upgrade(hash);
+        assert!(c.upgrade_in_flight);
+        assert_eq!(c.config()["upgrade_in_flight"], true);
+        c.upgrade_in_flight = false;
+        let again = staged(&mut c);
+        act_unpaid(OWNER, 6);
+        let _ = c.upgrade(again);
+        assert!(c.upgrade_in_flight, "the next upgrade sets it again");
     }
 
     #[test]
