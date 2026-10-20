@@ -91,6 +91,8 @@ jobs:
           key: cargo-near-0.22.0-${{ runner.os }}
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      - name: Install the system libraries cargo-near links against
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libudev-dev
       - name: Install cargo-near
         run: cargo near --version 2>/dev/null | grep -q 0.22.0 || cargo install cargo-near --version 0.22.0 --locked
       - name: Build the wasm the sandbox tests load
