@@ -93,7 +93,7 @@ const ALICE = "alice.test.near";
 const holdings = { 0: [42_500_000n, 0n], 3: [0n, 18_000_000n], 5: [25_000_000n, 0n], 6: [12_000_000n, 3_000_000n], 12: [0n, 30_000_000n], 15: [8_750_000n, 0n] };
 const sharesOf = (id, account) => (account === ALICE && holdings[id] ? holdings[id].map(String) : ["0", "0"]);
 
-const pub = ({ history: _, ...m }) => m;
+const pub = (m) => { const { history, ...rest } = m; void history; return rest; };
 const quote = (m, side, amount) => {
   const p = Number(side === "yes" ? m.price_yes : m.price_no) / 1e6;
   const fee = (amount * 2n) / 100n;
