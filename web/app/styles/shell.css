@@ -36,13 +36,13 @@
 }
 .site-nav-link:hover { color: var(--text); }
 .site-nav-link[aria-current="page"] { color: var(--brand); }
-@media (min-width: 1024px) { .site-header-start > .site-nav { display: flex; } }
+@media (min-width: 1280px) { .site-header-start > .site-nav { display: flex; } }
 
 .mobile-nav-frame { display: block; border-top: 1px solid var(--line); }
 .mobile-site-nav { display: flex; overflow-x: auto; scrollbar-width: none; padding: var(--s-1) var(--gutter); scroll-padding-inline: var(--gutter); mask-image: linear-gradient(90deg, transparent, black var(--gutter), black calc(100% - var(--gutter)), transparent); }
 .mobile-site-nav::-webkit-scrollbar { display: none; }
 .mobile-site-nav .site-nav-link { flex-shrink: 0; }
-@media (min-width: 1024px) { .mobile-nav-frame { display: none; } }
+@media (min-width: 1280px) { .mobile-nav-frame { display: none; } }
 
 /* Brand: the dragon crest recoloured through its silhouette, and the Sora wordmark. */
 .site-brand { display: inline-flex; align-items: center; gap: 0.6rem; color: var(--text); text-decoration: none; white-space: nowrap; }
