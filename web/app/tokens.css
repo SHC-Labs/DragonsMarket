@@ -1,37 +1,110 @@
-/* Generated from tokens.json by generate.py. Edit the JSON, not this file. Dark theme only. */
+/* Design tokens. Colours come from design/palette.json (npm run tokens writes app/palette.css);
+   everything here derives from those variables, so each theme and section palette gets the full set. */
 :root {
-  color-scheme: dark;
-  --font-sans-stack: IBM Plex Sans, Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  --font-mono-stack: JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, monospace;
-  --font-display-stack: var(--font-sans-stack);
-  --text-xs-size: 0.75rem;  --text-xs-line: 1rem;  --text-xs-weight: 500;
-  --text-sm-size: 0.875rem;  --text-sm-line: 1.25rem;  --text-sm-weight: 400;
-  --text-base-size: 1rem;  --text-base-line: 1.5rem;  --text-base-weight: 400;
-  --text-lg-size: 1.25rem;  --text-lg-line: 1.75rem;  --text-lg-weight: 600;
-  --text-xl-size: 1.75rem;  --text-xl-line: 2.125rem;  --text-xl-weight: 600;
-  --text-display-size: 2.5rem;  --text-display-line: 2.75rem;  --text-display-weight: 600;
-  --space-0: 0px;
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 24px;
-  --space-6: 32px;
-  --space-7: 48px;
-  --space-8: 64px;
-  --radius-sm: 0.25rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.875rem;
-  --radius-pill: 999px;
-  --shadow-pop: 0 8px 24px rgba(0,0,0,.55);
-  --motion-fast: 120ms;
-  --motion-base: 200ms;
-  --motion-ease: cubic-bezier(.2,.8,.2,1);
-  --layout-content-max: 1080px;
-  --layout-ticket-width: 360px;
-  --layout-header-height: 56px;
-  --layout-breakpoint-stack: 900px;
+  /* Type */
+  --font-sans-stack: var(--font-plex), "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono-stack: var(--font-jetbrains), "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-brand-stack: var(--font-brand), var(--font-sans-stack);
+  --fs-2xs: 0.75rem;
+  --fs-xs: 0.8125rem;
+  --fs-sm: 0.875rem;
+  --fs-md: 1rem;
+  --fs-lg: 1.125rem;
+  --fs-xl: 1.375rem;
+  --fs-2xl: 1.75rem;
+  --fs-3xl: 2.25rem;
+  --fs-4xl: 3rem;
+  --fs-5xl: 4rem;
+  --fs-6xl: 5.5rem;
+  --lh-tight: 1.1;
+  --lh-snug: 1.3;
+  --lh-body: 1.6;
+  --track-display: -0.035em;
+  --track-title: -0.02em;
+  --track-eyebrow: 0.08em;
+
+  /* Space, on a 4px grid */
+  --s-1: 0.25rem;
+  --s-2: 0.5rem;
+  --s-3: 0.75rem;
+  --s-4: 1rem;
+  --s-5: 1.25rem;
+  --s-6: 1.5rem;
+  --s-7: 2rem;
+  --s-8: 2.5rem;
+  --s-9: 3rem;
+  --s-10: 4rem;
+  --s-11: 5rem;
+  --s-12: 6rem;
+
+  /* Shape */
+  --r-xs: 6px;
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
+  --r-pill: 999px;
+  --content-radius: var(--r-lg);
+  --control-sm: 36px;
+  --control-md: 44px;
+  --control-lg: 52px;
+
+  /* Layout */
+  --page-max: 90rem;
+  --gutter: clamp(1rem, 3.2vw, 3rem);
+  --header-h: 4rem;
+  --ticket-w: 24rem;
+  --section-space: clamp(3rem, 6vw, 5rem);
+
+  /* Motion */
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 220ms;
+  --dur-4: 420ms;
+  --dur-5: 720ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-emph: cubic-bezier(0.22, 1.2, 0.36, 1);
+  --stagger: 28ms;
 }
+
+/* Derived colour roles. Custom properties resolve on <html> after the palette selectors cascade,
+   so these follow whichever theme and section palette is active. */
+:root {
+  --line: color-mix(in oklab, var(--border) 72%, transparent);
+  --line-strong: var(--border);
+  --surface-hover: color-mix(in oklab, var(--raised) 70%, var(--surface));
+  --glass: color-mix(in oklab, var(--bg) 72%, transparent);
+  --glass-strong: color-mix(in oklab, var(--surface) 86%, transparent);
+  --yes-tint: color-mix(in oklab, var(--chart-yes) 14%, transparent);
+  --no-tint: color-mix(in oklab, var(--chart-no) 14%, transparent);
+  --brand-tint: color-mix(in oklab, var(--brand) 12%, transparent);
+  --council-tint: color-mix(in oklab, var(--council) 14%, transparent);
+  --glow-brand: color-mix(in oklab, var(--brand) 26%, transparent);
+  --glow-council: color-mix(in oklab, var(--council) 22%, transparent);
+  --highlight: color-mix(in oklab, var(--text) 7%, transparent);
+  --scrim: color-mix(in oklab, var(--bg) 70%, black);
+  --accent-fill: linear-gradient(180deg, color-mix(in oklab, var(--accent) 88%, white), var(--accent));
+  --accent-fill-hover: linear-gradient(180deg, var(--accent), var(--accent-hover));
+  --elev-1: 0 1px 0 var(--highlight) inset, 0 1px 2px rgb(0 0 0 / 0.35);
+  --elev-2: 0 1px 0 var(--highlight) inset, 0 10px 30px -12px rgb(0 0 0 / 0.65), 0 2px 6px rgb(0 0 0 / 0.3);
+  --elev-3: 0 1px 0 var(--highlight) inset, 0 30px 80px -20px rgb(0 0 0 / 0.75), 0 8px 24px rgb(0 0 0 / 0.35);
+  --aurora-a: color-mix(in oklab, var(--brand) 16%, transparent);
+  --aurora-b: color-mix(in oklab, var(--council) 7%, transparent);
+  --grid-line: color-mix(in oklab, var(--text) 4%, transparent);
+}
+
+:root[data-theme="light"] {
+  --highlight: rgb(255 255 255 / 0.9);
+  --glass: color-mix(in oklab, var(--bg) 78%, transparent);
+  --elev-1: 0 1px 2px color-mix(in oklab, var(--brand) 8%, transparent), 0 0 0 1px color-mix(in oklab, var(--border) 50%, transparent);
+  --elev-2: 0 12px 32px -14px color-mix(in oklab, var(--brand) 26%, transparent), 0 2px 6px color-mix(in oklab, var(--brand) 7%, transparent);
+  --elev-3: 0 30px 70px -24px color-mix(in oklab, var(--brand) 34%, transparent), 0 8px 20px color-mix(in oklab, var(--brand) 9%, transparent);
+  --aurora-a: color-mix(in oklab, var(--brand) 9%, transparent);
+  --aurora-b: color-mix(in oklab, var(--council) 6%, transparent);
+  --grid-line: color-mix(in oklab, var(--brand) 5%, transparent);
+  --scrim: color-mix(in oklab, var(--text) 40%, transparent);
+}
+
 @media (prefers-reduced-motion: reduce) {
-  :root { --motion-fast: 0ms; --motion-base: 0ms; }
+  :root { --dur-1: 0ms; --dur-2: 0ms; --dur-3: 0ms; --dur-4: 0ms; --dur-5: 0ms; --stagger: 0ms; }
 }

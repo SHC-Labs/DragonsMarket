@@ -3,14 +3,15 @@
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { PageHeader } from "@/components/PageHeader";
-import { Notice, StateBadge } from "@/components/ui";
+import { Notice, SplitMeter, StateBadge } from "@/components/ui";
 import type { Pt } from "@/components/PriceChart";
 import { MarketOutcomeChart } from "@/components/MarketOutcomeChart";
-import { ProbBar } from "@/components/MarketCard";
+import { CountUp } from "@/components/CountUp";
 import { RulesBlock } from "@/components/RulesBlock";
 import { Resolution } from "@/components/Resolution";
 import { MarketIcon } from "@/components/MarketIcon";
 import { TradeTicket } from "@/components/TradeTicket";
+import { Clock, Coin } from "@/components/icons";
 import { config } from "@/lib/config";
 import { formatDateTime, formatMoney, nsToMs } from "@/lib/format";
 import { usePoll } from "@/lib/hooks";
@@ -35,7 +36,7 @@ export function MarketView() {
   );
 
   if (!/^\d+$/.test(id)) return <PageHeader title="Market unavailable" description="This market does not exist." actions={<Link href="/">Browse markets</Link>} />;
-  if (loading && !data) return <><PageHeader title="Market" /><p role="status" className="text-muted">Loading market</p></>;
+  if (loading && !data) return <><h1 className="sr-only">Market</h1><p role="status" className="sr-only">Loading market</p><MarketSkeleton /></>;
   if (error && !data) return <><PageHeader title="Market unavailable" actions={<Link href="/">Browse markets</Link>} /><Notice tone="danger">Could not load this market. Check your connection.</Notice></>;
   if (!data?.market) return <PageHeader title="Market unavailable" description="This market does not exist." actions={<Link href="/">Browse markets</Link>} />;
 
@@ -45,64 +46,73 @@ export function MarketView() {
   const yes = pct(m.price_yes);
   const first = data.points[0]?.p;
   const delta = first === undefined ? 0 : Math.round(yes - first);
+  const labels = labelOf(m.category, m.subcategory);
 
   return (
     <div className="market-detail-page">
-      <nav aria-label="Breadcrumb" className="flex flex-wrap items-center gap-2 text-sm text-muted">
-        <Link href="/" className="no-underline hover:text-fg">Markets</Link>
+      <nav aria-label="Breadcrumb" className="breadcrumb">
+        <Link href="/">Markets</Link>
         <span aria-hidden="true">/</span>
-        <Link href={`/?cat=${categoryOf(m)}`} className="no-underline hover:text-fg">{labelOf(m.category, m.subcategory).category}</Link>
+        <Link href={`/?cat=${categoryOf(m)}`}>{labels.category}</Link>
         <span aria-hidden="true">/</span>
-        <Link href={`/?cat=${categoryOf(m)}&sub=${m.subcategory}`} className="text-fg no-underline hover:underline">{labelOf(m.category, m.subcategory).sub}</Link>
+        <Link href={`/?cat=${categoryOf(m)}&sub=${m.subcategory}`} aria-current="page">{labels.sub}</Link>
       </nav>
-      <div className="market-detail-layout mt-5 grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_24rem] lg:items-start">
-        <div className="min-w-0 [overflow-wrap:anywhere]">
-          <header className="market-detail-header flex items-start gap-4">
-            <div className="hidden shrink-0 sm:block"><MarketIcon category={m.category} sub={m.subcategory} /></div>
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-3 text-sm text-muted">
-                <StateBadge status={m.status} caseStage={data.stage} />
-                <span>Closes <span className="num">{formatDateTime(m.close_at)}</span></span>
-                <span><span className="num">{formatMoney(m.locked)}</span> {config.tokenSymbol} in play</span>
-                {m.outcome && <span className="text-fg">Result: {resultWord(m)}</span>}
-              </div>
-              <h1 className="page-title mb-0 mt-4">{m.title}</h1>
+      <div className="market-detail-layout">
+        <header className="market-detail-header">
+          <MarketIcon category={m.category} sub={m.subcategory} />
+          <div className="min-w-0">
+            <div className="market-detail-meta">
+              <StateBadge status={m.status} caseStage={data.stage} />
+              <span><Clock size={15} />Closes <span className="num">{formatDateTime(m.close_at)}</span></span>
+              <span><Coin size={15} /><span className="num">{formatMoney(m.locked)}</span> {config.tokenSymbol} in play</span>
+              {m.outcome && <span className="market-detail-result">Result: {resultWord(m)}</span>}
             </div>
-          </header>
+            <h1 className="market-title">{m.title}</h1>
+          </div>
+        </header>
 
-          <section className="rise mt-8 rounded-xl border border-border bg-surface/60 p-5 sm:p-7" style={{ "--i": 2 } as React.CSSProperties} aria-label="Price">
-            <div className="flex flex-wrap items-end justify-between gap-4">
-              <div className="flex items-end gap-3">
-                {done ? (
-                  <div className="display text-[6rem] leading-[5.25rem]">{resultWord(m)}</div>
-                ) : (
-                  <div className="display text-[6.5rem] leading-[5.5rem]">
-                    {yes}
-                    <span className="text-[3rem] text-muted">%</span>
-                  </div>
-                )}
-                <div className="pb-2 text-sm text-muted">{done ? "final result" : "chance of Yes"}</div>
-              </div>
-              {!done && data.points.length > 1 && (
-                <div className={`num pb-2 text-sm ${delta >= 0 ? "text-yes" : "text-no"}`}>
-                  {delta >= 0 ? "+" : ""}
-                  {delta} pts over the available history
-                </div>
+        <section className="price-panel" aria-label="Price">
+          <div className="price-panel-head">
+            <div className="price-panel-figure">
+              {done ? (
+                <div className="display price-panel-number">{resultWord(m)}</div>
+              ) : (
+                <div className="display price-panel-number"><CountUp value={yes} /><span>%</span></div>
               )}
+              <div className="price-panel-label">{done ? "final result" : "chance of Yes"}</div>
             </div>
-            <div className="mt-5">{done ? <div className="h-1.5 rounded-full bg-border" /> : <ProbBar yes={yes} />}</div>
-            <div className="mt-7">
-              <MarketOutcomeChart points={data.points} />
-            </div>
-          </section>
+            {!done && data.points.length > 1 && (
+              <div className="price-panel-delta num" data-dir={delta > 0 ? "up" : delta < 0 ? "down" : "flat"}>
+                {delta >= 0 ? "+" : ""}
+                {delta} pts over the available history
+              </div>
+            )}
+          </div>
+          {done ? <div className="price-panel-settled" aria-hidden="true" /> : <SplitMeter yes={yes} labels size="lg" />}
+          <div className="price-panel-chart">
+            <MarketOutcomeChart points={data.points} />
+          </div>
+        </section>
 
+        <div className="market-ticket-slot">
+          <TradeTicket market={m} initialSide={initialSide} />
+        </div>
+
+        <div className="market-detail-body">
           <RulesBlock market={m} />
           <Resolution market={m} />
-        </div>
-        <div className="rise lg:sticky lg:top-24" style={{ "--i": 3 } as React.CSSProperties}>
-          <TradeTicket market={m} initialSide={initialSide} />
         </div>
       </div>
     </div>
   );
+}
+
+function MarketSkeleton() {
+  return <div className="market-detail-page" aria-hidden="true">
+    <div className="market-detail-layout">
+      <div className="market-detail-header"><div className="skeleton market-skeleton-icon" /><div className="market-skeleton-title"><span className="skeleton-line" /><span className="skeleton-line" /></div></div>
+      <div className="skeleton market-skeleton-price" />
+      <div className="market-ticket-slot"><div className="skeleton market-skeleton-ticket" /></div>
+    </div>
+  </div>;
 }

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { MarketCard } from "./MarketCard";
+import { ArrowDown } from "./icons";
 import type { MarketView } from "@/lib/market";
 import type { Pt } from "./PriceChart";
 export function MarketGrid({markets,stages,histories}:{markets:MarketView[];stages:Record<string,string|null>;histories:Record<string,Pt[]>}) {
@@ -12,5 +13,7 @@ export function MarketGrid({markets,stages,histories}:{markets:MarketView[];stag
  const divisors=Array.from({length:columns},(_,i)=>columns-i).filter(n=>count%n===0);
  const displayColumns=count<columns?Math.max(1,count):count===markets.length&&(divisors[0]??1)>1?divisors[0]:columns;
  const rows=Array.from({length:Math.ceil(count/displayColumns)},(_,i)=>visible.slice(i*displayColumns,(i+1)*displayColumns));
- return <><div ref={ref} className="market-card-grid paginated-market-grid">{rows.map(row=><div className="market-grid-row" key={row[0].id} style={{gridTemplateColumns:`repeat(${displayColumns},minmax(0,1fr))`}}>{row.map(m=><MarketCard key={m.id} market={m} stage={stages[m.id]??null} index={0} points={histories[m.id]??[]}/>)}</div>)}</div><div className="market-grid-pagination"><p role="status">Showing {count} of {markets.length} markets</p>{count<markets.length&&<button type="button" onClick={()=>setBatches(v=>v+1)}>Show More <span aria-hidden="true">↓</span></button>}</div></>;
+ // Each batch staggers in from its own first card, so Show More reveals the new cards in order.
+ const order=(id:string)=>visible.findIndex(m=>m.id===id)%batch;
+ return <><div ref={ref} className="market-card-grid paginated-market-grid">{rows.map(row=><div className="market-grid-row" key={row[0].id} style={{gridTemplateColumns:`repeat(${displayColumns},minmax(0,1fr))`}}>{row.map(m=><MarketCard key={m.id} market={m} stage={stages[m.id]??null} index={order(m.id)} points={histories[m.id]??[]}/>)}</div>)}</div><div className="market-grid-pagination"><p role="status"><span className="num">Showing {count} of {markets.length} markets</span><span className="market-grid-progress" aria-hidden="true"><span style={{width:`${(count/Math.max(1,markets.length))*100}%`}}/></span></p>{count<markets.length&&<button type="button" className="btn btn-secondary" onClick={()=>setBatches(v=>v+1)}>Show More <ArrowDown size={16}/></button>}</div></>;
 }

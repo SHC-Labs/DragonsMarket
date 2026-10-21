@@ -1,0 +1,97 @@
+/* Element defaults live in the base layer so Tailwind utilities still win over them. */
+@layer base {
+  html {
+    font-size: 16px;
+    background: var(--bg);
+    -webkit-text-size-adjust: 100%;
+    scrollbar-color: var(--border) transparent;
+  }
+  body {
+    position: relative;
+    min-height: 100vh;
+    background-color: var(--bg);
+    background-image:
+      radial-gradient(60rem 36rem at 88% -12rem, var(--aurora-a), transparent 70%),
+      radial-gradient(48rem 30rem at -10% -8rem, var(--aurora-b), transparent 70%);
+    background-repeat: no-repeat;
+    color: var(--text);
+    font-family: var(--font-sans-stack);
+    font-size: var(--fs-md);
+    line-height: var(--lh-body);
+    font-feature-settings: "ss02";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+  /* A hairline grid behind the top of every page, faded out toward the content. */
+  body::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 44rem;
+    z-index: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+    background-size: 64px 64px;
+    mask-image: radial-gradient(ellipse 80% 70% at 70% 0%, black 10%, transparent 72%);
+  }
+  h1, h2, h3, h4 {
+    font-family: var(--font-sans-stack);
+    font-weight: 500;
+    letter-spacing: var(--track-title);
+    text-wrap: balance;
+  }
+  p { text-wrap: pretty; }
+  a {
+    color: inherit;
+    text-decoration-color: color-mix(in oklab, currentColor 40%, transparent);
+    text-underline-offset: 3px;
+    transition: color var(--dur-2) var(--ease-out), text-decoration-color var(--dur-2) var(--ease-out);
+  }
+  a:hover { text-decoration-color: currentColor; }
+  button { font: inherit; color: inherit; }
+  summary { cursor: pointer; }
+  ::selection { background: var(--brand); color: var(--bg); }
+  input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
+}
+
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--r-xs); }
+
+/* Numbers use Plex's tabular figures; mono is kept for identifiers and hashes. */
+.num { font-family: var(--font-sans-stack); font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+.mono { font-family: var(--font-mono-stack); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.display { font-weight: 300; letter-spacing: var(--track-display); font-variant-numeric: tabular-nums; }
+.eyebrow { font-size: var(--fs-2xs); font-weight: 500; letter-spacing: var(--track-eyebrow); text-transform: uppercase; color: var(--text-muted); }
+
+.skip-link {
+  position: fixed; top: var(--s-2); left: var(--s-4); z-index: 100;
+  padding: var(--s-3) var(--s-4); border-radius: var(--r-sm);
+  background: var(--text); color: var(--bg);
+  transform: translateY(-200%);
+  transition: transform var(--dur-2) var(--ease-out);
+}
+.skip-link:focus { transform: none; }
+#main-content { scroll-margin-top: 7rem; min-width: 0; outline: none; }
+
+/* Main routes start with their content; the navigation names the page. */
+.page-content { padding-top: var(--s-7); }
+@media (max-width: 767px) { .page-content { padding-top: var(--s-5); } }
+
+/* Entrances: a short fade and rise, staggered by --i. They run once. */
+@keyframes enter-rise { from { opacity: 0; transform: translateY(6px); } }
+@keyframes enter-fade { from { opacity: 0; } }
+@keyframes enter-scale { from { opacity: 0; transform: scale(0.97); } }
+.enter { animation: enter-rise var(--dur-4) var(--ease-out) both; animation-delay: calc(var(--i, 0) * var(--stagger)); }
+.enter-fade { animation: enter-fade var(--dur-4) var(--ease-out) both; animation-delay: calc(var(--i, 0) * var(--stagger)); }
+
+/* Fingers need bigger targets than cursors. */
+@media (pointer: coarse) {
+  button, [role="tab"], select, summary, input:not([type="radio"]):not([type="checkbox"]) { min-height: var(--control-md); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0ms !important; animation-delay: 0ms !important; transition-duration: 0ms !important; scroll-behavior: auto !important; }
+}

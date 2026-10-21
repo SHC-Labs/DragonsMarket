@@ -13,6 +13,8 @@ import { Trending } from "@/components/Featured";
 import { MarketGrid } from "@/components/MarketGrid";
 import type { Pt } from "@/components/PriceChart";
 import { Button, Notice } from "@/components/ui";
+import { Search } from "@/components/icons";
+import { useIndicator } from "@/components/useIndicator";
 import { countMarkets, findCategory } from "@/lib/categories";
 import { config, isConfigured } from "@/lib/config";
 import { filterMarkets, filtersFromQuery, sortMarkets, statusOf, type Status } from "@/lib/filters";
@@ -55,6 +57,7 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
   const router = useRouter();
   const pathname = usePathname();
   const { ids: watchedIds } = useWatchlist();
+  const tabs = useRef<HTMLDivElement>(null);
   const watching = watchlistOnly || params.get("watching") === "true";
   const f = filtersFromQuery((k) => params.get(k));
   const { data, error, loading, reload } = usePoll(() => load(f.cat, f.sub), [f.cat, f.sub], 30000);
@@ -90,6 +93,7 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
     }
   }, [f.q]);
 
+  useIndicator(tabs, `${watching}:${Boolean(data)}`);
   const counts = useMemo(() => countMarkets(data?.markets ?? []), [data]);
   const statusCounts = useMemo(() => {
     const scoped = filterMarkets(data?.markets ?? [], { ...f, status: "all", q: typed });
@@ -103,7 +107,7 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
   if (watching && !account) return <div className="page-content"><PageLandmark title="Watchlist" /><AccountEmptyState title="Save markets with your wallet" description="Connect your wallet, then select Watch on a market. Your list is saved for that wallet on this browser." actions={<><Button onClick={openConnect} disabled={!walletAvailable}>Connect wallet</Button><Link href="/">Browse markets</Link></>} /></div>;
   const intro = <PageLandmark title={watching ? "Watchlist" : "Prediction markets"} />;
   if (!isConfigured) return <div className="page-content">{intro}</div>;
-  if (loading && !data) return <div className="page-content">{intro}<p role="status" className="text-muted">Loading markets</p><div className="market-loading" aria-hidden="true"><div /><div /><div /></div></div>;
+  if (loading && !data) return <div className="page-content">{intro}<p role="status" className="sr-only">Loading markets</p><MarketsSkeleton /></div>;
   if (error && !data) {
     return (
       <div className="page-content">
@@ -147,17 +151,21 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
         stats={{ markets: data.markets.length, locked: formatMoney(locked), symbol: config.tokenSymbol }}
       />
 
-      <div className="market-list-tabs" role="group" aria-label="Market list"><button type="button" aria-pressed={!watching} onClick={()=>watchlistOnly ? router.push("/") : update({watching:null})}>All markets</button><button type="button" aria-pressed={watching} onClick={()=>router.push("/watchlist")}>Watchlist <span className="num">{data.markets.filter(m=>watchedIds.includes(m.id)).length}</span></button>{watching && <span>Saved for your connected wallet on this browser.</span>}</div>
-      <section id="markets" className="mt-10 scroll-mt-32" aria-label="Markets">
-        <h2 className="section-title m-0">
+      <div className="market-list-head">
+        <div ref={tabs} className="market-list-tabs" role="group" aria-label="Market list"><button type="button" aria-pressed={!watching} onClick={()=>watchlistOnly ? router.push("/") : update({watching:null})}>All markets</button><button type="button" aria-pressed={watching} onClick={()=>router.push("/watchlist")}>Watchlist <span className="count num">{data.markets.filter(m=>watchedIds.includes(m.id)).length}</span></button></div>
+        {watching && <span className="market-list-note">Saved for your connected wallet on this browser.</span>}
+      </div>
+      <section id="markets" aria-label="Markets">
+        <h2 className="section-title markets-heading">
           {filtered ? `${shown.length} ${shown.length === 1 ? "market" : "markets"}${where ? ` in ${where}` : ""}` : watching ? "Your watchlist" : "Find a market"}
         </h2>
 
         {shown.length === 0 ? (
-          <div className="mt-6 rounded-lg border border-dashed border-border p-10 text-center text-muted">
-            {watching && watchedIds.length === 0 ? "Nothing saved yet. Tap Watch on a market to keep it here." : data.markets.length === 0 ? "No markets yet." : where && !typed.trim() ? `No markets in ${where} yet.` : "No markets match that."}{" "}
+          <div className="empty-results">
+            <span className="empty-results-icon" aria-hidden="true"><Search size={26} variant="Bulk" /></span>
+            <p>{watching && watchedIds.length === 0 ? "Nothing saved yet. Tap Watch on a market to keep it here." : data.markets.length === 0 ? "No markets yet." : where && !typed.trim() ? `No markets in ${where} yet.` : "No markets match that."}</p>
             {data.markets.length > 0 && (
-              <Button variant="ghost" size="sm" onClick={() => { setTyped(""); lastSynced.current = ""; router.replace(pathname, { scroll: false }); }}>Clear filters</Button>
+              <Button variant="secondary" size="sm" onClick={() => { setTyped(""); lastSynced.current = ""; router.replace(pathname, { scroll: false }); }}>Clear filters</Button>
             )}
           </div>
         ) : (
@@ -168,4 +176,12 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
       {!watching && <RecentPrices markets={data.markets} histories={data.histories} />}
     </div>
   );
+}
+
+function MarketsSkeleton() {
+  return <div className="markets-skeleton" aria-hidden="true">
+    <div className="market-spotlight"><div className="skeleton markets-skeleton-hero" /><div className="skeleton markets-skeleton-rail" /></div>
+    <div className="skeleton markets-skeleton-bar" />
+    <div className="markets-skeleton-grid">{Array.from({ length: 8 }, (_, i) => <div key={i} className="skeleton markets-skeleton-card" style={{ "--i": i } as React.CSSProperties}><span className="skeleton-line" /><span className="skeleton-line" /><span className="skeleton-line" /></div>)}</div>
+  </div>;
 }
