@@ -11,7 +11,8 @@
     "test": "vitest run",
     "e2e": "playwright test",
     "serve": "node scripts/serve.mjs",
-    "build:dev": "bash scripts/build-dev.sh"
+    "build:dev": "bash scripts/build-dev.sh",
+    "dev:mock": "node scripts/dev-mock.mjs"
   },
   "dependencies": {
     "@hot-labs/near-connect": "^0.11.4",
