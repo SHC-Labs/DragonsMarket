@@ -120,8 +120,8 @@ test("sports artwork follows the theme and final rulings use Council typography"
     await page.goto("/market?id=0");
     const verdict = page.locator(".resolution-verdict");
     await expect(verdict).toHaveText("Final answer: No");
-    // v2 sets final rulings in the engraved display face (Gloock), still in the Council colour.
-    expect(await verdict.evaluate(e => getComputedStyle(e).fontFamily)).toContain("Gloock");
+    // v2 sets final rulings in the display face (Funnel Display), still in the Council colour.
+    expect(await verdict.evaluate(e => getComputedStyle(e).fontFamily)).toContain("Funnel Display");
     expect(await verdict.evaluate(e => {
       const probe = document.createElement("span"); probe.style.color = "var(--council)"; e.append(probe);
       const expected = getComputedStyle(probe).color; probe.remove();

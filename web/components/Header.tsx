@@ -28,7 +28,7 @@ export function Header() {
     <Link key={href} href={href} aria-current={pathname === href || (href === "/" && pathname === "/market") ? "page" : undefined} className="site-nav-link">{label}</Link>
   ));
   return (
-    <header className="site-header">
+    <header className="site-header" style={{ viewTransitionName: "site-header" }}>
       <div className="site-header-row">
         <div className="site-header-start">
           <Brand />

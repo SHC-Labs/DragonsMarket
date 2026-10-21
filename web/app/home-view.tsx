@@ -22,7 +22,7 @@ import { config, isConfigured } from "@/lib/config";
 import { filterMarkets, filtersFromQuery, sortMarkets, statusOf, type Status } from "@/lib/filters";
 import { formatMoney, nsToMs } from "@/lib/format";
 import { usePoll } from "@/lib/hooks";
-import { getCase, getHistory, listMarkets, isMarketListed } from "@/lib/market";
+import { getCase, getHistory, listMarkets, isMarketListed, rememberStages } from "@/lib/market";
 
 // Share in-flight reads (including React development remounts) and recent history.
 const historyReads = new Map<string, { expires: number; promise: Promise<Pt[]> }>();
@@ -50,6 +50,7 @@ async function load(category: string, subcategory: string) {
       catch { histories[m.id] = []; } // A chart failure must not hide the market list.
     }),
   ]);
+  rememberStages(stages);
   return { markets, stages, histories };
 }
 

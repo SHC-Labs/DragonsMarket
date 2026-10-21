@@ -4,7 +4,8 @@ import Link from "next/link";
 import { AccountEmptyState, PageLandmark } from "@/components/PageHeader";
 import { Button, Notice } from "@/components/ui";
 import { CountUp } from "@/components/CountUp";
-import { MarketSeal } from "@/components/MarketSeal";
+import { MarketIcon } from "@/components/MarketIcon";
+import { Embers } from "@/components/Embers";
 import { Award, Lock, Wallet } from "@/components/icons";
 import { useWallet } from "@/components/WalletProvider";
 import { config } from "@/lib/config";
@@ -34,6 +35,7 @@ function Title() {
 
 function Balance({ label, value, children, tone }: { label: string; value: bigint; children?: React.ReactNode; tone: "wallet" | "market" }) {
   return <div className="balance-tile" data-tone={tone}>
+    <Embers height={0.85} intensity={0.8} spark={tone === "market" ? "--council" : "--yes"} smoke={tone === "market" ? "--council" : "--accent"} />
     <dt><Wallet size={18} variant="Bulk" />{label}</dt>
     <dd>
       <span className="balance-figure" aria-hidden="true"><CountUp value={Number(value) / 1e6} format={money} className="num" duration={1100} /> <span className="balance-unit">{config.tokenSymbol}</span></span>
@@ -119,7 +121,7 @@ export default function Portfolio() {
                 const won = resolved && p.market.outcome !== "void" && pay !== null && pay > 0n;
                 return (
                   <li key={p.market.id} className="position-row enter" data-won={won || undefined} style={{ "--i": i } as React.CSSProperties}>
-                    <MarketSeal hash={p.market.rule_hash} id={p.market.id} className="position-seal" />
+                    <MarketIcon category={p.market.category} sub={p.market.subcategory} small />
                     <div className="position-main">
                       <Link href={`/market?id=${p.market.id}`} className="position-title">{p.market.title}</Link>
                       <div className="position-shares num">

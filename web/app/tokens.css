@@ -5,8 +5,8 @@
   --font-sans-stack: var(--font-plex), "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono-stack: var(--font-jetbrains), "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-brand-stack: var(--font-brand), var(--font-sans-stack);
-  /* Engraved display face for questions, odds, balances and verdicts. */
-  --font-display-stack: var(--font-gloock), "Gloock", Georgia, "Times New Roman", serif;
+  /* Display face for questions, odds, balances and verdicts. */
+  --font-display-stack: var(--font-funnel), "Funnel Display", var(--font-sans-stack);
   --fs-2xs: 0.75rem;
   --fs-xs: 0.8125rem;
   --fs-sm: 0.875rem;

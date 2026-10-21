@@ -1,16 +1,16 @@
 /* v2 "Sealed by Dragons": the engraved display face, market seals, embers, the tape and the dragons. */
 
-/* ---------- Engraved display type ---------- */
+/* ---------- Display type (Funnel Display) ---------- */
 :is(.spotlight-title, .market-title, .market-card h3, .section-title, .council-hub h2, .council-hero-copy h2, .account-empty h2,
   .page-title, .partner-intro h2, .partner-section-heading h2, .guide-stage-copy h3, .legal-heading h1, .trending-panel h2,
   .collection-gallery-heading h2, .council-call h2, .view-title h2) {
-  font-family: var(--font-display-stack); font-weight: 400; letter-spacing: -0.012em;
+  font-family: var(--font-display-stack); font-weight: 600; letter-spacing: -0.025em;
 }
 :is(.spotlight-number, .price-panel-number, .market-card-odds b, .balance-figure, .ticket-outcome-price,
   .feature-outcome-row strong, .pulse-chance, .portfolio-count, .resolution-verdict, .spotlight-result strong) {
-  font-family: var(--font-display-stack); font-weight: 400; letter-spacing: -0.02em; font-variant-numeric: lining-nums tabular-nums;
+  font-family: var(--font-display-stack); font-weight: 500; letter-spacing: -0.04em; font-variant-numeric: lining-nums tabular-nums;
 }
-.resolution-verdict strong { font-weight: 400; }
+.resolution-verdict strong { font-weight: 700; }
 .spotlight-title { font-size: clamp(1.625rem, 1.1rem + 1.4vw, 2.5rem); line-height: 1.08; }
 .spotlight-number { font-size: clamp(5rem, 3rem + 6vw, 8.5rem); line-height: 0.78; }
 .spotlight-number small { font-family: var(--font-display-stack); }
@@ -18,7 +18,7 @@
 .price-panel-number { font-size: clamp(5.5rem, 3rem + 7vw, 10rem); line-height: 0.78; transition: color var(--dur-2); }
 .price-panel-number[data-scrubbing] { color: var(--brand); }
 .market-card h3 { font-size: 1.25rem; line-height: 1.18; -webkit-line-clamp: 3; }
-.market-card-heading { min-height: 6.25rem; }
+.market-card-heading { min-height: 5.5rem; }
 .market-card-cat { display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-2); }
 .market-card-cat .market-icon { width: 1.375rem; height: 1.375rem; border-radius: 6px; }
 .market-card-cat .market-icon svg { width: 14px; height: 14px; }
@@ -44,8 +44,6 @@
 
 .spotlight-seal { position: absolute; z-index: 0; right: -4.5rem; top: -4.5rem; width: 21rem; height: 21rem; opacity: 0.55; pointer-events: none; }
 .spotlight-copy, .spotlight-chart { position: relative; z-index: 1; }
-.card-seal { flex-shrink: 0; width: 3.25rem; height: 3.25rem; margin-left: auto; transition: transform var(--dur-5) var(--ease-emph); }
-.market-card:hover .card-seal { transform: rotate(28deg) scale(1.06); }
 .market-card-heading { gap: var(--s-3); }
 .detail-seal { flex-shrink: 0; width: 6.5rem; height: 6.5rem; filter: drop-shadow(0 10px 30px var(--glow-brand)); }
 .case-seal { grid-area: num; width: 3.5rem; height: 3.5rem; align-self: center; }
@@ -53,21 +51,21 @@
 .case-list .case-number { grid-area: ref; }
 .position-seal { width: 2.75rem; height: 2.75rem; }
 .verdict-seal { width: 8rem; height: 8rem; }
-.verdict-seal > span { font-family: var(--font-display-stack); font-size: var(--fs-md); letter-spacing: 0.08em; }
+.verdict-seal > span { font-family: var(--font-display-stack); font-weight: 700; font-size: var(--fs-md); letter-spacing: 0.08em; }
 
 /* ---------- Embers (canvas-ui Blaze, overlay) ---------- */
 .embers { position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; border-radius: inherit; }
 .embers-canvas { position: absolute; inset: 0; width: 100%; height: 100%; mix-blend-mode: screen; }
 
 /* ---------- The tape ---------- */
-.tape { position: relative; display: flex; align-items: center; gap: var(--s-2); margin: calc(var(--s-7) * -1 + var(--s-1)) calc(var(--gutter) * -1) var(--s-6); padding: 0 var(--gutter); border-bottom: 1px solid var(--line); background: color-mix(in oklab, var(--surface) 55%, transparent); }
-.tape-viewport { display: flex; flex: 1; min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, transparent, black 4rem, black calc(100% - 4rem), transparent); }
+.tape { position: relative; display: flex; align-items: center; gap: var(--s-2); width: 100cqw; margin: calc(var(--s-7) * -1 + var(--s-1)) calc(50% - 50cqw) var(--s-6); padding: 0 var(--gutter); border-bottom: 1px solid var(--line); background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--surface) 60%, transparent) 15%, color-mix(in oklab, var(--surface) 60%, transparent) 85%, transparent); }
+.tape-viewport { display: flex; flex: 1; min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, transparent, black clamp(4rem, 12vw, 14rem), black calc(100% - clamp(4rem, 12vw, 14rem)), transparent); }
 .tape-track { display: flex; flex-shrink: 0; gap: 0; margin: 0; padding: 0; list-style: none; animation: tape-run calc(var(--tape-items) * 4.5s) linear infinite; }
 .tape:is(:hover, :focus-within, [data-paused]) .tape-track { animation-play-state: paused; }
 @keyframes tape-run { to { transform: translateX(-100%); } }
 .tape li a { display: inline-flex; align-items: baseline; gap: var(--s-2); padding: var(--s-3) var(--s-6) var(--s-3) 0; margin-right: var(--s-6); border-right: 1px solid var(--line); white-space: nowrap; text-decoration: none; font-size: var(--fs-xs); color: var(--text-muted); transition: color var(--dur-2); }
 .tape li a:hover { color: var(--text); }
-.tape-price { font-family: var(--font-display-stack); font-size: var(--fs-lg); color: var(--text); }
+.tape-price { font-family: var(--font-display-stack); font-weight: 600; font-size: var(--fs-lg); color: var(--text); }
 .tape-toggle { display: grid; place-items: center; flex-shrink: 0; width: 2rem; height: 2rem; min-height: 0; min-width: 0; border-radius: 50%; border: 1px solid var(--line-strong); color: var(--text-muted); cursor: pointer; transition: color var(--dur-2), border-color var(--dur-2); }
 .tape-toggle:hover { color: var(--text); border-color: var(--brand); }
 @media (prefers-reduced-motion: reduce) {
@@ -132,9 +130,117 @@
   .spotlight-number { animation: enter-rise 700ms var(--ease-out) 220ms both; }
 }
 @keyframes title-reveal { from { opacity: 0; transform: translateY(0.4em); clip-path: inset(0 0 100% 0); } to { clip-path: inset(0 0 -20% 0); } }
-.market-card-result strong { font-family: var(--font-display-stack); font-weight: 400; font-size: var(--fs-3xl); line-height: 1; }
+.market-card-result strong { font-family: var(--font-display-stack); font-weight: 600; font-size: var(--fs-3xl); line-height: 1; }
 @media (max-width: 899px) {
   .spotlight-seal { width: 11rem; height: 11rem; right: -3.5rem; top: -3.5rem; opacity: 0.3; }
 }
 /* The outgoing slide is a fresh copy made only for the push; it must arrive already at rest. */
 .featured-slide-outgoing *, .featured-slide-outgoing *::before, .featured-slide-outgoing *::after { animation: none !important; }
+.seal-crest { transform-box: fill-box; transform-origin: center; }
+@media (prefers-reduced-motion: no-preference) { .market-seal .seal-crest { animation: crest-strike 900ms var(--ease-emph) 500ms both; } }
+@keyframes crest-strike { from { opacity: 0; transform: scale(1.35); } }
+.featured-slide-outgoing .seal-crest { animation: none !important; }
+
+/* Portfolio: embers rise behind the balances; winning rows catch the light once. */
+.balance-tile { isolation: isolate; }
+.balance-tile > :is(dt, dd) { position: relative; z-index: 1; }
+.position-row[data-won] { position: relative; overflow: hidden; }
+@media (prefers-reduced-motion: no-preference) {
+  .position-row[data-won]::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(105deg, transparent 35%, color-mix(in oklab, var(--success) 22%, transparent) 50%, transparent 65%); transform: translateX(-100%); animation: won-sheen 1.6s var(--ease-out) 900ms both; }
+}
+@keyframes won-sheen { to { transform: translateX(100%); } }
+
+/* Cases still open carry an hourglass-like pending mark; only final cases are sealed. */
+.case-pending { grid-area: num; position: relative; width: 3.5rem; height: 3.5rem; border-radius: 50%; border: 1.5px dashed color-mix(in oklab, var(--warning) 60%, transparent); }
+.case-pending[data-stage="disputed"] { border-color: color-mix(in oklab, var(--council) 60%, transparent); }
+.case-pending::after { content: ""; position: absolute; inset: 30%; border-radius: 50%; background: currentColor; color: var(--warning); opacity: 0.85; }
+.case-pending[data-stage="disputed"]::after { color: var(--council); }
+@media (prefers-reduced-motion: no-preference) { .case-pending { animation: pending-turn 12s linear infinite; } }
+@keyframes pending-turn { to { transform: rotate(1turn); } }
+@media (max-width: 767px) { .case-pending { width: 3rem; height: 3rem; align-self: start; } }
+
+/* ---------- Page transitions: the question flies from its card into the market page ---------- */
+.chart-skeleton { height: 330px; }
+::view-transition { pointer-events: none; }
+::view-transition-group(site-header) { animation: none; z-index: 100; }
+::view-transition-old(site-header) { display: none; }
+::view-transition-new(site-header) { animation: none; }
+::view-transition-group(.morph) { animation-duration: 460ms; animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1); }
+::view-transition-image-pair(.morph) { animation-name: morph-blur; }
+@keyframes morph-blur { 35% { filter: blur(2px); } }
+::view-transition-old(root) { animation: 220ms var(--ease-out) both page-out; }
+::view-transition-new(root) { animation: 320ms var(--ease-out) 60ms both page-in; }
+@keyframes page-out { to { opacity: 0; transform: scale(0.99); } }
+@keyframes page-in { from { opacity: 0; transform: translateY(10px); } }
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(*), ::view-transition-new(*), ::view-transition-group(*) { animation-duration: 0s !important; animation-delay: 0s !important; }
+}
+
+/* ---------- Degen Arena ---------- */
+.partnership-page { --rocket-spark: #ff8a3d; --rocket-smoke: #ff3d6e; }
+.partner-intro h2 { font-size: clamp(3rem, 1.6rem + 5vw, 6.5rem); line-height: 0.92; letter-spacing: -0.035em; }
+/* The handshake: both marks slide in and the × strikes between them. */
+@media (prefers-reduced-motion: no-preference) {
+  .partner-dragon-logo { animation: lockup-left 900ms var(--ease-emph) 150ms both; }
+  .partner-arena-logo { animation: lockup-right 900ms var(--ease-emph) 150ms both; }
+  .partner-logo-separator { animation: lockup-strike 600ms var(--ease-emph) 750ms both; }
+}
+@keyframes lockup-left { from { opacity: 0; transform: translateX(-2.5rem) rotate(-8deg); } }
+@keyframes lockup-right { from { opacity: 0; transform: translateX(2.5rem) rotate(6deg); } }
+@keyframes lockup-strike { from { opacity: 0; transform: scale(2.4) rotate(-90deg); } }
+.partner-logo-separator { display: inline-block; color: var(--brand); font-weight: 600; }
+
+/* Hero art turns toward the pointer; rocket sparks rise through it. */
+.partner-hero-art { transform: perspective(1200px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, -4deg)); transition: transform 420ms var(--ease-out), box-shadow 420ms var(--ease-out); }
+.partner-hero-art:hover { transform: perspective(1200px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) scale(1.01); box-shadow: var(--elev-3), 0 40px 120px -30px color-mix(in oklab, var(--rocket-smoke) 50%, transparent); }
+.partner-hero-art .embers { z-index: 1; }
+
+/* Game cards: the art leans in and a drawing of how the game plays rises over it. */
+.partner-game-art { position: relative; }
+.partner-game-art::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, transparent 35%, rgb(8 4 14 / 0.72)); opacity: 0; transition: opacity var(--dur-4) var(--ease-out); }
+.game-hint { position: absolute; z-index: 1; left: 50%; bottom: 10%; width: 46%; transform: translate(-50%, 12px); opacity: 0; transition: opacity var(--dur-4) var(--ease-out), transform var(--dur-4) var(--ease-out); pointer-events: none; overflow: visible; }
+.partner-game:is(:hover, :focus-visible) .partner-game-art::after { opacity: 1; }
+.partner-game:is(:hover, :focus-visible) .game-hint { opacity: 1; transform: translate(-50%, 0); }
+.hint-climb { fill: none; stroke: #ffd166; stroke-width: 4; stroke-linecap: round; stroke-dasharray: 1; stroke-dashoffset: 1; filter: drop-shadow(0 0 6px #ff8a3d); }
+.hint-rocket { fill: #fff; opacity: 0; }
+.hint-crash { stroke: #ff3d6e; stroke-width: 3; stroke-linecap: round; opacity: 0; }
+.hint-blackjack { display: flex; justify-content: center; height: 46%; width: 40%; }
+.hint-card { position: relative; display: grid; place-items: center; width: 40%; aspect-ratio: 5 / 7; margin: 0 -8%; border-radius: 6px; background: #fff; color: #0b080e; box-shadow: 0 10px 24px rgb(0 0 0 / 0.45); font: 700 clamp(0.9rem, 1.4vw, 1.4rem) var(--font-display-stack); transform-origin: bottom center; }
+.hint-card i { position: absolute; bottom: 8%; right: 12%; font-style: normal; font-size: 0.8em; }
+.hint-card:nth-child(2) { color: #d32f4b; }
+.hint-peg { fill: rgb(255 255 255 / 0.85); }
+.hint-ball { fill: #ff3d6e; filter: drop-shadow(0 0 6px #ff3d6e); }
+@media (prefers-reduced-motion: no-preference) {
+  .partner-game:is(:hover, :focus-visible) .hint-climb { animation: climb 1.3s var(--ease-in-out) 120ms forwards; }
+  .partner-game:is(:hover, :focus-visible) .hint-rocket { animation: hint-show 200ms 1.3s forwards; }
+  .partner-game:is(:hover, :focus-visible) .hint-crash { animation: hint-show 120ms 1.45s forwards; }
+  .partner-game:is(:hover, :focus-visible) .hint-card:nth-child(1) { animation: deal-left 600ms var(--ease-emph) 80ms both; }
+  .partner-game:is(:hover, :focus-visible) .hint-card:nth-child(2) { animation: deal-right 600ms var(--ease-emph) 220ms both; }
+  .partner-game:is(:hover, :focus-visible) .hint-ball { animation: plinko 1.8s cubic-bezier(0.5, 0, 0.75, 1) 150ms infinite; }
+}
+@media (prefers-reduced-motion: reduce) { .hint-climb { stroke-dashoffset: 0; } .hint-rocket, .hint-crash { opacity: 1; } .hint-card:nth-child(1) { transform: rotate(-10deg); } .hint-card:nth-child(2) { transform: rotate(10deg); } }
+@keyframes climb { to { stroke-dashoffset: 0; } }
+@keyframes hint-show { to { opacity: 1; } }
+@keyframes deal-left { from { opacity: 0; transform: translateY(40%) rotate(0deg); } to { transform: rotate(-12deg); } }
+@keyframes deal-right { from { opacity: 0; transform: translateY(40%) rotate(0deg); } to { transform: rotate(12deg); } }
+@keyframes plinko {
+  0% { transform: translate(0, 0); } 16% { transform: translate(-9px, 18px); } 32% { transform: translate(0, 36px); }
+  48% { transform: translate(9px, 54px); } 64% { transform: translate(18px, 72px); } 80% { transform: translate(9px, 90px); }
+  92%, 100% { transform: translate(9px, 104px); opacity: 0; }
+}
+/* An arcade marquee of the three games, moved by the scroll itself rather than a timer. */
+.arena-marquee { display: grid; gap: var(--s-2); width: 100cqw; margin: var(--s-4) calc(50% - 50cqw) var(--s-9); overflow: hidden; mask-image: linear-gradient(90deg, transparent, black 10%, black 90%, transparent); }
+.arena-marquee-row { display: flex; width: max-content; }
+.arena-marquee-row span { display: flex; }
+.arena-marquee b { padding: 0 0.35em; font: 700 clamp(3rem, 2rem + 4vw, 6.5rem)/1 var(--font-display-stack); letter-spacing: -0.03em; color: transparent; -webkit-text-stroke: 1.5px color-mix(in oklab, var(--text) 35%, transparent); white-space: nowrap; }
+.arena-marquee b::after { content: "✦"; padding-left: 0.7em; font-size: 0.4em; vertical-align: middle; -webkit-text-stroke: 0; color: var(--rocket-spark); }
+.arena-marquee-row:nth-child(2) b:nth-child(2n) { color: var(--brand); -webkit-text-stroke: 0; }
+.arena-marquee-row:nth-child(1) b:nth-child(3n+1) { color: var(--rocket-spark); -webkit-text-stroke: 0; }
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .arena-marquee-row { animation: marquee-left linear both; animation-timeline: view(); animation-range: cover; }
+    .arena-marquee-row:nth-child(2) { animation-name: marquee-right; }
+  }
+}
+@keyframes marquee-left { from { transform: translateX(0); } to { transform: translateX(-35%); } }
+@keyframes marquee-right { from { transform: translateX(-35%); } to { transform: translateX(0); } }

@@ -9,8 +9,8 @@ const subscribe = (notify: () => void) => {
 };
 
 // "#d4a2db" -> [0.83, 0.64, 0.86], the shader's colour format.
-function rgb(variable: string): [number, number, number] {
-  const hex = getComputedStyle(document.documentElement).getPropertyValue(variable).trim().replace("#", "");
+function rgb(variable: string, from: Element): [number, number, number] {
+  const hex = getComputedStyle(from).getPropertyValue(variable).trim().replace("#", "");
   const n = parseInt(hex.length === 3 ? hex.replace(/./g, c => c + c) : hex, 16);
   return Number.isNaN(n) ? [1, 0.6, 0.9] : [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
 }
@@ -31,7 +31,7 @@ export function Embers({ height = 0.75, intensity = 1, spark = "--yes", smoke = 
         { source: source.current, content: box.current, output: output.current },
         {
           height, distortion: 0, speed: 0.55, sparks: 0.55 * intensity, sparkDensity: 1.4, sparkSize: 1.25, layers: 6,
-          smoke: 0.35 * intensity, glow: 0.9 * intensity, sparkColor: rgb(spark), smokeColor: rgb(smoke),
+          smoke: 0.35 * intensity, glow: 0.9 * intensity, sparkColor: rgb(spark, box.current), smokeColor: rgb(smoke, box.current),
         },
         { overlayOnly: true },
       );

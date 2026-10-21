@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Gloock, IBM_Plex_Sans, JetBrains_Mono, Sora } from "next/font/google";
+import { Funnel_Display, IBM_Plex_Sans, JetBrains_Mono, Sora } from "next/font/google";
 import "./globals.css";
 import "./palette.css";
 import { WalletProvider } from "@/components/WalletProvider";
@@ -10,7 +10,7 @@ import { Footer } from "@/components/Footer";
 
 const plex = IBM_Plex_Sans({ variable: "--font-plex", subsets: ["latin"], weight: ["300", "400", "500", "600"] });
 const sora = Sora({ variable: "--font-brand", subsets: ["latin"], weight: "600", display: "swap" });
-const gloock = Gloock({ variable: "--font-gloock", subsets: ["latin"], weight: "400", display: "swap" });
+const funnel = Funnel_Display({ variable: "--font-funnel", subsets: ["latin"], weight: ["400", "500", "600", "700"], display: "swap" });
 const jetbrains = JetBrains_Mono({ variable: "--font-jetbrains", subsets: ["latin"], weight: ["400", "500"] });
 
 export const metadata: Metadata = {
@@ -27,7 +27,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" suppressHydrationWarning className={`${plex.variable} ${jetbrains.variable} ${sora.variable} ${gloock.variable}`}>
+    <html lang="en" suppressHydrationWarning className={`${plex.variable} ${jetbrains.variable} ${sora.variable} ${funnel.variable}`}>
       <head><script dangerouslySetInnerHTML={{ __html: `(function(){var t='dark';try{t=localStorage.getItem('council-theme')||'dark'}catch(e){}document.documentElement.dataset.theme=t==='light'?'light':'dark';var c=/^\\/(council|membership)(\\/|$)/.test(location.pathname);var w=/^\\/watchlist(\\/|$)/.test(location.pathname);document.documentElement.dataset.palette=w?'watchlist':c?'council':'venue';var m=document.createElement('meta');m.name='theme-color';m.content=w?(t==='light'?'${palette.sections.watchlist.light.bg}':'${palette.sections.watchlist.dark.bg}'):c?(t==='light'?'${palette.sections.council.light.bg}':'${palette.sections.council.dark.bg}'):(t==='light'?'${palette.themes.light.bg}':'${palette.themes.dark.bg}');document.head.appendChild(m)})()` }} /></head>
       <body>
         <a href="#main-content" className="skip-link">Skip to content</a>

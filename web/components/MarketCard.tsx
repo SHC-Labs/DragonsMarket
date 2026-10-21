@@ -1,14 +1,13 @@
 "use client";
 import Link from "next/link";
 import type { CSSProperties, PointerEvent } from "react";
-import { useState } from "react";
+import { useState, ViewTransition } from "react";
 import { Star, Share2 } from "@/components/icons";
 import { useWallet } from "./WalletProvider";
 import { useWatchlist } from "@/lib/watchlist";
 import { type Pt } from "./PriceChart";
 import { SplitMeter, StateBadge } from "./ui";
 import { MarketIcon } from "./MarketIcon";
-import { MarketSeal } from "./MarketSeal";
 import { labelOf } from "@/lib/categories";
 import { config } from "@/lib/config";
 import { formatDateTime, formatMoney } from "@/lib/format";
@@ -58,9 +57,8 @@ export function MarketCard({ market: m, stage, index }: { market: MarketView; st
       <Link href={`/market?id=${m.id}`} className="market-card-heading">
         <div className="min-w-0">
           <div className="market-card-cat"><MarketIcon category={m.category} sub={m.subcategory} small />{labels.category} <span aria-hidden="true">·</span> {labels.sub}</div>
-          <h3>{m.title}</h3>
+          <ViewTransition name={`market-title-${m.id}`} share="morph" default="none"><h3>{m.title}</h3></ViewTransition>
         </div>
-        <MarketSeal hash={m.rule_hash} id={m.id} className="card-seal" />
       </Link>
 
       <div className="market-card-outcomes">

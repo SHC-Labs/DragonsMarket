@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, ViewTransition } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { PageHeader } from "@/components/PageHeader";
@@ -16,7 +16,7 @@ import { Clock, Coin } from "@/components/icons";
 import { config } from "@/lib/config";
 import { formatDateTime, formatMoney, nsToMs } from "@/lib/format";
 import { usePoll } from "@/lib/hooks";
-import { getCase, getHistory, getMarket, isMarketListed } from "@/lib/market";
+import { getCase, getHistory, getMarket, isMarketListed, listedMarket, listedStage } from "@/lib/market";
 import { pct, resultWord } from "@/lib/probability";
 import { categoryOf, labelOf } from "@/lib/categories";
 
@@ -36,17 +36,21 @@ export function MarketView() {
     [id],
     5000,
   );
+  // Opened from the list: draw the header from the list's copy at once (so the question can morph across), then the fresh read replaces it.
+  const cached = !data && !error ? listedMarket(id) : null;
+  const view = data ?? (cached ? { market: cached, stage: listedStage(id), points: [] as Pt[] } : null);
+  const pending = !data;
 
   if (!/^\d+$/.test(id)) return <PageHeader title="Market unavailable" description="This market does not exist." actions={<Link href="/">Browse markets</Link>} />;
-  if (loading && !data) return <><h1 className="sr-only">Market</h1><p role="status" className="sr-only">Loading market</p><MarketSkeleton /></>;
+  if (loading && !view) return <><h1 className="sr-only">Market</h1><p role="status" className="sr-only">Loading market</p><MarketSkeleton /></>;
   if (error && !data) return <><PageHeader title="Market unavailable" actions={<Link href="/">Browse markets</Link>} /><Notice tone="danger">Could not load this market. Check your connection.</Notice></>;
-  if (!data?.market) return <PageHeader title="Market unavailable" description="This market does not exist." actions={<Link href="/">Browse markets</Link>} />;
+  if (!view?.market) return <PageHeader title="Market unavailable" description="This market does not exist." actions={<Link href="/">Browse markets</Link>} />;
 
-  const m = data.market;
+  const m = view.market;
   if (!isMarketListed(m)) return <PageHeader title="Market unavailable" description="This market is not ready for trading." actions={<Link href="/">Browse available markets</Link>} />;
   const done = m.status === "resolved";
   const yes = pct(m.price_yes);
-  const first = data.points[0]?.p;
+  const first = view.points[0]?.p;
   const delta = first === undefined ? 0 : Math.round(yes - first);
   const labels = labelOf(m.category, m.subcategory);
 
@@ -64,12 +68,12 @@ export function MarketView() {
           <MarketSeal hash={m.rule_hash} id={m.id} className="detail-seal" />
           <div className="min-w-0">
             <div className="market-detail-meta">
-              <StateBadge status={m.status} caseStage={data.stage} />
+              <StateBadge status={m.status} caseStage={view.stage} />
               <span><Clock size={15} />Closes <span className="num">{formatDateTime(m.close_at)}</span></span>
               <span><Coin size={15} /><span className="num">{formatMoney(m.locked)}</span> {config.tokenSymbol} in play</span>
               {m.outcome && <span className="market-detail-result">Result: {resultWord(m)}</span>}
             </div>
-            <h1 className="market-title">{m.title}</h1>
+            <ViewTransition name={`market-title-${m.id}`} share="morph" default="none"><h1 className="market-title">{m.title}</h1></ViewTransition>
           </div>
         </header>
 
@@ -83,7 +87,7 @@ export function MarketView() {
               )}
               <div className="price-panel-label" aria-live="off">{done ? "final result" : scrub ? <>chance of Yes on <time className="num" dateTime={new Date(scrub.at).toISOString()}>{new Date(scrub.at).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</time></> : "chance of Yes"}</div>
             </div>
-            {!done && data.points.length > 1 && (
+            {!done && view.points.length > 1 && (
               <div className="price-panel-delta num" data-dir={delta > 0 ? "up" : delta < 0 ? "down" : "flat"}>
                 {delta >= 0 ? "+" : ""}
                 {delta} pts over the available history
@@ -92,7 +96,7 @@ export function MarketView() {
           </div>
           {done ? <div className="price-panel-settled" aria-hidden="true" /> : <SplitMeter yes={yes} labels size="lg" />}
           <div className="price-panel-chart">
-            <MarketOutcomeChart points={data.points} onActive={done ? undefined : setScrub} />
+            {pending ? <div className="skeleton chart-skeleton" aria-hidden="true" /> : <MarketOutcomeChart points={view.points} onActive={done ? undefined : setScrub} />}
           </div>
         </section>
 

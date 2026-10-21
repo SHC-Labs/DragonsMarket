@@ -3,6 +3,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { PageLandmark } from "@/components/PageHeader";
 import { ArrowUpRight } from "@/components/icons";
+import { ArenaHero, GameHint } from "@/components/ArenaArt";
 
 export const metadata: Metadata = {
   title: "Partnerships | Dragons Market",
@@ -30,14 +31,15 @@ export default function PartnershipsPage() {
         <p className="partner-lead">Degen Arena is a crypto gaming platform with blackjack, Moonshot and Plinko. We’re preparing a partnership between our communities.</p>
         <a className="partner-primary" href={site} target="_blank" rel="noopener noreferrer">Explore Degen Arena <ArrowUpRight size={20} /></a>
       </div>
-      <figure className="partner-hero-art">
+      <ArenaHero>
         <Image src="/partners/degen-arena/moonshot.webp" alt="Degen Arena’s illustrated mascot riding a red rocket through a star-filled sky" width={3048} height={1828} priority unoptimized />
-      </figure>
+      </ArenaHero>
     </section>
+    <div className="arena-marquee" aria-hidden="true">{[0, 1].map(row => <div key={row} className="arena-marquee-row">{Array.from({ length: 4 }, (_, i) => <span key={i}>{games.map(g => <b key={g.slug}>{g.name}</b>)}</span>)}</div>)}</div>
     <section className="partner-games" aria-labelledby="partner-games-title">
       <div className="partner-section-heading"><h2 id="partner-games-title">Games on Degen Arena</h2><p>Read the rules before you play.</p></div>
       <div className="partner-game-grid">{games.map(game => <a key={game.slug} className="partner-game" href={`${site}/how-it-works/${game.slug}`} target="_blank" rel="noopener noreferrer" aria-label={`${game.name}: read the game guide on Degen Arena (opens in a new tab)`}>
-        <div className="partner-game-art"><Image src={`/partners/degen-arena/${game.slug}.webp`} alt={`${game.name} game artwork by Degen Arena`} width={3048} height={1828} unoptimized /></div>
+        <div className="partner-game-art"><Image src={`/partners/degen-arena/${game.slug}.webp`} alt={`${game.name} game artwork by Degen Arena`} width={3048} height={1828} unoptimized /><GameHint game={game.slug} /></div>
         <div className="partner-game-copy"><h3>{game.name}<ArrowUpRight size={20} /></h3><p>{game.description}</p><span className="partner-guide-link">Read the game guide</span></div>
       </a>)}</div>
     </section>
