@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, ViewTransition } from "react";
+import { useState, useSyncExternalStore, ViewTransition } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { PageHeader } from "@/components/PageHeader";
@@ -16,11 +16,11 @@ import { Clock, Coin } from "@/components/icons";
 import { config } from "@/lib/config";
 import { formatDateTime, formatMoney, nsToMs } from "@/lib/format";
 import { usePoll } from "@/lib/hooks";
-import { getCase, getHistory, getMarket, isMarketListed, listedMarket, listedStage } from "@/lib/market";
+import { getCase, getHistory, getMarket, isMarketListed, listedMarket, listedStage, type MarketView } from "@/lib/market";
 import { pct, resultWord } from "@/lib/probability";
 import { categoryOf, labelOf } from "@/lib/categories";
 
-export function MarketView() {
+export function MarketPageView() {
   const params = useSearchParams();
   const id = params.get("id") ?? "";
   const initialSide = params.get("side") === "no" ? "no" : "yes";
@@ -52,30 +52,12 @@ export function MarketView() {
   const yes = pct(m.price_yes);
   const first = view.points[0]?.p;
   const delta = first === undefined ? 0 : Math.round(yes - first);
-  const labels = labelOf(m.category, m.subcategory);
 
   return (
     <div className="market-detail-page">
-      <nav aria-label="Breadcrumb" className="breadcrumb">
-        <Link href="/">Markets</Link>
-        <span aria-hidden="true">/</span>
-        <Link href={`/?cat=${categoryOf(m)}`}>{labels.category}</Link>
-        <span aria-hidden="true">/</span>
-        <Link href={`/?cat=${categoryOf(m)}&sub=${m.subcategory}`} aria-current="page">{labels.sub}</Link>
-      </nav>
+      <MarketBreadcrumb m={m} />
       <div className="market-detail-layout">
-        <header className="market-detail-header">
-          <MarketSeal hash={m.rule_hash} id={m.id} className="detail-seal" />
-          <div className="min-w-0">
-            <div className="market-detail-meta">
-              <StateBadge status={m.status} caseStage={view.stage} />
-              <span><Clock size={15} />Closes <span className="num">{formatDateTime(m.close_at)}</span></span>
-              <span><Coin size={15} /><span className="num">{formatMoney(m.locked)}</span> {config.tokenSymbol} in play</span>
-              {m.outcome && <span className="market-detail-result">Result: {resultWord(m)}</span>}
-            </div>
-            <ViewTransition name={`market-title-${m.id}`} share="morph" default="none"><h1 className="market-title">{m.title}</h1></ViewTransition>
-          </div>
-        </header>
+        <MarketHeading m={m} stage={view.stage} />
 
         <section className="price-panel" aria-label="Price">
           <div className="price-panel-head">
@@ -111,6 +93,56 @@ export function MarketView() {
       </div>
     </div>
   );
+}
+
+function MarketBreadcrumb({ m }: { m: MarketView }) {
+  const labels = labelOf(m.category, m.subcategory);
+  return (
+        <nav aria-label="Breadcrumb" className="breadcrumb">
+        <Link href="/">Markets</Link>
+        <span aria-hidden="true">/</span>
+        <Link href={`/?cat=${categoryOf(m)}`}>{labels.category}</Link>
+        <span aria-hidden="true">/</span>
+        <Link href={`/?cat=${categoryOf(m)}&sub=${m.subcategory}`} aria-current="page">{labels.sub}</Link>
+      </nav>
+  );
+}
+
+// The headline the card's question morphs into. Shared by the page and its loading fallback, so it exists in the
+// navigation's first commit even though the static export renders the query-driven page one pass later.
+function MarketHeading({ m, stage }: { m: MarketView; stage: string | null }) {
+  return (
+        <header className="market-detail-header">
+          <MarketSeal hash={m.rule_hash} id={m.id} className="detail-seal" />
+          <div className="min-w-0">
+            <div className="market-detail-meta">
+              <StateBadge status={m.status} caseStage={stage} />
+              <span><Clock size={15} />Closes <span className="num">{formatDateTime(m.close_at)}</span></span>
+              <span><Coin size={15} /><span className="num">{formatMoney(m.locked)}</span> {config.tokenSymbol} in play</span>
+              {m.outcome && <span className="market-detail-result">Result: {resultWord(m)}</span>}
+            </div>
+            <ViewTransition name={`market-title-${m.id}`} share="morph" default="none"><h1 className="market-title">{m.title}</h1></ViewTransition>
+          </div>
+        </header>
+  );
+}
+
+const noSubscribe = () => () => {};
+
+// Route fallback: on a client navigation it reads the id from the address and draws the list's copy of the heading.
+export function MarketFallback() {
+  const search = useSyncExternalStore(noSubscribe, () => location.search, () => "");
+  const id = new URLSearchParams(search).get("id") ?? "";
+  const m = id ? listedMarket(id) : null;
+  if (!m) return <><p role="status" className="sr-only">Loading market</p><MarketSkeleton /></>;
+  return <div className="market-detail-page">
+    <MarketBreadcrumb m={m} />
+    <div className="market-detail-layout">
+      <MarketHeading m={m} stage={listedStage(id)} />
+      <div className="skeleton market-skeleton-price" aria-hidden="true" />
+      <div className="market-ticket-slot" aria-hidden="true"><div className="skeleton market-skeleton-ticket" /></div>
+    </div>
+  </div>;
 }
 
 function MarketSkeleton() {
