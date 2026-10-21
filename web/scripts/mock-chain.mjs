@@ -3,6 +3,7 @@
 // same six resolution states. Read-only: transactions are not simulated.
 //   node scripts/mock-chain.mjs            listens on 127.0.0.1:3030 (MOCK_CHAIN_PORT overrides)
 import http from "node:http";
+import { existsSync, writeFileSync } from "node:fs";
 
 const PORT = Number(process.env.MOCK_CHAIN_PORT ?? 3030);
 const MARKET = "market.test.near", ORACLE = "oracle.test.near", TOKEN = "ft.test.near";
@@ -87,6 +88,11 @@ const cases = {
 Object.assign(markets[3], { status: "resolved", outcome: "no" });
 Object.assign(markets[5], { status: "resolved", outcome: "yes" });
 
+// alice holds positions across open, closed and resolved markets so the portfolio has something to show.
+const ALICE = "alice.test.near";
+const holdings = { 0: [42_500_000n, 0n], 3: [0n, 18_000_000n], 5: [25_000_000n, 0n], 6: [12_000_000n, 3_000_000n], 12: [0n, 30_000_000n], 15: [8_750_000n, 0n] };
+const sharesOf = (id, account) => (account === ALICE && holdings[id] ? holdings[id].map(String) : ["0", "0"]);
+
 const pub = ({ history: _, ...m }) => m;
 const quote = (m, side, amount) => {
   const p = Number(side === "yes" ? m.price_yes : m.price_no) / 1e6;
@@ -99,9 +105,9 @@ const views = {
     list_markets: ({ from_index = "0", limit = "50" }) => markets.slice(Number(from_index), Number(from_index) + Number(limit)).map(pub),
     get_market: ({ market_id }) => (markets[Number(market_id)] ? pub(markets[Number(market_id)]) : null),
     get_history: ({ market_id }) => markets[Number(market_id)]?.history ?? [],
-    get_balance: () => "0",
-    get_shares: () => ["0", "0"],
-    is_registered: () => false,
+    get_balance: ({ account_id }) => (account_id === ALICE ? String(126_400_000n) : "0"),
+    get_shares: ({ market_id, account_id }) => sharesOf(Number(market_id), account_id),
+    is_registered: ({ account_id }) => account_id === ALICE,
     quote_buy: ({ market_id, side, amount }) => {
       const q = quote(markets[Number(market_id)], side, BigInt(amount));
       return { shares_out: String(BigInt(Math.floor(Number(q.net) / q.p))), fee: q.fee };
@@ -117,7 +123,7 @@ const views = {
     config: () => ({ bond: String(50n * USD), window_ns: String(600n * SEC), panel_deadline_ns: String(1800n * SEC), council: "council.test.near", jury_size: 3, draw_delay_blocks: "5" }),
     claimable_of: () => "0",
   },
-  [TOKEN]: { ft_balance_of: () => "0" },
+  [TOKEN]: { ft_balance_of: ({ account_id }) => (account_id === ALICE ? String(2_874_250_000n) : "0") },
 };
 
 function handle(body) {
@@ -131,6 +137,14 @@ function handle(body) {
   const out = Buffer.from(JSON.stringify(fn(args)));
   return { result: { result: [...out], logs: [], block_height: 1, block_hash: "mock" } };
 }
+
+// The e2e specs read the chain layout from contracts/dev-chain.json; write one unless a real chain already did.
+const layout = new URL("../../contracts/dev-chain.json", import.meta.url);
+if (!existsSync(layout)) writeFileSync(layout, JSON.stringify({
+  mock: true, rpc: `http://127.0.0.1:${PORT}`, market: MARKET, oracle: ORACLE, token: TOKEN, count: markets.length,
+  markets: { open: 0, proposed: 1, disputed: 2, verdict: 3, nobody: 4, final_yes: 5 },
+  accounts: { owner: "owner.test.near", alice: ALICE, bob: "bob.test.near", carol: "carol.test.near", dave: "dave.test.near", jurors },
+}, null, 2));
 
 http.createServer((req, res) => {
   let raw = "";
