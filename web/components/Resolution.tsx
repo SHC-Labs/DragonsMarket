@@ -17,7 +17,7 @@ export function Resolution({ market }: { market: MarketView }) {
   const evidence = evidenceUrl(c?.evidence ?? "");
   return <section aria-labelledby="res-h">
     <h2 id="res-h" className="mb-3 mt-8 border-b border-border pb-2 text-xs font-medium uppercase tracking-[0.12em] text-muted">Resolution</h2>
-    {market.status === "open" ? <p className="text-muted">Trading closes on {formatDateTime(market.close_at)}. Result information will appear here.</p> : <>
+    {market.status === "open" ? <p className="text-muted">Trading closes on {formatDateTime(market.close_at)}. Follow the proposed answer and final result here.</p> : <>
       {record.loading && !c && <p role="status" className="text-muted">Loading the result record…</p>}
       {record.error && <p role="alert" className="text-muted">The result record is unavailable. <button type="button" className="underline" onClick={record.reload}>Retry</button></p>}
       {c && <div className="resolution-record rounded-md border border-border bg-surface p-4">
@@ -26,10 +26,10 @@ export function Resolution({ market }: { market: MarketView }) {
         {evidence && <a href={evidence.href} target="_blank" rel="noopener noreferrer" className="text-council underline">Read the evidence · {evidence?.hostname} ↗</a>}
         {c.final_outcome && <p className="resolution-verdict">Final answer: <strong>{WORD[c.final_outcome]}</strong></p>}
         {Array.isArray(c.votes) && c.votes.length > 0 && <><h3 className="mt-4 text-base">Public votes</h3><ul>{c.votes.map((vote, i) => <li key={`${vote.juror}-${i}`} className="mb-3"><span className="break-all num">{vote.juror}</span><p>{WORD[vote.outcome]}{vote.reason ? `: ${vote.reason}` : ""}</p></li>)}</ul></>}
-        {c.stage === "disputed" && <p className="text-muted">Jury details and dispute actions will appear here when they’re available.</p>}
+        {c.stage === "disputed" && <p className="text-muted">Jury details and dispute actions are not available here yet.</p>}
       </div>}
       {!record.loading && !record.error && !c && <p className="text-muted">No result has been published yet.</p>}
     </>}
-    <p className="mt-4 text-sm text-muted">Result proposals, challenges and voting aren’t available yet.</p>
+    <p className="mt-4 text-sm text-muted">You cannot submit proposals, challenge results or vote on this site yet.</p>
   </section>;
 }

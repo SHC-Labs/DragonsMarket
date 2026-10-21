@@ -6,10 +6,15 @@ import os from "node:os";
 import path from "node:path";
 import {
   advanceCursor, dueActions, formatNear, juryProblems, marginReport, nearToYocto, readCursor, readKeyFile, refuseKeyFlags,
-  resolveKeys, secondJurySize, storageMargin, writeCursor,
+  resolveKeys, secondJurySize, storageMargin, writeCursor, refuseRetiredController,
 } from "./keeper.mjs";
 
 const NOW = 1_000_000n;
+
+test("retired controller flags are rejected before any RPC call", () => {
+  assert.throws(() => refuseRetiredController({ governance: "old.example.near" }), /retired/);
+  assert.doesNotThrow(() => refuseRetiredController({ treasury: "example.sputnik-dao.near" }));
+});
 const base = {
   now: NOW, height: 100n, markets: [{ id: "0", outcome: null, resolve_by: "9000000" }], locked: {}, feesDue: 0n, minSweep: 1_000n,
 };

@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { PowerUpLink, PowerUpVisual } from "./PowerUp";
 import type { CSSProperties } from "react";
 import { MarketOutcomeChart } from "./MarketOutcomeChart";
-import { type Pt } from "./PriceChart";
+import { type Pt } from "@/lib/history";
 import { StateBadge } from "./ui";
 import { MarketIcon } from "./MarketIcon";
 import { labelOf } from "@/lib/categories";
@@ -25,7 +26,7 @@ export function FeaturedMarket({ market: m, stage, points }: { market: MarketVie
   const category=labelOf(m.category,m.subcategory);
   return <section data-testid="featured-market" className="featured-panel" aria-label="Featured market">
     <div className="feature-market-title"><MarketIcon category={m.category} sub={m.subcategory}/><div><p>{category.category} · {category.sub}</p><h2><Link href={`/market?id=${m.id}`}>{m.title}</Link></h2></div><StateBadge status={m.status} caseStage={stage}/></div>
-    <div className="feature-outcome-layout"><div className="feature-outcomes">{done ? <p className="featured-price">Result: {resultWord(m)}</p> : <>{(["yes","no"] as const).map(side=><Link key={side} href={`/market?id=${m.id}&side=${side}`} className={`feature-outcome-row feature-outcome-${side}`}><span><i className={`outcome-dot outcome-${side}`}/>{side==="yes"?"Yes":"No"}</span><strong>{side==="yes"?yes:100-yes}%</strong><small>{m.status==="open"?"Buy ↗":"View ↗"}</small></Link>)}</>}</div><MarketOutcomeChart points={points} compact/></div>
+    <div className="feature-outcome-layout"><div className="feature-outcomes">{done ? <p className="featured-price">Result: {resultWord(m)}</p> : <>{(["yes","no"] as const).map(side=><PowerUpLink key={side} href={`/market?id=${m.id}&side=${side}`} className={`feature-outcome-row feature-outcome-${side} power-up-target`}><PowerUpVisual /><span><i className={`outcome-dot outcome-${side}`}/>{side==="yes"?"Yes":"No"}</span><strong>{side==="yes"?yes:100-yes}%</strong><small>{m.status==="open"?"Buy ↗":"View ↗"}</small></PowerUpLink>)}</>}</div><MarketOutcomeChart points={points} compact/></div>
     <div className="feature-card-footer"><span>{formatMoney(m.locked)} {config.tokenSymbol} in play</span><span>Closes {formatDateTime(m.close_at)}</span></div>
   </section>;
 }

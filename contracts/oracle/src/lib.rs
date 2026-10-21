@@ -222,7 +222,7 @@ pub struct OracleContract {
     // Set by propose_owner. Ownership moves only when this account calls accept_owner.
     pending_owner: Option<AccountId>,
     // The fast key for protective changes: it can remove a price publisher at once. Adding one, and changing how many
-    // must agree, stay with the owner, which is governance.
+    // must agree, stay with the owner, which is the DAO.
     operator: AccountId,
     market: AccountId,
     bond_token: AccountId,
@@ -243,8 +243,8 @@ pub struct OracleContract {
     // The keys that sign prices, and how many of them must sign the same price for it to count.
     publishers: Vec<PublicKey>,
     price_threshold: u32,
-    // Where the challenger's half bond goes when neither jury decided and no juror revealed. The owner is governance, which
-    // has no use for a token flow, so this is normally the business wallet.
+    // Where the challenger's half bond goes when neither jury decided and no juror revealed. The owner is the DAO, which
+    // takes no part in the token flow, so this is normally the business wallet.
     no_decision_recipient: AccountId,
     markets: LookupMap<u64, MarketInfo>,
     cases: LookupMap<u64, Case>,
@@ -434,8 +434,9 @@ impl OracleContract {
         staged.code_hash
     }
 
-    // Owner only, which is the governance contract, so code changes wait out its vote and timelock. The deploy and
-    // migrate are one batch: a migrate that panics puts the old code back. Attach at least 100 TGas.
+    // Owner only, which is the DAO. SputnikDAO has no delay between approval and execution, so the delay a code change
+    // should wait out is a separate requirement (R-07) that is not built yet. The deploy and migrate are one batch: a
+    // migrate that panics puts the old code back. Attach at least 100 TGas.
     pub fn upgrade(&mut self, code_hash: Base58CryptoHash) -> Promise {
         upgrade::require_upgrade_gas();
         self.only_owner();
@@ -546,7 +547,7 @@ impl OracleContract {
         self.no_decision_recipient = recipient;
     }
 
-    // Adding a publisher grants power over prices, so it is the owner's (a governance vote and its timelock).
+    // Adding a publisher grants power over prices, so it is the owner's (a DAO proposal).
     pub fn add_publisher(&mut self, key: PublicKey) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
         require!(key.curve_type() == CurveType::ED25519, "publishers use ed25519 keys");
@@ -1830,7 +1831,7 @@ mod tests {
     }
 
     // With nobody having revealed, the jurors' half is held by the no-decision recipient, so it still leaves the two
-    // parties, and it does not land in the owner's claimable, which is governance's.
+    // parties, and it does not land in the owner's claimable, which is the DAO's.
     #[test]
     fn when_no_juror_revealed_the_no_decision_recipient_holds_the_jurors_half() {
         let mut o = oracle_with_bond(BOND);

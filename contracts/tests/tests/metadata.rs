@@ -26,7 +26,7 @@ fn standards(metadata: &Value) -> Vec<(String, String)> {
 
 #[tokio::test]
 async fn every_contract_names_its_source_and_the_standards_it_follows() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
+    let w = setup().await?;
     let nep = |name: &str, version: &str| (name.to_string(), version.to_string());
     let cases = [
         (
@@ -35,7 +35,6 @@ async fn every_contract_names_its_source_and_the_standards_it_follows() -> anyho
         ),
         (&w.oracle, vec![nep("nep297", "1.0.0"), nep("nep330", "1.3.0")]),
         (&w.council, vec![nep("nep297", "1.0.0"), nep("nep330", "1.3.0")]),
-        (&g.contract, vec![nep("nep297", "1.0.0"), nep("nep330", "1.3.0")]),
     ];
     for (contract, want) in cases {
         let m = metadata(contract).await;

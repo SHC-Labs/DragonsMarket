@@ -1,9 +1,10 @@
 // Proves what the design assumes about the NEAR Intents verifier, using the real contract built from
 // github.com/near/intents at 16d04f6ec4401263f8914638710260da50bb46b0 (see contracts/INTENTS-PROOF.md for the build).
-// The verifier wasm is not committed. Without it at target/intents/defuse.wasm every test here prints a notice and passes.
+// The verifier wasm is not committed. Without it at target/intents/defuse.wasm every test here fails with the build recipe, and
+// CI must build it first.
 mod common;
 use base64::Engine;
-use common::{wasm, USD};
+use common::{verifier_wasm, wasm, USD};
 use ed25519_dalek::{Signer, SigningKey};
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
@@ -11,7 +12,6 @@ use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
 
 const NEP413_PREFIX_TAG: u32 = 2_147_484_061;
 const STORAGE_PRICE_PER_BYTE: u128 = 10_000_000_000_000_000_000;
@@ -33,23 +33,9 @@ impl Env {
     }
 }
 
-fn verifier_wasm() -> Option<Vec<u8>> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/intents/defuse.wasm");
-    let bytes = std::fs::read(&p).ok();
-    if bytes.is_none() {
-        eprintln!(
-            "skipped: the verifier wasm is missing at {p:?}, build it as described in contracts/INTENTS-PROOF.md"
-        );
-    }
-    bytes
-}
-
-async fn setup() -> anyhow::Result<Option<Env>> {
-    let Some(verifier_code) = verifier_wasm() else {
-        return Ok(None);
-    };
+async fn setup() -> anyhow::Result<Env> {
     let worker = near_workspaces::sandbox().await?;
-    let verifier = worker.dev_deploy(&verifier_code).await?;
+    let verifier = worker.dev_deploy(&verifier_wasm()).await?;
     let usdc = worker.dev_deploy(&wasm("mock_ft")).await?;
     let recv = worker.dev_deploy(&wasm("mock_mt_receiver")).await?;
     let owner = worker.dev_create_account().await?;
@@ -89,7 +75,7 @@ async fn setup() -> anyhow::Result<Option<Env>> {
             .await?
             .into_result()?;
     }
-    Ok(Some(Env {
+    Ok(Env {
         worker,
         verifier,
         usdc,
@@ -97,16 +83,7 @@ async fn setup() -> anyhow::Result<Option<Env>> {
         owner,
         alice,
         bob,
-    }))
-}
-
-macro_rules! env_or_skip {
-    () => {
-        match setup().await? {
-            Some(e) => e,
-            None => return Ok(()),
-        }
-    };
+    })
 }
 
 async fn deposit(e: &Env, from: &Account, amount: u128, msg: &str) -> anyhow::Result<ExecutionFinalResult> {
@@ -217,7 +194,7 @@ fn touched(r: &ExecutionFinalResult, who: &AccountId) -> bool {
 // Claim a: ft_transfer_call with a msg naming the recipient credits nep141:<token> to that account.
 #[tokio::test]
 async fn deposit_credits_the_account_named_in_msg() -> anyhow::Result<()> {
-    let e = env_or_skip!();
+    let e = setup().await?;
     let r = deposit(&e, &e.alice, 10 * USD, e.bob.id().as_str()).await?;
     assert_clean("deposit", &r);
     assert_eq!(
@@ -261,7 +238,7 @@ async fn deposit_credits_the_account_named_in_msg() -> anyhow::Result<()> {
 // Claim b: no notification on deposit in 0.4.5, whatever the msg asks for.
 #[tokio::test]
 async fn deposit_never_notifies_the_receiver() -> anyhow::Result<()> {
-    let e = env_or_skip!();
+    let e = setup().await?;
     let r = deposit(&e, &e.alice, 10 * USD, e.recv.id().as_str()).await?;
     assert_clean("deposit to a contract", &r);
     assert!(!touched(&r, e.recv.id()), "no receipt ran on the receiver");
@@ -289,7 +266,7 @@ async fn deposit_never_notifies_the_receiver() -> anyhow::Result<()> {
 // Claim c: mt_transfer_call notifies with the true sender, and the resolve step refunds on a bad receiver.
 #[tokio::test]
 async fn transfer_call_notifies_and_refunds_on_a_bad_receiver() -> anyhow::Result<()> {
-    let e = env_or_skip!();
+    let e = setup().await?;
     let token = e.token_id();
     deposit(&e, &e.alice, 100 * USD, "").await?.into_result()?;
 
@@ -373,7 +350,7 @@ async fn transfer_call_notifies_and_refunds_on_a_bad_receiver() -> anyhow::Resul
 // call. Gas is measured on the way.
 #[tokio::test]
 async fn keyless_contract_pays_out_by_cross_contract_call() -> anyhow::Result<()> {
-    let e = env_or_skip!();
+    let e = setup().await?;
     let token = e.token_id();
     let sink = e.worker.dev_deploy(&wasm("mock_mt_receiver")).await?;
     deposit(&e, &e.alice, 100 * USD, e.recv.id().as_str())
@@ -501,7 +478,7 @@ async fn keyless_contract_pays_out_by_cross_contract_call() -> anyhow::Result<()
 // How little gas each call survives with, for a receiver that does almost nothing.
 #[tokio::test]
 async fn gas_floors_of_the_verifier_calls() -> anyhow::Result<()> {
-    let e = env_or_skip!();
+    let e = setup().await?;
     deposit(&e, &e.alice, 100 * USD, "").await?.into_result()?;
 
     let mut floor_transfer = None;
@@ -599,7 +576,7 @@ fn signed_transfer(
 // Claim f: a signed transfer with a notification, relayed by anyone, calls mt_on_transfer with the signer as sender.
 #[tokio::test]
 async fn signed_transfer_notifies_with_the_signer_as_sender() -> anyhow::Result<()> {
-    let e = env_or_skip!();
+    let e = setup().await?;
     let key = SigningKey::from_bytes(&[7u8; 32]);
     let signer = implicit_id(&key);
     deposit(&e, &e.alice, 100 * USD, &signer).await?.into_result()?;
@@ -708,7 +685,7 @@ async fn signed_transfer_notifies_with_the_signer_as_sender() -> anyhow::Result<
 // Claim g: receiving needs no registration, and the verifier carries the storage.
 #[tokio::test]
 async fn receiving_needs_no_storage_registration() -> anyhow::Result<()> {
-    let e = env_or_skip!();
+    let e = setup().await?;
     deposit(&e, &e.alice, 100 * USD, "").await?.into_result()?;
 
     let fresh: AccountId = "never-registered.test.near".parse()?;
@@ -759,7 +736,7 @@ async fn receiving_needs_no_storage_registration() -> anyhow::Result<()> {
 // Claim h: money sent without a callback shows up as a balance the receiver never accounted for.
 #[tokio::test]
 async fn unattributed_surplus_is_visible_without_a_callback() -> anyhow::Result<()> {
-    let e = env_or_skip!();
+    let e = setup().await?;
     deposit(&e, &e.alice, 25 * USD, e.recv.id().as_str())
         .await?
         .into_result()?;
@@ -791,7 +768,7 @@ async fn unattributed_surplus_is_visible_without_a_callback() -> anyhow::Result<
 // Token id formats: only the nep141:<contract> form is a balance.
 #[tokio::test]
 async fn token_id_must_be_the_nep141_form() -> anyhow::Result<()> {
-    let e = env_or_skip!();
+    let e = setup().await?;
     deposit(&e, &e.alice, 10 * USD, "").await?.into_result()?;
     assert_eq!(balance_of_token(&e, e.token_id()).await?, (10 * USD).to_string());
     assert_eq!(
@@ -819,7 +796,7 @@ async fn token_id_must_be_the_nep141_form() -> anyhow::Result<()> {
 // The emergency powers the design has to disclose: a pause or an account lock stops payouts, and neither stops receipts.
 #[tokio::test]
 async fn pause_and_lock_stop_payouts_but_not_receipts() -> anyhow::Result<()> {
-    let e = env_or_skip!();
+    let e = setup().await?;
     deposit(&e, &e.alice, 100 * USD, e.recv.id().as_str())
         .await?
         .into_result()?;

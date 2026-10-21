@@ -293,7 +293,7 @@ async fn a_case_whose_jury_is_never_drawn_is_a_no_decision_twice_and_ends_void()
     assert_eq!(claimable(&w, w.business.id()).await, BOND / 2);
     assert_eq!(claimable(&w, w.owner.id()).await, 0, "the owner is not paid");
 
-    let before = ft_balance(&w, w.business.id()).await;
+    let before = holdings(&w, w.business.id()).await;
     w.business
         .call(w.oracle.id(), "withdraw_bond")
         .deposit(near_workspaces::types::NearToken::from_yoctonear(1))
@@ -301,6 +301,6 @@ async fn a_case_whose_jury_is_never_drawn_is_a_no_decision_twice_and_ends_void()
         .transact()
         .await?
         .into_result()?;
-    assert_eq!(ft_balance(&w, w.business.id()).await - before, BOND / 2);
+    assert_eq!(holdings(&w, w.business.id()).await - before, BOND / 2);
     Ok(())
 }

@@ -2,6 +2,7 @@
 # Starts the Next dev server on :3400 against the local dev chain (contracts/dev-chain.json). Stops after 2 hours by default; DEV_SERVER_SECS=0 keeps it running.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/use-node.sh
 chain=../contracts/dev-chain.json
 read_key() { python3 -I -c "import json; print(json.load(open('$chain'))$1)"; }
 export NEXT_PUBLIC_NETWORK=sandbox

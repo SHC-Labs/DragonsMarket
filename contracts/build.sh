@@ -2,7 +2,7 @@
 # Builds the wasm files the integration tests load: target/near/<crate>/<crate>.wasm
 #
 #   ./build.sh                 the local toolchain, for the sandbox tests. Builds the mocks too.
-#   ./build.sh --reproducible  the four contracts that get deployed, built inside the docker image pinned in each
+#   ./build.sh --reproducible  the three application contracts that get deployed, built inside the docker image pinned in each
 #                              Cargo.toml, with the sha256 of each wasm written to target/near/HASHES.txt. Needs docker
 #                              and every change committed: the build uses the committed code, not the working tree.
 set -euo pipefail
@@ -23,7 +23,7 @@ if [ -n "${reproducible:-}" ]; then
   hashes=target/near/HASHES.txt
   mkdir -p target/near
   : >"$hashes"
-  for c in council governance market oracle; do
+  for c in council market oracle; do
     (cd "$c" && cargo near build reproducible-wasm)
     crate=${c//-/_}
     (cd "target/near/$crate" && sha256sum "$crate.wasm") >>"$hashes"
@@ -33,7 +33,7 @@ if [ -n "${reproducible:-}" ]; then
 fi
 
 log=$(mktemp)
-for c in mock-ft mock-nft mock-mt-receiver council governance market oracle; do
+for c in mock-ft mock-nft mock-mt-receiver council market oracle; do
   if (cd "$c" && cargo near build non-reproducible-wasm >"$log" 2>&1); then
     echo "built $c"
   else

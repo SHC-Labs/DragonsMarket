@@ -1,11 +1,12 @@
 "use client";
 import Link from "next/link";
+import { PowerUpLink, PowerUpVisual } from "./PowerUp";
 import type { CSSProperties, PointerEvent } from "react";
 import { useState } from "react";
 import { Star, Share2 } from "@/components/icons";
 import { useWallet } from "./WalletProvider";
 import { useWatchlist } from "@/lib/watchlist";
-import { type Pt } from "./PriceChart";
+import { type Pt } from "@/lib/history";
 import { StateBadge } from "./ui";
 import { MarketIcon } from "./MarketIcon";
 import { labelOf } from "@/lib/categories";
@@ -29,10 +30,10 @@ function OutcomeRows({ market: m }: { market: MarketView }) {
   return <div className="market-outcome-rows">{(["yes", "no"] as const).map(side => {
     const chance = pct(side === "yes" ? m.price_yes : m.price_no);
     const label = side === "yes" ? "Yes" : "No";
-    return <Link key={side} href={`/market?id=${m.id}&side=${side}`} className={`market-outcome-option market-outcome-${side}`} aria-label={`${m.status === "open" ? "Buy" : "View"} ${label}, ${chance}% chance, ${m.title}`}>
+    return <PowerUpLink key={side} href={`/market?id=${m.id}&side=${side}`} className={`market-outcome-option market-outcome-${side}`} aria-label={`${m.status === "open" ? "Buy" : "View"} ${label}, ${chance}% chance, ${m.title}`}>
       <span className="market-outcome-label">{label}<span className="market-outcome-track" aria-hidden="true"><span style={{ width: `${chance}%` }} /></span></span>
-      <span className="market-outcome-chance num">{chance}%</span>
-    </Link>;
+      <span className="market-outcome-chance power-up-target num"><PowerUpVisual />{chance}%</span>
+    </PowerUpLink>;
   })}</div>;
 }
 
@@ -83,7 +84,7 @@ export function MarketCard({ market: m, stage, index }: { market: MarketView; st
           <OutcomeRows market={m} />
         ) : (
           <div className="rounded-md border border-dashed border-border px-3 py-2.5 text-sm text-muted">
-            Trading stopped. {stage === "disputed" ? "The Council is deciding." : stage === "proposed" ? "An answer is waiting for a challenge." : "Waiting for an answer."}
+            Trading stopped. {stage === "disputed" ? "The Council is deciding." : stage === "proposed" ? "An answer has been proposed." : "Waiting for an answer."}
           </div>
         )}
       </div>

@@ -53,9 +53,9 @@ async fn an_unanswered_market_is_voided_by_anyone_after_its_deadline_so_money_is
 
     // Past the deadline a proposal could not finish any more, so it is refused and the bond comes back.
     skip_secs(&w.worker, 620).await;
-    let before = ft_balance(&w, w.carol.id()).await;
+    let before = holdings(&w, w.carol.id()).await;
     let _ = propose(&w, &w.carol, id, "yes").await;
-    assert_eq!(ft_balance(&w, w.carol.id()).await, before, "a late bond is refunded");
+    assert_eq!(holdings(&w, w.carol.id()).await, before, "a late bond is refunded");
     assert!(case_json(&w, id).await.is_null());
 
     // The market's own void is still shut: the deadline has passed but the grace period has not.
@@ -399,10 +399,10 @@ async fn a_late_proposal_is_refused_when_apply_could_not_land_but_an_early_one_o
     );
 
     skip_secs(&w.worker, 180).await;
-    let before = ft_balance(&w, w.carol.id()).await;
+    let before = holdings(&w, w.carol.id()).await;
     let _ = propose(&w, &w.carol, late, "yes").await;
     assert_eq!(
-        ft_balance(&w, w.carol.id()).await,
+        holdings(&w, w.carol.id()).await,
         before,
         "a bond with no room for apply() is refunded"
     );
@@ -455,10 +455,10 @@ async fn a_market_that_leaves_too_little_time_to_resolve_never_opens() -> anyhow
         false,
         "retrying cannot change the dates"
     );
-    let before = ft_balance(&w, w.owner.id()).await;
+    let before = holdings(&w, w.owner.id()).await;
     ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{too_short}")).await?;
     assert_eq!(
-        ft_balance(&w, w.owner.id()).await,
+        holdings(&w, w.owner.id()).await,
         before,
         "the seed is refunded: the market cannot be funded or traded"
     );
@@ -484,7 +484,7 @@ async fn oversized_evidence_and_reasons_are_refused() -> anyhow::Result<()> {
     skip_secs(&w.worker, 130).await;
 
     // A 600 byte evidence link is refused and the bond is refunded.
-    let before = ft_balance(&w, w.carol.id()).await;
+    let before = holdings(&w, w.carol.id()).await;
     let long = "a".repeat(600);
     let _ = ft_call(
         &w,
@@ -494,7 +494,7 @@ async fn oversized_evidence_and_reasons_are_refused() -> anyhow::Result<()> {
         &format!("propose:{id}:yes:https://example.com/{long}"),
     )
     .await;
-    assert_eq!(ft_balance(&w, w.carol.id()).await, before);
+    assert_eq!(holdings(&w, w.carol.id()).await, before);
     assert!(case_json(&w, id).await.is_null());
 
     // A normal one works, and a 1200 byte juror reason or a 65 byte salt is refused.
@@ -622,9 +622,9 @@ async fn a_market_cannot_be_seeded_once_it_has_closed() -> anyhow::Result<()> {
     let w = setup().await?;
     let id = create_market(&w, 20, 3_600).await?;
     skip_secs(&w.worker, 30).await;
-    let before = ft_balance(&w, w.owner.id()).await;
+    let before = holdings(&w, w.owner.id()).await;
     ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{id}")).await?;
-    assert_eq!(ft_balance(&w, w.owner.id()).await, before, "the seed came back");
+    assert_eq!(holdings(&w, w.owner.id()).await, before, "the seed came back");
     assert_eq!(u(&market_json(&w, id).await["locked"]), 0);
     Ok(())
 }

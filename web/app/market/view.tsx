@@ -4,9 +4,8 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { PageHeader } from "@/components/PageHeader";
 import { Notice, StateBadge } from "@/components/ui";
-import type { Pt } from "@/components/PriceChart";
+import type { Pt } from "@/lib/history";
 import { MarketOutcomeChart } from "@/components/MarketOutcomeChart";
-import { ProbBar } from "@/components/MarketCard";
 import { RulesBlock } from "@/components/RulesBlock";
 import { Resolution } from "@/components/Resolution";
 import { MarketIcon } from "@/components/MarketIcon";
@@ -70,37 +69,38 @@ export function MarketView() {
             </div>
           </header>
 
-          <section className="rise mt-8 rounded-xl border border-border bg-surface/60 p-5 sm:p-7" style={{ "--i": 2 } as React.CSSProperties} aria-label="Price">
+          <section className="market-detail-price rise rounded-xl border border-border bg-surface/60" style={{ "--i": 2 } as React.CSSProperties} aria-label="Price">
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div className="flex items-end gap-3">
                 {done ? (
-                  <div className="display text-[6rem] leading-[5.25rem]">{resultWord(m)}</div>
+                  <div className="market-detail-value">{resultWord(m)}</div>
                 ) : (
-                  <div className="display text-[6.5rem] leading-[5.5rem]">
+                  <div className="market-detail-value">
                     {yes}
-                    <span className="text-[3rem] text-muted">%</span>
+                    <span className="market-detail-unit">%</span>
                   </div>
                 )}
                 <div className="pb-2 text-sm text-muted">{done ? "final result" : "chance of Yes"}</div>
               </div>
               {!done && data.points.length > 1 && (
-                <div className={`num pb-2 text-sm ${delta >= 0 ? "text-yes" : "text-no"}`}>
+                <div className={`market-detail-delta num ${delta >= 0 ? "text-yes" : "text-no"}`}>
                   {delta >= 0 ? "+" : ""}
-                  {delta} pts over the available history
+                  {delta} {Math.abs(delta) === 1 ? "point" : "points"} since opening
                 </div>
               )}
             </div>
-            <div className="mt-5">{done ? <div className="h-1.5 rounded-full bg-border" /> : <ProbBar yes={yes} />}</div>
-            <div className="mt-7">
+            <div className="market-detail-chart">
               <MarketOutcomeChart points={data.points} />
             </div>
           </section>
 
+        </div>
+        <div className="market-detail-ticket rise lg:sticky lg:top-24" style={{ "--i": 3 } as React.CSSProperties}>
+          <TradeTicket market={m} initialSide={initialSide} />
+        </div>
+        <div className="market-detail-rules min-w-0 [overflow-wrap:anywhere]">
           <RulesBlock market={m} />
           <Resolution market={m} />
-        </div>
-        <div className="rise lg:sticky lg:top-24" style={{ "--i": 3 } as React.CSSProperties}>
-          <TradeTicket market={m} initialSide={initialSide} />
         </div>
       </div>
     </div>

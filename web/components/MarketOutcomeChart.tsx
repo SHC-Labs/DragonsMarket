@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { LinePath } from "@visx/shape";
 import { scaleLinear } from "@visx/scale";
 import { curveLinear } from "@visx/curve";
-import type { Pt } from "./PriceChart";
+import type { Pt } from "@/lib/history";
 export function MarketOutcomeChart({points,compact=false}:{points:Pt[];compact?:boolean}) {
  const [index,setIndex]=useState<number|null>(null);
  const svgRef=useRef<SVGSVGElement>(null);
@@ -19,7 +19,7 @@ export function MarketOutcomeChart({points,compact=false}:{points:Pt[];compact?:
  const W=size.width,H=size.height,L=8,R=Math.max(50,W-70),T=14,B=Math.max(40,H-30);
  const x=scaleLinear({domain:[points[0].at,Math.max(points[0].at+1,points[points.length-1].at)],range:[L,R]});const y=scaleLinear({domain:[min,max],range:[B,T]});
  const active=points[Math.min(index??points.length-1,points.length-1)],last=points[points.length-1];
- let yesY=y(last.p),noY=y(100-last.p);if(Math.abs(yesY-noY)<38){const center=(yesY+noY)/2;yesY=center-21;noY=center+21;}
+ let yesY=y(last.p),noY=y(100-last.p);if(Math.abs(yesY-noY)<38){const center=(yesY+noY)/2,direction=yesY<=noY?-1:1;yesY=center+direction*21;noY=center-direction*21;}
  const fmt=(at:number)=>new Date(at).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"});
  return <figure className="outcome-chart" aria-label="Yes and No price history">
  <svg ref={svgRef} preserveAspectRatio="none" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Yes ${last.p.toFixed(1)} percent, No ${(100-last.p).toFixed(1)} percent. Price history from ${fmt(points[0].at)} to ${fmt(last.at)}.`} onPointerMove={e=>{const r=e.currentTarget.getBoundingClientRect();const at=x.invert((e.clientX-r.left)/r.width*W);let i=0;points.forEach((p,n)=>{if(p.at<=at)i=n});setIndex(i);}} onPointerLeave={()=>setIndex(null)}>

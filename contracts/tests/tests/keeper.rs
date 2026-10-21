@@ -318,7 +318,7 @@ async fn the_keeper_sweeps_fees_once_they_reach_the_minimum_with_keys_scoped_to_
         "the sweep paid everything out: {left} {revenue_due} {business_due}"
     );
     assert!(
-        ft_balance(&w, w.business.id()).await >= collected * 3 / 4 - 1,
+        holdings(&w, w.business.id()).await >= collected * 3 / 4 - 1,
         "the business wallet got its 75%"
     );
 
@@ -407,14 +407,15 @@ async fn the_deploy_check_reports_whether_the_council_can_seat_a_jury_and_a_seco
 #[tokio::test]
 async fn the_deploy_check_reports_what_each_account_has_left_after_storage_and_warns_under_the_margin(
 ) -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
-    let governance = g.contract.id().to_string();
-    let (out, _) = keeper(&w, &["check", "--governance", &governance]).await;
+    let w = setup().await?;
+    let treasury = w.worker.dev_create_account().await?;
+    let treasury_id = treasury.id().to_string();
+    let (out, _) = keeper(&w, &["check", "--treasury", &treasury_id]).await;
     for (name, id) in [
         ("market", w.market.id()),
         ("oracle", w.oracle.id()),
         ("council", w.council.id()),
-        ("governance", g.contract.id()),
+        ("treasury", treasury.id()),
     ] {
         let line = out
             .lines()
@@ -431,17 +432,17 @@ async fn the_deploy_check_reports_what_each_account_has_left_after_storage_and_w
     );
 
     // The same accounts under a margin no sandbox account has: each one is a problem.
-    let (out, ok) = keeper(&w, &["check", "--governance", &governance, "--min-margin", "1000"]).await;
+    let (out, ok) = keeper(&w, &["check", "--treasury", &treasury_id, "--min-margin", "1000"]).await;
     assert!(!ok, "{out}");
-    for name in ["market", "oracle", "council", "governance"] {
+    for name in ["market", "oracle", "council", "treasury"] {
         assert!(
             out.contains(&format!("PROBLEM: {name} ")) && out.contains("under the 1000.000 NEAR margin"),
             "{name} missing from:\n{out}"
         );
     }
 
-    // Without --governance only the three accounts are reported.
+    // Without --treasury only the three accounts are reported.
     let (out, _) = keeper(&w, &["check"]).await;
-    assert!(!out.contains("governance "), "{out}");
+    assert!(!out.contains("treasury "), "{out}");
     Ok(())
 }

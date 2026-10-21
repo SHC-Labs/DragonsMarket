@@ -1,4 +1,4 @@
-// The upgrade path market, oracle, council and governance share, and the gas floor check they all use. Each
+// The upgrade path market, oracle and council share, and the gas floor check they all use. Each
 // contract keeps its own methods (stage_code, upgrade, migrate, seal) and its own events and owner check, and calls these
 // for the storage, gas and promise work. An upgrade is two steps so the code can be read before it runs: anyone stages a
 // wasm, and only the owner can then deploy it by its hash.

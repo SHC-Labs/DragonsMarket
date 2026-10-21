@@ -19,20 +19,20 @@ async function loadCouncil() {
 }
 
 const process = [
-  ["The rules are fixed first", "Before trading opens, each market publishes its question, result source, deadline and Void policy. These are the rules the jury must follow."],
+  ["The rules are fixed first", "Each market publishes its question, result source, deadline and cancellation rules before trading opens. Jurors must use those rules to decide the case."],
   ["An answer is proposed", "After the market closes, a proposer submits an answer, evidence and a bond. If nobody challenges it within the window, it can be finalized."],
-  ["A challenge brings in the jury", "A challenger submits a different answer and an equal bond. A jury is drawn from eligible staked Council seats for that case."],
-  ["Jurors commit, then reveal", "Jurors first submit a hidden commitment. They then reveal their vote and reason in a separate window. Votes choose between the proposed and challenged answers; the majority decides."],
+  ["A challenger disputes the answer", "A challenger submits a different answer and an equal bond. A jury is drawn from eligible staked Council seats for that case."],
+  ["Jurors commit, then reveal", "Jurors commit their votes without showing them. In a separate window, they reveal their vote and reason. They choose between the proposed and challenged answers; the majority decides."],
   ["The outcome is settled", "If the jury cannot decide, the case can move to a second round and then the contract's fallback. The market page shows the deadlines, final ruling and payout rules."],
 ];
 
 const questions = [
-  ["Do I need an NFT to trade?", "No. The Dragon NFT is for Council membership. You can browse and trade markets without joining the Council once trading is available."],
-  ["Can I mint or stake here now?", "Not yet. Minting and staking actions are not available on this site. Supply, price, launch date and final participation terms will be published before launch."],
-  ["Does every NFT holder earn?", "No. Only eligible staked seats accrue the Council share of platform fees. The intended payout cadence is quarterly; final claim terms will be published before launch. Earnings are variable, not guaranteed."],
-  ["Is this the whole collection?", "No. The artwork shown here is a selection from the wider Dragon collection."],
-  ["What does Void mean?", "The market is cancelled. The payout uses the published time-weighted closing Yes price and its complement for No. It is not a fixed half-token refund."],
-  ["Where can I read a jury's decision?", "Open a case in Cases and results to see its market page. The Resolution section shows the recorded evidence, revealed votes, reasons and final result."],
+  ["Do I need an NFT to trade?", "You can browse without an NFT. When trading opens, you will also be able to trade without joining the Council. Dragon NFTs are for Council membership."],
+  ["Can I mint or stake here now?", "Minting and staking are not open yet. We will publish the supply, price, launch date and final participation terms before launch."],
+  ["Does every NFT holder earn?", "Only eligible staked seats earn a share of Council fees. Quarterly payouts are planned, and we will publish final claim terms before launch. Earnings vary and are not guaranteed."],
+  ["Is this the whole collection?", "These are a few Dragons from the larger collection."],
+  ["What does Void mean?", "Void means the market is cancelled. Yes pays the published time-weighted closing price; No pays one token minus that price. The payout is not fixed at half a token."],
+  ["Where can I read a jury's decision?", "Select a case under Cases and results. Its market page shows the evidence, revealed votes, reasons and final result in the Resolution section."],
 ];
 
 export function CouncilView() {
@@ -47,7 +47,7 @@ export function CouncilView() {
       <div id="cases" className="tribunal-layout taste-case-layout council-cases">
         <section className="case-docket" aria-labelledby="cases-title">
           <div className="docket-heading"><h2 id="cases-title">Cases and results</h2><span className="num">{data ? `${cases.length} recorded cases` : "Awaiting records"}</span></div>
-          <p className="council-case-intro">Read the evidence, follow a challenge, or see how a market was settled.</p>
+          <p className="council-case-intro">Open a case to read the evidence and follow its result.</p>
           {loading && !data && <p role="status" className="text-muted">Loading case records…</p>}
           {error && <p role="alert" className="text-muted">Could not load cases. <button className="underline" onClick={reload}>Retry</button></p>}
           {data && cases.length === 0 && <p className="text-muted">No case records yet. Proposed answers, disputed outcomes and final results will appear here.</p>}
@@ -60,7 +60,7 @@ export function CouncilView() {
         </section>
         <aside className="tribunal-sidebar" aria-labelledby="jury-title">
           <h2 id="jury-title">How juries are selected</h2>
-          <p>Jurors are selected from eligible staked seats. There is no single permanent panel deciding every market.</p>
+          <p>Each case draws its own jury from eligible staked Council seats.</p>
           <p>Each case has its own deadlines. Once votes are revealed, the market page shows the jurors and their reasons.</p>
           <a href="#process" className="ritual-link">Follow the dispute process ↘</a>
         </aside>
@@ -72,7 +72,7 @@ export function CouncilView() {
       </section>
 
       <section id="questions" className="membership-faq council-questions" aria-labelledby="questions-title">
-        <h2 id="questions-title">Questions</h2>
+        <h2 id="questions-title">Common questions</h2>
         {questions.map(([question, answer]) => <details key={question}><summary>{question}</summary><p>{answer}</p></details>)}
       </section>
     </div>

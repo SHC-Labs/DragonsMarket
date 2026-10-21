@@ -4,6 +4,6 @@
 here="$(cd "$(dirname "$0")" && pwd)"
 ps -eo pid=,comm= | awk '$2 ~ /^(dev_chain|near-sandbox|cargo)/ {print $1}' | while read -r pid; do
   exe="$(readlink "/proc/$pid/exe" 2>/dev/null)"; cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)"
-  case "$exe$cwd" in *"$here"*|*"/PredictionMarket/contracts"*) kill "$pid" 2>/dev/null && echo "stopped $pid";; esac
+  case "$exe$cwd" in *"$here"*) kill "$pid" 2>/dev/null && echo "stopped $pid";; esac
 done
 exit 0

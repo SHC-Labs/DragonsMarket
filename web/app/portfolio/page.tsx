@@ -52,7 +52,7 @@ export default function Portfolio() {
     return (
       <div className="page-content">
         <Title />
-        <AccountEmptyState title="View your portfolio" description="Connect your wallet to see your positions and balances. Withdrawals and redemptions will be available here when they open." actions={<Button onClick={openConnect} disabled={!walletAvailable}>Connect wallet</Button>} />
+        <AccountEmptyState title="View your portfolio" description="Connect your wallet to see your positions and balances. Withdrawals and redemptions are not open yet." actions={<Button onClick={openConnect} disabled={!walletAvailable}>Connect wallet</Button>} />
       </div>
     );
   }
@@ -92,7 +92,7 @@ export default function Portfolio() {
               </dd>
             </div>
           </dl>
-          <p id="portfolio-integration" className="mt-3 text-sm text-muted">Withdrawals and redemptions aren’t available yet. You can still view your positions here.</p>
+          <p id="portfolio-integration" className="mt-3 text-sm text-muted">You can view your positions here. Withdrawals and redemptions are not open yet.</p>
 
           <h2 className="section-title mb-4 mt-12">Positions</h2>
           {data.positions.length === 0 ? (

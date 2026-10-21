@@ -36,14 +36,14 @@ async fn a_challenge_must_name_a_different_answer_and_the_case_records_it() -> a
     let id = proposed(&w).await?;
 
     // Naming the proposed answer, or no answer, or a word that is not an answer, bounces and the bond comes back.
-    let before = ft_balance(&w, w.dave.id()).await;
+    let before = holdings(&w, w.dave.id()).await;
     for msg in [
         format!("challenge:{id}:yes"),
         format!("challenge:{id}"),
         format!("challenge:{id}:maybe"),
     ] {
         let _ = ft_call(&w, &w.dave, w.oracle.id(), BOND, &msg).await;
-        assert_eq!(ft_balance(&w, w.dave.id()).await, before, "{msg} was not bounced");
+        assert_eq!(holdings(&w, w.dave.id()).await, before, "{msg} was not bounced");
         assert_eq!(case_json(&w, id).await["stage"], "proposed");
     }
 

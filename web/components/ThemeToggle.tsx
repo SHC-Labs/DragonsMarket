@@ -11,9 +11,9 @@ export function ThemeToggle() {
   const pathname = usePathname();
   const theme = useSyncExternalStore(subscribe, () => document.documentElement.dataset.theme || "dark", () => "dark");
   useEffect(() => {
-    const section = /^\/(council|membership)(\/|$)/.test(pathname) ? "council" : /^\/watchlist(\/|$)/.test(pathname) ? "watchlist" : "venue";
+    const section = /^\/(council|membership)(\/|$)/.test(pathname) ? "council" : /^\/watchlist(\/|$)/.test(pathname) ? "watchlist" : pathname === "/" || /^\/market(\/|$)/.test(pathname) ? "markets" : "venue";
     document.documentElement.dataset.palette = section;
-    const colors = section === "venue" ? palette.themes : palette.sections[section];
+    const colors = palette.themes;
     const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
     if (meta) meta.content = theme === "light" ? colors.light.bg : colors.dark.bg;
   }, [theme, pathname]);

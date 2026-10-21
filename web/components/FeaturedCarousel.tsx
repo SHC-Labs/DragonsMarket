@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useCallback, useState } from "react
 import { ArrowLeft,ArrowRight,Pause,Play } from "@/components/icons";
 import { FeaturedMarket } from "./Featured";
 import type { MarketView } from "@/lib/market";
-import type { Pt } from "./PriceChart";
+import type { Pt } from "@/lib/history";
 
 function SlidingCard({children,outgoing=false,animate,direction,onFinish,label,live}:{children:ReactNode;outgoing?:boolean;animate:boolean;direction:number;onFinish?:()=>void;label?:string;live?:"off"|"polite"}) {
  const ref=useRef<HTMLDivElement>(null);

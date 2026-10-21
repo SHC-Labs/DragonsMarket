@@ -2,9 +2,19 @@
 
 import { useState } from "react";
 import { Button } from "./ui";
+import { PowerUpVisual, usePowerUp } from "./PowerUp";
 import { config } from "@/lib/config";
 import { formatMoney, formatShares, toMicro } from "@/lib/format";
 import type { MarketView, Side } from "@/lib/market";
+
+function OutcomeOption({ option, selected, price, onSelect }: { option: Side; selected: boolean; price: number; onSelect: () => void }) {
+  const effect = usePowerUp();
+  return <label {...effect} data-selected={selected} className={`trade-outcome trade-outcome-${option} power-up-control power-up-target flex cursor-pointer items-center justify-between rounded-md border px-3 py-3 has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-focus`}>
+    <PowerUpVisual />
+    <input type="radio" name="outcome" value={option} checked={selected} onChange={onSelect} className="sr-only" />
+    <span className="trade-outcome-label"><span className="trade-outcome-check" aria-hidden="true">{selected ? "✓" : ""}</span>{option === "yes" ? "Yes" : "No"}</span><span className="trade-outcome-price num">{price}¢</span>
+  </label>;
+}
 
 // Integration point: connect quoteBuy/quoteSell and wallet confirmation from
 // lib/market.ts once the contract interface and fee rules are finalized.
@@ -26,10 +36,8 @@ export function TradeTicket({ market, initialSide = "yes" }: { market: MarketVie
     </div>
     <fieldset className="m-0 mb-4 grid grid-cols-2 gap-2 border-0 p-0">
       <legend className="mb-2 text-sm text-muted">Outcome</legend>
-      {(["yes", "no"] as const).map(option => <label key={option} className={`flex cursor-pointer items-center justify-between rounded-md border px-3 py-3 ${side === option ? "border-2 border-input bg-surface" : "border-input"} has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-focus`}>
-        <input type="radio" name="outcome" value={option} checked={side === option} onChange={() => setSide(option)} className="sr-only" />
-        <span>{option === "yes" ? "Yes" : "No"}</span><span className="num text-muted">{Math.round(Number(option === "yes" ? market.price_yes : market.price_no) / 10_000)}¢</span>
-      </label>)}
+      {(["yes", "no"] as const).map(option => <OutcomeOption key={option} option={option} selected={side === option}
+        onSelect={() => setSide(option)} price={Math.round(Number(option === "yes" ? market.price_yes : market.price_no) / 10_000)} />)}
     </fieldset>
     <label htmlFor="amount" className="mb-1 block text-sm text-muted">{mode === "buy" ? "Amount" : "Shares to sell"}</label>
     <div className="trade-amount-field flex min-h-11 items-center gap-2 rounded-md border border-input bg-canvas px-3">
@@ -43,6 +51,6 @@ export function TradeTicket({ market, initialSide = "yes" }: { market: MarketVie
       <div><dt>Fee</dt><dd>Not available yet</dd></div>
     </dl>
     <Button size="lg" disabled aria-describedby="trading-status">Trading coming soon</Button>
-    <p id="trading-status" className="mb-0 mt-3 text-sm text-muted">Trading isn’t open yet. Prices, fees and order confirmation will be available here when it opens.</p>
+    <p id="trading-status" className="mb-0 mt-3 text-sm text-muted">Trading isn’t open yet. When it opens, you’ll see prices and fees here before confirming an order.</p>
   </aside>;
 }

@@ -52,7 +52,7 @@ async fn the_majority_jurors_split_a_quarter_of_the_losing_bond_and_can_withdraw
 
     // It is real money: the juror withdraws it.
     register_ft(&w, voters[0].id()).await?;
-    let before = ft_balance(&w, voters[0].id()).await;
+    let before = holdings(&w, voters[0].id()).await;
     voters[0]
         .call(w.oracle.id(), "withdraw_bond")
         .deposit(NearToken::from_yoctonear(1))
@@ -60,7 +60,7 @@ async fn the_majority_jurors_split_a_quarter_of_the_losing_bond_and_can_withdraw
         .transact()
         .await?
         .into_result()?;
-    assert_eq!(ft_balance(&w, voters[0].id()).await, before + 625_000);
+    assert_eq!(holdings(&w, voters[0].id()).await, before + 625_000);
     assert_eq!(claimable(&w, voters[0].id()).await, 0);
     Ok(())
 }
@@ -103,7 +103,7 @@ async fn a_juror_who_never_voted_forfeits_the_revenue_earned_while_serving() -> 
     register_ft(&w, silent.id()).await?;
     let paid = claimed_in(&claim(&w, &silent, tok(&silent)).await?);
     assert!(paid >= kept);
-    assert_eq!(ft_balance(&w, silent.id()).await, paid);
+    assert_eq!(holdings(&w, silent.id()).await, paid);
     Ok(())
 }
 

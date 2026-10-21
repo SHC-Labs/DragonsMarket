@@ -6,12 +6,12 @@ import { ArrowUpRight } from "@/components/icons";
 
 export const metadata: Metadata = {
   title: "Partnerships | Dragons Market",
-  description: "Meet the projects partnering with Dragons Market, starting with Degen Arena.",
+  description: "Our planned partnership with Degen Arena, a crypto gaming platform.",
 };
 const games = [
-  { name: "Moonshot", slug: "moonshot", type: "Live rounds", description: "Watch the multiplier climb. Cash out before the crash to lock in your result." },
-  { name: "Blackjack", slug: "blackjack", type: "Classic cards", description: "Take a seat against the dealer. Hit, stand, split or double: every hand gives you a decision." },
-  { name: "Plinko", slug: "plinko", type: "Pick your risk", description: "Choose your rows and risk level, then follow each ball down the board to its final bucket." },
+  { name: "Moonshot", slug: "moonshot", type: "Live rounds", description: "The multiplier rises until it crashes. Cash out before the crash." },
+  { name: "Blackjack", slug: "blackjack", type: "Classic cards", description: "Play against the dealer. Hit, stand, split or double." },
+  { name: "Plinko", slug: "plinko", type: "Pick your risk", description: "Choose the number of rows and your risk level, then drop a ball down the board." },
 ];
 const site = "https://degenarena.gg";
 
@@ -41,7 +41,7 @@ export default function PartnershipsPage() {
         <div className="partner-game-copy"><h3>{game.name}<ArrowUpRight size={20} /></h3><p>{game.description}</p><span className="partner-guide-link">Read the game guide</span></div>
       </a>)}</div>
     </section>
-    <p className="partner-update">Partnership details will be announced here once confirmed.</p>
+    <p className="partner-update">We will post the partnership details here once they are confirmed.</p>
     <p className="partner-fine-print">Degen Arena is a separate platform with its own rules and terms. Games involve financial risk. Read the rules and play responsibly.</p>
   </div>;
 }

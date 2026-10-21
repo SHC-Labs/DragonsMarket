@@ -11,7 +11,7 @@ import { Controls } from "@/components/Controls";
 import { FeaturedCarousel } from "@/components/FeaturedCarousel";
 import { Trending } from "@/components/Featured";
 import { MarketGrid } from "@/components/MarketGrid";
-import type { Pt } from "@/components/PriceChart";
+import type { Pt } from "@/lib/history";
 import { Button, Notice } from "@/components/ui";
 import { countMarkets, findCategory } from "@/lib/categories";
 import { config, isConfigured } from "@/lib/config";
@@ -100,7 +100,7 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
 
   const shown = useMemo(() => sortMarkets(filterMarkets(data?.markets ?? [], { ...f, q: typed }).filter(m => !watching || watchedIds.includes(m.id)), f.sort), [data, f.cat, f.sub, f.status, f.sort, typed, watching, watchedIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (watching && !account) return <div className="page-content"><PageLandmark title="Watchlist" /><AccountEmptyState title="Save markets with your wallet" description="Connect your wallet, then select Watch on a market. Your list is saved for that wallet on this browser." actions={<><Button onClick={openConnect} disabled={!walletAvailable}>Connect wallet</Button><Link href="/">Browse markets</Link></>} /></div>;
+  if (watching && !account) return <div className="page-content"><PageLandmark title="Watchlist" /><AccountEmptyState title="Keep an eye on your markets" description="Connect your wallet and select Watch on any market. This browser keeps a separate list for each wallet." actions={<><Button onClick={openConnect} disabled={!walletAvailable}>Connect wallet</Button><Link href="/">Browse markets</Link></>} /></div>;
   const intro = <PageLandmark title={watching ? "Watchlist" : "Prediction markets"} />;
   if (!isConfigured) return <div className="page-content">{intro}</div>;
   if (loading && !data) return <div className="page-content">{intro}<p role="status" className="text-muted">Loading markets</p><div className="market-loading" aria-hidden="true"><div /><div /><div /></div></div>;
@@ -147,7 +147,7 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
         stats={{ markets: data.markets.length, locked: formatMoney(locked), symbol: config.tokenSymbol }}
       />
 
-      <div className="market-list-tabs" role="group" aria-label="Market list"><button type="button" aria-pressed={!watching} onClick={()=>watchlistOnly ? router.push("/") : update({watching:null})}>All markets</button><button type="button" aria-pressed={watching} onClick={()=>router.push("/watchlist")}>Watchlist <span className="num">{data.markets.filter(m=>watchedIds.includes(m.id)).length}</span></button>{watching && <span>Saved for your connected wallet on this browser.</span>}</div>
+      <div className="market-list-tabs" role="group" aria-label="Market list"><button type="button" aria-pressed={!watching} onClick={()=>watchlistOnly ? router.push("/") : update({watching:null})}>All markets</button><button type="button" aria-pressed={watching} onClick={()=>router.push("/watchlist")}>Watchlist <span className="num">{data.markets.filter(m=>watchedIds.includes(m.id)).length}</span></button>{watching && <span>Saved for this wallet in this browser.</span>}</div>
       <section id="markets" className="mt-10 scroll-mt-32" aria-label="Markets">
         <h2 className="section-title m-0">
           {filtered ? `${shown.length} ${shown.length === 1 ? "market" : "markets"}${where ? ` in ${where}` : ""}` : watching ? "Your watchlist" : "Find a market"}
@@ -155,7 +155,7 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
 
         {shown.length === 0 ? (
           <div className="mt-6 rounded-lg border border-dashed border-border p-10 text-center text-muted">
-            {watching && watchedIds.length === 0 ? "Nothing saved yet. Tap Watch on a market to keep it here." : data.markets.length === 0 ? "No markets yet." : where && !typed.trim() ? `No markets in ${where} yet.` : "No markets match that."}{" "}
+            {watching && watchedIds.length === 0 ? "Your watchlist is empty. Select Watch on a market to save it." : data.markets.length === 0 ? "No markets yet." : where && !typed.trim() ? `No markets in ${where} yet.` : "No markets match your search."}{" "}
             {data.markets.length > 0 && (
               <Button variant="ghost" size="sm" onClick={() => { setTyped(""); lastSynced.current = ""; router.replace(pathname, { scroll: false }); }}>Clear filters</Button>
             )}

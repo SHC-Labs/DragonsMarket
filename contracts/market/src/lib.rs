@@ -40,8 +40,8 @@ const VOID_PRICE_WINDOW_NS: u64 = 86_400_000_000_000;
 // here instead, for the case of an oracle that is gone. 7 days in nanoseconds.
 const VOID_GRACE_NS: u64 = 7 * 86_400_000_000_000;
 // The fee on a trade is rate × shares × p × (1 − p). 2% costs about 1% of what a 50c trade pays. Both fees start at
-// these values and governance can change them, but never above the ceilings, which are written here so that even a
-// captured governance cannot set a confiscatory fee.
+// these values and the owner (the DAO) can change them, but never above the ceilings, which are written here so that even
+// a captured owner cannot set a confiscatory fee.
 const DEFAULT_FEE_RATE_BPS: u128 = 200;
 const MAX_FEE_RATE_BPS: u128 = 500;
 // ponytail: placeholder, 1 unit of the 6-decimal test token, taken out of the seed transfer. The ceiling is 10 units.
@@ -49,17 +49,23 @@ const DEFAULT_CREATE_FEE: u128 = 1_000_000;
 const MAX_CREATE_FEE: u128 = 10_000_000;
 const REVENUE_SHARE_BPS: u128 = 2_500;
 const BUSINESS_SHARE_BPS: u128 = 7_500;
-const GAS_FT_TRANSFER: Gas = Gas::from_tgas(15);
-// The token keeps 30 TGas for itself and its resolve step; the rest goes to the Council's ft_on_transfer.
-const GAS_FT_TRANSFER_CALL: Gas = Gas::from_tgas(50);
+// The verifier burned 3.8 TGas for a payout from a contract in the sandbox (INTENTS-PROOF.md), so this is a wide margin.
+const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
+// mt_transfer_call needs 21 TGas attached before the receiver gets any (measured), so the verifier's own part is rounded up
+// to 22 and the rest is what the Council's mt_on_transfer gets.
+const GAS_VERIFIER_CALL_OVERHEAD: Gas = Gas::from_tgas(22);
+const GAS_COUNCIL_RECEIPT: Gas = Gas::from_tgas(20);
+const GAS_MT_TRANSFER_CALL: Gas = Gas::from_gas(GAS_VERIFIER_CALL_OVERHEAD.as_gas() + GAS_COUNCIL_RECEIPT.as_gas());
 const GAS_REGISTER: Gas = Gas::from_tgas(20);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
 // A sweep sends the Council's part with its callback and the business wallet's part with its callback, and burns about 3
-// TGas itself. 92 TGas was the least that worked in the sandbox.
+// TGas itself.
 const GAS_SWEEP_OVERHEAD: Gas = Gas::from_tgas(10);
 const GAS_SWEEP_FLOOR: Gas = Gas::from_gas(
-    GAS_FT_TRANSFER_CALL.as_gas() + GAS_FT_TRANSFER.as_gas() + 2 * GAS_CALLBACK.as_gas() + GAS_SWEEP_OVERHEAD.as_gas(),
+    GAS_MT_TRANSFER_CALL.as_gas() + GAS_MT_TRANSFER.as_gas() + 2 * GAS_CALLBACK.as_gas() + GAS_SWEEP_OVERHEAD.as_gas(),
 );
+// Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
+const NEP141_PREFIX: &str = "nep141:";
 // The layout of the state below. migrate reads exactly this one and refuses any other.
 const STATE_VERSION: u16 = 1;
 
@@ -209,10 +215,26 @@ pub struct SellQuote {
     fee: U128,
 }
 
-#[ext_contract(ext_ft)]
-pub trait FtCore {
-    fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
-    fn ft_transfer_call(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>, msg: String) -> U128;
+// The NEAR Intents verifier. All the backing sits in this contract's own account there, and it pays out by calling these.
+#[ext_contract(ext_verifier)]
+pub trait Verifier {
+    fn mt_transfer(
+        &mut self,
+        receiver_id: AccountId,
+        token_id: String,
+        amount: U128,
+        approval: Option<(AccountId, u64)>,
+        memo: Option<String>,
+    );
+    fn mt_transfer_call(
+        &mut self,
+        receiver_id: AccountId,
+        token_id: String,
+        amount: U128,
+        approval: Option<(AccountId, u64)>,
+        memo: Option<String>,
+        msg: String,
+    ) -> PromiseOrValue<Vec<U128>>;
 }
 
 #[ext_contract(ext_oracle)]
@@ -246,13 +268,15 @@ pub struct MarketContract {
     upgrade_in_flight: bool,
     // Only the owner can change the operator, add a fee recipient, or hand off ownership. Everything else
     // routine (create a market, seed it, pause, halt, claim a residual) also takes the operator, so day to
-    // day running does not need to wait on a governance vote.
+    // day running does not need to wait on a DAO proposal.
     owner: AccountId,
     // Set by propose_owner. Ownership moves only when this account calls accept_owner.
     pending_owner: Option<AccountId>,
     operator: AccountId,
     oracle: AccountId,
-    collateral: AccountId,
+    // The Intents verifier that holds every unit of backing, and the exact id of the collateral in it, "nep141:<token>".
+    verifier: AccountId,
+    collateral_token_id: String,
     paused: bool,
     // What a trade and a new market pay now. Each applies from the next trade or seed; nothing already paid changes.
     fee_rate_bps: u128,
@@ -260,6 +284,8 @@ pub struct MarketContract {
     next_market_id: u64,
     markets: LookupMap<u64, Market>,
     balances: LookupMap<AccountId, u128>,
+    // The sum of every entry in balances, kept so total_owed can add it up without walking a map.
+    balances_total: u128,
     // account -> number of share entries it holds. Presence means the account paid its storage deposit.
     accounts: LookupMap<AccountId, u32>,
     // (market, account, 0 = yes / 1 = no) -> shares
@@ -331,10 +357,15 @@ impl MarketContract {
         owner_id: AccountId,
         operator_id: AccountId,
         oracle_id: AccountId,
-        collateral_token: AccountId,
+        verifier_id: AccountId,
+        collateral_token_id: String,
         revenue_pool: AccountId,
         business_wallet: AccountId,
     ) -> Self {
+        require!(
+            collateral_token_id.starts_with(NEP141_PREFIX),
+            "the collateral token id must look like nep141:<token>"
+        );
         Self {
             state_version: STATE_VERSION,
             upgrade_proven: false,
@@ -343,13 +374,15 @@ impl MarketContract {
             pending_owner: None,
             operator: operator_id,
             oracle: oracle_id,
-            collateral: collateral_token,
+            verifier: verifier_id,
+            collateral_token_id,
             paused: false,
             fee_rate_bps: DEFAULT_FEE_RATE_BPS,
             create_fee: DEFAULT_CREATE_FEE,
             next_market_id: 0,
             markets: LookupMap::new(Key::Markets),
             balances: LookupMap::new(Key::Balances),
+            balances_total: 0,
             accounts: LookupMap::new(Key::Accounts),
             shares: LookupMap::new(Key::Shares),
             revenue_pool,
@@ -374,10 +407,10 @@ impl MarketContract {
         staged.code_hash
     }
 
-    // Owner only, which is the governance contract, so code changes wait out its vote and timelock. That wait is the
-    // users' exit window: withdraw and redeem never pause, so nobody has to trust the new code with money they can
-    // take out first. The deploy and migrate are one batch: a migrate that panics puts the old code back. Attach at
-    // least 100 TGas.
+    // Owner only, which is the DAO. SputnikDAO runs a proposal as soon as it passes, so nothing here enforces a delay
+    // between approval and deploy. That delay is a separate requirement (R-07) that is not built yet. Until it is,
+    // withdraw and redeem never pause, so the exit is open whatever the code does next. The deploy and migrate are one
+    // batch: a migrate that panics puts the old code back. Attach at least 100 TGas.
     pub fn upgrade(&mut self, code_hash: Base58CryptoHash) -> Promise {
         upgrade::require_upgrade_gas();
         self.only_owner();
@@ -558,7 +591,7 @@ impl MarketContract {
         require!(
             env::predecessor_account_id() == self.owner
                 || env::block_timestamp().saturating_add(VOID_PRICE_WINDOW_NS) < m.close_at,
-            "a halt in the last day before close is a governance action"
+            "a halt in the last day before close is an owner action"
         );
         m.advance_twap(env::block_timestamp());
         m.halted = true;
@@ -614,7 +647,7 @@ impl MarketContract {
     }
 
     // After resolution the pool's leftover collateral goes to the business wallet, not the owner: the owner is the
-    // governance contract, which has no easy way to spend a balance held here. Users' payouts stay reserved.
+    // DAO, which has no easy way to spend a balance held here. Users' payouts stay reserved.
     pub fn claim_residual(&mut self, market_id: U64) {
         self.only_operator_or_owner();
         let mut m = self.market(market_id.0);
@@ -676,9 +709,31 @@ impl MarketContract {
 
     // ---- money in -------------------------------------------------------------------------
 
-    // Called by the collateral token. Panicking here makes the token refund the sender.
-    pub fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> PromiseOrValue<U128> {
-        require!(env::predecessor_account_id() == self.collateral, "wrong token");
+    // Called by the verifier after a user's mt_transfer_call (or a signed transfer with a notification), once the money is
+    // already in this contract's Intents account. Returns the amounts to hand back, so 0 keeps everything. Panicking makes
+    // the verifier refund the sender in full. A plain deposit never reaches here: it is surplus (see total_owed).
+    pub fn mt_on_transfer(
+        &mut self,
+        sender_id: AccountId,
+        previous_owner_ids: Vec<AccountId>,
+        token_ids: Vec<String>,
+        amounts: Vec<U128>,
+        msg: String,
+    ) -> Vec<U128> {
+        require!(
+            env::predecessor_account_id() == self.verifier,
+            "only the verifier can deliver money"
+        );
+        require!(
+            token_ids.len() == 1 && amounts.len() == 1,
+            "exactly one token and amount"
+        );
+        require!(token_ids[0] == self.collateral_token_id, "wrong token");
+        require!(
+            previous_owner_ids.as_slice() == [sender_id.clone()],
+            "the money must come from the sender's own balance"
+        );
+        let amount = amounts[0];
         require!(amount.0 > 0, "amount must be positive");
         let mut parts = msg.split(':');
         match parts.next() {
@@ -721,7 +776,7 @@ impl MarketContract {
             }
             _ => env::panic_str("unknown action"),
         }
-        PromiseOrValue::Value(U128(0))
+        vec![U128(0)]
     }
 
     // ---- trading --------------------------------------------------------------------------
@@ -732,11 +787,7 @@ impl MarketContract {
     pub fn buy(&mut self, market_id: U64, side: String, amount: U128, min_shares: U128) {
         assert_one_yocto();
         let who = env::predecessor_account_id();
-        let have = self.balances.get(&who).copied().unwrap_or(0);
-        let left = have
-            .checked_sub(amount.0)
-            .unwrap_or_else(|| env::panic_str("not enough balance"));
-        self.balances.insert(who.clone(), left);
+        self.debit(&who, amount.0);
         self.buy_with(&who, market_id.0, side_index(&side), amount.0, min_shares.0);
     }
 
@@ -821,18 +872,16 @@ impl MarketContract {
     pub fn withdraw(&mut self, amount: U128) -> Promise {
         assert_one_yocto();
         let who = env::predecessor_account_id();
-        let have = self.balances.get(&who).copied().unwrap_or(0);
-        let left = have
-            .checked_sub(amount.0)
-            .unwrap_or_else(|| env::panic_str("not enough balance"));
         require!(amount.0 > 0, "amount must be positive");
         // Take the balance first; give it back in the callback if the transfer fails.
-        self.balances.insert(who.clone(), left);
+        self.debit(&who, amount.0);
         emit("withdraw", json!({ "account": who, "amount": amount.0.to_string() }));
-        ext_ft::ext(self.collateral.clone())
-            .with_attached_deposit(NearToken::from_yoctonear(1))
-            .with_static_gas(GAS_FT_TRANSFER)
-            .ft_transfer(who.clone(), amount, None)
+        // The payout goes to the caller's own Intents account, inside the verifier. mt_transfer returns nothing, so an
+        // error here means the verifier's receipt failed (paused, locked, out of gas) and nothing moved.
+        ext_verifier::ext(self.verifier.clone())
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(GAS_MT_TRANSFER)
+            .mt_transfer(who.clone(), self.collateral_token_id.clone(), amount, None, None)
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_CALLBACK)
@@ -859,8 +908,9 @@ impl MarketContract {
     // ---- fees -----------------------------------------------------------------------------
 
     // Anyone may call it. Splits the collected fees 25/75, rounding both shares down so the remainder stays
-    // collected, then sends whatever is due. With nothing due it does nothing. It needs at least 95 TGas attached and
-    // burns about 14 TGas in all, the Council's receipt included, which does not depend on how many seats are staked.
+    // collected, then sends whatever is due. With nothing due it does nothing. It needs at least 87 TGas attached (GAS_SWEEP_FLOOR)
+    // and burns about 20 TGas in all, the verifier's and the Council's receipt included, which does not depend on how many
+    // seats are staked.
     pub fn sweep_fees(&mut self) {
         upgrade::require_gas(
             GAS_SWEEP_FLOOR,
@@ -883,10 +933,17 @@ impl MarketContract {
         // Zero each due before its transfer; the callback restores what did not arrive.
         if revenue > 0 {
             self.revenue_due = 0;
-            let _ = ext_ft::ext(self.collateral.clone())
-                .with_attached_deposit(NearToken::from_yoctonear(1))
-                .with_static_gas(GAS_FT_TRANSFER_CALL)
-                .ft_transfer_call(self.revenue_pool.clone(), U128(revenue), None, "revenue".to_string())
+            let _ = ext_verifier::ext(self.verifier.clone())
+                .with_attached_deposit(ONE_YOCTO)
+                .with_static_gas(GAS_MT_TRANSFER_CALL)
+                .mt_transfer_call(
+                    self.revenue_pool.clone(),
+                    self.collateral_token_id.clone(),
+                    U128(revenue),
+                    None,
+                    None,
+                    "revenue".to_string(),
+                )
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(GAS_CALLBACK)
@@ -895,10 +952,16 @@ impl MarketContract {
         }
         if business > 0 {
             self.business_due = 0;
-            let _ = ext_ft::ext(self.collateral.clone())
-                .with_attached_deposit(NearToken::from_yoctonear(1))
-                .with_static_gas(GAS_FT_TRANSFER)
-                .ft_transfer(self.business_wallet.clone(), U128(business), None)
+            let _ = ext_verifier::ext(self.verifier.clone())
+                .with_attached_deposit(ONE_YOCTO)
+                .with_static_gas(GAS_MT_TRANSFER)
+                .mt_transfer(
+                    self.business_wallet.clone(),
+                    self.collateral_token_id.clone(),
+                    U128(business),
+                    None,
+                    None,
+                )
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(GAS_CALLBACK)
@@ -907,14 +970,15 @@ impl MarketContract {
         }
     }
 
-    // The token reports how much the pool kept; the rest came back here. With no report the amount is unknown: ft_transfer_call
-    // moves the tokens first, so when its own resolve step fails they may be with the Council already. Crediting the amount
-    // back to revenue_due could then pay it twice, out of users' collateral, so it waits in revenue_unresolved.
+    // The verifier reports the amount the Council kept, one entry for the one token. A Council that panicked reports 0: the
+    // verifier has already refunded the whole amount here, so it is due again. With no usable report the amount is unknown,
+    // because the verifier's own resolve step may be what failed and the money may be with the Council already. Crediting
+    // it back to revenue_due could then pay it twice, out of users' collateral, so it waits in revenue_unresolved.
     #[private]
-    pub fn on_revenue_sent(&mut self, amount: U128, #[callback_result] used: Result<U128, PromiseError>) {
+    pub fn on_revenue_sent(&mut self, amount: U128, #[callback_result] used: Result<Vec<U128>, PromiseError>) {
         match used {
-            Ok(used) => {
-                let back = amount.0.saturating_sub(used.0);
+            Ok(used) if used.len() == 1 => {
+                let back = amount.0.saturating_sub(used[0].0);
                 if back > 0 {
                     self.revenue_due += back;
                     emit(
@@ -923,7 +987,7 @@ impl MarketContract {
                     );
                 }
             }
-            Err(_) => {
+            _ => {
                 self.revenue_unresolved += amount.0;
                 emit(
                     "fee_transfer_unresolved",
@@ -970,7 +1034,8 @@ impl MarketContract {
 
     pub fn config(&self) -> near_sdk::serde_json::Value {
         json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
-                "owner": self.owner, "pending_owner": self.pending_owner, "operator": self.operator, "oracle": self.oracle, "collateral": self.collateral,
+                "owner": self.owner, "pending_owner": self.pending_owner, "operator": self.operator, "oracle": self.oracle,
+                "verifier": self.verifier, "collateral_token_id": self.collateral_token_id,
                 "paused": self.paused, "markets": self.next_market_id.to_string(), "storage_deposit": STORAGE_DEPOSIT.as_yoctonear().to_string(),
                 "max_positions": MAX_POSITIONS, "fee_rate_bps": self.fee_rate_bps as u32, "create_fee": self.create_fee.to_string(),
                 "revenue_pool": self.revenue_pool, "business_wallet": self.business_wallet,
@@ -984,6 +1049,17 @@ impl MarketContract {
 
     pub fn is_registered(&self, account_id: AccountId) -> bool {
         self.accounts.contains_key(&account_id)
+    }
+
+    // Everything this contract owes, in collateral units: user balances, what is locked in every market, and every fee
+    // bucket. The keeper compares it with the verifier's mt_balance_of for this account at the same finalized block. More
+    // there than here is surplus nobody is credited for. Less is an incident. Walks every market, so it is a view only.
+    pub fn total_owed(&self) -> U128 {
+        let locked: u128 = (0..self.next_market_id)
+            .filter_map(|id| self.markets.get(&id))
+            .map(|m| m.locked)
+            .sum();
+        U128(self.balances_total + locked + self.fees + self.revenue_due + self.business_due + self.revenue_unresolved)
     }
 
     pub fn get_balance(&self, account_id: AccountId) -> U128 {
@@ -1293,6 +1369,16 @@ impl MarketContract {
     fn credit(&mut self, who: &AccountId, amount: u128) {
         let have = self.balances.get(who).copied().unwrap_or(0);
         self.balances.insert(who.clone(), have + amount);
+        self.balances_total += amount;
+    }
+
+    fn debit(&mut self, who: &AccountId, amount: u128) {
+        let have = self.balances.get(who).copied().unwrap_or(0);
+        let left = have
+            .checked_sub(amount)
+            .unwrap_or_else(|| env::panic_str("not enough balance"));
+        self.balances.insert(who.clone(), left);
+        self.balances_total -= amount;
     }
 
     fn owed(m: &Market, outcome: Outcome) -> u128 {
@@ -1350,7 +1436,7 @@ impl MarketContract {
         );
     }
 
-    // Spend `amount` that has already left the buyer's balance (or arrived by ft_transfer_call). The fee comes out
+    // Spend `amount` that has already left the buyer's balance (or arrived by mt_transfer_call). The fee comes out
     // of it first and only the rest enters the market.
     fn buy_with(&mut self, who: &AccountId, id: u64, idx: u8, amount: u128, min_out: u128) {
         require!(!self.paused, "paused");
@@ -1523,7 +1609,8 @@ mod tests {
 
     const OWNER: &str = "owner.near";
     const ORACLE: &str = "oracle.near";
-    const TOKEN: &str = "usdc.near";
+    const VERIFIER: &str = "intents.near";
+    const COLLATERAL_ID: &str = "nep141:usdc.near";
     const COUNCIL: &str = "council.near";
     const BUSINESS: &str = "business.near";
     const USERS: [&str; 3] = ["ann.near", "ben.near", "cat.near"];
@@ -1535,6 +1622,17 @@ mod tests {
 
     fn acct(name: &str) -> AccountId {
         name.parse().unwrap()
+    }
+
+    // What the verifier calls after a user's mt_transfer_call. The caller must already be acting as the verifier.
+    fn receive(c: &mut MarketContract, from: AccountId, amount: U128, msg: String) -> Vec<U128> {
+        c.mt_on_transfer(
+            from.clone(),
+            vec![from],
+            vec![COLLATERAL_ID.to_string()],
+            vec![amount],
+            msg,
+        )
     }
 
     // Every call carries the one yocto that buy and sell need.
@@ -1564,7 +1662,8 @@ mod tests {
             acct(OWNER),
             acct(OWNER),
             acct(ORACLE),
-            acct(TOKEN),
+            acct(VERIFIER),
+            COLLATERAL_ID.to_string(),
             acct(COUNCIL),
             acct(BUSINESS),
         );
@@ -1591,9 +1690,9 @@ mod tests {
         for u in USERS.iter().chain([&OWNER]) {
             c.accounts.insert(acct(u), 0);
         }
-        act_as(TOKEN, 2);
-        let _ = c.ft_on_transfer(acct(OWNER), U128(SEED_UNITS), "seed:0".to_string());
-        let _ = c.ft_on_transfer(acct(OWNER), U128(SEED_UNITS), "seed:1:300000".to_string());
+        act_as(VERIFIER, 2);
+        let _ = receive(&mut c, acct(OWNER), U128(SEED_UNITS), "seed:0".to_string());
+        let _ = receive(&mut c, acct(OWNER), U128(SEED_UNITS), "seed:1:300000".to_string());
         (c, 2 * SEED_UNITS)
     }
 
@@ -1615,6 +1714,11 @@ mod tests {
             total_in,
             "money was created or lost"
         );
+        assert_eq!(
+            c.total_owed().0,
+            total_in,
+            "total_owed disagrees with what was received"
+        );
         for id in 0..2 {
             assert!(
                 c.check_invariant(U64(id)),
@@ -1628,9 +1732,9 @@ mod tests {
         match op {
             // buy Yes or No by sending tokens in one transfer
             0 | 1 => {
-                act_as(TOKEN, 3);
+                act_as(VERIFIER, 3);
                 let side = if op == 0 { "yes" } else { "no" };
-                let _ = c.ft_on_transfer(acct(who), U128(amount), format!("buy:{id}:{side}:1"));
+                let _ = receive(c, acct(who), U128(amount), format!("buy:{id}:{side}:1"));
                 *total_in += amount;
             }
             // sell part of a holding
@@ -1646,8 +1750,8 @@ mod tests {
             }
             // deposit, then buy out of the balance
             _ => {
-                act_as(TOKEN, 3);
-                let _ = c.ft_on_transfer(acct(who), U128(amount), "deposit".to_string());
+                act_as(VERIFIER, 3);
+                let _ = receive(c, acct(who), U128(amount), "deposit".to_string());
                 *total_in += amount;
                 act_as(who, 3);
                 c.buy(U64(id), "yes".to_string(), U128(amount / 2 + 1), U128(1));
@@ -1721,8 +1825,8 @@ mod tests {
         let (mut c, _) = world();
         assert_eq!(c.fees, 2 * DEFAULT_CREATE_FEE, "each seed paid the creation fee");
         let q = c.quote_buy(U64(0), "yes".into(), U128(10_000_000));
-        act_as(TOKEN, 3);
-        let _ = c.ft_on_transfer(acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
         assert_eq!(holdings(&c, 0, USERS[0]).0, q.shares_out.0);
         assert_eq!(c.fees, 2 * DEFAULT_CREATE_FEE + q.fee.0);
         assert_eq!(
@@ -1770,7 +1874,7 @@ mod tests {
 
         // The business wallet refuses its transfer and the Council takes only part of its share.
         c.on_business_sent(U128(750_002), Err(PromiseError::Failed));
-        c.on_revenue_sent(U128(250_000), Ok(U128(249_000)));
+        c.on_revenue_sent(U128(250_000), Ok(vec![U128(249_000)]));
         assert_eq!((c.fees, c.revenue_due, c.business_due), (1, 1_000, 750_002));
 
         // The next sweep resends each due to its own recipient; nothing is split again.
@@ -1848,7 +1952,7 @@ mod tests {
         assert_conserved(&c, total_in);
     }
 
-    // ---- governance-set fees, with ceilings ------------------------------------------------------------
+    // ---- owner-set fees, with ceilings ------------------------------------------------------------
 
     #[test]
     fn the_owner_sets_the_trade_fee_and_the_next_trade_pays_it() {
@@ -1864,10 +1968,10 @@ mod tests {
         );
 
         // The quote is what is charged.
-        act_as(TOKEN, 6);
+        act_as(VERIFIER, 6);
         let q = c.quote_buy(U64(0), "yes".into(), U128(10_000_000));
         let fees_before = c.fees;
-        let _ = c.ft_on_transfer(acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
         assert_eq!(c.fees - fees_before, q.fee.0);
 
         act_as(OWNER, 7);
@@ -1914,8 +2018,8 @@ mod tests {
         m.registered = true;
         c.markets.insert(id.0, m);
         let before = c.fees;
-        act_as(TOKEN, 6);
-        let _ = c.ft_on_transfer(acct(OWNER), U128(SEED_UNITS), format!("seed:{}", id.0));
+        act_as(VERIFIER, 6);
+        let _ = receive(&mut c, acct(OWNER), U128(SEED_UNITS), format!("seed:{}", id.0));
         assert_eq!(c.fees - before, 2_500_000);
         assert_eq!(c.market(id.0).locked, SEED_UNITS - 2_500_000);
     }
@@ -1949,12 +2053,12 @@ mod tests {
     }
 
     fn seed_with(c: &mut MarketContract, who: &str, id: u64, price: Option<&str>) {
-        act_as(TOKEN, 6);
+        act_as(VERIFIER, 6);
         let msg = match price {
             Some(p) => format!("seed:{id}:{p}"),
             None => format!("seed:{id}"),
         };
-        let _ = c.ft_on_transfer(acct(who), U128(SEED_UNITS), msg);
+        let _ = receive(c, acct(who), U128(SEED_UNITS), msg);
     }
 
     #[test]
@@ -2043,8 +2147,13 @@ mod tests {
     fn a_seed_too_small_for_its_price_is_refused_rather_than_opening_with_an_empty_pool() {
         let (mut c, _) = world();
         let id = open_market(&mut c);
-        act_as(TOKEN, 6);
-        let _ = c.ft_on_transfer(acct(OWNER), U128(DEFAULT_CREATE_FEE + 5), format!("seed:{id}:10000"));
+        act_as(VERIFIER, 6);
+        let _ = receive(
+            &mut c,
+            acct(OWNER),
+            U128(DEFAULT_CREATE_FEE + 5),
+            format!("seed:{id}:10000"),
+        );
     }
 
     #[test]
@@ -2092,11 +2201,11 @@ mod tests {
         let quoted = c.quote_buy(U64(0), "yes".into(), U128(victim)).shares_out.0;
         let min_out = quoted * (10_000 - tolerance_bps) / 10_000;
 
-        act_as(TOKEN, 3);
-        let _ = c.ft_on_transfer(acct(ATTACKER), U128(front), "buy:0:yes:1".into());
-        act_as(TOKEN, 4);
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(ATTACKER), U128(front), "buy:0:yes:1".into());
+        act_as(VERIFIER, 4);
         let filled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = c.ft_on_transfer(acct(VICTIM), U128(victim), format!("buy:0:yes:{min_out}"));
+            let _ = receive(&mut c, acct(VICTIM), U128(victim), format!("buy:0:yes:{min_out}"));
         }))
         .is_ok();
 
@@ -2185,8 +2294,8 @@ mod tests {
             let (mut c, _) = world();
             let before = c.fees;
             for _ in 0..slices {
-                act_as(TOKEN, 3);
-                let _ = c.ft_on_transfer(acct(ATTACKER), U128(total / slices), "buy:0:yes:1".into());
+                act_as(VERIFIER, 3);
+                let _ = receive(&mut c, acct(ATTACKER), U128(total / slices), "buy:0:yes:1".into());
             }
             let fee = c.fees - before;
             let shares = holdings(&c, 0, ATTACKER).0;
@@ -2209,9 +2318,9 @@ mod tests {
         let mut spent = 0u128;
         for amount in [1u128, 2, 3, 7, 11, 100, 999] {
             for _ in 0..300 {
-                act_as(TOKEN, 3);
+                act_as(VERIFIER, 3);
                 let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ = c.ft_on_transfer(acct(ATTACKER), U128(amount), "buy:0:yes:1".into());
+                    let _ = receive(&mut c, acct(ATTACKER), U128(amount), "buy:0:yes:1".into());
                 }))
                 .is_ok();
                 if ok {
@@ -2248,9 +2357,9 @@ mod tests {
             for (op, amount, frac) in ops {
                 let side = if op % 2 == 0 { "yes" } else { "no" };
                 if op < 2 {
-                    act_as(TOKEN, 3);
+                    act_as(VERIFIER, 3);
                     let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let _ = c.ft_on_transfer(acct(ATTACKER), U128(amount), format!("buy:0:{side}:1"));
+                        let _ = receive(&mut c, acct(ATTACKER), U128(amount), format!("buy:0:{side}:1"));
                     })).is_ok();
                     if ok { put_in += amount; }
                 } else {
@@ -2285,8 +2394,8 @@ mod tests {
     fn pumping_the_price_and_then_a_void_pays_the_pumper_from_the_pool_and_this_is_how_much() {
         for put in [5_000_000u128, 20_000_000, 40_000_000, 80_000_000] {
             let (mut c, _) = world();
-            act_as(TOKEN, 3);
-            let _ = c.ft_on_transfer(acct(ATTACKER), U128(put), "buy:0:yes:1".into());
+            act_as(VERIFIER, 3);
+            let _ = receive(&mut c, acct(ATTACKER), U128(put), "buy:0:yes:1".into());
             act_as(USERS[2], VOID_OPEN);
             c.void_if_unresolved(U64(0));
             let price = c.market(0).void_price_yes.unwrap();
@@ -2308,13 +2417,13 @@ mod tests {
     #[test]
     fn flooding_the_price_log_with_dust_trades_cannot_turn_a_days_average_into_the_last_minute() {
         let (mut c, _) = world();
-        act_as(TOKEN, CLOSE - 1_000);
-        let _ = c.ft_on_transfer(acct(ATTACKER), U128(150_000_000), "buy:0:yes:1".into());
+        act_as(VERIFIER, CLOSE - 1_000);
+        let _ = receive(&mut c, acct(ATTACKER), U128(150_000_000), "buy:0:yes:1".into());
         let pumped = c.get_market(U64(0)).unwrap().price_yes.0;
         assert!(pumped > 750_000, "the pump moved the price to {pumped}");
         for i in 0..130u64 {
-            act_as(TOKEN, CLOSE - 900 + i);
-            let _ = c.ft_on_transfer(acct(ATTACKER), U128(1_000), "buy:0:yes:1".into());
+            act_as(VERIFIER, CLOSE - 900 + i);
+            let _ = receive(&mut c, acct(ATTACKER), U128(1_000), "buy:0:yes:1".into());
         }
         assert_eq!(
             c.market(0).history.len(),
@@ -2337,15 +2446,15 @@ mod tests {
     #[should_panic(expected = "market is closed")]
     fn nobody_can_trade_at_the_exact_moment_of_close() {
         let (mut c, _) = world();
-        act_as(TOKEN, CLOSE);
-        let _ = c.ft_on_transfer(acct(ATTACKER), U128(1_000_000), "buy:0:yes:1".into());
+        act_as(VERIFIER, CLOSE);
+        let _ = receive(&mut c, acct(ATTACKER), U128(1_000_000), "buy:0:yes:1".into());
     }
 
     #[test]
     fn trading_works_up_to_the_last_nanosecond_before_close() {
         let (mut c, _) = world();
-        act_as(TOKEN, CLOSE - 1);
-        let _ = c.ft_on_transfer(acct(ATTACKER), U128(1_000_000), "buy:0:yes:1".into());
+        act_as(VERIFIER, CLOSE - 1);
+        let _ = receive(&mut c, acct(ATTACKER), U128(1_000_000), "buy:0:yes:1".into());
         assert!(holdings(&c, 0, ATTACKER).0 > 0);
     }
 
@@ -2390,7 +2499,7 @@ mod tests {
         assert_eq!(
             c.get_balance(acct(OWNER)).0,
             0,
-            "the owner, which is governance, is not credited"
+            "the owner, which is the DAO, is not credited"
         );
         assert_eq!(c.market(0).locked, owed, "what users are owed stays reserved");
         assert_conserved(&c, total_in);
@@ -2593,7 +2702,7 @@ mod tests {
         );
     }
 
-    // A governance owner and a separate fast operator: the operator runs routine business, the owner alone
+    // A DAO owner and a separate fast operator: the operator runs routine business, the owner alone
     // changes who the operator is and where fees go.
     #[test]
     fn the_operator_runs_routine_business_and_only_the_owner_changes_who_that_is() {
@@ -2711,8 +2820,8 @@ mod tests {
     #[test]
     fn halting_right_after_a_pump_does_not_pin_the_void_price_at_the_pumped_price() {
         let (mut c, mut total_in) = world();
-        act_as(TOKEN, 5_000);
-        let _ = c.ft_on_transfer(acct(USERS[0]), U128(80_000_000), "buy:0:yes:1".into());
+        act_as(VERIFIER, 5_000);
+        let _ = receive(&mut c, acct(USERS[0]), U128(80_000_000), "buy:0:yes:1".into());
         total_in += 80_000_000;
         let pumped = c.get_market(U64(0)).unwrap().price_yes.0;
         assert!(pumped > 650_000, "the buy moved the price to {pumped}");
@@ -2733,8 +2842,8 @@ mod tests {
     #[test]
     fn halting_counts_the_trading_time_before_the_halt() {
         let (mut c, _) = world();
-        act_as(TOKEN, 5_000);
-        let _ = c.ft_on_transfer(acct(USERS[0]), U128(80_000_000), "buy:0:yes:1".into());
+        act_as(VERIFIER, 5_000);
+        let _ = receive(&mut c, acct(USERS[0]), U128(80_000_000), "buy:0:yes:1".into());
         let pumped = c.get_market(U64(0)).unwrap().price_yes.0;
         act_as(OWNER, 9_000);
         c.halt(U64(0), "checking".into());
@@ -2748,8 +2857,8 @@ mod tests {
     #[test]
     fn a_resume_counts_trading_time_from_the_resume_not_from_the_halt() {
         let (mut c, _) = world();
-        act_as(TOKEN, 5_000);
-        let _ = c.ft_on_transfer(acct(USERS[0]), U128(80_000_000), "buy:0:yes:1".into());
+        act_as(VERIFIER, 5_000);
+        let _ = receive(&mut c, acct(USERS[0]), U128(80_000_000), "buy:0:yes:1".into());
         let pumped = c.get_market(U64(0)).unwrap().price_yes.0;
         act_as(OWNER, 6_000);
         c.halt(U64(0), "checking".into());
@@ -2777,7 +2886,8 @@ mod tests {
             acct("gov.near"),
             acct("op.near"),
             acct(ORACLE),
-            acct(TOKEN),
+            acct(VERIFIER),
+            COLLATERAL_ID.to_string(),
             acct(COUNCIL),
             acct(BUSINESS),
         );
@@ -2798,10 +2908,10 @@ mod tests {
         let mut m = c.market(id);
         m.registered = true;
         c.markets.insert(id, m);
-        act_unpaid(TOKEN, 2);
-        let _ = c.ft_on_transfer(acct("op.near"), U128(100_000_000), format!("seed:{id}"));
+        act_unpaid(VERIFIER, 2);
+        let _ = receive(&mut c, acct("op.near"), U128(100_000_000), format!("seed:{id}"));
         c.accounts.insert(acct("pumper.near"), 0);
-        c.balances.insert(acct("pumper.near"), 400_000_000);
+        c.credit(&acct("pumper.near"), 400_000_000);
         act_as("pumper.near", 75 * HOUR);
         c.buy(U64(id), "yes".into(), U128(400_000_000), U128(1));
         let pumped = c.get_market(U64(id)).unwrap().price_yes.0;
@@ -2860,7 +2970,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a halt in the last day before close is a governance action")]
+    #[should_panic(expected = "a halt in the last day before close is an owner action")]
     fn the_operator_cannot_halt_in_the_first_nanosecond_of_the_last_day() {
         let (mut c, id) = late_market();
         let close = c.market(id).close_at;
@@ -2869,7 +2979,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a halt in the last day before close is a governance action")]
+    #[should_panic(expected = "a halt in the last day before close is an owner action")]
     fn the_operator_cannot_halt_after_close_either() {
         let (mut c, id) = late_market();
         let close = c.market(id).close_at;
@@ -2917,8 +3027,8 @@ mod tests {
         m.registered = true;
         c.markets.insert(id, m);
         assert_eq!(status_and_seeded(&c, id), ("unseeded".into(), false));
-        act_unpaid(TOKEN, 6);
-        let _ = c.ft_on_transfer(acct(OWNER), U128(SEED_UNITS), format!("seed:{id}"));
+        act_unpaid(VERIFIER, 6);
+        let _ = receive(&mut c, acct(OWNER), U128(SEED_UNITS), format!("seed:{id}"));
         assert_eq!(status_and_seeded(&c, id), ("open".into(), true));
         assert!(c.list_markets(U64(id), U64(1))[0].seeded);
     }
@@ -3019,9 +3129,9 @@ mod tests {
         for i in 0..21 {
             let id = create_registered(&mut c, OWNER);
             seed_with(&mut c, OWNER, id, None);
-            act_as(TOKEN, 7);
+            act_as(VERIFIER, 7);
             let bought = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = c.ft_on_transfer(acct(USERS[0]), U128(1_000_000), format!("buy:{id}:yes:1"));
+                let _ = receive(&mut c, acct(USERS[0]), U128(1_000_000), format!("buy:{id}:yes:1"));
             }));
             // The two markets of the test world are not part of this count, so the account holds i positions here.
             assert_eq!(bought.is_ok(), i < MAX_POSITIONS, "buy number {}", i + 1);
@@ -3045,17 +3155,332 @@ mod tests {
     fn a_market_cannot_be_seeded_at_its_close() {
         let (mut c, _) = world();
         let id = create_registered(&mut c, OWNER);
-        act_as(TOKEN, CLOSE);
-        let _ = c.ft_on_transfer(acct(OWNER), U128(SEED_UNITS), format!("seed:{id}"));
+        act_as(VERIFIER, CLOSE);
+        let _ = receive(&mut c, acct(OWNER), U128(SEED_UNITS), format!("seed:{id}"));
     }
 
     #[test]
     fn a_market_can_be_seeded_up_to_the_last_moment_before_close() {
         let (mut c, _) = world();
         let id = create_registered(&mut c, OWNER);
-        act_as(TOKEN, CLOSE - 1);
-        let _ = c.ft_on_transfer(acct(OWNER), U128(SEED_UNITS), format!("seed:{id}"));
+        act_as(VERIFIER, CLOSE - 1);
+        let _ = receive(&mut c, acct(OWNER), U128(SEED_UNITS), format!("seed:{id}"));
         assert!(c.market(id).seeded);
+    }
+
+    // ---- money in comes only from the verifier, as one token from the sender's own balance ----------------------
+
+    fn deliver(
+        who: &str,
+        sender: &str,
+        previous: Vec<&str>,
+        token_ids: Vec<&str>,
+        amounts: Vec<u128>,
+        msg: &str,
+    ) -> (MarketContract, Vec<U128>) {
+        let (mut c, _) = world();
+        act_as(who, 4);
+        let out = c.mt_on_transfer(
+            acct(sender),
+            previous.into_iter().map(acct).collect(),
+            token_ids.into_iter().map(String::from).collect(),
+            amounts.into_iter().map(U128).collect(),
+            msg.to_string(),
+        );
+        (c, out)
+    }
+
+    #[test]
+    fn money_from_the_verifier_is_kept_in_full_and_the_receipt_returns_a_zero_refund() {
+        let (c, out) = deliver(
+            VERIFIER,
+            USERS[0],
+            vec![USERS[0]],
+            vec![COLLATERAL_ID],
+            vec![5_000_000],
+            "deposit",
+        );
+        assert_eq!(out, vec![U128(0)]);
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 5_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the verifier can deliver money")]
+    fn money_from_anyone_but_the_verifier_is_refused() {
+        deliver(
+            USERS[1],
+            USERS[0],
+            vec![USERS[0]],
+            vec![COLLATERAL_ID],
+            vec![5_000_000],
+            "deposit",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong token")]
+    fn a_token_that_is_not_the_collateral_is_refused() {
+        deliver(
+            VERIFIER,
+            USERS[0],
+            vec![USERS[0]],
+            vec!["nep141:other.near"],
+            vec![5_000_000],
+            "deposit",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong token")]
+    fn the_bare_contract_id_is_not_the_collateral() {
+        deliver(
+            VERIFIER,
+            USERS[0],
+            vec![USERS[0]],
+            vec!["usdc.near"],
+            vec![5_000_000],
+            "deposit",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "the money must come from the sender's own balance")]
+    fn money_that_belonged_to_someone_else_is_refused() {
+        deliver(
+            VERIFIER,
+            USERS[0],
+            vec![USERS[1]],
+            vec![COLLATERAL_ID],
+            vec![5_000_000],
+            "deposit",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "the money must come from the sender's own balance")]
+    fn no_previous_owner_is_refused() {
+        deliver(
+            VERIFIER,
+            USERS[0],
+            vec![],
+            vec![COLLATERAL_ID],
+            vec![5_000_000],
+            "deposit",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "exactly one token and amount")]
+    fn two_tokens_in_one_delivery_are_refused() {
+        deliver(
+            VERIFIER,
+            USERS[0],
+            vec![USERS[0], USERS[0]],
+            vec![COLLATERAL_ID, COLLATERAL_ID],
+            vec![1_000_000, 1_000_000],
+            "deposit",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn a_zero_delivery_is_refused() {
+        deliver(
+            VERIFIER,
+            USERS[0],
+            vec![USERS[0]],
+            vec![COLLATERAL_ID],
+            vec![0],
+            "deposit",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown action")]
+    fn a_message_that_names_no_action_is_refused_so_the_verifier_refunds() {
+        deliver(
+            VERIFIER,
+            USERS[0],
+            vec![USERS[0]],
+            vec![COLLATERAL_ID],
+            vec![5_000_000],
+            "hello",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "the collateral token id must look like nep141:<token>")]
+    fn a_collateral_id_without_the_nep141_prefix_is_refused_at_init() {
+        act_as(OWNER, 1);
+        MarketContract::new(
+            acct(OWNER),
+            acct(OWNER),
+            acct(ORACLE),
+            acct(VERIFIER),
+            "usdc.near".to_string(),
+            acct(COUNCIL),
+            acct(BUSINESS),
+        );
+    }
+
+    #[test]
+    fn config_names_the_verifier_and_the_exact_token_id() {
+        let (c, _) = world();
+        let config = c.config();
+        assert_eq!(config["verifier"], VERIFIER);
+        assert_eq!(config["collateral_token_id"], COLLATERAL_ID);
+        assert!(config.get("collateral").is_none());
+    }
+
+    // ---- total_owed: what the verifier must hold for this contract --------------------------------------------
+
+    #[test]
+    fn total_owed_adds_balances_locked_collateral_and_every_fee_bucket() {
+        let (mut c, total_in) = world();
+        assert_eq!(c.total_owed().0, total_in);
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(7_000_000), "deposit".to_string());
+        assert_eq!(
+            c.total_owed().0,
+            total_in + 7_000_000,
+            "a deposit is owed to its sender"
+        );
+        c.revenue_due = 11;
+        c.business_due = 13;
+        c.revenue_unresolved = 17;
+        assert_eq!(c.total_owed().0, total_in + 7_000_000 + 41);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(2_000_000));
+        assert_eq!(
+            c.total_owed().0,
+            total_in + 5_000_000 + 41,
+            "a withdrawal stops being owed once it is taken from the balance"
+        );
+    }
+
+    #[test]
+    fn a_failed_withdrawal_puts_the_balance_back_and_total_owed_with_it() {
+        let (mut c, total_in) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(7_000_000), "deposit".to_string());
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(7_000_000));
+        assert_eq!(c.total_owed().0, total_in);
+        act_as("market.near", 5);
+        c.on_withdraw(acct(USERS[0]), U128(7_000_000), Err(PromiseError::Failed));
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
+        assert_eq!(c.total_owed().0, total_in + 7_000_000);
+        assert_eq!(last_event()["event"], "withdraw_failed");
+    }
+
+    #[test]
+    fn a_successful_withdrawal_leaves_the_balance_gone() {
+        let (mut c, total_in) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(7_000_000), "deposit".to_string());
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(7_000_000));
+        act_as("market.near", 5);
+        c.on_withdraw(acct(USERS[0]), U128(7_000_000), Ok(()));
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 0);
+        assert_eq!(c.total_owed().0, total_in);
+    }
+
+    // ---- payouts are verifier calls to accounts the records name ---------------------------------------------
+
+    fn call_of(r: &near_sdk::mock::Receipt) -> (String, near_sdk::serde_json::Value, u128, u64) {
+        match &r.actions[0] {
+            near_sdk::mock::MockAction::FunctionCallWeight {
+                method_name,
+                args,
+                attached_deposit,
+                prepaid_gas,
+                ..
+            } => (
+                String::from_utf8(method_name.clone()).unwrap(),
+                near_sdk::serde_json::from_slice(args).unwrap(),
+                attached_deposit.as_yoctonear(),
+                prepaid_gas.as_gas(),
+            ),
+            other => panic!("not a function call: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_withdrawal_is_one_mt_transfer_of_one_yocto_to_the_caller() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(7_000_000), "deposit".to_string());
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        let sent = receipts();
+        assert_eq!(sent[0].receiver_id, acct(VERIFIER));
+        let (method, args, deposit, gas) = call_of(&sent[0]);
+        assert_eq!(method, "mt_transfer");
+        assert_eq!(deposit, 1);
+        assert_eq!(gas, GAS_MT_TRANSFER.as_gas());
+        assert_eq!(args["receiver_id"], USERS[0]);
+        assert_eq!(args["token_id"], COLLATERAL_ID);
+        assert_eq!(args["amount"], "3000000");
+    }
+
+    #[test]
+    fn a_sweep_sends_the_council_a_transfer_call_and_the_business_wallet_a_plain_transfer() {
+        let (mut c, _) = world();
+        c.fees = 1_000_000;
+        act_as(USERS[2], 5);
+        c.sweep_fees();
+        let sent = receipts();
+        let to_verifier: Vec<_> = sent.iter().filter(|r| r.receiver_id == acct(VERIFIER)).collect();
+        assert_eq!(to_verifier.len(), 2);
+        let (method, args, deposit, gas) = call_of(to_verifier[0]);
+        assert_eq!(method, "mt_transfer_call");
+        assert_eq!((deposit, gas), (1, GAS_MT_TRANSFER_CALL.as_gas()));
+        assert_eq!(args["receiver_id"], COUNCIL);
+        assert_eq!(args["token_id"], COLLATERAL_ID);
+        assert_eq!(args["amount"], "250000");
+        assert_eq!(args["msg"], "revenue");
+        let (method, args, deposit, gas) = call_of(to_verifier[1]);
+        assert_eq!(method, "mt_transfer");
+        assert_eq!((deposit, gas), (1, GAS_MT_TRANSFER.as_gas()));
+        assert_eq!(args["receiver_id"], BUSINESS);
+        assert_eq!(args["amount"], "750000");
+    }
+
+    // ---- what the verifier's report on a revenue transfer means -----------------------------------------------
+
+    #[test]
+    fn a_council_that_refused_reports_zero_kept_and_the_whole_amount_is_due_again() {
+        let mut c = after_a_sweep();
+        act_as("market.near", 6);
+        c.on_revenue_sent(U128(250_000), Ok(vec![U128(0)]));
+        assert_eq!((c.revenue_due, c.revenue_unresolved), (250_000, 0));
+        assert_eq!(last_event()["event"], "fee_transfer_failed");
+    }
+
+    #[test]
+    fn a_council_that_kept_everything_leaves_nothing_due() {
+        let mut c = after_a_sweep();
+        act_as("market.near", 6);
+        c.on_revenue_sent(U128(250_000), Ok(vec![U128(250_000)]));
+        assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 0));
+    }
+
+    #[test]
+    fn a_report_of_the_wrong_shape_is_unknown_and_parks_the_amount() {
+        let mut c = after_a_sweep();
+        act_as("market.near", 6);
+        c.on_revenue_sent(U128(250_000), Ok(vec![]));
+        c.on_revenue_sent(U128(250_000), Ok(vec![U128(0), U128(0)]));
+        assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 500_000));
+    }
+
+    #[test]
+    fn a_report_that_claims_more_than_was_sent_never_creates_money() {
+        let mut c = after_a_sweep();
+        act_as("market.near", 6);
+        c.on_revenue_sent(U128(250_000), Ok(vec![U128(999_999_999)]));
+        assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 0));
     }
 
     // ---- a revenue transfer whose result is lost ---------------------------------------------------------
@@ -3103,7 +3528,7 @@ mod tests {
     fn a_report_that_says_part_was_kept_still_returns_the_rest_to_due() {
         let mut c = after_a_sweep();
         act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Ok(U128(100_000)));
+        c.on_revenue_sent(U128(250_000), Ok(vec![U128(100_000)]));
         assert_eq!((c.revenue_due, c.revenue_unresolved), (150_000, 0));
         assert_eq!(last_event()["event"], "fee_transfer_failed");
     }
@@ -3230,8 +3655,8 @@ mod tests {
                         let sent = revenue_out.remove(amount as usize % revenue_out.len());
                         act_as("market.near", 6);
                         match how {
-                            0 => { c.on_revenue_sent(U128(sent), Ok(U128(sent))); gone += sent; }
-                            1 => { let used = sent / 3; c.on_revenue_sent(U128(sent), Ok(U128(used))); gone += used; }
+                            0 => { c.on_revenue_sent(U128(sent), Ok(vec![U128(sent)])); gone += sent; }
+                            1 => { let used = sent / 3; c.on_revenue_sent(U128(sent), Ok(vec![U128(used)])); gone += used; }
                             _ => c.on_revenue_sent(U128(sent), Err(PromiseError::Failed)),
                         }
                     }
@@ -3272,12 +3697,12 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "attach at least 95 TGas: a sweep sends the Council its part and the business wallet its part"
+        expected = "attach at least 87 TGas: a sweep sends the Council its part and the business wallet its part"
     )]
     fn a_sweep_with_less_than_its_floor_is_refused_and_says_how_much() {
         let (mut c, _) = world();
         c.fees = 1_000_000;
-        act_with_gas(USERS[2], 94);
+        act_with_gas(USERS[2], 86);
         c.sweep_fees();
     }
 
@@ -3287,12 +3712,12 @@ mod tests {
     fn a_sweep_with_exactly_its_floor_gets_past_the_check() {
         let (mut c, _) = world();
         c.fees = 0;
-        act_with_gas(USERS[2], 95);
+        act_with_gas(USERS[2], 87);
         c.sweep_fees();
         assert_eq!(
             GAS_SWEEP_FLOOR,
-            Gas::from_tgas(95),
-            "the Council's 50 and 10, the business wallet's 15 and 10, and 10 for the call itself"
+            Gas::from_tgas(87),
+            "the Council's 22 and 20, the business wallet's 15 and 10, and 10 for the call itself"
         );
     }
 
@@ -3470,12 +3895,12 @@ mod tests {
         MarketContract::migrate();
     }
 
-    // The timelock on an upgrade is the users' exit window, so no pause may close the way out.
+    // The way out is the users' protection around an upgrade, so no pause may close it.
     #[test]
     fn withdraw_and_redeem_still_work_while_the_market_is_paused() {
         let (mut c, _) = world();
-        act_as(TOKEN, 3);
-        let _ = c.ft_on_transfer(acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
         act_as(ORACLE, CLOSE);
         c.set_outcome(U64(0), Outcome::Yes);
         act_as(OWNER, CLOSE + 1);
@@ -3656,8 +4081,8 @@ mod tests {
     #[should_panic(expected = "withdraw your balance first")]
     fn an_account_with_a_balance_cannot_unregister() {
         let mut c = blank_world();
-        act_as(TOKEN, 3);
-        let _ = c.ft_on_transfer(acct(USERS[0]), U128(5_000_000), "deposit".into());
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(5_000_000), "deposit".into());
         act_as(USERS[0], 5);
         c.storage_unregister(None);
     }
@@ -3666,8 +4091,8 @@ mod tests {
     #[should_panic(expected = "force is not supported")]
     fn force_is_refused_so_nobody_burns_a_balance_by_accident() {
         let mut c = blank_world();
-        act_as(TOKEN, 3);
-        let _ = c.ft_on_transfer(acct(USERS[0]), U128(5_000_000), "deposit".into());
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(5_000_000), "deposit".into());
         act_as(USERS[0], 5);
         c.storage_unregister(Some(true));
     }
@@ -3678,8 +4103,8 @@ mod tests {
         let mut c = blank_world();
         act_as(USERS[0], 5);
         assert!(c.storage_unregister(None));
-        act_as(TOKEN, 6);
-        let _ = c.ft_on_transfer(acct(USERS[0]), U128(5_000_000), "deposit".into());
+        act_as(VERIFIER, 6);
+        let _ = receive(&mut c, acct(USERS[0]), U128(5_000_000), "deposit".into());
     }
 
     // Selling everything can leave a share of dust (the quote rounds against the seller), so the way out is to redeem.

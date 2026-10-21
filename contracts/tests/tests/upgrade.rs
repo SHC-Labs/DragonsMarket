@@ -1,5 +1,5 @@
-// The upgrade path of all four contracts on a real sandbox chain: stage a build, pass it through a governance vote and
-// its timelock, and see the state survive, the failed upgrades change nothing, and seal remove every access key.
+// Application upgrade paths on a real sandbox with a separate owner fixture. This does not
+// establish Trezu/Sputnik approval or execution-delay behaviour. Those need dedicated integration tests.
 mod common;
 use common::*;
 use near_workspaces::types::{Gas, NearToken};
@@ -8,9 +8,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 const STAGE_DEPOSIT: NearToken = NearToken::from_near(5);
-// The gas a governance call to upgrade carries. The contract itself asks for at least 100.
+// The gas the configured owner attaches to an upgrade. The contract itself asks for at least 100.
 const UPGRADE_CALL_TGAS: u64 = 100;
-const GAS_EXECUTE_UPGRADE_TGAS: u64 = 110;
 
 // The same code with a custom section on the end, so it is a different build with its own hash. The section is a name
 // and no data, which every wasm reader skips.
@@ -75,12 +74,20 @@ fn seal_call(target: &Contract, key: &str) -> serde_json::Value {
     function_call(target.id(), "seal", json!({ "public_key": key }), 20)
 }
 
-// Passes the action, waits out the timelock and executes it. Returns the proposal id and the logs of the whole call.
-async fn vote_and_execute(w: &World, g: &Governance, action: serde_json::Value) -> anyhow::Result<(u64, Vec<String>)> {
-    let id = gov_pass(g, action).await?;
-    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
-    let logs = gov_execute(g, &w.carol, id).await?;
-    Ok((id, logs))
+// Direct application-owner fixture. This proves application upgrades, not DAO approval or delays.
+async fn owner_execute(admin: &Account, action: serde_json::Value) -> anyhow::Result<(bool, Vec<String>)> {
+    use base64::Engine;
+    let call = &action["function_call"];
+    let args = base64::engine::general_purpose::STANDARD.decode(call["args"].as_str().unwrap())?;
+    let target: AccountId = call["receiver_id"].as_str().unwrap().parse()?;
+    let result = admin
+        .call(&target, call["method_name"].as_str().unwrap())
+        .args(args)
+        .gas(Gas::from_gas(call["gas"].as_str().unwrap().parse()?))
+        .transact()
+        .await?;
+    let ok = result.is_success() && result.receipt_failures().is_empty();
+    Ok((ok, result.logs().iter().map(|l| l.to_string()).collect()))
 }
 
 async fn config_without_proof(c: &Contract) -> serde_json::Value {
@@ -120,8 +127,9 @@ fn governed_contracts(w: &World) -> Vec<(&'static str, &'static str, &Contract)>
 }
 
 #[tokio::test]
-async fn the_market_the_oracle_and_the_council_upgrade_through_a_vote_and_keep_their_state() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
+async fn the_market_the_oracle_and_the_council_upgrade_through_the_configured_owner_and_keep_their_state(
+) -> anyhow::Result<()> {
+    let (w, admin) = setup_admin_owned().await?;
     let id = seed_state(&w).await?;
     let before = snapshot(&w, id).await;
 
@@ -150,7 +158,7 @@ async fn the_market_the_oracle_and_the_council_upgrade_through_a_vote_and_keep_t
         let hash = stage(&w.bob, target.id(), &code).await?;
         assert!(is_staged(target, &hash).await, "{label}");
 
-        // Only governance deploys it: not the owner key that set the contracts up, not the staker.
+        // Only the configured owner deploys it: not the owner key that set the contracts up, not the staker.
         for stranger in [&w.owner, &w.bob] {
             refused(
                 stranger
@@ -166,13 +174,9 @@ async fn the_market_the_oracle_and_the_council_upgrade_through_a_vote_and_keep_t
         let old_code = deployed_hash(target).await;
         assert_ne!(old_code, hash);
 
-        let (proposal, logs) = vote_and_execute(&w, &g, upgrade_call(target, &hash, UPGRADE_CALL_TGAS)).await?;
-        assert_eq!(
-            event_names(&logs),
-            vec!["call_sent", "upgrade_sent", "migrated", "executed"],
-            "{label}"
-        );
-        assert_eq!(gov_proposal(&g, proposal).await["stage"], "executed", "{label}");
+        let (proposal, logs) = owner_execute(&admin, upgrade_call(target, &hash, UPGRADE_CALL_TGAS)).await?;
+        assert_eq!(event_names(&logs), vec!["upgrade_sent", "migrated"], "{label}");
+        assert!(proposal, "owner action succeeded");
         assert_eq!(deployed_hash(target).await, hash, "{label} runs the staged build");
         assert!(!is_staged(target, &hash).await, "{label}: the staged copy is removed");
         let c = config(target).await;
@@ -190,7 +194,7 @@ async fn the_market_the_oracle_and_the_council_upgrade_through_a_vote_and_keep_t
 
 #[tokio::test]
 async fn an_upgrade_that_cannot_finish_leaves_the_old_code_in_place_and_the_state_intact() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
+    let (w, admin) = setup_admin_owned().await?;
     let id = seed_state(&w).await?;
     let before = snapshot(&w, id).await;
 
@@ -199,20 +203,16 @@ async fn an_upgrade_that_cannot_finish_leaves_the_old_code_in_place_and_the_stat
 
         // A hash nobody staged.
         let unknown = hash_of(b"nobody staged this");
-        let (p, logs) = vote_and_execute(&w, &g, upgrade_call(target, &unknown, UPGRADE_CALL_TGAS)).await?;
-        assert_eq!(event_names(&logs), vec!["call_sent", "execution_failed"], "{label}");
-        assert_eq!(gov_proposal(&g, p).await["stage"], "execution_failed");
+        let (p, logs) = owner_execute(&admin, upgrade_call(target, &unknown, UPGRADE_CALL_TGAS)).await?;
+        assert!(event_names(&logs).is_empty(), "{label}");
+        assert!(!p, "owner action failed");
 
         // A build with no migrate: the batch reverts, and so does the deploy.
         let no_migrate = wasm("mock_ft");
         let hash = stage(&w.bob, target.id(), &no_migrate).await?;
-        let (p, logs) = vote_and_execute(&w, &g, upgrade_call(target, &hash, UPGRADE_CALL_TGAS)).await?;
-        assert_eq!(
-            event_names(&logs),
-            vec!["call_sent", "upgrade_sent", "execution_failed"],
-            "{label}"
-        );
-        assert_eq!(gov_proposal(&g, p).await["stage"], "execution_failed");
+        let (p, logs) = owner_execute(&admin, upgrade_call(target, &hash, UPGRADE_CALL_TGAS)).await?;
+        assert_eq!(event_names(&logs), vec!["upgrade_sent",], "{label}");
+        assert!(!p, "owner action failed");
         assert_eq!(deployed_hash(target).await, old, "{label} still runs its old code");
         assert!(
             !is_staged(target, &hash).await,
@@ -228,20 +228,16 @@ async fn an_upgrade_that_cannot_finish_leaves_the_old_code_in_place_and_the_stat
         // Too little gas is refused at the top, before the staged copy is touched.
         let good = rebuilt(wasm_name, "v2");
         let hash = stage(&w.bob, target.id(), &good).await?;
-        let (p, logs) = vote_and_execute(&w, &g, upgrade_call(target, &hash, UPGRADE_CALL_TGAS - 1)).await?;
-        assert_eq!(event_names(&logs), vec!["call_sent", "execution_failed"], "{label}");
-        assert_eq!(gov_proposal(&g, p).await["stage"], "execution_failed");
+        let (p, logs) = owner_execute(&admin, upgrade_call(target, &hash, UPGRADE_CALL_TGAS - 1)).await?;
+        assert!(event_names(&logs).is_empty(), "{label}");
+        assert!(!p, "owner action failed");
         assert!(is_staged(target, &hash).await, "{label}: the copy is still there");
         assert_eq!(deployed_hash(target).await, old, "{label}");
 
         // The next upgrade marks it again, goes through and clears the mark.
-        let (p, logs) = vote_and_execute(&w, &g, upgrade_call(target, &hash, UPGRADE_CALL_TGAS)).await?;
-        assert_eq!(
-            event_names(&logs),
-            vec!["call_sent", "upgrade_sent", "migrated", "executed"],
-            "{label}"
-        );
-        assert_eq!(gov_proposal(&g, p).await["stage"], "executed");
+        let (p, logs) = owner_execute(&admin, upgrade_call(target, &hash, UPGRADE_CALL_TGAS)).await?;
+        assert_eq!(event_names(&logs), vec!["upgrade_sent", "migrated"], "{label}");
+        assert!(p, "owner action succeeded");
         let c = config(target).await;
         assert_eq!(
             (&c["upgrade_proven"], &c["upgrade_in_flight"]),
@@ -256,10 +252,9 @@ async fn an_upgrade_that_cannot_finish_leaves_the_old_code_in_place_and_the_stat
 // migrate is private, so the account itself, or anyone holding its key, can call it. Without an upgrade having sent the
 // batch, that used to set upgrade_proven and let seal delete the keys of an account whose upgrade path never ran.
 #[tokio::test]
-async fn migrate_called_by_hand_is_refused_on_all_four_and_proves_nothing() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
-    let mut targets = governed_contracts(&w);
-    targets.push(("governance", "governance", &g.contract));
+async fn migrate_called_by_hand_is_refused_on_all_three_and_proves_nothing() -> anyhow::Result<()> {
+    let (w, _admin) = setup_admin_owned().await?;
+    let targets = governed_contracts(&w);
     for (_, label, target) in targets {
         refused(
             target.call("migrate").max_gas().transact().await?.into_result(),
@@ -275,10 +270,10 @@ async fn migrate_called_by_hand_is_refused_on_all_four_and_proves_nothing() -> a
     Ok(())
 }
 
-// The timelock on an upgrade is the users' exit window, so neither a pause nor an upgrade may close the way out.
+// A pause or successful upgrade must preserve available-balance exits.
 #[tokio::test]
 async fn a_balance_can_be_withdrawn_while_the_market_is_paused_and_after_it_is_upgraded() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
+    let (w, admin) = setup_admin_owned().await?;
     ft_call(&w, &w.alice, w.market.id(), 20 * USD, "deposit").await?;
     assert_eq!(market_balance(&w, w.alice.id()).await, 20 * USD);
     w.owner
@@ -290,7 +285,7 @@ async fn a_balance_can_be_withdrawn_while_the_market_is_paused_and_after_it_is_u
     assert_eq!(config(&w.market).await["paused"], true);
 
     let hash = stage(&w.bob, w.market.id(), &rebuilt("market", "v2")).await?;
-    vote_and_execute(&w, &g, upgrade_call(&w.market, &hash, UPGRADE_CALL_TGAS)).await?;
+    owner_execute(&admin, upgrade_call(&w.market, &hash, UPGRADE_CALL_TGAS)).await?;
     assert_eq!(config(&w.market).await["upgrade_proven"], true);
     assert_eq!(
         config(&w.market).await["paused"],
@@ -298,7 +293,7 @@ async fn a_balance_can_be_withdrawn_while_the_market_is_paused_and_after_it_is_u
         "the pause survives the upgrade"
     );
 
-    let before = ft_balance(&w, w.alice.id()).await;
+    let before = holdings(&w, w.alice.id()).await;
     w.alice
         .call(w.market.id(), "withdraw")
         .args_json(json!({ "amount": (20 * USD).to_string() }))
@@ -307,7 +302,7 @@ async fn a_balance_can_be_withdrawn_while_the_market_is_paused_and_after_it_is_u
         .transact()
         .await?
         .into_result()?;
-    assert_eq!(ft_balance(&w, w.alice.id()).await - before, 20 * USD);
+    assert_eq!(holdings(&w, w.alice.id()).await - before, 20 * USD);
     assert_eq!(market_balance(&w, w.alice.id()).await, 0);
     Ok(())
 }
@@ -331,7 +326,7 @@ async fn the_upgrade_call_names_the_gas_it_needs() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn seal_waits_for_a_proven_upgrade_and_then_removes_every_access_key() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
+    let (w, admin) = setup_admin_owned().await?;
     let id = seed_state(&w).await?;
 
     for (wasm_name, label, target) in governed_contracts(&w) {
@@ -347,9 +342,9 @@ async fn seal_waits_for_a_proven_upgrade_and_then_removes_every_access_key() -> 
             "owner only",
         );
 
-        // Before an upgrade has gone through, the vote to seal is recorded as failed and the key stays.
-        let (p, _) = vote_and_execute(&w, &g, seal_call(target, &key)).await?;
-        assert_eq!(gov_proposal(&g, p).await["stage"], "execution_failed", "{label}");
+        // Before an upgrade has gone through, sealing fails and the key stays.
+        let (p, _) = owner_execute(&admin, seal_call(target, &key)).await?;
+        assert!(!p, "owner action failed");
         assert_eq!(
             key_count(target).await,
             1,
@@ -357,17 +352,13 @@ async fn seal_waits_for_a_proven_upgrade_and_then_removes_every_access_key() -> 
         );
 
         let hash = stage(&w.bob, target.id(), &rebuilt(wasm_name, "v2")).await?;
-        vote_and_execute(&w, &g, upgrade_call(target, &hash, UPGRADE_CALL_TGAS)).await?;
+        owner_execute(&admin, upgrade_call(target, &hash, UPGRADE_CALL_TGAS)).await?;
         assert_eq!(config(target).await["upgrade_proven"], true);
 
         // The key still deploys, until it is sealed.
-        let (p, logs) = vote_and_execute(&w, &g, seal_call(target, &key)).await?;
-        assert_eq!(
-            event_names(&logs),
-            vec!["call_sent", "seal_sent", "executed"],
-            "{label}"
-        );
-        assert_eq!(gov_proposal(&g, p).await["stage"], "executed");
+        let (p, logs) = owner_execute(&admin, seal_call(target, &key)).await?;
+        assert_eq!(event_names(&logs), vec!["seal_sent"], "{label}");
+        assert!(p, "owner action succeeded");
         assert_eq!(key_count(target).await, 0, "{label} has no access key left");
         let old_key_deploy = target.as_account().deploy(&wasm("mock_ft")).await;
         assert!(old_key_deploy.is_err(), "{label}: the old key can no longer deploy");
@@ -381,179 +372,6 @@ async fn seal_waits_for_a_proven_upgrade_and_then_removes_every_access_key() -> 
     // The contracts keep working with no keys: an account redeems and a case moves on.
     assert!(invariant(&w, id).await);
     assert_eq!(case_json(&w, id).await["stage"], "proposed");
-    Ok(())
-}
-
-#[tokio::test]
-async fn governance_upgrades_itself_through_its_own_vote_and_keeps_its_proposals() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
-    let members_before = g.contract.view("get_members").await?.json::<Vec<String>>()?;
-    let key = public_key(&g.contract).await;
-    let code = rebuilt("governance", "v2");
-
-    // Anyone stages it, and a seal is refused while the upgrade path is unproven.
-    refused(
-        w.bob
-            .call(g.contract.id(), "stage_code")
-            .args(code.clone())
-            .deposit(NearToken::from_yoctonear(1))
-            .max_gas()
-            .transact()
-            .await?
-            .into_result(),
-        "attach at least",
-    );
-    let hash = stage(&w.bob, g.contract.id(), &code).await?;
-    refused(
-        g.members[0]
-            .call(g.contract.id(), "propose")
-            .args_json(json!({ "action": { "seal": { "public_key": key } } }))
-            .transact()
-            .await?
-            .into_result(),
-        "prove the upgrade path before deleting keys",
-    );
-    refused(
-        g.members[0]
-            .call(g.contract.id(), "propose")
-            .args_json(json!({ "action": { "upgrade_self": { "code_hash": hash_of(b"nobody staged this") } } }))
-            .transact()
-            .await?
-            .into_result(),
-        "stage the code first",
-    );
-    // A call to itself is still not a way around the actions.
-    refused(
-        g.members[0]
-            .call(g.contract.id(), "propose")
-            .args_json(json!({ "action": function_call(g.contract.id(), "upgrade", json!({}), 20) }))
-            .transact()
-            .await?
-            .into_result(),
-        "governance changes itself only through its own actions",
-    );
-
-    // A proposal approved before the upgrade is read, and executed, by the new code afterwards.
-    let early = gov_pass(
-        &g,
-        function_call(w.oracle.id(), "set_jury_size", json!({ "jury_size": 5 }), 20),
-    )
-    .await?;
-    let upgrade = gov_pass(&g, json!({ "upgrade_self": { "code_hash": hash } })).await?;
-    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
-
-    // Too little gas is refused and says how much to attach; nothing changes.
-    refused(
-        g.contract
-            .call("execute")
-            .args_json(json!({ "proposal_id": upgrade.to_string() }))
-            .gas(Gas::from_tgas(GAS_EXECUTE_UPGRADE_TGAS - 1))
-            .transact()
-            .await?
-            .into_result(),
-        "attach at least 110 TGas to execute an upgrade",
-    );
-    assert_eq!(gov_proposal(&g, upgrade).await["stage"], "approved");
-    assert!(is_staged(&g.contract, &hash).await);
-
-    let old_code = deployed_hash(&g.contract).await;
-    let logs = gov_execute(&g, &w.carol, upgrade).await?;
-    assert_eq!(event_names(&logs), vec!["upgrade_sent", "migrated", "executed"]);
-    assert_eq!(deployed_hash(&g.contract).await, hash);
-    assert_ne!(old_code, hash);
-    assert!(!is_staged(&g.contract, &hash).await);
-    assert_eq!(
-        gov_proposal(&g, upgrade).await["stage"],
-        "executed",
-        "the new code recorded the result of its own deploy"
-    );
-    let c = config(&g.contract).await;
-    assert_eq!(
-        (
-            &c["upgrade_proven"],
-            &c["upgrade_in_flight"],
-            &c["state_version"],
-            &c["proposals"]
-        ),
-        (&json!(true), &json!(false), &json!(1), &json!("2"))
-    );
-    assert_eq!(
-        g.contract.view("get_members").await?.json::<Vec<String>>()?,
-        members_before
-    );
-
-    assert_eq!(gov_proposal(&g, early).await["stage"], "approved");
-    assert_eq!(
-        event_names(&gov_execute(&g, &w.carol, early).await?),
-        vec!["call_sent", "executed"]
-    );
-    assert_eq!(config(&w.oracle).await["jury_size"], 5);
-
-    // And now a seal goes through a vote like any other action and leaves the account with no key.
-    assert_eq!(key_count(&g.contract).await, 1);
-    let (seal, logs) = vote_and_execute(&w, &g, json!({ "seal": { "public_key": key } })).await?;
-    assert_eq!(event_names(&logs), vec!["seal_sent", "executed"]);
-    assert_eq!(gov_proposal(&g, seal).await["stage"], "executed");
-    assert_eq!(key_count(&g.contract).await, 0);
-    assert!(
-        g.contract.as_account().deploy(&wasm("mock_ft")).await.is_err(),
-        "the old key can no longer deploy"
-    );
-    // Members still propose: the contract needs no key of its own.
-    gov_propose(
-        &g,
-        &g.members[0],
-        function_call(w.oracle.id(), "set_jury_size", json!({ "jury_size": 3 }), 20),
-    )
-    .await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_failed_governance_self_upgrade_is_recorded_as_failed_and_changes_nothing() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
-    let old_code = deployed_hash(&g.contract).await;
-    let before = config(&g.contract).await;
-
-    // No migrate, no on_executed: the batch reverts, and the callback runs in the old code that is still there.
-    let hash = stage(&w.bob, g.contract.id(), &wasm("mock_ft")).await?;
-    let (bad, logs) = vote_and_execute(&w, &g, json!({ "upgrade_self": { "code_hash": hash } })).await?;
-    assert_eq!(event_names(&logs), vec!["upgrade_sent", "execution_failed"]);
-    assert_eq!(gov_proposal(&g, bad).await["stage"], "execution_failed");
-    assert_eq!(deployed_hash(&g.contract).await, old_code);
-    let mut after = config(&g.contract).await;
-    assert_eq!(after["proposals"], "1");
-    assert_eq!(
-        after["upgrade_in_flight"], true,
-        "the old code keeps the mark of the batch that failed"
-    );
-    after["proposals"] = before["proposals"].clone();
-    after["upgrade_in_flight"] = before["upgrade_in_flight"].clone();
-    assert_eq!(after, before);
-    assert_eq!(config(&g.contract).await["upgrade_proven"], false);
-
-    // A build whose migrate panics is the same case: the market's migrate cannot read governance's state.
-    let hash = stage(&w.bob, g.contract.id(), &wasm("market")).await?;
-    let (bad, logs) = vote_and_execute(&w, &g, json!({ "upgrade_self": { "code_hash": hash } })).await?;
-    assert_eq!(event_names(&logs), vec!["upgrade_sent", "execution_failed"]);
-    assert_eq!(gov_proposal(&g, bad).await["stage"], "execution_failed");
-    assert_eq!(deployed_hash(&g.contract).await, old_code);
-
-    // The failed attempts did not break governance: a good upgrade right after goes through.
-    let good = stage(&w.bob, g.contract.id(), &rebuilt("governance", "v2")).await?;
-    let (ok, logs) = vote_and_execute(&w, &g, json!({ "upgrade_self": { "code_hash": good } })).await?;
-    assert_eq!(event_names(&logs), vec!["upgrade_sent", "migrated", "executed"]);
-    assert_eq!(gov_proposal(&g, ok).await["stage"], "executed");
-    let c = config(&g.contract).await;
-    assert_eq!(
-        (&c["upgrade_proven"], &c["upgrade_in_flight"]),
-        (&json!(true), &json!(false))
-    );
-    assert_eq!(
-        gov_proposal(&g, bad).await["stage"],
-        "execution_failed",
-        "the old record is still read correctly"
-    );
     Ok(())
 }
 
@@ -615,25 +433,5 @@ async fn the_gas_of_staging_upgrading_migrating_and_sealing_fits_what_is_asked()
         assert_eq!(key_count(target).await, 0, "{label}");
     }
 
-    // Governance executing an upgrade of itself, the largest call: the deploy, migrate and callback in one execute.
-    let (w, g) = setup_governed().await?;
-    let hash = stage(&w.bob, g.contract.id(), &rebuilt("governance", "gas")).await?;
-    let id = gov_pass(&g, json!({ "upgrade_self": { "code_hash": hash } })).await?;
-    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
-    let r = g.members[0]
-        .call(g.contract.id(), "execute")
-        .args_json(json!({ "proposal_id": id.to_string() }))
-        .max_gas()
-        .transact()
-        .await?
-        .into_result()?;
-    println!(
-        "governance upgrade_self, execute in all: {} TGas",
-        r.total_gas_burnt.as_tgas()
-    );
-    for o in r.outcomes() {
-        println!("    {} burnt {} TGas", o.executor_id, o.gas_burnt.as_tgas());
-    }
-    assert!(r.total_gas_burnt.as_tgas() < GAS_EXECUTE_UPGRADE_TGAS);
     Ok(())
 }

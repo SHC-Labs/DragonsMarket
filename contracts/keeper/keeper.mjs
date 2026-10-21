@@ -8,7 +8,7 @@
 //   node keeper.mjs run   --rpc URL --market ID --oracle ID --council ID --account ID [--dry-run]
 //                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH]
 //                         [--state-file PATH] [--min-sweep UNITS]
-//   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID [--governance ID] [--min-margin NEAR]
+//   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID [--treasury ID] [--min-margin NEAR]
 //
 // `run` needs an account with a little NEAR for gas. The calls it makes move no money of the keeper's own, and none
 // of them attach a deposit, so a function call access key is enough. `check` reads only. It reports whether the
@@ -341,7 +341,7 @@ async function check(opts) {
   console.log(`jury size ${oracle.jury_size} then ${secondJurySize(oracle.jury_size)}, ${owners.size} different seat holders, ${oracle.publishers.length} publishers (${oracle.price_threshold} must sign)`);
 
   const named = [["market", opts.market], ["oracle", opts.oracle], ["council", opts.council]];
-  if (opts.governance) named.push(["governance", opts.governance]);
+  if (opts.treasury) named.push(["treasury", opts.treasury]);
   const accounts = [];
   for (const [name, id] of named) {
     const account = await rpc(opts.rpc, "query", { request_type: "view_account", finality: "final", account_id: id });
@@ -367,6 +367,12 @@ function options(argv) {
   return opts;
 }
 
+export function refuseRetiredController(opts) {
+  if (Object.hasOwn(opts, "governance")) {
+    throw new Error("--governance is retired; use --treasury with the verified Trezu/Sputnik account ID");
+  }
+}
+
 function label(action) {
   return `${action.contract}.${action.method}(${action.args.market_id ?? ""})`;
 }
@@ -374,6 +380,7 @@ function label(action) {
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const opts = options(rest);
+  refuseRetiredController(opts);
   if (command === "check") process.exit(await check(opts));
   if (command !== "run") {
     console.error("usage: keeper.mjs run|check --rpc URL --market ID --oracle ID --council ID [--account ID] [--dry-run] (see the top of the file)");

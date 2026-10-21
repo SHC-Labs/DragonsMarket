@@ -40,7 +40,7 @@ export function TermsAcceptanceDialog({ account, onAccept, onDismiss }: {
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
   }}>
     <h2 id="terms-dialog-title">Before you continue</h2>
-    <p id="terms-dialog-description">Review the policies for Dragons Market before using your wallet here.</p>
+    <p id="terms-dialog-description">Read the Terms of Use and Privacy Policy before using wallet features.</p>
     <p className="terms-dialog-account num">{shortAccount(account, 28)}</p>
     <form onSubmit={event => {
       event.preventDefault();
@@ -58,7 +58,7 @@ export function TermsAcceptanceDialog({ account, onAccept, onDismiss }: {
         <span>Version {LEGAL_DOCUMENTS.privacy.version}</span>
       </div>
       <label className="terms-agreement"><input type="checkbox" required checked={privacyAcknowledged} onChange={event => setPrivacyAcknowledged(event.target.checked)} /><span>I acknowledge the Privacy Policy.</span></label>
-      <p className="terms-dialog-note">This choice is remembered for this wallet in this browser. A policy update may require you to review it again.</p>
+      <p className="terms-dialog-note">This browser saves your choice for this wallet. We may ask you to review the policies again if they change.</p>
       {error && <p className="terms-dialog-error" role="alert">{error}</p>}
       <div className="terms-dialog-actions"><Button variant="secondary" onClick={onDismiss}>Not now</Button><Button type="submit" disabled={!termsAgreed || !privacyAcknowledged}>Accept and continue</Button></div>
     </form>
