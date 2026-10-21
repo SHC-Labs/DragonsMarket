@@ -35,7 +35,7 @@ export default function PartnershipsPage() {
         <Image src="/partners/degen-arena/moonshot.webp" alt="Degen Arena’s illustrated mascot riding a red rocket through a star-filled sky" width={3048} height={1828} priority unoptimized />
       </ArenaHero>
     </section>
-    <div className="arena-marquee" aria-hidden="true">{[0, 1].map(row => <div key={row} className="arena-marquee-row">{Array.from({ length: 4 }, (_, i) => <span key={i}>{games.map(g => <b key={g.slug}>{g.name}</b>)}</span>)}</div>)}</div>
+    <div className="arena-marquee" aria-hidden="true">{[0, 1].map(row => <div key={row} className="arena-marquee-row">{Array.from({ length: 4 }, (_, i) => <span key={i}>{games.map((g, j) => { const n = row * 12 + i * 3 + j; return <b key={g.slug} style={{ "--dx": `${((n * 37) % 11) - 5}px`, "--dy": `${((n * 53) % 9) - 4}px`, "--dur": `${5 + ((n * 29) % 7)}s`, "--delay": `${-((n * 17) % 9)}s` } as React.CSSProperties}>{g.name}</b>; })}</span>)}</div>)}</div>
     <section className="partner-games" aria-labelledby="partner-games-title">
       <div className="partner-section-heading"><h2 id="partner-games-title">Games on Degen Arena</h2><p>Read the rules before you play.</p></div>
       <div className="partner-game-grid">{games.map(game => <a key={game.slug} className="partner-game" href={`${site}/how-it-works/${game.slug}`} target="_blank" rel="noopener noreferrer" aria-label={`${game.name}: read the game guide on Degen Arena (opens in a new tab)`}>

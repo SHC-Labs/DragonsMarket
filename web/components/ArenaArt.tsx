@@ -14,7 +14,8 @@ export function ArenaHero({ children }: { children: ReactNode }) {
   const leave = (e: PointerEvent<HTMLElement>) => { e.currentTarget.style.removeProperty("--rx"); e.currentTarget.style.removeProperty("--ry"); };
   return <figure className="partner-hero-art" onPointerMove={move} onPointerLeave={leave}>
     {children}
-    <Embers height={0.9} intensity={1.6} spark="--rocket-spark" smoke="--rocket-smoke" />
+    <span className="arena-exhaust" aria-hidden="true" />
+    <Embers height={0.95} intensity={2.2} spark="--rocket-spark" smoke="--rocket-smoke" />
   </figure>;
 }
 

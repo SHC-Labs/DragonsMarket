@@ -244,3 +244,31 @@
 }
 @keyframes marquee-left { from { transform: translateX(0); } to { transform: translateX(-35%); } }
 @keyframes marquee-right { from { transform: translateX(-35%); } to { transform: translateX(0); } }
+
+/* ---------- v2.1 ---------- */
+/* The seal's outer ring keeps turning slowly once struck: reeding, inscription and the four element marks. */
+.seal-ring { transform-origin: 100px 100px; }
+.seal-element path { fill: none; stroke: var(--seal-ink); stroke-width: 1.2; stroke-linejoin: round; }
+.seal-element line { stroke: var(--seal-ink); stroke-width: 1.2; }
+.seal-inscription { font-size: 8.6px; letter-spacing: 0.1em; }
+@media (prefers-reduced-motion: no-preference) {
+  .market-seal .seal-ring { animation: seal-turn-forever 90s linear 1.8s infinite; }
+  .detail-seal .seal-ring, .case-seal .seal-ring { animation-duration: 60s; }
+}
+@keyframes seal-turn-forever { to { transform: rotate(1turn); } }
+
+/* Council hero: the ember layer fades out at the bottom instead of ending on a line. */
+.council-membership-intro .embers { mask-image: linear-gradient(180deg, black 55%, transparent); -webkit-mask-image: linear-gradient(180deg, black 55%, transparent); }
+
+/* Arena marquee: every word drifts on its own path, on top of the scroll slide. */
+@media (prefers-reduced-motion: no-preference) {
+  .arena-marquee b { display: inline-block; animation: word-drift var(--dur, 7s) var(--ease-in-out) var(--delay, 0s) infinite alternate; }
+}
+@keyframes word-drift { 0% { transform: translate(0, 0) rotate(0deg); } 50% { transform: translate(var(--dx), var(--dy)) rotate(calc(var(--dx) * 0.08deg)); } 100% { transform: translate(calc(var(--dx) * -0.6), calc(var(--dy) * -0.8)) rotate(0deg); } }
+
+/* Arena hero: an engine glow that flickers at the rocket's nozzle, under the rising sparks and smoke. */
+.arena-exhaust { position: absolute; z-index: 1; left: 45%; top: 60%; width: 32%; height: 30%; pointer-events: none; background: radial-gradient(closest-side, color-mix(in oklab, var(--rocket-spark) 75%, white) 0%, color-mix(in oklab, var(--rocket-spark) 45%, transparent) 40%, transparent 72%); mix-blend-mode: screen; opacity: 0.55; filter: blur(6px); }
+@media (prefers-reduced-motion: no-preference) { .arena-exhaust { animation: exhaust-flicker 1.1s steps(1, end) infinite, exhaust-breathe 3.2s var(--ease-in-out) infinite alternate; } }
+@keyframes exhaust-flicker { 0% { opacity: 0.55; } 18% { opacity: 0.4; } 31% { opacity: 0.68; } 47% { opacity: 0.5; } 66% { opacity: 0.62; } 82% { opacity: 0.45; } }
+@keyframes exhaust-breathe { to { transform: scale(1.12) translateX(3%); } }
+:root[data-theme="light"] .arena-exhaust { opacity: 0.3; }
