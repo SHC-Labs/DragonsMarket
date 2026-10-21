@@ -6,6 +6,8 @@ import Link from "next/link";
 import { useWallet } from "@/components/WalletProvider";
 import { useWatchlist } from "@/lib/watchlist";
 import { RecentPrices } from "@/components/RecentPrices";
+import { Ticker } from "@/components/Ticker";
+import { CouncilCall } from "@/components/CouncilCall";
 import { AccountEmptyState, PageLandmark } from "@/components/PageHeader";
 import { Controls } from "@/components/Controls";
 import { FeaturedCarousel } from "@/components/FeaturedCarousel";
@@ -131,7 +133,7 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
   return (
     <div className="page-content">
       {intro}
-
+      {!watching && <Ticker markets={data.markets} histories={data.histories} />}
 
       {browsing && featuredMarkets.length>0 && (
         <div className="market-spotlight">
@@ -174,6 +176,7 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
       </section>
 
       {!watching && <RecentPrices markets={data.markets} histories={data.histories} />}
+      {!watching && <CouncilCall />}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { PageHeader } from "@/components/PageHeader";
@@ -9,7 +10,7 @@ import { MarketOutcomeChart } from "@/components/MarketOutcomeChart";
 import { CountUp } from "@/components/CountUp";
 import { RulesBlock } from "@/components/RulesBlock";
 import { Resolution } from "@/components/Resolution";
-import { MarketIcon } from "@/components/MarketIcon";
+import { MarketSeal } from "@/components/MarketSeal";
 import { TradeTicket } from "@/components/TradeTicket";
 import { Clock, Coin } from "@/components/icons";
 import { config } from "@/lib/config";
@@ -23,6 +24,7 @@ export function MarketView() {
   const params = useSearchParams();
   const id = params.get("id") ?? "";
   const initialSide = params.get("side") === "no" ? "no" : "yes";
+  const [scrub, setScrub] = useState<Pt | null>(null);
   const { data, error, loading } = usePoll(
     async () => {
       const market = await getMarket(id);
@@ -59,7 +61,7 @@ export function MarketView() {
       </nav>
       <div className="market-detail-layout">
         <header className="market-detail-header">
-          <MarketIcon category={m.category} sub={m.subcategory} />
+          <MarketSeal hash={m.rule_hash} id={m.id} className="detail-seal" />
           <div className="min-w-0">
             <div className="market-detail-meta">
               <StateBadge status={m.status} caseStage={data.stage} />
@@ -77,9 +79,9 @@ export function MarketView() {
               {done ? (
                 <div className="display price-panel-number">{resultWord(m)}</div>
               ) : (
-                <div className="display price-panel-number"><CountUp value={yes} /><span>%</span></div>
+                <div className="display price-panel-number" data-scrubbing={scrub ? true : undefined}><CountUp value={scrub ? Math.round(scrub.p) : yes} duration={scrub ? 260 : 900} /><span>%</span></div>
               )}
-              <div className="price-panel-label">{done ? "final result" : "chance of Yes"}</div>
+              <div className="price-panel-label" aria-live="off">{done ? "final result" : scrub ? <>chance of Yes on <time className="num" dateTime={new Date(scrub.at).toISOString()}>{new Date(scrub.at).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</time></> : "chance of Yes"}</div>
             </div>
             {!done && data.points.length > 1 && (
               <div className="price-panel-delta num" data-dir={delta > 0 ? "up" : delta < 0 ? "down" : "flat"}>
@@ -90,7 +92,7 @@ export function MarketView() {
           </div>
           {done ? <div className="price-panel-settled" aria-hidden="true" /> : <SplitMeter yes={yes} labels size="lg" />}
           <div className="price-panel-chart">
-            <MarketOutcomeChart points={data.points} />
+            <MarketOutcomeChart points={data.points} onActive={done ? undefined : setScrub} />
           </div>
         </section>
 

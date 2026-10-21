@@ -1,5 +1,9 @@
 import { CollectionGallery } from "./CollectionGallery";
+import Image from "next/image";
 import { ArrowDown, Coin, Judge, Lock } from "./icons";
+import { Embers } from "./Embers";
+
+const WALL = ["robots-01", "council-02", "robots-03", "council-03", "robots-05", "council-01", "robots-02", "council-04", "robots-04", "robots-06"];
 
 const TERMS = [
   { title: "Help resolve disputes", icon: Judge, text: "When drawn, read the market rule and evidence, commit your vote, then reveal it before the deadline. Your vote and reason become part of the public case record." },
@@ -11,6 +15,8 @@ export function Membership() {
   return (
     <section id="membership" className="council-membership" aria-labelledby="membership-title">
       <div className="council-membership-intro">
+        <Embers height={0.7} intensity={0.9} spark="--council" smoke="--council" />
+        <div className="council-wall" aria-hidden="true">{[0, 1, 2].map(col => <div key={col} className="council-wall-col">{WALL.filter((_, i) => i % 3 === col).concat(WALL.filter((_, i) => i % 3 === col)).map((name, i) => <Image key={`${name}-${i}`} src={`/collection/${name}.jpg`} alt="" width={360} height={360} unoptimized />)}</div>)}</div>
         <div className="council-hero-copy">
           <p className="eyebrow council-eyebrow"><span className="brand-mark" aria-hidden="true" />Dragon Council</p>
           <h2 id="membership-title">Join the Council</h2>

@@ -5,7 +5,7 @@ import { getCase, type Case, type MarketView, type Outcome } from "@/lib/market"
 import { formatDateTime } from "@/lib/format";
 import { seedHex } from "@/lib/sigil";
 import { Sigil } from "./Sigil";
-import { CouncilSeal } from "./Threshold";
+import { MarketSeal } from "./MarketSeal";
 import { ArrowUpRight } from "./icons";
 
 const evidenceUrl = (value: string) => {
@@ -58,7 +58,7 @@ export function Resolution({ market }: { market: MarketView }) {
           {evidence && <a href={evidence.href} target="_blank" rel="noopener noreferrer" className="text-link resolution-evidence">Read the evidence · {evidence?.hostname}<ArrowUpRight size={15} /></a>}
         </div>
         {c.final_outcome && <div className="resolution-ruling">
-          <div className="verdict-seal" aria-hidden="true"><CouncilSeal className="verdict-seal-art" /><span>{WORD[c.final_outcome]}</span></div>
+          <div className="verdict-seal" aria-hidden="true"><MarketSeal hash={market.rule_hash} id={market.id} tone="council" className="verdict-seal-art" /><span>{WORD[c.final_outcome]}</span></div>
           <p className="resolution-verdict">Final answer: <strong>{WORD[c.final_outcome]}</strong></p>
         </div>}
         {Array.isArray(c.votes) && c.votes.length > 0 && <><h3 className="resolution-votes-title">Public votes</h3><ul className="resolution-votes">{c.votes.map((vote, i) => <li key={`${vote.juror}-${i}`} className="vote-card enter" style={{ "--i": i } as React.CSSProperties}>

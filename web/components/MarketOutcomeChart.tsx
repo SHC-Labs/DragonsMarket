@@ -22,8 +22,10 @@ function niceTicks(min: number, max: number): number[] {
   return out;
 }
 
-export function MarketOutcomeChart({ points, compact = false }: { points: Pt[]; compact?: boolean }) {
+export function MarketOutcomeChart({ points, compact = false, onActive }: { points: Pt[]; compact?: boolean; onActive?: (point: Pt | null) => void }) {
   const [index, setIndex] = useState<number | null>(null);
+  // Lets the page follow the cursor through history (the market page's big numeral rewinds with it).
+  useEffect(() => { onActive?.(index === null ? null : points[Math.min(index, points.length - 1)] ?? null); }, [index]); // eslint-disable-line react-hooks/exhaustive-deps
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ width: 620, height: 280 });
   const gradient = useId().replace(/:/g, "");

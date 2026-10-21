@@ -1,0 +1,138 @@
+/* v2 "Sealed by Dragons": the engraved display face, market seals, embers, the tape and the dragons. */
+
+/* ---------- Engraved display type ---------- */
+:is(.spotlight-title, .market-title, .market-card h3, .section-title, .council-hub h2, .council-hero-copy h2, .account-empty h2,
+  .page-title, .partner-intro h2, .partner-section-heading h2, .guide-stage-copy h3, .legal-heading h1, .trending-panel h2,
+  .collection-gallery-heading h2, .council-call h2, .view-title h2) {
+  font-family: var(--font-display-stack); font-weight: 400; letter-spacing: -0.012em;
+}
+:is(.spotlight-number, .price-panel-number, .market-card-odds b, .balance-figure, .ticket-outcome-price,
+  .feature-outcome-row strong, .pulse-chance, .portfolio-count, .resolution-verdict, .spotlight-result strong) {
+  font-family: var(--font-display-stack); font-weight: 400; letter-spacing: -0.02em; font-variant-numeric: lining-nums tabular-nums;
+}
+.resolution-verdict strong { font-weight: 400; }
+.spotlight-title { font-size: clamp(1.625rem, 1.1rem + 1.4vw, 2.5rem); line-height: 1.08; }
+.spotlight-number { font-size: clamp(5rem, 3rem + 6vw, 8.5rem); line-height: 0.78; }
+.spotlight-number small { font-family: var(--font-display-stack); }
+.market-title { font-size: clamp(2rem, 1.3rem + 2.4vw, 3.5rem); line-height: 1.04; letter-spacing: -0.02em; }
+.price-panel-number { font-size: clamp(5.5rem, 3rem + 7vw, 10rem); line-height: 0.78; transition: color var(--dur-2); }
+.price-panel-number[data-scrubbing] { color: var(--brand); }
+.market-card h3 { font-size: 1.25rem; line-height: 1.18; -webkit-line-clamp: 3; }
+.market-card-heading { min-height: 6.25rem; }
+.market-card-cat { display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-2); }
+.market-card-cat .market-icon { width: 1.375rem; height: 1.375rem; border-radius: 6px; }
+.market-card-cat .market-icon svg { width: 14px; height: 14px; }
+.market-card-odds b { font-size: 2.75rem; }
+.council-hero-copy h2 { font-size: clamp(3rem, 1.6rem + 5vw, 6rem); line-height: 0.95; letter-spacing: -0.025em; }
+.council-call h2 { font-size: clamp(2rem, 1.3rem + 2.4vw, 3.25rem); line-height: 1.02; }
+.balance-figure { letter-spacing: -0.03em; }
+.resolution-verdict { font-size: clamp(2.25rem, 1.6rem + 2vw, 3.25rem); line-height: 1; }
+.section-title { font-size: var(--fs-2xl); }
+
+/* ---------- Market seals ---------- */
+.market-seal { --seal-ink: var(--brand); display: block; overflow: visible; color: var(--seal-ink); }
+.seal-face { fill: color-mix(in oklab, var(--seal-ink) 7%, var(--surface)); stroke: color-mix(in oklab, var(--seal-ink) 40%, transparent); stroke-width: 1; }
+.seal-reeding line { stroke: var(--seal-ink); stroke-opacity: 0.55; stroke-width: 1.2; }
+.seal-line { fill: none; stroke: var(--seal-ink); stroke-width: 1.1; stroke-opacity: 0.8; }
+.seal-inscription { fill: var(--seal-ink); font: 600 9.5px var(--font-sans-stack); letter-spacing: 0.06em; }
+@media (prefers-reduced-motion: no-preference) {
+  .market-seal :is(.seal-line, .seal-draw) { stroke-dasharray: 1; animation: chart-draw 1.6s var(--ease-out) 150ms both; }
+  .market-seal .seal-reeding { transform-origin: 100px 100px; animation: seal-spin 1.6s var(--ease-out) both; }
+  .market-seal .seal-inscription { transform-origin: 100px 100px; animation: seal-inscribe 1.8s var(--ease-out) 200ms both; }
+}
+@keyframes seal-inscribe { from { opacity: 0; transform: rotate(-40deg); } }
+
+.spotlight-seal { position: absolute; z-index: 0; right: -4.5rem; top: -4.5rem; width: 21rem; height: 21rem; opacity: 0.55; pointer-events: none; }
+.spotlight-copy, .spotlight-chart { position: relative; z-index: 1; }
+.card-seal { flex-shrink: 0; width: 3.25rem; height: 3.25rem; margin-left: auto; transition: transform var(--dur-5) var(--ease-emph); }
+.market-card:hover .card-seal { transform: rotate(28deg) scale(1.06); }
+.market-card-heading { gap: var(--s-3); }
+.detail-seal { flex-shrink: 0; width: 6.5rem; height: 6.5rem; filter: drop-shadow(0 10px 30px var(--glow-brand)); }
+.case-seal { grid-area: num; width: 3.5rem; height: 3.5rem; align-self: center; }
+.case-list a { grid-template-columns: 3.5rem 6.5rem minmax(0, 1fr) auto; grid-template-areas: "num ref title outcome" "num ref meta outcome"; }
+.case-list .case-number { grid-area: ref; }
+.position-seal { width: 2.75rem; height: 2.75rem; }
+.verdict-seal { width: 8rem; height: 8rem; }
+.verdict-seal > span { font-family: var(--font-display-stack); font-size: var(--fs-md); letter-spacing: 0.08em; }
+
+/* ---------- Embers (canvas-ui Blaze, overlay) ---------- */
+.embers { position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; border-radius: inherit; }
+.embers-canvas { position: absolute; inset: 0; width: 100%; height: 100%; mix-blend-mode: screen; }
+
+/* ---------- The tape ---------- */
+.tape { position: relative; display: flex; align-items: center; gap: var(--s-2); margin: calc(var(--s-7) * -1 + var(--s-1)) calc(var(--gutter) * -1) var(--s-6); padding: 0 var(--gutter); border-bottom: 1px solid var(--line); background: color-mix(in oklab, var(--surface) 55%, transparent); }
+.tape-viewport { display: flex; flex: 1; min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, transparent, black 4rem, black calc(100% - 4rem), transparent); }
+.tape-track { display: flex; flex-shrink: 0; gap: 0; margin: 0; padding: 0; list-style: none; animation: tape-run calc(var(--tape-items) * 4.5s) linear infinite; }
+.tape:is(:hover, :focus-within, [data-paused]) .tape-track { animation-play-state: paused; }
+@keyframes tape-run { to { transform: translateX(-100%); } }
+.tape li a { display: inline-flex; align-items: baseline; gap: var(--s-2); padding: var(--s-3) var(--s-6) var(--s-3) 0; margin-right: var(--s-6); border-right: 1px solid var(--line); white-space: nowrap; text-decoration: none; font-size: var(--fs-xs); color: var(--text-muted); transition: color var(--dur-2); }
+.tape li a:hover { color: var(--text); }
+.tape-price { font-family: var(--font-display-stack); font-size: var(--fs-lg); color: var(--text); }
+.tape-toggle { display: grid; place-items: center; flex-shrink: 0; width: 2rem; height: 2rem; min-height: 0; min-width: 0; border-radius: 50%; border: 1px solid var(--line-strong); color: var(--text-muted); cursor: pointer; transition: color var(--dur-2), border-color var(--dur-2); }
+.tape-toggle:hover { color: var(--text); border-color: var(--brand); }
+@media (prefers-reduced-motion: reduce) {
+  .tape-track { animation: none; }
+  .tape-track[aria-hidden] { display: none; }
+  .tape-viewport { overflow-x: auto; mask-image: none; }
+  .tape-toggle { display: none; }
+}
+@media (max-width: 767px) { .tape { margin-top: calc(var(--s-5) * -1 + var(--s-1)); } }
+
+/* ---------- The Council on the home page ---------- */
+.council-call { position: relative; display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr); align-items: center; gap: var(--s-9); margin-top: var(--section-space); padding: var(--s-10) var(--s-9); border-radius: var(--r-lg); background: radial-gradient(40rem 22rem at 100% 100%, var(--council-tint), transparent 70%), color-mix(in oklab, var(--council-soft) 45%, var(--surface)); overflow: hidden; isolation: isolate; }
+.council-call-copy { display: grid; justify-items: start; gap: var(--s-4); }
+.council-call h2 { margin: 0; color: var(--text); }
+.council-call p { margin: 0; max-width: 34rem; color: var(--text-muted); font-size: var(--fs-lg); }
+.council-call .text-link { color: var(--council); }
+.council-call-art { display: flex; justify-content: center; margin: 0; padding: 0; list-style: none; }
+.council-call-art li { --tilt: calc((var(--i) - 3) * 4deg); flex: 0 0 auto; width: clamp(6rem, 11vw, 10rem); margin-left: clamp(-3.5rem, -3.5vw, -1.5rem); border: 3px solid var(--surface); border-radius: var(--r-md); overflow: hidden; box-shadow: var(--elev-2); transform: rotate(var(--tilt)) translateY(calc(abs(var(--i) - 3) * 0.6rem)); transition: transform var(--dur-4) var(--ease-emph), box-shadow var(--dur-4); }
+.council-call-art li:first-child { margin-left: 0; }
+.council-call-art li:hover { z-index: 2; transform: rotate(0deg) translateY(-1rem) scale(1.12); box-shadow: var(--elev-3), 0 0 0 2px var(--council); }
+.council-call-art img { display: block; width: 100%; height: auto; aspect-ratio: 1; }
+@media (max-width: 899px) {
+  .council-call { grid-template-columns: 1fr; padding: var(--s-7) var(--s-5); gap: var(--s-7); }
+  .council-call-art li { width: 22vw; margin-left: -8vw; }
+}
+
+/* ---------- Council hero: a drifting wall of dragons behind the seat pass ---------- */
+.council-membership-intro { isolation: isolate; }
+.council-membership-intro > :is(.council-hero-copy, .membership-overview) { position: relative; z-index: 2; }
+.council-wall { position: absolute; z-index: 1; top: -2rem; bottom: -2rem; right: -2%; width: 58%; display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--s-4); overflow: hidden; transform: rotate(-6deg); mask-image: linear-gradient(90deg, transparent, black 30%), linear-gradient(180deg, transparent, black 18%, black 82%, transparent); mask-composite: intersect; -webkit-mask-composite: source-in; opacity: 0.55; pointer-events: none; }
+.council-wall-col { display: grid; gap: var(--s-4); align-content: start; }
+.council-wall-col img { display: block; width: 100%; height: auto; aspect-ratio: 1; border-radius: var(--r-md); }
+@media (prefers-reduced-motion: no-preference) {
+  .council-wall-col { animation: wall-drift 60s linear infinite; }
+  .council-wall-col:nth-child(2) { animation-direction: reverse; animation-duration: 75s; }
+  .council-wall-col:nth-child(3) { animation-duration: 90s; }
+}
+@keyframes wall-drift { to { transform: translateY(-50%); } }
+@media (max-width: 767px) { .council-wall { width: 100%; right: 0; opacity: 0.22; } }
+
+/* ---------- Process line fills as you read down it ---------- */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .process-timeline::after { content: ""; position: absolute; top: 1.5rem; bottom: 1.5rem; left: 1.375rem; width: 2px; border-radius: 2px; background: var(--council); box-shadow: 0 0 12px var(--glow-council); transform-origin: top; animation: line-fill linear both; animation-timeline: view(); animation-range: entry 30% cover 70%; }
+  }
+}
+@keyframes line-fill { from { transform: scaleY(0); } }
+
+/* ---------- Light theme: the seal is ink on paper ---------- */
+:root[data-theme="light"] .spotlight-seal { opacity: 0.35; }
+:root[data-theme="light"] .seal-face { fill: color-mix(in oklab, var(--seal-ink) 5%, var(--surface)); }
+.council-membership { overflow-x: clip; }
+@media (max-width: 767px) {
+  .case-list a { grid-template-columns: 3rem minmax(0, 1fr); grid-template-areas: "num ref" "num title" "num meta" "num outcome"; }
+  .case-seal { align-self: start; width: 3rem; height: 3rem; }
+  .detail-seal { width: 4.5rem; height: 4.5rem; }
+}
+
+/* Each spotlight question rises out of a mask as its slide arrives. */
+@media (prefers-reduced-motion: no-preference) {
+  .spotlight-title { animation: title-reveal 900ms var(--ease-out) 80ms both; }
+  .spotlight-number { animation: enter-rise 700ms var(--ease-out) 220ms both; }
+}
+@keyframes title-reveal { from { opacity: 0; transform: translateY(0.4em); clip-path: inset(0 0 100% 0); } to { clip-path: inset(0 0 -20% 0); } }
+.market-card-result strong { font-family: var(--font-display-stack); font-weight: 400; font-size: var(--fs-3xl); line-height: 1; }
+@media (max-width: 899px) {
+  .spotlight-seal { width: 11rem; height: 11rem; right: -3.5rem; top: -3.5rem; opacity: 0.3; }
+}

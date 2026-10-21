@@ -6,6 +6,8 @@ import { type Pt } from "./PriceChart";
 import { SplitMeter, StateBadge } from "./ui";
 import { CountUp } from "./CountUp";
 import { MarketIcon } from "./MarketIcon";
+import { MarketSeal } from "./MarketSeal";
+import { Embers } from "./Embers";
 import { ArrowRight } from "./icons";
 import { labelOf } from "@/lib/categories";
 import { config } from "@/lib/config";
@@ -29,6 +31,8 @@ export function FeaturedMarket({ market: m, stage, points }: { market: MarketVie
   const yes = pct(m.price_yes);
   const category = labelOf(m.category, m.subcategory);
   return <section data-testid="featured-market" className="spotlight-card featured-panel" aria-label="Featured market">
+    <Embers height={0.6} intensity={1.35} />
+    <MarketSeal hash={m.rule_hash} id={m.id} className="spotlight-seal" />
     <div className="spotlight-copy">
       <div className="spotlight-meta"><MarketIcon category={m.category} sub={m.subcategory} small /><span>{category.category} · {category.sub}</span><StateBadge status={m.status} caseStage={stage} /></div>
       <h2 className="spotlight-title"><Link href={`/market?id=${m.id}`}>{m.title}</Link></h2>

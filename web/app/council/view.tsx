@@ -8,6 +8,7 @@ import { usePoll } from "@/lib/hooks";
 import { getCase, listMarkets } from "@/lib/market";
 import { StateBadge } from "@/components/ui";
 import { CouncilSeal } from "@/components/Threshold";
+import { MarketSeal } from "@/components/MarketSeal";
 import { ArrowDown, ArrowRight } from "@/components/icons";
 
 async function loadCouncil() {
@@ -56,7 +57,7 @@ export function CouncilView() {
           <ul className="case-list">{cases.map(({ market, record }, i) => {
             const outcome = record?.final_outcome ? `Result: ${record.final_outcome.toUpperCase()}` : record?.stage === "disputed" ? "In dispute" : "Answer proposed";
             return <li key={market.id} className="enter" style={{ "--i": i } as React.CSSProperties}><Link href={`/market?id=${market.id}`} data-stage={record?.stage}>
-              <span className="case-number mono">CASE / {market.id.padStart(3, "0")}</span><h3>{market.title}</h3>
+              <MarketSeal hash={market.rule_hash} id={market.id} tone="council" className="case-seal" /><span className="case-number mono">CASE / {market.id.padStart(3, "0")}</span><h3>{market.title}</h3>
               <div className="case-meta"><StateBadge status={market.status} caseStage={record?.stage} /><span>{record?.votes.length ?? 0} revealed votes</span></div>
               <span className="case-outcome" data-final={record?.final_outcome ? true : undefined}>{outcome}<ArrowRight size={16} /></span>
             </Link></li>;
