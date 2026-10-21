@@ -90,7 +90,7 @@
 /* ---------- Toolbar ---------- */
 .market-controls {
   position: relative; z-index: 20;
-  display: grid; gap: var(--s-3);
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-3);
   padding: var(--s-3);
   border: 1px solid var(--line); border-radius: var(--content-radius);
   background: var(--glass-strong);

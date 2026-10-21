@@ -7,6 +7,8 @@ import { isConfigured } from "@/lib/config";
 import { usePoll } from "@/lib/hooks";
 import { getCase, listMarkets } from "@/lib/market";
 import { StateBadge } from "@/components/ui";
+import { CouncilSeal } from "@/components/Threshold";
+import { ArrowDown, ArrowRight } from "@/components/icons";
 
 async function loadCouncil() {
   if (!isConfigured) return { cases: [] };
@@ -46,34 +48,37 @@ export function CouncilView() {
 
       <div id="cases" className="tribunal-layout taste-case-layout council-cases">
         <section className="case-docket" aria-labelledby="cases-title">
-          <div className="docket-heading"><h2 id="cases-title">Cases and results</h2><span className="num">{data ? `${cases.length} recorded cases` : "Awaiting records"}</span></div>
+          <div className="docket-heading"><h2 id="cases-title">Cases and results</h2><span className="num docket-count">{data ? `${cases.length} recorded cases` : "Awaiting records"}</span></div>
           <p className="council-case-intro">Read the evidence, follow a challenge, or see how a market was settled.</p>
-          {loading && !data && <p role="status" className="text-muted">Loading case records…</p>}
-          {error && <p role="alert" className="text-muted">Could not load cases. <button className="underline" onClick={reload}>Retry</button></p>}
-          {data && cases.length === 0 && <p className="text-muted">No case records yet. Proposed answers, disputed outcomes and final results will appear here.</p>}
-          <ul className="case-list">{cases.map(({ market, record }) => (
-            <li key={market.id}><Link href={`/market?id=${market.id}`}>
-              <span className="case-number num">CASE / {market.id.padStart(3, "0")}</span><h3>{market.title}</h3>
-              <div className="case-meta"><StateBadge status={market.status} caseStage={record?.stage} /><span>{record?.votes.length ?? 0} revealed votes</span><span>{record?.final_outcome ? `Result: ${record.final_outcome.toUpperCase()}` : record?.stage === "disputed" ? "In dispute" : "Answer proposed"} ↗</span></div>
-            </Link></li>
-          ))}</ul>
+          {loading && !data && <><p role="status" className="sr-only">Loading case records…</p><div className="case-skeleton" aria-hidden="true">{[0, 1, 2].map(i => <div key={i} className="skeleton" />)}</div></>}
+          {error && <p role="alert" className="text-muted">Could not load cases. <button className="btn btn-ghost btn-sm" onClick={reload}>Retry</button></p>}
+          {data && cases.length === 0 && <p className="case-empty">No case records yet. Proposed answers, disputed outcomes and final results will appear here.</p>}
+          <ul className="case-list">{cases.map(({ market, record }, i) => {
+            const outcome = record?.final_outcome ? `Result: ${record.final_outcome.toUpperCase()}` : record?.stage === "disputed" ? "In dispute" : "Answer proposed";
+            return <li key={market.id} className="enter" style={{ "--i": i } as React.CSSProperties}><Link href={`/market?id=${market.id}`} data-stage={record?.stage}>
+              <span className="case-number mono">CASE / {market.id.padStart(3, "0")}</span><h3>{market.title}</h3>
+              <div className="case-meta"><StateBadge status={market.status} caseStage={record?.stage} /><span>{record?.votes.length ?? 0} revealed votes</span></div>
+              <span className="case-outcome" data-final={record?.final_outcome ? true : undefined}>{outcome}<ArrowRight size={16} /></span>
+            </Link></li>;
+          })}</ul>
         </section>
         <aside className="tribunal-sidebar" aria-labelledby="jury-title">
+          <CouncilSeal className="council-seal" />
           <h2 id="jury-title">How juries are selected</h2>
           <p>Jurors are selected from eligible staked seats. There is no single permanent panel deciding every market.</p>
           <p>Each case has its own deadlines. Once votes are revealed, the market page shows the jurors and their reasons.</p>
-          <a href="#process" className="ritual-link">Follow the dispute process ↘</a>
+          <a href="#process" className="ritual-link">Follow the dispute process <ArrowDown size={16} /></a>
         </aside>
       </div>
 
       <section id="process" className="council-journey" aria-labelledby="process-title">
-        <div><h2 id="process-title">How disputes work</h2><p>A bond is the deposit required to propose or challenge an answer. The case record shows which step comes next.</p></div>
-        <ol>{process.map(([title, text], i) => <li key={title}><span className="num">{String(i + 1).padStart(2, "0")}</span><div><h3>{title}</h3><p>{text}</p></div></li>)}</ol>
+        <div className="council-journey-intro"><h2 id="process-title">How disputes work</h2><p>A bond is the deposit required to propose or challenge an answer. The case record shows which step comes next.</p></div>
+        <ol className="process-timeline">{process.map(([title, text], i) => <li key={title}><span className="process-node num">{String(i + 1).padStart(2, "0")}</span><div><h3>{title}</h3><p>{text}</p></div></li>)}</ol>
       </section>
 
       <section id="questions" className="membership-faq council-questions" aria-labelledby="questions-title">
         <h2 id="questions-title">Questions</h2>
-        {questions.map(([question, answer]) => <details key={question}><summary>{question}</summary><p>{answer}</p></details>)}
+        <div className="faq-list">{questions.map(([question, answer]) => <details key={question}><summary>{question}<span className="faq-icon" aria-hidden="true" /></summary><p>{answer}</p></details>)}</div>
       </section>
     </div>
   );

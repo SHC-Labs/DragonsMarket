@@ -21,7 +21,7 @@ function steps(market: MarketView, c: Case | null): { label: string; state: Step
   const stage = c?.stage;
   const final = stage === "final";
   return [
-    { label: "Trading closed", state: closed ? "done" : "current" },
+    { label: closed ? "Trading closed" : "Trading open", state: closed ? "done" : "current" },
     { label: "Answer proposed", state: !closed ? "upcoming" : !c ? "current" : stage === "proposed" ? "current" : "done" },
     { label: "Challenged", state: stage === "disputed" ? "current" : final ? (c?.challenger ? "done" : "skipped") : "upcoming" },
     { label: "Final result", state: final ? "done" : "upcoming" },

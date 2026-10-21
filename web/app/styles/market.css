@@ -28,7 +28,7 @@
 .price-panel-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--s-4); margin-bottom: var(--s-6); }
 .price-panel-figure { display: flex; align-items: flex-end; gap: var(--s-4); }
 .price-panel-number { font-size: clamp(4.5rem, 3rem + 5vw, 7.5rem); line-height: 0.8; color: var(--text); }
-.price-panel-number > span { font-size: 0.4em; color: var(--text-muted); font-weight: 400; margin-left: 0.04em; }
+.price-panel-number > span:last-child:not(:first-child) { font-size: 0.4em; color: var(--text-muted); font-weight: 400; margin-left: 0.04em; }
 .price-panel-label { padding-bottom: var(--s-1); font-size: var(--fs-md); color: var(--text-muted); }
 .price-panel-delta { display: inline-flex; align-items: center; gap: var(--s-2); padding: var(--s-1) var(--s-3); border-radius: var(--r-pill); font-size: var(--fs-xs); font-weight: 500; color: var(--text-muted); background: color-mix(in oklab, var(--text-muted) 12%, transparent); }
 .price-panel-delta[data-dir="up"] { color: var(--success); background: color-mix(in oklab, var(--success) 12%, transparent); }
@@ -41,7 +41,7 @@
 /* Ticket */
 .ticket {
   --side: var(--chart-yes);
-  position: relative; display: grid; gap: var(--s-4);
+  position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-4);
   padding: var(--s-6); border: 1px solid var(--line-strong); border-radius: var(--content-radius);
   background: linear-gradient(180deg, color-mix(in oklab, var(--side) 7%, var(--surface)), var(--surface) 45%);
   box-shadow: var(--elev-3);

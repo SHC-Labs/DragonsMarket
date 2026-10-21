@@ -8,5 +8,5 @@ import { useEffect } from "react";
 export function MembershipRedirect() {
   const router = useRouter();
   useEffect(() => { router.replace("/council#membership"); }, [router]);
-  return <section className="py-10"><p role="status">Membership is now part of the Council.</p><Link href="/council#membership" className="ritual-link">Go to Council membership ↗</Link></section>;
+  return <section className="membership-redirect"><p role="status">Membership is now part of the Council.</p><Link href="/council#membership" className="ritual-link">Go to Council membership ↗</Link></section>;
 }
