@@ -14,7 +14,8 @@ export function CountUp({ value, decimals = 0, duration = 900, format, className
     if (!el) return;
     const from = shown.current ?? 0;
     shown.current = value;
-    if (from === value || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    // A copy rendered only to animate out (the carousel's outgoing slide) shows its value at rest.
+    if (from === value || el.closest(".featured-slide-outgoing") || matchMedia("(prefers-reduced-motion: reduce)").matches) {
       el.textContent = text(value);
       return;
     }

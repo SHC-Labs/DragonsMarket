@@ -136,3 +136,5 @@
 @media (max-width: 899px) {
   .spotlight-seal { width: 11rem; height: 11rem; right: -3.5rem; top: -3.5rem; opacity: 0.3; }
 }
+/* The outgoing slide is a fresh copy made only for the push; it must arrive already at rest. */
+.featured-slide-outgoing *, .featured-slide-outgoing *::before, .featured-slide-outgoing *::after { animation: none !important; }
