@@ -34,3 +34,6 @@ export const config = {
 
 export const isConfigured = Boolean(config.marketId && config.oracleId && config.verifierId && config.collateralTokenId);
 export const isTestMoney = network !== "mainnet";
+
+// Shown before funding. Plain text for the interface to display.
+export const WALLET_RULE_V1 = "Version 1 works with NEAR wallets only. Wallets from other chains arrive in version 2.";

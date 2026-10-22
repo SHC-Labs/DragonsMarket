@@ -117,8 +117,8 @@ PROPOSED additions:
 interface AccountView  { registered: boolean; available: U128; pending_withdrawals: U128; positions: number }
 type LegStatus = "pending" | "settled" | "refused" | "unresolved";
 interface SweepView { id: U64; at: U64; total: U128; carried_council: U128; carried_treasury: U128;
-                      council: { amount: U128; status: LegStatus };
-                      treasury: { amount: U128; status: LegStatus } }
+                      council: { to: AccountId; amount: U128; status: LegStatus };
+                      treasury: { to: AccountId; amount: U128; status: LegStatus } }
 interface InFlightView { withdrawals: U128; withdrawal_count: number; legs: U128; leg_count: number }
 interface OwedView { balances: U128; locked: U128; fees: U128; revenue_due: U128; treasury_due: U128;
                      unresolved: U128; pending_withdrawals: U128; total: U128 }
@@ -138,16 +138,16 @@ interface OwedView { balances: U128; locked: U128; fees: U128; revenue_due: U128
 | `is_registered` | `{account_id}` | `boolean` | EXISTING |
 | `storage_balance_of` | `{account_id}` | `{total: string, available: string} \| null` | EXISTING |
 | `storage_balance_bounds` | `{}` | `{min: string, max: string}` | EXISTING |
-| `get_fees` | `{}` | `{collected, revenue_due, business_due, revenue_unresolved}`, all `U128` | EXISTING |
+| `get_fees` | `{}` | `{collected, revenue_due, treasury_due, revenue_unresolved}`, all `U128` | EXISTING |
 | `total_owed` | `{}` | `U128` | EXISTING |
 | `config` | `{}` | See below | EXISTING |
 | `check_invariant` | `{market_id: U64}` | `boolean` | EXISTING |
 | `get_account` | `{account_id}` | `AccountView`. `positions` is the length of `get_positions`. An unknown account is `registered: false` with zeros | BUILT |
 | `get_positions` | `{account_id}` | `PositionView[]`, one per market where the account holds shares, by market id. `redeemable` is what `redeem` would credit now, `"0"` until the market resolves | BUILT |
-| `get_sweep`, `list_sweeps` | `{sweep_id: U64}`, `{from_index: U64, limit: U64}` | `SweepView \| null`, `SweepView[]` | NEW |
+| `get_sweep`, `list_sweeps` | `{sweep_id: U64}`, `{from_index: U64, limit: U64}` | `SweepView \| null`, `SweepView[]` | BUILT |
 | `in_flight`, `owed_breakdown` | `{}` | `InFlightView`, `OwedView`. `total` equals `total_owed`, which includes `pending_withdrawals`. `legs` counts fee legs that are `pending` or `unresolved` | BUILT |
 
-`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `create_fee: U128`, `revenue_pool`, `business_wallet` (NEW name `treasury`), `revenue_unresolved: U128`, `void_price_window_ns: U64`, `void_grace_ns: U64`, `settle_wait_minutes: number`, `reconcile_wait_minutes: number`, `min_sweep_interval_minutes: number`, `min_open_price: U128`, `max_open_price: U128`, `max_fee_rate_bps: number`, `max_create_fee: U128`, `min_revenue_share_bps: number`, `max_revenue_share_bps: number`, `max_min_sweep: U128`. `max_positions` is the stored cap.
+`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `create_fee: U128`, `revenue_pool: string \| null`, `treasury: string \| null`, `revenue_share_bps: number`, `treasury_share_bps: number`, `min_sweep: U128`, `next_sweep_id: U64`, `revenue_unresolved: U128`, `void_price_window_ns: U64`, `void_grace_ns: U64`, `settle_wait_minutes: number`, `reconcile_wait_minutes: number`, `min_sweep_interval_minutes: number`, `min_open_price: U128`, `max_open_price: U128`, `max_fee_rate_bps: number`, `max_create_fee: U128`, `min_revenue_share_bps: number`, `max_revenue_share_bps: number`, `max_min_sweep: U128`. `max_positions` is the stored cap.
 
 ---
 
@@ -241,7 +241,7 @@ interface BondTotals { bonds_held: U128; claimable: U128; pending_payouts: U128;
 
 `list_cases` looks at `limit` consecutive market ids from `from_market_id`, clamped to 50, and returns a row for each id that has a case. An id without a case is skipped, so a page can hold fewer than `limit` rows and the caller advances by `limit`. `votes` is the count of revealed votes.
 
-`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `market`, `bond_token` (NEW: `verifier`, `collateral_token_id`), `bond: U128`, `window_ns`, `panel_deadline_ns`, `draw_window_ns`, `min_proposal_ns`, `min_resolve_gap_ns`, `apply_buffer_ns` (all `U64`), `council`, `jury_size: number`, `draw_delay_blocks: U64`, `operator`, `network: string`, `publishers: string[]`, `price_threshold: number`, `no_decision_recipient`, `juror_share_bps: number`, `no_decision_share_bps: number`, `max_publishers: number`, `reconcile_wait_ns: U64`.
+`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `market`, `verifier`, `collateral_token_id`, `bond: U128`, `window_ns`, `panel_deadline_ns`, `draw_window_ns`, `min_proposal_ns`, `min_resolve_gap_ns`, `apply_buffer_ns` (all `U64`), `council`, `jury_size: number`, `draw_delay_blocks: U64`, `operator`, `network: string`, `publishers: string[]`, `price_threshold: number`, `no_decision_recipient`, `juror_share_bps: number`, `no_decision_share_bps: number`, `max_publishers: number`, `reconcile_wait_ns: U64`.
 
 ### 6.3 Calls and messages
 
@@ -391,8 +391,9 @@ The site shows a sentence from `web/lib/errors.ts`. It matches the panic text wi
 | Pattern the site matches today | Contract strings it catches |
 | --- | --- |
 | `has not closed` | market `market has not closed`, oracle `the market has not closed yet` |
-| `market is closed`, `market is resolved`, `market is halted`, `paused`, `sells are paused`, `wait an hour since the last sweep` (or `wait <n> minutes since the last sweep`) | market |
+| `market is closed`, `market is resolved`, `market is halted`, `sells are paused` (matched before the generic `paused`), `paused`, `a withdrawal is still pending`, `wait an hour since the last sweep` (or `wait <n> minutes since the last sweep`) | market |
 | `too many positions`, `min shares must be above zero`, `price moved`, `not enough balance`, `not enough shares` | market |
+| `a jury drawn in this quarter is still open` | council |
 | `storage deposit` | market `do the storage deposit first` |
 | `wrong token` | market, oracle, council |
 | `not registered with the oracle` | market |
@@ -454,9 +455,11 @@ Money states the interface must keep apart (R-08), with their source:
 | `Case` fields | `market.ts:34-51` | Lacks `bond`, `challenger_answer`, `round`, `jury_size`, `draw_by`, `first_panel`. `panel_deadline` is required but `0` before a jury is drawn | Section 6.1 |
 | `OracleConfig` | `market.ts:58-65` | Partial | Section 6.2 |
 | Configuration | `web/lib/config.ts:15-27` | No verifier, council, collateral token id or NFT account. `isConfigured` needs `tokenId` | Section 2 |
-| Positions | `web/app/portfolio/page.tsx:36-43` | One `get_shares` call per market | `get_positions` |
-| Council list | `web/app/council/view.tsx:13-18` | `listMarkets`, then `getCase` per market | `list_cases` |
-| Error copy | `web/lib/errors.ts:2-16` | Covers the market only | Section 10 |
+| Positions | `web/app/portfolio/page.tsx:36-43` | One `get_shares` call per market | `get_positions`. `getPositions` exists in the library layer; the page still pending |
+| Council list | `web/app/council/view.tsx:13-18` | `listMarkets`, then `getCase` per market | `list_cases`. `listCases` exists in the library layer; the page still pending |
+| Error copy | `web/lib/errors.ts:2-16` | Covers the market only | Section 10. Library layer DONE for the market, oracle and council strings listed there, including `sells are paused`, `a withdrawal is still pending` and `a jury drawn in this quarter is still open` |
+| New views and settings | `web/lib/market.ts`, `council.ts` | `get_positions`, `get_account`, `in_flight`, `owed_breakdown`, `list_cases`, `bond_totals`, `get_market_info` and the new `config` fields had no wrappers or types | Library layer DONE (`getPositions`, `getAccount`, `getInFlight`, `getOwedBreakdown`, `listCases`, `getBondTotals`, `getMarketInfo`, extended config types). Components still pending |
+| First release wallet rule | `web/lib/config.ts` | No shared text | `WALLET_RULE_V1` exported. Library layer DONE, components still pending |
 | Council calls | `web/lib/market.ts` | No stake, unstake or claim builder | Section 7.3 |
 | Voting | `web/lib/market.ts:174-175` | No commit or reveal builder, by design until the final ABI | Section 6.3 |
 | Redeem and withdraw | `market.ts:153-167` | Builders exist. The portfolio disables them (`portfolio/page.tsx:91`, `:124`) | Enable after the market change |

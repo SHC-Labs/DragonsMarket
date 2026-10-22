@@ -65,6 +65,43 @@ export interface Case {
   votes: Vote[];
   final_outcome: Outcome | null;
   applied: boolean;
+  // The shares of the bonds that go to jurors, fixed when the answer was proposed.
+  juror_share_bps: number;
+  no_decision_share_bps: number;
+}
+
+// One row of list_cases: where a case stands, without the evidence, the panel or the vote text.
+export interface CaseSummary {
+  market_id: string;
+  stage: Case["stage"];
+  proposed: Outcome;
+  challenger_answer: Outcome | null;
+  round: number;
+  final_outcome: Outcome | null;
+  applied: boolean;
+  // Revealed votes only
+  votes: number;
+  window_ends_at: string;
+  draw_by: string;
+  panel_deadline: string;
+}
+
+export interface BondTotals {
+  bonds_held: string;
+  claimable: string;
+  pending_payouts: string;
+  total: string;
+}
+
+export interface OracleMarketInfo {
+  close_at: string;
+  resolve_by: string;
+  rule_hash: string;
+  price_rule: PriceRule | null;
+  window_ns: string;
+  panel_deadline_ns: string;
+  draw_window_ns: string;
+  apply_buffer_ns: string;
 }
 
 export interface PricePoint {
@@ -85,6 +122,11 @@ export interface OracleConfig {
   jury_size: number;
   draw_delay_blocks: string;
   no_decision_recipient: string | null;
+  apply_buffer_ns: string;
+  juror_share_bps: number;
+  no_decision_share_bps: number;
+  max_publishers: number;
+  reconcile_wait_ns: string;
 }
 
 export interface MarketConfig {
@@ -99,6 +141,19 @@ export interface MarketConfig {
   treasury: string | null;
   revenue_share_bps: number;
   treasury_share_bps: number;
+  sells_paused: boolean;
+  void_price_window_ns: string;
+  void_grace_ns: string;
+  settle_wait_minutes: number;
+  reconcile_wait_minutes: number;
+  min_sweep_interval_minutes: number;
+  min_open_price: string;
+  max_open_price: string;
+  max_fee_rate_bps: number;
+  min_revenue_share_bps: number;
+  max_revenue_share_bps: number;
+  max_create_fee: string;
+  max_min_sweep: string;
 }
 
 export interface Fees {
@@ -106,6 +161,44 @@ export interface Fees {
   revenue_due: string;
   treasury_due: string;
   revenue_unresolved: string;
+}
+
+// One market where an account holds shares. redeemable is what redeem would credit now, "0" until the market resolves.
+export interface PositionView {
+  market_id: string;
+  yes: string;
+  no: string;
+  status: MarketStatus;
+  outcome: Outcome | null;
+  redeemable: string;
+}
+
+export interface AccountView {
+  registered: boolean;
+  available: string;
+  pending_withdrawals: string;
+  // How many markets the account holds shares in
+  positions: number;
+}
+
+// Money sent and not yet reported: withdrawals waiting on their callback, and fee legs that are pending or unresolved.
+export interface InFlightView {
+  withdrawals: string;
+  withdrawal_count: number;
+  legs: string;
+  leg_count: number;
+}
+
+// The buckets total_owed adds, and their sum.
+export interface OwedView {
+  balances: string;
+  locked: string;
+  fees: string;
+  revenue_due: string;
+  treasury_due: string;
+  unresolved: string;
+  pending_withdrawals: string;
+  total: string;
 }
 
 export type LegStatus = "pending" | "settled" | "refused" | "unresolved";
@@ -165,12 +258,21 @@ export interface SellQuote { collateral_out: string; shares_in: string; fee: str
 export const getMarket = (id: string) => view<MarketView | null>(market(), "get_market", { market_id: id });
 export const getHistory = (id: string) => view<PricePoint[]>(market(), "get_history", { market_id: id });
 export const getCase = (id: string) => view<Case | null>(oracle(), "get_case", { market_id: id });
+export const getMarketInfo = (id: string) => view<OracleMarketInfo | null>(oracle(), "get_market_info", { market_id: id });
+// Looks at `limit` consecutive market ids and returns a row for each one that has a case, so advance by `limit`.
+export const listCases = (fromMarketId: number, limit: number) =>
+  view<CaseSummary[]>(oracle(), "list_cases", { from_market_id: String(fromMarketId), limit });
+export const getBondTotals = () => view<BondTotals>(oracle(), "bond_totals");
 export const getOracleConfig = () => view<OracleConfig>(oracle(), "config");
 export const getMarketConfig = () => view<MarketConfig>(market(), "config");
 export const getFees = () => view<Fees>(market(), "get_fees");
 export const getSweep = (id: string) => view<Sweep | null>(market(), "get_sweep", { sweep_id: id });
 export const listSweeps = (from: number, limit: number) =>
   view<Sweep[]>(market(), "list_sweeps", { from_index: String(from), limit: String(limit) });
+export const getPositions = (account: string) => view<PositionView[]>(market(), "get_positions", { account_id: account });
+export const getAccount = (account: string) => view<AccountView>(market(), "get_account", { account_id: account });
+export const getInFlight = () => view<InFlightView>(market(), "in_flight");
+export const getOwedBreakdown = () => view<OwedView>(market(), "owed_breakdown");
 export const marketTotalOwed = () => view<string>(market(), "total_owed");
 export const getBalance = (account: string) => view<string>(market(), "get_balance", { account_id: account });
 export const getShares = (id: string, account: string) =>

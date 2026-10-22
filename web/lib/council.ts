@@ -61,6 +61,7 @@ export interface CouncilConfig {
   max_seats_per_account: number;
   allowlist_enabled: boolean;
   close_grace_ns: string;
+  reconcile_wait_ns: string;
 }
 
 const council = () => config.councilId;

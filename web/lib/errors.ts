@@ -5,6 +5,7 @@ const RULES: [RegExp, string][] = [
   [/market is resolved/i, "This market already has a final result."],
   [/too many positions/i, "You have reached the position limit. Close an existing position before opening another."],
   [/min shares must be above zero/i, "This amount is too small to trade. Enter a larger amount."],
+  [/sells are paused/i, "Selling is paused right now. Buying may still work."],
   [/paused/i, "Trading is paused. Check the market status before trying again."],
   [/market is halted/i, "This market is paused. Check its status before trying again."],
   [/price moved/i, "The price moved. You would get less than your minimum. Try again."],
@@ -39,6 +40,8 @@ const RULES: [RegExp, string][] = [
   [/nothing to claim|already claimed/i, "There is nothing left to claim for that quarter."],
   [/claim is already pending/i, "That claim is already on its way."],
   [/that quarter is not final/i, "That quarter is still open. Claims open when it is final."],
+  [/a withdrawal is still pending/i, "A withdrawal is still on its way. Wait for it to finish, then try again."],
+  [/a jury drawn in this quarter is still open/i, "A jury drawn in this quarter is still open. This quarter closes when that case ends."],
   [/attach at least (\d+) TGas/i, "This needed more gas than was attached. Try again."],
 ];
 

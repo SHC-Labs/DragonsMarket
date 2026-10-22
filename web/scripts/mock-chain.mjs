@@ -77,11 +77,11 @@ const markets = SPECS.map(([title, source, voidPolicy, category, sub, days], i) 
 const jurors = ["juror0.test.near", "juror1.test.near", "juror2.test.near"];
 const ago = (s) => String(now() - BigInt(s) * SEC);
 const ahead = (s) => String(now() + BigInt(s) * SEC);
-const base = { proposer: "carol.test.near", panel_deadline: ahead(1800), challenger: null, votes: [], final_outcome: null, applied: false };
+const base = { proposer: "carol.test.near", panel_deadline: ahead(1800), challenger: null, challenger_answer: null, round: 0, draw_by: "0", votes: [], final_outcome: null, applied: false, juror_share_bps: 5000, no_decision_share_bps: 5000 };
 const cases = {
   1: () => ({ ...base, stage: "proposed", proposed: "no", evidence: "Exchange closes: 83,912 / 84,105 / 83,990 USD.", window_ends_at: ahead(540) }),
-  2: () => ({ ...base, stage: "disputed", proposed: "yes", evidence: "Final score on mlb.com: Yankees 5, Rays 3.", window_ends_at: ago(30), challenger: "dave.test.near", challenged_at: ago(60), panel: jurors, commits: [{ juror: jurors[0], commitment: "9f2c…a71e" }], commit_ends_at: ahead(900), draw_after_height: "1200", delinquent: [] }),
-  3: () => ({ ...base, stage: "final", proposed: "yes", evidence: "NHC advisory 14 upgraded Isaias.", window_ends_at: ago(400), challenger: "dave.test.near", challenged_at: ago(380), panel: jurors, commits: [], delinquent: [jurors[2]], final_outcome: "no", applied: true,
+  2: () => ({ ...base, stage: "disputed", proposed: "yes", evidence: "Final score on mlb.com: Yankees 5, Rays 3.", window_ends_at: ago(30), challenger: "dave.test.near", challenger_answer: "no", draw_by: ahead(3600), challenged_at: ago(60), panel: jurors, commits: [{ juror: jurors[0], commitment: "9f2c…a71e" }], commit_ends_at: ahead(900), draw_after_height: "1200", delinquent: [] }),
+  3: () => ({ ...base, stage: "final", proposed: "yes", evidence: "NHC advisory 14 upgraded Isaias.", window_ends_at: ago(400), challenger: "dave.test.near", challenger_answer: "no", challenged_at: ago(380), panel: jurors, commits: [], delinquent: [jurors[2]], final_outcome: "no", applied: true,
     votes: [{ juror: jurors[0], outcome: "no", reason: "The hurricane centre's advisory still lists it as a tropical storm." }, { juror: jurors[1], outcome: "no", reason: "No hurricane advisory was issued before the deadline." }] }),
   5: () => ({ ...base, stage: "final", proposed: "yes", evidence: "Gemini 4 general availability post on blog.google.", window_ends_at: ago(200), final_outcome: "yes", applied: true }),
 };
@@ -92,6 +92,16 @@ Object.assign(markets[5], { status: "resolved", outcome: "yes" });
 const ALICE = "alice.test.near";
 const holdings = { 0: [42_500_000n, 0n], 3: [0n, 18_000_000n], 5: [25_000_000n, 0n], 6: [12_000_000n, 3_000_000n], 12: [0n, 30_000_000n], 15: [8_750_000n, 0n] };
 const sharesOf = (id, account) => (account === ALICE && holdings[id] ? holdings[id].map(String) : ["0", "0"]);
+
+// What redeem would credit: a winning share pays one unit of collateral, a losing one nothing.
+const redeemable = (m, [yes, no]) => (m.outcome === "yes" ? yes : m.outcome === "no" ? no : 0n);
+const positionsOf = (account) => (account === ALICE ? Object.keys(holdings).map(Number).sort((a, b) => a - b) : []).map((id) => {
+  const m = markets[id], [yes, no] = holdings[id];
+  return { market_id: String(id), yes: String(yes), no: String(no), status: m.status, outcome: m.outcome, redeemable: String(redeemable(m, [yes, no])) };
+});
+const BALANCE = { [ALICE]: 126_400_000n };
+const lockedTotal = markets.reduce((sum, m) => sum + BigInt(m.locked), 0n);
+const FEES = 3_250_000n, REVENUE_DUE = 1_000_000n, TREASURY_DUE = 1_000_000n;
 
 const pub = (m) => { const { history, ...rest } = m; void history; return rest; };
 const quote = (m, side, amount) => {
@@ -105,7 +115,17 @@ const views = {
     list_markets: ({ from_index = "0", limit = "50" }) => markets.slice(Number(from_index), Number(from_index) + Number(limit)).map(pub),
     get_market: ({ market_id }) => (markets[Number(market_id)] ? pub(markets[Number(market_id)]) : null),
     get_history: ({ market_id }) => markets[Number(market_id)]?.history ?? [],
-    get_balance: ({ account_id }) => (account_id === ALICE ? String(126_400_000n) : "0"),
+    get_balance: ({ account_id }) => String(BALANCE[account_id] ?? 0n),
+    get_positions: ({ account_id }) => positionsOf(account_id),
+    get_account: ({ account_id }) => ({
+      registered: account_id === ALICE, available: String(BALANCE[account_id] ?? 0n), pending_withdrawals: "0", positions: positionsOf(account_id).length,
+    }),
+    in_flight: () => ({ withdrawals: "0", withdrawal_count: 0, legs: "0", leg_count: 0 }),
+    owed_breakdown: () => ({
+      balances: String(BALANCE[ALICE]), locked: String(lockedTotal), fees: String(FEES), revenue_due: String(REVENUE_DUE),
+      treasury_due: String(TREASURY_DUE), unresolved: "0", pending_withdrawals: "0",
+      total: String(BALANCE[ALICE] + lockedTotal + FEES + REVENUE_DUE + TREASURY_DUE),
+    }),
     get_shares: ({ market_id, account_id }) => sharesOf(Number(market_id), account_id),
     is_registered: ({ account_id }) => account_id === ALICE,
     quote_buy: ({ market_id, side, amount }) => {
@@ -120,7 +140,30 @@ const views = {
   },
   [ORACLE]: {
     get_case: ({ market_id }) => cases[Number(market_id)]?.() ?? null,
-    config: () => ({ bond: String(50n * USD), window_ns: String(600n * SEC), panel_deadline_ns: String(1800n * SEC), council: "council.test.near", jury_size: 3, draw_delay_blocks: "5" }),
+    list_cases: ({ from_market_id, limit }) => Object.keys(cases).map(Number)
+      .filter((id) => id >= Number(from_market_id) && id < Number(from_market_id) + Math.min(Number(limit), 50))
+      .map((id) => {
+        const c = cases[id]();
+        return {
+          market_id: String(id), stage: c.stage, proposed: c.proposed, challenger_answer: c.challenger_answer, round: c.round,
+          final_outcome: c.final_outcome, applied: c.applied, votes: c.votes.length, window_ends_at: c.window_ends_at,
+          draw_by: c.draw_by, panel_deadline: c.panel_deadline,
+        };
+      }),
+    // The bonds held are those of the two cases that are not final.
+    bond_totals: () => ({ bonds_held: String(2n * 50n * USD), claimable: "0", pending_payouts: "0", total: String(2n * 50n * USD) }),
+    get_market_info: ({ market_id }) => {
+      const m = markets[Number(market_id)];
+      if (!m) return null;
+      return {
+        close_at: m.close_at, resolve_by: m.resolve_by, rule_hash: m.rule_hash, price_rule: null,
+        window_ns: String(600n * SEC), panel_deadline_ns: String(1800n * SEC), draw_window_ns: String(3600n * SEC), apply_buffer_ns: String(600n * SEC),
+      };
+    },
+    config: () => ({
+      bond: String(50n * USD), window_ns: String(600n * SEC), panel_deadline_ns: String(1800n * SEC), council: "council.test.near", jury_size: 3, draw_delay_blocks: "5",
+      apply_buffer_ns: String(600n * SEC), juror_share_bps: 5000, no_decision_share_bps: 5000, max_publishers: 10, reconcile_wait_ns: String(DAY),
+    }),
     claimable_of: () => "0",
   },
   [VERIFIER]: { mt_balance_of: ({ account_id }) => (account_id === ALICE ? String(2_874_250_000n) : "0") },
