@@ -24,10 +24,10 @@ See [requirements R-04, R-06, R-07 and R-08](../spec.md#requirements-to-implemen
 | R-04, the propose, challenge, jury, commit and reveal rules | Unchanged by the migration and still tested |
 | R-06, bonds and juror pay settle separately from holder revenue, inside Intents | Built. Bonds arrive by `mt_on_transfer` and are paid by `mt_transfer` from the oracle's own Intents account. A source guard fails if the oracle code names holder revenue |
 | R-07, the owner is a DAO account | The owner is an `AccountId` and no custom governance exists. No test runs a real SputnikDAO |
-| R-08, views for the website and keeper | `total_owed` is built. A case list, bond totals and a pending payout view are not |
+| R-08, views for the website and keeper | `total_owed`, `list_cases` and `bond_totals` are built. A pending payout view is not |
 
 Specified in [the oracle spec](specs/oracle.md) and not built: `payout_bond(account)`, which would let a keeper pay a
-DAO recipient without a proposal, `list_cases`, `bond_totals`, and a `bond_received` event.
+DAO recipient without a proposal, and a `bond_received` event.
 
 ---
 
@@ -569,6 +569,8 @@ integration evidence.
 | `get_market_info(market_id)` | What was registered: close, resolve_by, rule hash, price rule, and the three windows the market was registered with.                                                                                                                                                                            |
 | `claimable_of(account_id)`   | An account's withdrawable bonds and juror pay.                                                                                                                                                                                                                                                    |
 | `total_owed()`               | Everything this contract owes, in collateral units: the bonds sitting in cases that are not final plus everything claimable. At rest it equals `mt_balance_of(this contract, collateral token id)` in the verifier. A payout in flight makes the verifier's figure the larger for a block. A smaller one is an incident. |
+| `list_cases(from_market_id, limit)` | A summary of each case among `limit` consecutive market ids from `from_market_id`, at most 50 ids per call: market id, stage, proposed, challenger answer, round, final outcome, applied, revealed vote count, window end, draw deadline, panel deadline. An id without a case is skipped, so a page can be shorter than `limit` and the caller advances by `limit`. |
+| `bond_totals()` | `bonds_held`, `claimable` and `total`, where `total` is what `total_owed` returns. There is no pending payouts figure yet. |
 | `config()`                   | state version, upgrade proven, upgrade in flight, owner, pending owner, market, verifier, collateral token id, bond, window, panel deadline, draw window, council, jury size, draw delay, minimum proposal time, minimum gap, operator, network, the publisher keys, the threshold, and the no-decision recipient. |
 
 ### The case record

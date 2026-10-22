@@ -67,6 +67,8 @@ const MAX_SALT: usize = 64;
 // A submission with all 10 signing burned 4.5 TGas in this contract, 9.4 in all, and worked with 30 TGas attached
 // (measured in the sandbox).
 const MAX_PUBLISHERS: usize = 10;
+// The most market ids list_cases looks at in one call.
+const MAX_LIST_CASES: u32 = 50;
 // Of the loser's bond in a decided dispute, the share the jurors who revealed and sat with the majority split.
 // The rest goes to the winner.
 const JUROR_SHARE_BPS: u128 = 2_500;
@@ -201,6 +203,33 @@ pub struct Case {
     // Set when a disputed case settles: the drawn jurors of either round who did not vote. The Council takes the
     // revenue their seats earned while serving. Kept on the case so retry_unlock sends the same list.
     delinquent: Vec<AccountId>,
+}
+
+// One row of list_cases: where a case stands, without the evidence, the panel or the vote text.
+#[near(serializers=[json])]
+#[derive(Clone, Debug)]
+pub struct CaseSummary {
+    market_id: U64,
+    stage: Stage,
+    proposed: Outcome,
+    challenger_answer: Option<Outcome>,
+    round: u8,
+    final_outcome: Option<Outcome>,
+    applied: bool,
+    // Revealed votes only.
+    votes: u32,
+    window_ends_at: U64,
+    draw_by: U64,
+    panel_deadline: U64,
+}
+
+// What bond_totals adds up. total is what total_owed returns.
+#[near(serializers=[json])]
+#[derive(Clone, Copy, Debug)]
+pub struct BondTotals {
+    bonds_held: U128,
+    claimable: U128,
+    total: U128,
 }
 
 // The NEAR Intents verifier. Bonds arrive in this contract's account there, and payouts are sent out of it.
@@ -1039,6 +1068,38 @@ impl OracleContract {
     // there than here is surplus nobody is credited for, or a payout that is in flight. Less is an incident.
     pub fn total_owed(&self) -> U128 {
         U128(self.bonds_held + self.claimable_total)
+    }
+
+    // Looks at `limit` consecutive market ids from `from_market_id` (at most MAX_LIST_CASES) and returns a summary for each
+    // one that has a case. An id without a case is skipped, so a page can hold fewer than `limit` entries and the caller
+    // advances by `limit`, not by the number returned.
+    pub fn list_cases(&self, from_market_id: U64, limit: u32) -> Vec<CaseSummary> {
+        (from_market_id.0..=u64::MAX)
+            .take(limit.min(MAX_LIST_CASES) as usize)
+            .filter_map(|id| {
+                self.cases.get(&id).map(|case| CaseSummary {
+                    market_id: U64(id),
+                    stage: case.stage,
+                    proposed: case.proposed,
+                    challenger_answer: case.challenger_answer,
+                    round: case.round,
+                    final_outcome: case.final_outcome,
+                    applied: case.applied,
+                    votes: case.votes.len() as u32,
+                    window_ends_at: case.window_ends_at,
+                    draw_by: case.draw_by,
+                    panel_deadline: case.panel_deadline,
+                })
+            })
+            .collect()
+    }
+
+    pub fn bond_totals(&self) -> BondTotals {
+        BondTotals {
+            bonds_held: U128(self.bonds_held),
+            claimable: U128(self.claimable_total),
+            total: self.total_owed(),
+        }
     }
 
     // Whether a wasm with this sha256 is staged here, for the members to check before they vote to deploy it.
@@ -4120,5 +4181,157 @@ mod tests {
         assert_eq!(config["verifier"], VERIFIER);
         assert_eq!(config["collateral_token_id"], COLLATERAL);
         assert!(config.get("bond_token").is_none());
+    }
+
+    // ---- list_cases and bond_totals ------------------------------------------------------------------------
+
+    fn put_case_at(o: &mut OracleContract, id: u64, mut case: Case) {
+        case.window_ends_at = U64(id);
+        o.cases.insert(id, case);
+    }
+
+    fn summary_json(o: &OracleContract, from: u64, limit: u32) -> near_sdk::serde_json::Value {
+        near_sdk::serde_json::to_value(o.list_cases(U64(from), limit)).unwrap()
+    }
+
+    fn proposed_case() -> Case {
+        let mut o = oracle_with_resolve_by(MARKET_DEADLINE);
+        act_as(VERIFIER, SECOND);
+        deliver(&mut o, "carol.near", 1, "propose:0:yes:https://x");
+        o.case(0)
+    }
+
+    #[test]
+    fn list_cases_shows_proposed_disputed_and_final_cases_with_exact_fields() {
+        let proposed = proposed_case();
+        let mut o = oracle_with_bond(BOND);
+        put_case_at(&mut o, 3, proposed.clone());
+        disputed_case(&mut o, Outcome::Yes, &["j0.near"], &[("j0.near", Outcome::No)]);
+        let mut disputed = o.case(0);
+        disputed.round = 1;
+        put_case_at(&mut o, 4, disputed);
+        let mut done = proposed;
+        done.stage = Stage::Final;
+        done.final_outcome = Some(Outcome::Void);
+        done.applied = true;
+        put_case_at(&mut o, 5, done);
+
+        let rows = summary_json(&o, 3, 3);
+        let window_of = |id: u64| id.to_string();
+        let expected = near_sdk::serde_json::json!([
+            { "market_id": "3", "stage": "proposed", "proposed": "yes", "challenger_answer": null, "round": 0,
+              "final_outcome": null, "applied": false, "votes": 0, "window_ends_at": window_of(3),
+              "draw_by": "0", "panel_deadline": "0" },
+            { "market_id": "4", "stage": "disputed", "proposed": "yes", "challenger_answer": "no", "round": 1,
+              "final_outcome": null, "applied": false, "votes": 1, "window_ends_at": window_of(4),
+              "draw_by": DRAW_WINDOW.to_string(), "panel_deadline": DEADLINE.to_string() },
+            { "market_id": "5", "stage": "final", "proposed": "yes", "challenger_answer": null, "round": 0,
+              "final_outcome": "void", "applied": true, "votes": 0, "window_ends_at": window_of(5),
+              "draw_by": "0", "panel_deadline": "0" },
+        ]);
+        assert_eq!(rows, expected);
+    }
+
+    #[test]
+    fn list_cases_skips_ids_without_a_case_and_starts_at_the_id_asked_for() {
+        let case = proposed_case();
+        let mut o = fresh_oracle();
+        for id in [1, 4, 6] {
+            put_case_at(&mut o, id, case.clone());
+        }
+        let ids = |from, limit| -> Vec<String> {
+            o.list_cases(U64(from), limit)
+                .iter()
+                .map(|c| c.market_id.0.to_string())
+                .collect()
+        };
+        assert_eq!(ids(0, 7), ["1", "4", "6"]);
+        assert_eq!(ids(0, 4), ["1"], "ids 0 to 3 hold one case, so the page is short");
+        assert_eq!(ids(2, 3), ["4"]);
+        assert_eq!(ids(4, 10), ["4", "6"]);
+        assert_eq!(ids(5, 1), Vec::<String>::new());
+    }
+
+    #[test]
+    fn list_cases_clamps_the_limit_and_is_empty_past_the_last_id() {
+        let case = proposed_case();
+        let mut o = fresh_oracle();
+        let last = u64::from(MAX_LIST_CASES) + 9;
+        for id in 0..=last {
+            put_case_at(&mut o, id, case.clone());
+        }
+        assert_eq!(o.list_cases(U64(0), u32::MAX).len(), MAX_LIST_CASES as usize);
+        assert_eq!(
+            o.list_cases(U64(0), MAX_LIST_CASES + 1).last().unwrap().market_id.0,
+            u64::from(MAX_LIST_CASES) - 1
+        );
+        assert_eq!(o.list_cases(U64(0), 0).len(), 0);
+        assert!(o.list_cases(U64(last + 1), 10).is_empty());
+        assert!(o.list_cases(U64(u64::MAX), u32::MAX).is_empty());
+    }
+
+    #[test]
+    fn bond_totals_add_up_to_total_owed_through_a_proposal_a_challenge_a_settlement_and_a_withdrawal() {
+        let mut o = oracle_with_bond(BOND);
+        o.markets.insert(
+            0,
+            MarketInfo {
+                resolve_by: U64(MARKET_DEADLINE),
+                ..base_info()
+            },
+        );
+        let check = |o: &OracleContract, held: u128, claimable: u128| {
+            let totals = near_sdk::serde_json::to_value(o.bond_totals()).unwrap();
+            assert_eq!(
+                totals,
+                near_sdk::serde_json::json!({
+                    "bonds_held": held.to_string(),
+                    "claimable": claimable.to_string(),
+                    "total": (held + claimable).to_string()
+                })
+            );
+            assert_eq!(o.bond_totals().total, o.total_owed());
+        };
+        check(&o, 0, 0);
+        act_as(VERIFIER, SECOND);
+        deliver(&mut o, "carol.near", BOND, "propose:0:yes:https://x");
+        check(&o, BOND, 0);
+        act_as(VERIFIER, CHALLENGED_AT);
+        deliver(&mut o, "dave.near", BOND, "challenge:0:no");
+        check(&o, 2 * BOND, 0);
+        act_as("anyone.near", DRAW_BY + 1);
+        o.finalize(U64(0));
+        seat(&mut o, DRAW_BY + 1 + SECOND, &names(7, "k"));
+        act_as("anyone.near", o.case(0).panel_deadline.0 + 1);
+        o.finalize(U64(0));
+        assert_eq!(o.case(0).stage, Stage::Final);
+        check(&o, 0, 2 * BOND);
+        act_as(RECIPIENT, 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        check(&o, 0, 2 * BOND - BOND / 2);
+    }
+
+    #[test]
+    fn the_list_and_totals_views_change_nothing() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        let case = o.case(0);
+        put_case_at(&mut o, 9, case);
+        let before = (
+            near_sdk::serde_json::to_value(o.get_case(U64(0))).unwrap(),
+            near_sdk::serde_json::to_value(o.get_case(U64(9))).unwrap(),
+            o.config(),
+            o.total_owed(),
+        );
+        for _ in 0..2 {
+            let _ = o.list_cases(U64(0), 50);
+            let _ = o.bond_totals();
+        }
+        let after = (
+            near_sdk::serde_json::to_value(o.get_case(U64(0))).unwrap(),
+            near_sdk::serde_json::to_value(o.get_case(U64(9))).unwrap(),
+            o.config(),
+            o.total_owed(),
+        );
+        assert_eq!(before, after);
     }
 }

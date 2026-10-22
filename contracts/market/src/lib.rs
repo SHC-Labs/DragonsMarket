@@ -219,6 +219,17 @@ pub struct MarketView {
     locked: U128,
 }
 
+// One market in which an account holds shares. redeemable is what redeem would credit now, 0 until the market resolves.
+#[near(serializers=[json])]
+pub struct PositionView {
+    market_id: U64,
+    yes: U128,
+    no: U128,
+    status: String,
+    outcome: Option<Outcome>,
+    redeemable: U128,
+}
+
 #[near(serializers=[json])]
 pub struct PricePoint {
     at: U64,
@@ -1032,11 +1043,7 @@ impl MarketContract {
         let yes = self.shares.get(&(market_id.0, who.clone(), 0)).copied().unwrap_or(0);
         let no = self.shares.get(&(market_id.0, who.clone(), 1)).copied().unwrap_or(0);
         require!(yes + no > 0, "nothing to redeem");
-        let payout = match outcome {
-            Outcome::Yes => yes,
-            Outcome::No => no,
-            Outcome::Void => void_payout(yes, no, m.void_price()),
-        };
+        let payout = m.payout(outcome, yes, no);
         if yes > 0 {
             self.take_shares(&who, market_id.0, 0, yes);
         }
@@ -1361,6 +1368,33 @@ impl MarketContract {
         (U128(y), U128(n))
     }
 
+    // Every market in which the account holds shares, by market id, with what redeem would credit for each now.
+    pub fn get_positions(&self, account_id: AccountId) -> Vec<PositionView> {
+        // accounts counts the account's non-empty share entries, so the scan stops once it has found them all.
+        let mut left = self.accounts.get(&account_id).copied().unwrap_or(0);
+        let mut out = Vec::new();
+        for id in 0..self.next_market_id {
+            if left == 0 {
+                break;
+            }
+            let yes = self.shares.get(&(id, account_id.clone(), 0)).copied().unwrap_or(0);
+            let no = self.shares.get(&(id, account_id.clone(), 1)).copied().unwrap_or(0);
+            left = left.saturating_sub(u32::from(yes > 0) + u32::from(no > 0));
+            let Some(m) = self.markets.get(&id).filter(|_| yes + no > 0) else {
+                continue;
+            };
+            out.push(PositionView {
+                market_id: U64(id),
+                yes: U128(yes),
+                no: U128(no),
+                status: m.status().to_string(),
+                outcome: m.outcome,
+                redeemable: U128(m.outcome.map_or(0, |o| m.payout(o, yes, no))),
+            });
+        }
+        out
+    }
+
     pub fn get_market(&self, market_id: U64) -> Option<MarketView> {
         self.markets.get(&market_id.0).map(|m| self.view(market_id.0, m))
     }
@@ -1538,6 +1572,31 @@ impl Market {
         self.outcome = Some(outcome);
         if outcome == Outcome::Void {
             self.void_price_yes = Some(self.closing_price());
+        }
+    }
+
+    // What holders of `yes` and `no` shares redeem once the market has `outcome`.
+    fn payout(&self, outcome: Outcome, yes: u128, no: u128) -> u128 {
+        match outcome {
+            Outcome::Yes => yes,
+            Outcome::No => no,
+            Outcome::Void => void_payout(yes, no, self.void_price()),
+        }
+    }
+
+    fn status(&self) -> &'static str {
+        if self.outcome.is_some() {
+            "resolved"
+        } else if self.halted {
+            "halted"
+        } else if env::block_timestamp() >= self.close_at {
+            "closed"
+        } else if !self.registered {
+            "unregistered"
+        } else if !self.seeded {
+            "unseeded"
+        } else {
+            "open"
         }
     }
 
@@ -1847,19 +1906,6 @@ impl MarketContract {
     }
 
     fn view(&self, id: u64, m: &Market) -> MarketView {
-        let status = if m.outcome.is_some() {
-            "resolved"
-        } else if m.halted {
-            "halted"
-        } else if env::block_timestamp() >= m.close_at {
-            "closed"
-        } else if !m.registered {
-            "unregistered"
-        } else if !m.seeded {
-            "unseeded"
-        } else {
-            "open"
-        };
         let price_yes = curve::price_micro(m.pool_yes, m.pool_no);
         MarketView {
             id: U64(id),
@@ -1873,7 +1919,7 @@ impl MarketContract {
             price_rule: m.price_rule,
             close_at: U64(m.close_at),
             resolve_by: U64(m.resolve_by),
-            status: status.to_string(),
+            status: m.status().to_string(),
             registered: m.registered,
             seeded: m.seeded,
             outcome: m.outcome,
@@ -2295,6 +2341,153 @@ mod tests {
             "the cheap side is paid its price, well under the old half: {paid} for {ben_no} shares"
         );
         assert_conserved(&c, total_in);
+    }
+
+    // ---- get_positions -------------------------------------------------------------------------------------
+
+    // Ann holds both sides of markets 0 to 3. Markets 2 and 3 are made here, so the order of ids is the order of creation.
+    fn positions_world() -> MarketContract {
+        let (mut c, mut total_in) = world();
+        for _ in 0..2 {
+            let id = create_registered(&mut c, OWNER);
+            seed_with(&mut c, OWNER, id, None);
+        }
+        for id in 0..4 {
+            step(&mut c, &mut total_in, 0, 0, id, 10_000_000, 1);
+            step(&mut c, &mut total_in, 1, 0, id, 4_000_000, 1);
+        }
+        c
+    }
+
+    // Market 1 resolves Yes, market 2 No, market 3 is voided, market 0 is left unresolved.
+    fn resolve_positions_world(c: &mut MarketContract) {
+        act_as(ORACLE, CLOSE + 1);
+        c.set_outcome(U64(1), Outcome::Yes);
+        c.set_outcome(U64(2), Outcome::No);
+        act_as(USERS[2], VOID_OPEN);
+        c.void_if_unresolved(U64(3));
+    }
+
+    fn positions_json(c: &MarketContract, who: &str) -> near_sdk::serde_json::Value {
+        near_sdk::serde_json::to_value(c.get_positions(acct(who))).unwrap()
+    }
+
+    #[test]
+    fn positions_of_an_open_market_show_the_shares_and_redeem_nothing() {
+        let c = positions_world();
+        act_as(USERS[0], 7);
+        let (yes, no) = holdings(&c, 0, USERS[0]);
+        assert_eq!(
+            positions_json(&c, USERS[0])[0],
+            json!({ "market_id": "0", "yes": yes.to_string(), "no": no.to_string(), "status": "open",
+                    "outcome": null, "redeemable": "0" })
+        );
+        for p in c.get_positions(acct(USERS[0])) {
+            assert_eq!((p.status.as_str(), p.redeemable.0), ("open", 0));
+        }
+    }
+
+    #[test]
+    fn positions_of_resolved_markets_show_the_outcome_and_the_exact_payout() {
+        let mut c = positions_world();
+        resolve_positions_world(&mut c);
+        let price = c.market(3).void_price_yes.unwrap();
+        let held = |id| holdings(&c, id, USERS[0]);
+        let ((y1, n1), (y2, n2), (y3, n3), (y0, n0)) = (held(1), held(2), held(3), held(0));
+        let void_pay = (y3 * price + n3 * (1_000_000 - price)) / 1_000_000;
+        assert_eq!(
+            positions_json(&c, USERS[0]),
+            json!([
+                { "market_id": "0", "yes": y0.to_string(), "no": n0.to_string(), "status": "closed",
+                  "outcome": null, "redeemable": "0" },
+                { "market_id": "1", "yes": y1.to_string(), "no": n1.to_string(), "status": "resolved",
+                  "outcome": "yes", "redeemable": y1.to_string() },
+                { "market_id": "2", "yes": y2.to_string(), "no": n2.to_string(), "status": "resolved",
+                  "outcome": "no", "redeemable": n2.to_string() },
+                { "market_id": "3", "yes": y3.to_string(), "no": n3.to_string(), "status": "resolved",
+                  "outcome": "void", "redeemable": void_pay.to_string() },
+            ])
+        );
+    }
+
+    #[test]
+    fn what_positions_say_is_redeemable_is_what_redeem_credits() {
+        let mut c = positions_world();
+        resolve_positions_world(&mut c);
+        for p in c.get_positions(acct(USERS[0])) {
+            if p.outcome.is_none() {
+                continue;
+            }
+            let before = c.get_balance(acct(USERS[0])).0;
+            act_as(USERS[0], VOID_OPEN + 1);
+            let paid = c.redeem(p.market_id).0;
+            assert_eq!(paid, p.redeemable.0, "market {}", p.market_id.0);
+            assert_eq!(c.get_balance(acct(USERS[0])).0 - before, p.redeemable.0);
+        }
+        // Redeemed positions are gone; only the unresolved market is left.
+        let left = c.get_positions(acct(USERS[0]));
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].market_id.0, 0);
+    }
+
+    #[test]
+    fn positions_are_empty_for_an_account_with_none_and_for_an_unknown_one() {
+        let c = positions_world();
+        act_as(USERS[1], 7);
+        assert!(c.get_positions(acct(USERS[1])).is_empty());
+        assert!(c.get_positions(acct("nobody.near")).is_empty());
+    }
+
+    #[test]
+    fn positions_come_in_market_id_order_and_skip_markets_without_shares() {
+        let (mut c, mut total_in) = world();
+        for _ in 0..3 {
+            let id = create_registered(&mut c, OWNER);
+            seed_with(&mut c, OWNER, id, None);
+        }
+        for id in [4, 0, 3] {
+            step(&mut c, &mut total_in, 1, 1, id, 3_000_000, 1);
+        }
+        act_as(USERS[1], 7);
+        let ids: Vec<u64> = c.get_positions(acct(USERS[1])).iter().map(|p| p.market_id.0).collect();
+        assert_eq!(ids, vec![0, 3, 4]);
+    }
+
+    #[test]
+    fn reading_positions_changes_no_state() {
+        let mut c = positions_world();
+        resolve_positions_world(&mut c);
+        let snapshot = |c: &MarketContract| {
+            let markets: Vec<Vec<u8>> = (0..4)
+                .map(|id| near_sdk::borsh::to_vec(&c.market(id)).unwrap())
+                .collect();
+            (
+                markets,
+                c.accounts.get(&acct(USERS[0])).copied(),
+                c.get_balance(acct(USERS[0])),
+                c.locked_total,
+                c.fees,
+            )
+        };
+        let before = snapshot(&c);
+        let _ = c.get_positions(acct(USERS[0]));
+        let _ = c.get_positions(acct(USERS[0]));
+        assert!(before == snapshot(&c));
+    }
+
+    #[test]
+    fn an_account_at_the_position_cap_gets_every_position() {
+        let (mut c, _) = world();
+        for i in 0..MAX_POSITIONS {
+            let id = create_registered(&mut c, OWNER);
+            seed_with(&mut c, OWNER, id, None);
+            act_as(VERIFIER, 7);
+            let _ = receive(&mut c, acct(USERS[0]), U128(1_000_000), format!("buy:{id}:yes:1"));
+            assert_eq!(c.get_positions(acct(USERS[0])).len() as u32, i + 1);
+        }
+        act_as(USERS[0], 7);
+        let ids: Vec<u64> = c.get_positions(acct(USERS[0])).iter().map(|p| p.market_id.0).collect();
+        assert_eq!(ids, (2..2 + u64::from(MAX_POSITIONS)).collect::<Vec<_>>());
     }
 
     // ---- owner-set fees, with ceilings ------------------------------------------------------------

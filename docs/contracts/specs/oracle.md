@@ -246,14 +246,14 @@ An error from `mt_transfer` means the verifier receipt failed and nothing moved.
 | Item | Specification |
 | --- | --- |
 | `bonds_held` | Increment by the bond in `propose` and again in `challenge`. Decrement in `settle` by the case's bonds (one when unchallenged, two otherwise) as they move into `claimable` |
-| `bond_totals()` NEW | `{bonds_held: U128, claimable: U128, pending_payouts: U128, total: U128}` |
+| `bond_totals()` BUILT | `{bonds_held: U128, claimable: U128, total: U128}`. `pending_payouts` joins it when bond payouts in flight are tracked |
 | `total_owed()` NEW | `bonds_held + claimable_total + pending_payouts_total`. The keeper compares it with `mt_balance_of(O, token)` |
 
 ### 8.4 Case list for the website and keeper
 
 | Item | Specification |
 | --- | --- |
-| `list_cases(from_market_id: U64, limit: u32)` NEW | At most 50 ids from `from_market_id`. Returns only ids that have a case, each as `CaseSummary {market_id: U64, stage, proposed, challenger_answer: Option<Outcome>, round: u8, final_outcome: Option<Outcome>, applied: bool, votes: u32, window_ends_at: U64, draw_by: U64, panel_deadline: U64}` |
+| `list_cases(from_market_id: U64, limit: u32)` BUILT | At most 50 ids from `from_market_id`. Returns only ids that have a case, each as `CaseSummary {market_id: U64, stage, proposed, challenger_answer: Option<Outcome>, round: u8, final_outcome: Option<Outcome>, applied: bool, votes: u32, window_ends_at: U64, draw_by: U64, panel_deadline: U64}` |
 
 The website's Council page loads every market and then every case one by one (`web/app/council/view.tsx:13-18`). One page of this view replaces that fan-out. The keeper can also use it instead of `get_case` per market (`keeper/keeper.mjs:153-178`).
 
@@ -272,7 +272,7 @@ The website's Council page loads every market and then every case one by one (`w
 | Quantity | Source | Status |
 | --- | --- | --- |
 | A case and its public votes | `get_case` | EXISTING. Includes `votes[].reason` and `commits` |
-| Cases for a list page | `list_cases` | NEW |
+| Cases for a list page | `list_cases` | BUILT |
 | Bond required to propose or challenge | `config.bond`, `Case.bond` | EXISTING |
 | Windows of one market | `get_market_info` | EXISTING |
 | Claimable bond of an account | `claimable_of` | EXISTING |

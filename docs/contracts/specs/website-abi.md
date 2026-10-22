@@ -105,16 +105,16 @@ interface MarketView {                       // market.get_market, market.list_m
 interface PricePoint { at: U64; price_yes: number }            // price_yes is a u32 number
 interface BuyQuote  { shares_out: U128; fee: U128 }
 interface SellQuote { collateral_out: U128; shares_in: U128; fee: U128 }
+interface PositionView { market_id: U64; yes: U128; no: U128; status: MarketStatus;
+                         outcome: Outcome | null; redeemable: U128 }
 ```
 
-`status` is evaluated in this order (`market/src/lib.rs:1510-1522` in the 09:22 copy): `resolved`, `halted`, `closed`, then `unregistered` while the oracle has not confirmed, `unseeded` while there is no liquidity, otherwise `open`.
+`status` is evaluated in this order (`Market::status` in `market/src/lib.rs`): `resolved`, `halted`, `closed`, then `unregistered` while the oracle has not confirmed, `unseeded` while there is no liquidity, otherwise `open`.
 
 PROPOSED additions:
 
 ```ts
 interface AccountView  { registered: boolean; available: U128; pending_withdrawals: U128; positions: number }
-interface PositionView { market_id: U64; yes: U128; no: U128; status: MarketStatus;
-                         outcome: Outcome | null; redeemable: U128 }
 type LegStatus = "pending" | "settled" | "refused" | "unresolved";
 interface SweepView { id: U64; at: U64; total: U128; carried_council: U128; carried_treasury: U128;
                       council: { amount: U128; status: LegStatus };
@@ -143,7 +143,7 @@ interface OwedView { balances: U128; locked: U128; fees: U128; revenue_due: U128
 | `config` | `{}` | See below | EXISTING |
 | `check_invariant` | `{market_id: U64}` | `boolean` | EXISTING |
 | `get_account` | `{account_id}` | `AccountView` | NEW |
-| `get_positions` | `{account_id}` | `PositionView[]`, at most 20 | NEW |
+| `get_positions` | `{account_id}` | `PositionView[]`, one per market where the account holds shares, by market id. `redeemable` is what `redeem` would credit now, `"0"` until the market resolves | BUILT |
 | `get_sweep`, `list_sweeps` | `{sweep_id: U64}`, `{from_index: U64, limit: U64}` | `SweepView \| null`, `SweepView[]` | NEW |
 | `in_flight`, `owed_breakdown` | `{}` | `InFlightView`, `OwedView` | NEW |
 
@@ -216,14 +216,16 @@ interface OracleMarketInfo { close_at: U64; resolve_by: U64; rule_hash: string; 
                              window_ns: U64; panel_deadline_ns: U64; draw_window_ns: U64 }
 ```
 
-PROPOSED:
+BUILT (`list_cases`, `bond_totals`):
 
 ```ts
 interface CaseSummary { market_id: U64; stage: Stage; proposed: Outcome; challenger_answer: Outcome | null;
                         round: number; final_outcome: Outcome | null; applied: boolean; votes: number;
                         window_ends_at: U64; draw_by: U64; panel_deadline: U64 }
-interface BondTotals { bonds_held: U128; claimable: U128; pending_payouts: U128; total: U128 }
+interface BondTotals { bonds_held: U128; claimable: U128; total: U128 }   // total equals total_owed
 ```
+
+`BondTotals` has no `pending_payouts` yet: money in flight on a bond withdrawal is not tracked, and the field is added beside these when it is.
 
 ### 6.2 Views
 
@@ -233,8 +235,11 @@ interface BondTotals { bonds_held: U128; claimable: U128; pending_payouts: U128;
 | `get_market_info` | `{market_id: U64}` | `OracleMarketInfo \| null` | EXISTING |
 | `claimable_of` | `{account_id}` | `U128` | EXISTING |
 | `config` | `{}` | See below | EXISTING |
-| `list_cases` | `{from_market_id: U64, limit: number}` | `CaseSummary[]` | NEW |
-| `bond_totals`, `total_owed` | `{}` | `BondTotals`, `U128` | NEW |
+| `list_cases` | `{from_market_id: U64, limit: number}` | `CaseSummary[]` | BUILT |
+| `bond_totals` | `{}` | `BondTotals` | BUILT |
+| `total_owed` | `{}` | `U128` | EXISTING |
+
+`list_cases` looks at `limit` consecutive market ids from `from_market_id`, clamped to 50, and returns a row for each id that has a case. An id without a case is skipped, so a page can hold fewer than `limit` rows and the caller advances by `limit`. `votes` is the count of revealed votes.
 
 `config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `market`, `bond_token` (NEW: `verifier`, `collateral_token_id`), `bond: U128`, `window_ns`, `panel_deadline_ns`, `draw_window_ns`, `min_proposal_ns`, `min_resolve_gap_ns` (all `U64`), `council`, `jury_size: number`, `draw_delay_blocks: U64`, `operator`, `network: string`, `publishers: string[]`, `price_threshold: number`, `no_decision_recipient`.
 

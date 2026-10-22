@@ -383,7 +383,7 @@ PROPOSED. The website calls `get_shares` for every market to find a user's posit
 | Item | Specification |
 | --- | --- |
 | `positions` map | Updated in `add_shares` and `take_shares` when an account first holds or fully leaves a market. At most 20 market ids, which fits the flat 0.05 NEAR deposit |
-| `get_positions(account_id: AccountId)` NEW | `Vec<PositionView>`, each `{market_id: U64, yes: U128, no: U128, status: String, outcome: Option<Outcome>, redeemable: U128}`. `redeemable` is the exact payout when `outcome` is set, otherwise `"0"`. No mark to market value is computed on chain |
+| `get_positions(account_id: AccountId)` BUILT | `Vec<PositionView>`, each `{market_id: U64, yes: U128, no: U128, status: String, outcome: Option<Outcome>, redeemable: U128}`. `redeemable` is the exact payout when `outcome` is set, otherwise `"0"`. No mark to market value is computed on chain |
 | `get_account(account_id)` NEW | `AccountView` as in 7.1 |
 
 ### 7.5 Reconciliation views (R-08)
@@ -423,7 +423,7 @@ R-08 asks the interface to separate available, committed, pending, accrued, clai
 | Free funds in the user's own Intents account | Verifier `mt_balance_of(account, token_id)` | EXISTING (verifier) |
 | Available in the market (deposited, untraded) | `get_balance`, `get_account.available` | EXISTING, NEW |
 | Committed backing of a market | `MarketView.locked` | EXISTING |
-| A user's positions and redeemable amount | `get_positions` | NEW |
+| A user's positions and redeemable amount | `get_positions` | BUILT |
 | Pending withdrawal | `get_account.pending_withdrawals`, events `withdraw`, `withdraw_confirmed`, `withdraw_failed` | NEW |
 | Fees collected, split, in flight | `get_fees`, `get_sweep`, `list_sweeps`, `in_flight` | EXISTING, NEW |
 | Reconciliation state | `owed_breakdown`, `total_owed`, `in_flight` | NEW |
