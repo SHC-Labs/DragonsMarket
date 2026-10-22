@@ -42,6 +42,7 @@ const RULES: [RegExp, string][] = [
   [/that quarter is not final/i, "That quarter is still open. Claims open when it is final."],
   [/a withdrawal is still pending/i, "A withdrawal is still on its way. Wait for it to finish, then try again."],
   [/a jury drawn in this quarter is still open/i, "A jury drawn in this quarter is still open. This quarter closes when that case ends."],
+  [/wait (an hour|\d+ minutes) since the last sweep/i, "Fees were swept a moment ago. Try again after the waiting time has passed."],
   [/attach at least (\d+) TGas/i, "This needed more gas than was attached. Try again."],
 ];
 

@@ -77,6 +77,11 @@ describe("new refusal copy", () => {
   it("explains a pending withdrawal", () => {
     expect(friendlyError("a withdrawal is still pending", "r")).toContain("withdrawal is still on its way");
   });
+  it("explains a fee sweep inside the waiting time, for both wordings of the refusal", () => {
+    const copy = "Fees were swept a moment ago. Try again after the waiting time has passed.";
+    expect(friendlyError("wait an hour since the last sweep", "r")).toBe(copy);
+    expect(friendlyError("wait 5 minutes since the last sweep", "r")).toBe(copy);
+  });
   it("explains an open jury blocking a quarter", () => {
     expect(friendlyError("a jury drawn in this quarter is still open", "r")).toContain("jury drawn in this quarter is still open");
   });

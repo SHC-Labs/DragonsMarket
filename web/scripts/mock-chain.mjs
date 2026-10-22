@@ -112,6 +112,20 @@ const quote = (m, side, amount) => {
 
 const views = {
   [MARKET]: {
+    config: () => ({
+      state_version: 2, upgrade_proven: false, upgrade_in_flight: false,
+      owner: "owner.test.near", pending_owner: null, operator: "keeper.test.near", oracle: ORACLE,
+      verifier: VERIFIER, collateral_token_id: "nep141:ft.test.near",
+      paused: false, sells_paused: false, markets: String(markets.length), storage_deposit: "50000000000000000000000",
+      max_positions: 20, fee_rate_bps: 200, create_fee: "1000000",
+      revenue_pool: "council.test.near", treasury: "treasury.test.near",
+      revenue_share_bps: 2500, treasury_share_bps: 7500,
+      min_sweep: "1000000", next_sweep_id: "1", revenue_unresolved: "0",
+      void_price_window_ns: String(24n * 3600n * SEC), void_grace_ns: String(7n * 24n * 3600n * SEC),
+      settle_wait_minutes: 10, reconcile_wait_minutes: 60, min_sweep_interval_minutes: 60,
+      min_open_price: "10000", max_open_price: "990000",
+      max_fee_rate_bps: 500, max_create_fee: "10000000", min_revenue_share_bps: 1000, max_revenue_share_bps: 5000, max_min_sweep: "100000000",
+    }),
     list_markets: ({ from_index = "0", limit = "50" }) => markets.slice(Number(from_index), Number(from_index) + Number(limit)).map(pub),
     get_market: ({ market_id }) => (markets[Number(market_id)] ? pub(markets[Number(market_id)]) : null),
     get_history: ({ market_id }) => markets[Number(market_id)]?.history ?? [],

@@ -130,6 +130,17 @@ export interface OracleConfig {
 }
 
 export interface MarketConfig {
+  state_version: number;
+  upgrade_proven: boolean;
+  upgrade_in_flight: boolean;
+  owner: string;
+  pending_owner: string | null;
+  operator: string;
+  oracle: string;
+  markets: string;
+  min_sweep: string;
+  next_sweep_id: string;
+  revenue_unresolved: string;
   verifier: string;
   collateral_token_id: string;
   paused: boolean;
