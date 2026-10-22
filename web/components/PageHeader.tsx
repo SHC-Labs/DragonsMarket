@@ -15,7 +15,12 @@ export function PageLandmark({ title }: { title: string }) {
 
 export function AccountEmptyState({ title, description, actions }: { title: string; description: string; actions: ReactNode }) {
   return <section className="account-empty">
-    <span className="brand-mark" aria-hidden="true" />
-    <div><h2>{title}</h2><p>{description}</p><div className="account-empty-actions">{actions}</div></div>
+    <div className="account-empty-copy">
+      <span className="account-empty-crest" aria-hidden="true"><span className="brand-mark" /></span>
+      <h2>{title}</h2><p>{description}</p><div className="account-empty-actions">{actions}</div>
+    </div>
+    <div className="account-empty-art" aria-hidden="true">
+      {[0, 1, 2].map(i => <div key={i} className="account-empty-sheet" style={{ "--i": i } as React.CSSProperties}><span /><span /><span /><i /></div>)}
+    </div>
   </section>;
 }

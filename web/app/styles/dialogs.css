@@ -1,0 +1,68 @@
+/* Shared modal surface */
+.guide-dialog, .terms-dialog {
+  margin: auto; max-height: calc(100dvh - 2rem); overflow-y: auto; overscroll-behavior: contain;
+  border: 1px solid var(--line-strong); border-radius: var(--r-lg);
+  background: radial-gradient(36rem 18rem at 0% 0%, var(--brand-tint), transparent 70%), var(--surface);
+  color: var(--text); box-shadow: var(--elev-3);
+}
+.guide-dialog::backdrop, .terms-dialog::backdrop { background: color-mix(in oklab, var(--scrim) 75%, transparent); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+@media (prefers-reduced-motion: no-preference) {
+  .guide-dialog[open], .terms-dialog[open] { animation: dialog-in var(--dur-3) var(--ease-out); }
+  .guide-dialog[open]::backdrop, .terms-dialog[open]::backdrop { animation: enter-fade var(--dur-3) var(--ease-out); }
+}
+@keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } }
+
+/* How it works */
+.guide-dialog { width: min(44rem, calc(100% - 2rem)); min-height: min(34rem, calc(100dvh - 2rem)); padding: var(--s-7); }
+.guide-dialog[open] { display: flex; flex-direction: column; }
+.guide-heading { display: flex; align-items: center; gap: var(--s-3); }
+.guide-heading > .brand-mark { width: 1.75rem; height: 2.1rem; }
+.guide-heading h2 { margin: 0; font-size: var(--fs-xl); font-weight: 500; }
+.guide-close { display: grid; place-items: center; width: var(--control-md); height: var(--control-md); margin-left: auto; border-radius: 50%; color: var(--text-muted); cursor: pointer; transition: background var(--dur-2), color var(--dur-2), transform var(--dur-3) var(--ease-out); }
+.guide-close:hover { background: var(--surface-hover); color: var(--text); transform: rotate(90deg); }
+.guide-progress { display: flex; align-items: center; gap: var(--s-4); margin-top: var(--s-6); font-size: var(--fs-xs); color: var(--text-muted); }
+.guide-progress-bars { display: flex; flex: 1; gap: var(--s-2); }
+.guide-progress-bars > span { position: relative; flex: 1; height: 4px; border-radius: var(--r-pill); background: var(--line-strong); overflow: hidden; }
+.guide-progress-bars > span::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--brand); box-shadow: 0 0 10px var(--glow-brand); transform: scaleX(0); transform-origin: left; transition: transform var(--dur-4) var(--ease-out); }
+.guide-progress-bars > span[data-complete="true"]::after { transform: scaleX(1); }
+.guide-stage { display: grid; grid-template-columns: 6rem minmax(0, 1fr); align-items: center; gap: var(--s-8); flex: 1 0 auto; min-height: 17rem; padding: var(--s-8) 0; animation: guide-step var(--dur-4) var(--ease-out) both; }
+@keyframes guide-step { from { opacity: 0; transform: translateX(14px); } }
+.guide-stage-icon { position: relative; display: grid; place-items: center; width: 6rem; height: 6rem; border-radius: var(--r-lg); background: linear-gradient(150deg, color-mix(in oklab, var(--brand) 30%, transparent), var(--brand-tint)); color: var(--brand); box-shadow: 0 0 0 1px color-mix(in oklab, var(--brand) 30%, transparent) inset, 0 16px 40px -16px var(--glow-brand); }
+.guide-stage-icon::after { content: ""; position: absolute; inset: -10px; border-radius: calc(var(--r-lg) + 10px); border: 1px dashed color-mix(in oklab, var(--brand) 30%, transparent); }
+.guide-stage-copy h3 { margin: 0 0 var(--s-4); font-size: clamp(1.5rem, 1.2rem + 1vw, 2.25rem); font-weight: 400; line-height: 1.15; letter-spacing: -0.03em; }
+.guide-stage-copy h3:focus { outline: none; }
+.guide-stage-copy p { max-width: 46ch; margin: 0; color: var(--text-muted); font-size: var(--fs-lg); line-height: 1.7; }
+.guide-outcomes { display: flex; gap: var(--s-2); margin-top: var(--s-5); }
+.guide-outcomes span { padding: var(--s-2) var(--s-5); border: 1px solid color-mix(in oklab, var(--chart-yes) 50%, transparent); border-radius: var(--r-sm); background: var(--yes-tint); color: var(--yes); font-size: var(--fs-sm); font-weight: 600; }
+.guide-outcomes span + span { border-color: color-mix(in oklab, var(--chart-no) 50%, transparent); background: var(--no-tint); color: var(--no); }
+.guide-actions { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--s-3) var(--s-6); padding-top: var(--s-5); border-top: 1px solid var(--line); }
+.guide-actions > a { display: inline-flex; align-items: center; gap: var(--s-2); min-height: var(--control-md); color: var(--brand); font-size: var(--fs-sm); font-weight: 500; }
+.guide-navigation { display: flex; gap: var(--s-3); margin-left: auto; }
+.guide-navigation > button { min-width: 6rem; }
+@media (max-width: 479px) {
+  .guide-dialog { padding: var(--s-5); }
+  .guide-heading h2 { font-size: var(--fs-lg); white-space: nowrap; }
+  .guide-stage { grid-template-columns: 1fr; align-content: center; gap: var(--s-5); padding: var(--s-6) 0; }
+  .guide-stage-icon { width: 4.5rem; height: 4.5rem; }
+  .guide-stage-copy p { font-size: var(--fs-md); }
+}
+
+/* Terms acceptance */
+.terms-dialog { width: min(34rem, calc(100% - 2rem)); padding: var(--s-7); }
+.terms-dialog:not([open]) { display: none; }
+.terms-dialog h2 { margin: 0 0 var(--s-3); font-size: var(--fs-2xl); font-weight: 500; line-height: 1.2; }
+.terms-dialog p { margin: 0 0 var(--s-4); color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.65; }
+.terms-dialog .terms-dialog-account { display: inline-block; padding: var(--s-1) var(--s-3); border-radius: var(--r-pill); background: var(--raised); color: var(--text); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.terms-review-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--s-1) var(--s-4); padding-top: var(--s-3); border-top: 1px solid var(--line); }
+.terms-review-row > a { display: inline-flex; align-items: center; min-height: var(--control-md); color: var(--brand); font-size: var(--fs-sm); font-weight: 500; text-decoration: underline; text-underline-offset: 3px; }
+.terms-review-row > span { font-size: var(--fs-2xs); color: var(--text-muted); }
+.terms-agreement { display: flex; align-items: flex-start; gap: var(--s-3); padding: var(--s-3) 0 var(--s-5); cursor: pointer; font-size: var(--fs-sm); line-height: 1.6; }
+.terms-agreement input { width: 1.2rem; height: 1.2rem; margin-top: 0.15rem; flex-shrink: 0; }
+.terms-dialog .terms-dialog-note { font-size: var(--fs-xs); }
+.terms-dialog .terms-dialog-error { color: var(--danger); }
+.terms-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--s-3); margin-top: var(--s-5); }
+@media (max-width: 479px) {
+  .terms-dialog { padding: var(--s-5); }
+  .terms-dialog-actions { flex-direction: column-reverse; }
+  .terms-dialog-actions button { width: 100%; }
+}

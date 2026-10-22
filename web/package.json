@@ -11,14 +11,15 @@
     "test": "vitest run",
     "e2e": "playwright test",
     "serve": "node scripts/serve.mjs",
-    "build:dev": "bash scripts/build-dev.sh"
+    "build:dev": "bash scripts/build-dev.sh",
+    "dev:mock": "node scripts/dev-mock.mjs"
   },
   "dependencies": {
     "@hot-labs/near-connect": "^0.11.4",
+    "@phosphor-icons/react": "^2.1.10",
     "@visx/curve": "^4.0.0",
     "@visx/scale": "^4.0.0",
     "@visx/shape": "^4.0.0",
-    "iconsax-react": "^0.0.8",
     "next": "16.4.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"

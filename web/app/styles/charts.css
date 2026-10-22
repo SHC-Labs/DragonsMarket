@@ -1,0 +1,58 @@
+/* Outcome chart: Yes is a solid lilac line over a glow, No a dashed teal line, so the two never rely on colour alone. */
+.outcome-chart { position: relative; margin: 0; min-width: 0; }
+.outcome-chart > svg { display: block; width: 100%; height: 280px; overflow: visible; touch-action: pan-y; cursor: crosshair; }
+.outcome-chart[data-compact] > svg { height: 220px; }
+.outcome-chart-readout { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2) var(--s-5); margin-bottom: var(--s-3); font-size: var(--fs-xs); color: var(--text-muted); }
+.outcome-chart-readout > span { display: inline-flex; align-items: center; gap: var(--s-2); }
+.outcome-chart-readout b { color: var(--text); font-weight: 600; }
+.outcome-chart-readout time { margin-left: auto; font-size: var(--fs-2xs); }
+.outcome-dot { display: inline-block; width: 10px; height: 3px; border-radius: 2px; flex-shrink: 0; }
+.outcome-yes { background: var(--chart-yes); }
+.outcome-no { background: var(--chart-no); }
+.outcome-dot-dashed { background: linear-gradient(90deg, var(--chart-no) 0 40%, transparent 40% 60%, var(--chart-no) 60%); }
+
+.outcome-line { fill: none; stroke-width: 2.25; stroke-linejoin: round; stroke-linecap: round; }
+.outcome-yes-line { stroke: var(--chart-yes); filter: drop-shadow(0 0 6px color-mix(in oklab, var(--chart-yes) 55%, transparent)); stroke-dasharray: 1; stroke-dashoffset: 0; animation: chart-draw var(--dur-5) var(--ease-out) both; }
+.outcome-no-line { stroke: var(--chart-no); stroke-dasharray: 6 4; opacity: 0.9; animation: enter-fade var(--dur-5) var(--ease-out) both; }
+.outcome-area { animation: enter-fade var(--dur-5) var(--ease-out) 200ms both; }
+@keyframes chart-draw { from { stroke-dashoffset: 1; } }
+.outcome-grid { stroke: var(--line); stroke-dasharray: 2 6; }
+.outcome-axis { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.outcome-crosshair { stroke: var(--border-input); stroke-width: 1; }
+.outcome-scrub circle { stroke: var(--surface); stroke-width: 2; }
+.outcome-end { stroke: var(--surface); stroke-width: 2; }
+.outcome-halo { opacity: 0.18; transform-box: fill-box; transform-origin: center; animation: halo 2.6s var(--ease-out) 600ms 2 both; }
+@keyframes halo { 0% { transform: scale(0.4); opacity: 0.45; } 100% { transform: scale(1.4); opacity: 0; } }
+.outcome-connector { fill: none; stroke-width: 1; opacity: 0.6; }
+.outcome-yes-connector { stroke: var(--chart-yes); }
+.outcome-no-connector { stroke: var(--chart-no); }
+.outcome-end-label { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.outcome-chart:focus-within { outline: 2px solid var(--focus); outline-offset: 6px; border-radius: var(--r-xs); }
+
+.outcome-data { margin-top: var(--s-3); font-size: var(--fs-xs); color: var(--text-muted); }
+.outcome-data summary { display: inline-flex; align-items: center; gap: var(--s-2); width: fit-content; min-height: 2rem; padding: 0 var(--s-3); border: 1px solid var(--line); border-radius: var(--r-pill); list-style: none; font-weight: 500; color: var(--text-muted); transition: color var(--dur-2), border-color var(--dur-2); }
+.outcome-data summary::-webkit-details-marker { display: none; }
+.outcome-data summary::before { content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform var(--dur-2) var(--ease-out); }
+.outcome-data[open] summary::before { transform: rotate(45deg); }
+.outcome-data summary:hover { color: var(--text); border-color: var(--border-input); }
+.outcome-data-scroll { max-height: 16rem; overflow: auto; margin-top: var(--s-3); border: 1px solid var(--line); border-radius: var(--r-sm); }
+.outcome-data table { width: 100%; border-collapse: collapse; text-align: left; font-variant-numeric: tabular-nums; }
+.outcome-data th { position: sticky; top: 0; background: var(--surface); font-weight: 500; color: var(--text); }
+.outcome-data th, .outcome-data td { padding: var(--s-2) var(--s-3); border-bottom: 1px solid var(--line); }
+.outcome-data th:not(:first-child), .outcome-data td:not(:first-child) { text-align: right; }
+
+.price-chart-empty { display: grid; place-items: center; gap: var(--s-3); min-height: 12rem; padding: var(--s-6); border: 1px dashed var(--line-strong); border-radius: var(--r-md); color: var(--text-muted); font-size: var(--fs-sm); text-align: center; }
+.price-chart-empty-line { width: 7rem; height: 2px; background: repeating-linear-gradient(90deg, var(--border-input) 0 6px, transparent 6px 10px); }
+
+/* Split meter: Yes and No as one bar with a gap at the boundary. */
+.split-meter { --split: 50%; display: grid; gap: var(--s-2); }
+.split-meter-track { display: flex; gap: 3px; height: 6px; }
+.split-meter[data-size="sm"] .split-meter-track { height: 4px; }
+.split-meter[data-size="lg"] .split-meter-track { height: 10px; gap: 4px; }
+.split-meter-track > span { border-radius: var(--r-pill); transition: flex-basis var(--dur-4) var(--ease-out); }
+.split-yes { flex: 0 0 var(--split); background: linear-gradient(90deg, color-mix(in oklab, var(--chart-yes) 60%, transparent), var(--chart-yes)); box-shadow: 0 0 12px -2px color-mix(in oklab, var(--chart-yes) 60%, transparent); transform-origin: left; animation: meter-grow var(--dur-5) var(--ease-out) both; }
+.split-no { flex: 1 1 auto; background: linear-gradient(90deg, var(--chart-no), color-mix(in oklab, var(--chart-no) 55%, transparent)); transform-origin: right; animation: meter-grow var(--dur-5) var(--ease-out) both; }
+@keyframes meter-grow { from { transform: scaleX(0); } }
+.split-meter-labels { display: flex; justify-content: space-between; font-size: var(--fs-xs); color: var(--text-muted); }
+.split-meter-labels > span { display: inline-flex; align-items: center; gap: var(--s-2); }
+.split-meter-labels b { color: var(--text); font-weight: 600; }

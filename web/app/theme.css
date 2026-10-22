@@ -1,4 +1,5 @@
-/* Tailwind v4 mapping. Import after tokens.css. Utilities: bg-canvas, bg-surface, bg-raised, text-fg, text-muted, border-border, border-input, ring-focus, text-yes, bg-yes-soft, text-council, bg-council-soft, font-display ... */
+/* Tailwind v4 mapping of the design tokens. Import after tokens.css.
+   Utilities: bg-canvas, bg-surface, bg-raised, text-fg, text-muted, border-border, text-yes, text-council, rounded-md ... */
 @theme inline {
   --color-canvas: var(--bg);
   --color-surface: var(--surface);
@@ -26,17 +27,14 @@
   --color-council-soft: var(--council-soft);
   --font-sans: var(--font-sans-stack);
   --font-mono: var(--font-mono-stack);
-  --font-display: var(--font-display-stack);
-  --text-xs: var(--text-xs-size);  --text-xs--line-height: var(--text-xs-line);
-  --text-sm: var(--text-sm-size);  --text-sm--line-height: var(--text-sm-line);
-  --text-base: var(--text-base-size);  --text-base--line-height: var(--text-base-line);
-  --text-lg: var(--text-lg-size);  --text-lg--line-height: var(--text-lg-line);
-  --text-xl: var(--text-xl-size);  --text-xl--line-height: var(--text-xl-line);
-  --text-display: var(--text-display-size);  --text-display--line-height: var(--text-display-line);
-  --radius-sm: var(--radius-sm);
-  --radius-md: var(--radius-md);
-  --radius-lg: var(--radius-lg);
-  --radius-pill: var(--radius-pill);
-  --shadow-pop: var(--shadow-pop);
-  --ease-ui: cubic-bezier(.2,.8,.2,1);
+  --text-xs: var(--fs-2xs);  --text-xs--line-height: 1rem;
+  --text-sm: var(--fs-sm);  --text-sm--line-height: 1.25rem;
+  --text-base: var(--fs-md);  --text-base--line-height: 1.5rem;
+  --text-lg: var(--fs-lg);  --text-lg--line-height: 1.75rem;
+  --text-xl: var(--fs-xl);  --text-xl--line-height: 1.875rem;
+  --radius-sm: var(--r-xs);
+  --radius-md: var(--r-sm);
+  --radius-lg: var(--r-md);
+  --radius-xl: var(--r-lg);
+  --ease-ui: var(--ease-out);
 }

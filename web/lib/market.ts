@@ -69,6 +69,16 @@ const oracle = () => config.oracleId;
 
 // ---- reads --------------------------------------------------------------------------------
 
+// The last list read, so a market page opened from it can draw its header in the same frame as the navigation
+// (the shared-element morph needs both ends in one commit). The page still reads the market itself straight after.
+const lastListed = new Map<string, MarketView>();
+const lastStage = new Map<string, string | null>();
+export const listedMarket = (id: string) => lastListed.get(id) ?? null;
+export const listedStage = (id: string) => lastStage.get(id) ?? null;
+export function rememberStages(stages: Record<string, string | null>) {
+  for (const [id, stage] of Object.entries(stages)) lastStage.set(id, stage);
+}
+
 // Fetch every page: positions can belong to markets beyond the first 50.
 export async function listMarkets(): Promise<MarketView[]> {
   const all: MarketView[] = [];
@@ -80,7 +90,10 @@ export async function listMarkets(): Promise<MarketView[]> {
       seen.add(item.id);
       all.push(item);
     }
-    if (page.length < 50) return all;
+    if (page.length < 50) {
+      for (const m of all) lastListed.set(m.id, m);
+      return all;
+    }
   }
 }
 

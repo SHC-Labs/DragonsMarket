@@ -3,7 +3,10 @@
 import Link from "next/link";
 import { AccountEmptyState, PageLandmark } from "@/components/PageHeader";
 import { Button, Notice } from "@/components/ui";
+import { CountUp } from "@/components/CountUp";
 import { MarketIcon } from "@/components/MarketIcon";
+import { Embers } from "@/components/Embers";
+import { Award, Lock, Wallet } from "@/components/icons";
 import { useWallet } from "@/components/WalletProvider";
 import { config } from "@/lib/config";
 import { voidPayout } from "@/lib/settlement";
@@ -24,8 +27,22 @@ function payout(p: Position): bigint | null {
   return 0n;
 }
 
+const money = (n: number) => n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
 function Title() {
   return <PageLandmark title="Portfolio" />;
+}
+
+function Balance({ label, value, children, tone }: { label: string; value: bigint; children?: React.ReactNode; tone: "wallet" | "market" }) {
+  return <div className="balance-tile" data-tone={tone}>
+    <Embers height={0.85} intensity={0.7} speed={0.16} spark={tone === "market" ? "--council" : "--yes"} smoke={tone === "market" ? "--council" : "--accent"} />
+    <dt><Wallet size={18} variant="Bulk" />{label}</dt>
+    <dd>
+      <span className="balance-figure" aria-hidden="true"><CountUp value={Number(value) / 1e6} format={money} className="num" duration={1100} /> <span className="balance-unit">{config.tokenSymbol}</span></span>
+      <span className="sr-only">{formatMoney(value)} {config.tokenSymbol}</span>
+      {children}
+    </dd>
+  </div>;
 }
 
 export default function Portfolio() {
@@ -57,11 +74,17 @@ export default function Portfolio() {
     );
   }
 
+  const counts = data ? {
+    open: data.positions.filter(p => p.market.status === "open").length,
+    waiting: data.positions.filter(p => p.market.status === "closed" || p.market.status === "halted").length,
+    resolved: data.positions.filter(p => p.market.status === "resolved").length,
+  } : null;
+
   return (
-    <div className="page-content">
+    <div className="page-content portfolio-page">
       <Title />
       {loading && !data ? (
-        <p className="mt-8 text-muted">Loading your positions</p>
+        <><p role="status" className="sr-only">Loading your positions</p><div className="portfolio-skeleton" aria-hidden="true"><div className="skeleton" /><div className="skeleton" /><div className="skeleton" /></div></>
       ) : error && !data ? (
         <div className="mt-8">
           <Notice tone="danger">
@@ -69,61 +92,58 @@ export default function Portfolio() {
             <Button variant="ghost" size="sm" onClick={reload}>Retry</Button>
           </Notice>
         </div>
-      ) : data ? (
+      ) : data && counts ? (
         <>
-          <div className="portfolio-summary"><span className="num">{data.positions.length} positions</span><span className="num">{data.positions.filter(p => p.market.status === "resolved").length} resolved</span></div>
-          <dl className="portfolio-balances m-0 mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="min-w-0 rounded-xl border border-border bg-surface/60 p-6 [overflow-wrap:anywhere]">
-              <dt className="text-xs uppercase tracking-[0.1em] text-muted">In your wallet</dt>
-              <dd className="m-0 mt-2">
-                <span className="display block text-[3rem] leading-[3rem]">
-                  <span className="num text-[2.5rem]">{formatMoney(data.inWallet)}</span> <span className="text-xl text-muted">{config.tokenSymbol}</span>
-                </span>
-
-              </dd>
-            </div>
-            <div className="min-w-0 rounded-xl border border-border bg-surface/60 p-6 [overflow-wrap:anywhere]">
-              <dt className="text-xs uppercase tracking-[0.1em] text-muted">Available to withdraw</dt>
-              <dd className="m-0 mt-2">
-                <span className="display block text-[3rem] leading-[3rem]">
-                  <span className="num text-[2.5rem]">{formatMoney(data.inMarket)}</span> <span className="text-xl text-muted">{config.tokenSymbol}</span>
-                </span>
-                <Button variant="secondary" size="sm" className="mt-2" disabled aria-describedby="portfolio-integration">Withdrawals coming soon</Button>
-              </dd>
-            </div>
+          <div className="portfolio-summary">
+            <span className="num portfolio-count">{data.positions.length} positions</span>
+            <span className="portfolio-breakdown">
+              <span data-k="open"><i aria-hidden="true" />{counts.open} open</span>
+              <span data-k="waiting"><i aria-hidden="true" />{counts.waiting} awaiting answer</span>
+              <span data-k="resolved"><i aria-hidden="true" />{counts.resolved} resolved</span>
+            </span>
+          </div>
+          <dl className="portfolio-balances">
+            <Balance label="In your wallet" value={data.inWallet} tone="wallet" />
+            <Balance label="Available to withdraw" value={data.inMarket} tone="market">
+              <Button variant="secondary" size="sm" disabled aria-describedby="portfolio-integration"><Lock size={15} />Withdrawals coming soon</Button>
+            </Balance>
           </dl>
-          <p id="portfolio-integration" className="mt-3 text-sm text-muted">You can view your positions here. Withdrawals and redemptions are not open yet.</p>
+          <p id="portfolio-integration" className="portfolio-note">You can view your positions here. Withdrawals and redemptions are not open yet.</p>
 
-          <h2 className="section-title mb-4 mt-12">Positions</h2>
+          <h2 className="section-title portfolio-positions-title">Positions</h2>
           {data.positions.length === 0 ? (
-            <p className="text-muted">No positions yet. <Link href="/">Browse markets</Link></p>
+            <p className="portfolio-empty">No positions yet. <Link href="/" className="text-link">Browse markets</Link></p>
           ) : (
-            <ul className="m-0 grid list-none grid-cols-1 gap-3 p-0">
+            <ul className="position-list">
               {data.positions.map((p, i) => {
                 const pay = payout(p);
                 const resolved = p.market.status === "resolved";
+                const won = resolved && p.market.outcome !== "void" && pay !== null && pay > 0n;
                 return (
-                  <li key={p.market.id} className="rise flex flex-wrap items-center gap-4 rounded-xl border border-border bg-surface/60 p-4" style={{ "--i": i } as React.CSSProperties}>
+                  <li key={p.market.id} className="position-row enter" data-won={won || undefined} style={{ "--i": i } as React.CSSProperties}>
                     <MarketIcon category={p.market.category} sub={p.market.subcategory} small />
-                    <div className="min-w-0 flex-1 basis-60">
-                      <Link href={`/market?id=${p.market.id}`} className="font-medium no-underline hover:underline">{p.market.title}</Link>
-                      <div className="num mt-1 flex flex-wrap gap-x-4 text-sm">
-                        {p.yes > 0n && <span className="text-yes">{formatShares(p.yes)} Yes</span>}
-                        {p.no > 0n && <span className="text-no">{formatShares(p.no)} No</span>}
+                    <div className="position-main">
+                      <Link href={`/market?id=${p.market.id}`} className="position-title">{p.market.title}</Link>
+                      <div className="position-shares num">
+                        {p.yes > 0n && <span data-side="yes">{formatShares(p.yes)} Yes</span>}
+                        {p.no > 0n && <span data-side="no">{formatShares(p.no)} No</span>}
                       </div>
-                      <div className="mt-1 text-sm text-muted">
+                    </div>
+                    <div className="position-status">
+                      <span className="position-outcome" data-status={p.market.status}>
+                        {won && <Award size={16} variant="Bold" />}
                         {!resolved
                           ? p.market.status === "closed" ? "Waiting for the answer" : "Open"
                           : p.market.outcome === "void" ? pay === null ? "Void: settlement price has not been published." : `Void: estimated payout ${formatMoney(pay)} ${config.tokenSymbol}`
                           : pay !== null && pay > 0n ? `You won ${formatMoney(pay)} ${config.tokenSymbol}`
                           : `Resolved ${p.market.outcome === "yes" ? "Yes" : "No"}. Nothing to redeem.`}
-                      </div>
+                      </span>
                     </div>
-                    <div>
+                    <div className="position-action">
                       {resolved ? (
                         <Button size="sm" disabled aria-describedby="portfolio-integration">Redemption coming soon</Button>
                       ) : p.market.status === "open" ? (
-                        <Link href={`/market?id=${p.market.id}`} className="text-sm">Sell</Link>
+                        <Link href={`/market?id=${p.market.id}`} className="btn btn-secondary btn-sm">Sell</Link>
                       ) : null}
                     </div>
                   </li>

@@ -1,0 +1,119 @@
+/* App frame */
+.app-frame { position: relative; z-index: 1; display: flex; flex-direction: column; min-height: 100vh; container-type: inline-size; } /* cqw = page width without the scrollbar, for full-bleed bands */
+.app-main { flex: 1; width: 100%; max-width: var(--page-max); margin-inline: auto; padding: 0 var(--gutter) var(--s-12); }
+
+/* Header: a glass bar that sharpens once the page scrolls under it. */
+.site-header {
+  position: sticky; top: 0; z-index: 30;
+  background: var(--glass);
+  backdrop-filter: saturate(1.6) blur(16px);
+  -webkit-backdrop-filter: saturate(1.6) blur(16px);
+  border-bottom: 1px solid var(--line);
+}
+.site-header::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; pointer-events: none;
+  background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--brand) 55%, transparent) 30%, color-mix(in oklab, var(--council) 45%, transparent) 70%, transparent);
+  opacity: 0.55;
+}
+.site-header-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s-4); max-width: var(--page-max); height: var(--header-h); margin-inline: auto; padding: 0 var(--gutter); }
+.site-header-start { display: flex; align-items: center; gap: var(--s-8); min-width: 0; }
+.site-header-actions { display: flex; align-items: center; gap: var(--s-2); min-width: 0; }
+
+/* Navigation with a sliding active indicator (positioned by useIndicator). */
+.site-nav { position: relative; display: none; align-items: center; gap: var(--s-1); isolation: isolate; }
+.site-nav::before {
+  content: ""; position: absolute; z-index: -1; top: 50%; left: 0; height: 2.25rem; margin-top: -1.125rem;
+  width: var(--seg-w, 0); transform: translateX(var(--seg-x, 0));
+  border-radius: var(--r-pill); background: var(--brand-tint);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--brand) 22%, transparent) inset;
+  transition: transform var(--dur-3) var(--ease-out), width var(--dur-3) var(--ease-out), opacity var(--dur-2);
+}
+.site-nav:not([data-ready])::before { opacity: 0; }
+.site-nav-link {
+  display: inline-flex; align-items: center; min-height: var(--control-md); padding: 0 var(--s-4);
+  border-radius: var(--r-pill); color: var(--text-muted); font-size: var(--fs-sm); font-weight: 500; text-decoration: none; white-space: nowrap;
+  transition: color var(--dur-2) var(--ease-out);
+}
+.site-nav-link:hover { color: var(--text); }
+.site-nav-link[aria-current="page"] { color: var(--brand); }
+@media (min-width: 1280px) { .site-header-start > .site-nav { display: flex; } }
+
+.mobile-nav-frame { display: block; border-top: 1px solid var(--line); }
+.mobile-site-nav { display: flex; overflow-x: auto; scrollbar-width: none; padding: var(--s-1) var(--gutter); scroll-padding-inline: var(--gutter); mask-image: linear-gradient(90deg, transparent, black var(--gutter), black calc(100% - var(--gutter)), transparent); }
+.mobile-site-nav::-webkit-scrollbar { display: none; }
+.mobile-site-nav .site-nav-link { flex-shrink: 0; }
+@media (min-width: 1280px) { .mobile-nav-frame { display: none; } }
+
+/* Brand: the dragon crest recoloured through its silhouette, and the Sora wordmark. */
+.site-brand { display: inline-flex; align-items: center; gap: 0.6rem; color: var(--text); text-decoration: none; white-space: nowrap; }
+.brand-mark { display: block; flex-shrink: 0; width: 2rem; height: 2.4rem; background: var(--crest); mask: url("/brand/dragon-crest.png") center / contain no-repeat; -webkit-mask: url("/brand/dragon-crest.png") center / contain no-repeat; }
+.site-brand-header .brand-mark { width: 2.2rem; height: 2.65rem; filter: drop-shadow(0 0 12px var(--glow-council)); transition: transform var(--dur-4) var(--ease-emph); }
+.site-brand-header:hover .brand-mark { transform: rotate(-6deg) scale(1.06); }
+.brand-wordmark { font-family: var(--font-brand-stack); font-size: 1.125rem; font-weight: 600; letter-spacing: -0.045em; line-height: 1.2; }
+.site-brand-footer .brand-mark { width: 2.6rem; height: 3.1rem; }
+.site-brand-footer .brand-wordmark { font-size: 1.6rem; }
+
+/* Header actions */
+.how-it-works-trigger {
+  display: inline-flex; align-items: center; gap: var(--s-2); min-height: var(--control-md); padding: 0 var(--s-4); margin-right: var(--s-3);
+  border: 1px solid transparent; border-radius: var(--r-pill); background: transparent;
+  color: var(--text-muted); font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; cursor: pointer;
+  transition: background var(--dur-2) var(--ease-out), border-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
+}
+.how-it-works-trigger:hover, .how-it-works-trigger:focus-visible { color: var(--text); border-color: var(--line-strong); background: var(--surface-hover); }
+.theme-toggle {
+  display: grid; place-items: center; flex-shrink: 0; width: var(--control-md); height: var(--control-md);
+  border: 1px solid var(--line-strong); border-radius: 50%; background: transparent; color: var(--text); cursor: pointer;
+  transition: background var(--dur-2) var(--ease-out), border-color var(--dur-2) var(--ease-out);
+}
+.theme-toggle:hover { background: var(--surface-hover); border-color: var(--brand); }
+.theme-toggle svg { transition: transform var(--dur-4) var(--ease-emph); }
+.theme-toggle:hover svg { transform: rotate(-24deg); }
+.wallet-pill {
+  display: inline-flex; align-items: center; gap: var(--s-2); min-height: var(--control-md); padding: 0 var(--s-4) 0 var(--s-3);
+  border: 1px solid var(--line-strong); border-radius: var(--r-pill); background: var(--glass-strong); cursor: pointer;
+  transition: border-color var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out);
+}
+.wallet-pill:hover { border-color: var(--danger); }
+.wallet-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 22%, transparent); }
+.wallet-account { max-width: 9rem; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-sm); font-weight: 500; }
+.wallet-action { font-size: var(--fs-2xs); color: var(--text-muted); }
+.wallet-pill:hover .wallet-action { color: var(--danger); }
+.site-header-actions .btn { min-height: var(--control-md); }
+
+@media (max-width: 479px) {
+  .site-brand-header .brand-wordmark { font-size: 1rem; }
+  .site-brand-header .brand-mark { width: 1.9rem; height: 2.3rem; }
+  .site-header-row { gap: var(--s-2); }
+  .how-it-works-trigger { padding: 0 var(--s-3); margin-right: var(--s-4); font-size: var(--fs-xs); }
+  .site-header-actions .btn { padding: 0 var(--s-3); }
+  .wallet-action { display: none; }
+  .wallet-account { max-width: 6rem; }
+}
+/* Phones: the crest carries the brand in the bar; the footer keeps the full wordmark. */
+@media (max-width: 459px) {
+  .site-brand-header .brand-wordmark { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .site-header-actions .btn { font-size: var(--fs-xs); }
+}
+
+/* Footer */
+.site-footer { position: relative; margin-top: var(--s-10); border-top: 1px solid var(--line); background: linear-gradient(180deg, color-mix(in oklab, var(--surface) 60%, transparent), transparent 70%); }
+.site-footer::before { content: ""; position: absolute; top: -1px; left: 10%; right: 10%; height: 1px; background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--council) 60%, transparent), transparent); }
+.site-footer-inner { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s-8); max-width: var(--page-max); margin-inline: auto; padding: var(--s-10) var(--gutter) var(--s-9); }
+.site-footer-brand p { max-width: 26rem; margin: var(--s-3) 0 0; color: var(--text-muted); font-size: var(--fs-sm); }
+.site-footer-links { display: flex; gap: var(--s-10); }
+.site-footer-links nav { display: flex; flex-direction: column; gap: var(--s-1); min-width: 8rem; }
+.site-footer-links h2 { margin: 0 0 var(--s-2); }
+.site-footer-links a { display: inline-flex; align-items: center; gap: var(--s-2); min-height: 2.25rem; color: var(--text-muted); font-size: var(--fs-sm); text-decoration: none; }
+.site-footer-links a:hover { color: var(--text); }
+@media (pointer: coarse) { .site-footer-links a { min-height: var(--control-md); } }
+@media (max-width: 599px) { .site-footer-links { gap: var(--s-7); } }
+
+/* Recovery screens (missing page, missing market) */
+.page-header { position: relative; display: grid; justify-items: start; gap: var(--s-4); max-width: 40rem; padding: var(--s-11) 0 var(--s-9); }
+.page-header::before { content: ""; width: 3.5rem; height: 4.2rem; background: var(--crest); mask: url("/brand/dragon-crest.png") center / contain no-repeat; -webkit-mask: url("/brand/dragon-crest.png") center / contain no-repeat; filter: drop-shadow(0 0 24px var(--glow-council)); }
+.page-header-copy { min-width: 0; }
+.page-title { margin: 0; font-size: var(--fs-4xl); font-weight: 400; line-height: var(--lh-tight); letter-spacing: var(--track-display); }
+.page-description { margin: var(--s-3) 0 0; color: var(--text-muted); font-size: var(--fs-lg); line-height: var(--lh-body); overflow-wrap: anywhere; }
+.page-header-actions a:not(.btn) { display: inline-flex; align-items: center; gap: var(--s-2); min-height: var(--control-md); color: var(--brand); font-weight: 500; }
+@media (max-width: 767px) { .page-header { padding: var(--s-9) 0 var(--s-7); } .page-title { font-size: var(--fs-3xl); } }
