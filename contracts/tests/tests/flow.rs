@@ -251,14 +251,15 @@ async fn unchallenged_answer_becomes_final_and_pays_out_with_no_deadline() -> an
 
     // Carol's bond comes back.
     assert_eq!(claimable(&w, w.carol.id()).await, BOND);
-    w.carol
-        .call(w.oracle.id(), "withdraw_bond")
-        .deposit(NearToken::from_yoctonear(1))
-        .gas(Gas::from_tgas(100))
-        .transact()
-        .await?
-        .into_result()?;
+    assert_oracle_reconciled(&w).await;
+    withdraw_bond(&w, &w.carol).await?;
     assert_eq!(holdings(&w, w.carol.id()).await, 50 * USD);
+    assert_eq!(
+        intents_balance(&w, w.carol.id()).await,
+        BOND,
+        "the bond is back in her Intents account"
+    );
+    assert_oracle_reconciled(&w).await;
     Ok(())
 }
 

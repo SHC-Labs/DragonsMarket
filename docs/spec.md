@@ -164,18 +164,35 @@ See [the custody architecture](intents-architecture.md).
 | Oracle | Outcome proposals, challenges, deadlines, price evidence and bond/juror liabilities |
 | Council | NFT staking, eligibility, jury duties, reward entitlement and quarterly claims |
 | Intents verifier | Fungible asset ledger and authorised asset movement |
-| Trezu / SputnikDAO | Treasury membership, approvals and administration |
-| Reviewed delay mechanism | Enforce the agreed protection for sensitive administrative changes |
+| Trezu / SputnikDAO | Treasury membership, approvals and administration. Its voting period is the only delay |
 | Backend / keeper / indexer | Request routes, relay permitted operations, observe receipts and reconcile state |
 | Website | Explain state and prepare actions against reviewed interfaces |
 
 The custom governance contract is retired. Trezu/Sputnik is the selected replacement, but the
 treasury has not been created or configured. No live ownership handover is recorded.
 
-Sensitive changes retain the previously agreed minimum 72-hour delay after approval. Trezu's
-voting duration is the time available to collect votes; it does not enforce this delay. Claude
-must implement or select and prove an appropriate execution path, including upgrades, cancellation,
-recovery and access-key bypass checks. A focused delay component is permitted if required.
+DECIDED (owner, 21 October 2026): sensitive administrative changes use Trezu/Sputnik member
+approvals, and the DAO voting period is the only delay. No enforced delay after approval and no
+delay component will be built. This replaces the earlier 72-hour post-approval requirement.
+
+What the voting period gives, stated precisely: SputnikDAO executes a proposal in the same call
+as the approval that reaches the threshold (`proposals.rs` lines 638 to 643 at revision
+`5434a59dec23ee0c49df8c8c4350c208a7e75b0b`). A proposal is public while approvals arrive, and it
+expires unexecuted if the threshold is not reached before the period ends. So the period gives visibility and
+a deadline. It does not give users time to leave after a decision is made.
+
+The protections that do not depend on a delay:
+
+- `withdraw` and `redeem` ignore the market's pause, so a pause never closes the exit.
+- Upgrades deploy only staged code that anyone can read first, and `upgrade_in_flight` makes
+  `migrate` run only inside an upgrade.
+- `seal` deletes access keys only after an upgrade has been proven.
+- PROPOSED DAO policy: four of five approvals for every function call, unanimity for membership,
+  policy and DAO code changes, and a 72-hour voting period. The numbers are in
+  [the owner model](contracts/specs/owner-and-keeper.md#7-recommended-dao-policy).
+
+Claude must prove the restricted methods, the owner handover, upgrades and access-key bypass
+checks against a real SputnikDAO build.
 
 Treasury approvers cannot spend user backing or another holder's entitlement. Treasury membership
 does not grant a Council seat. Routine operator powers remain bounded and separate from ownership.
@@ -251,7 +268,7 @@ actual fees and eligible participation; no fixed return or payment amount is pro
 | R-04 | Enforce NFT eligibility and case obligations | Council / oracle | Ineligible seats cannot earn or vote; locks and stake changes follow the rules |
 | R-05 | Account for quarters and settle claims once | Council / settlement | Boundary, late-fee, no-seat, repeated-claim and failed-transfer tests |
 | R-06 | Settle bonds and juror pay independently | Oracle / settlement | Every final or failed round reconciles without spending holder allocations |
-| R-07 | Use Trezu/Sputnik with the required sensitive-action delay | DAO / delay integration | Ownership, upgrades, cancellation/recovery and key-bypass evidence |
+| R-07 | Use Trezu/Sputnik member approvals for sensitive administration, with the DAO voting period as the only delay (decided 2026-10-21) | DAO integration | Restricted methods refuse other callers, owner handover, upgrades and key-bypass checks, all with a real SputnikDAO |
 | R-08 | Expose reliable user, quarter and operation state | Views / events / services | UI distinguishes availability, commitments, accrual, claims and confirmed payments |
 
 The contract implementer records current coverage, missing methods/state, permissions, ABI,
@@ -268,8 +285,8 @@ Source inspection on 21 October 2026, without running or modifying contract code
 | --- | --- | --- |
 | Market | Uses verifier-held balances and Intents transfer callbacks | End-to-end funding/identity/exit validation and production configuration |
 | Council | Receives and pays through its Intents account | Quarterly entitlement and claim enforcement |
-| Oracle | Outcome/jury logic exists; bonds still use NEP-141 methods | Intents bond/juror settlement |
-| Administration | Custom governance removed from workspace; proposal helper exists | Create and verify treasury, implement delay path and transfer ownership |
+| Oracle | Outcome/jury logic exists; bonds and juror pay arrive through the verifier and are paid from the oracle's own Intents account (phase I3, 21 October 2026) | Real USDC and mainnet run, website bond message, a push payout for a DAO recipient |
+| Administration | Custom governance removed from workspace; proposal helper exists | Create and verify treasury, replace the helper's deny-list with an allow-list and transfer ownership |
 | Website | Pages and wallet connection exist; financial writes remain disabled | Reviewed DTOs, quotes, signing, receipts and recovery |
 | Backend | Required operation and reconciliation responsibilities are defined | Choose and implement the actual service and persistence design |
 
@@ -283,7 +300,7 @@ They apply to their recorded builds.
 
 - [ ] Complete the Intents-backed funding, trade, dispute, redeem and exit journey.
 - [ ] Implement quarterly Council claims and publish participation terms before minting.
-- [ ] Create/verify the treasury, enforce the sensitive-action delay and prove ownership migration.
+- [ ] Create/verify the treasury, set the DAO policy and prove ownership migration and upgrades.
 - [ ] Validate supported routes, USDC configuration, fees and failure recovery with bounded funding.
 - [ ] Review publisher sources, operational parameters, market exposure caps and incident handling.
 - [ ] Complete frontend integration and durable operation/reconciliation storage.

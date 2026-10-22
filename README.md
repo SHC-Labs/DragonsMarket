@@ -41,9 +41,14 @@ Owner decision, 20 October 2026. This is the implementation target, not a report
 | Disputes | Keep Council juries and oracle rules separate from treasury member voting |
 
 The Council must track entitlements while its reward backing remains in Intents. The current
-30-day reward stream does not implement a quarterly claim window. Trezu's voting period also does
-not enforce a delay after approval. Sensitive administrative changes still need an enforced delay
-path, with the exact integration and owner handover reviewed before deployment.
+30-day reward stream does not implement a quarterly claim window.
+
+Owner decision, 21 October 2026: sensitive administrative changes use Trezu/Sputnik member
+approvals, and the DAO voting period is the only delay. SputnikDAO executes a proposal at the
+approval that reaches its threshold, so the period gives public visibility and a deadline, not an
+exit window after approval. Withdraw and redeem never pause, upgrades use publicly staged code, and
+deployment keys are removed only after a proven upgrade. The owner handover still needs review
+before deployment.
 
 See [the accepted architecture](docs/intents-architecture.md) for the migration requirements and
 [the product specification](docs/spec.md#7-architecture-and-administration) for review scope.
@@ -93,8 +98,8 @@ The Rust toolchain and WebAssembly target are pinned in `contracts/rust-toolchai
 The active contract workspace contains `market`, `oracle`, `council` and the shared `upgrade`
 crate. Custom governance is removed from the workspace, builds, CI and active sandbox fixtures.
 Trezu/SputnikDAO administration helpers prepare wallet proposals in `contracts/keeper/treasury.mjs`;
-they do not sign or submit transactions. The treasury has not been created, and live ownership
-and the required execution-delay integration remain unconfigured.
+they do not sign or submit transactions. The treasury has not been created, live ownership is
+unconfigured, and the helper still uses a deny-list that an allow-list will replace.
 
 `mock-ft`, `mock-nft` and `mock-mt-receiver` are test fixtures. The scripts in
 `contracts/keeper/` advance contract actions that need a transaction, such as finalization and fee
@@ -172,14 +177,15 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Counts at the end of phase I2 (2026-10-21): unit tests market 148, oracle 103, council 87, upgrade 11;
-sandbox tests 137 in 19 files (10 verifier proof tests, 7 market and Council money-path tests, 6 source
-guards; the `dev_chain` harness is ignored); keeper 23. A missing `contracts/target/intents/defuse.wasm`
-fails the sandbox tests with the build recipe instead of skipping them, so CI builds it first.
+Counts at the end of phase I3 (2026-10-21): unit tests market 148, oracle 115, council 87, upgrade 11;
+sandbox tests 151 in 20 files (10 verifier proof tests, 7 market and Council money-path tests, 9 oracle
+money-path tests, 8 source guards; the `dev_chain` harness is ignored); keeper 24. A missing
+`contracts/target/intents/defuse.wasm` fails the sandbox tests with the build recipe instead of skipping
+them, so CI builds it first.
 
 These commands cover the application contracts. Owner/upgrade tests use an explicitly labelled
-local account fixture, not simulated DAO approvals. Real Sputnik proposal execution and the
-sensitive-action delay still need dedicated integration evidence. No retired controller is deployed.
+local account fixture, not simulated DAO approvals. Real Sputnik proposal execution, expiry and
+owner handover still need dedicated integration evidence. No retired controller is deployed.
 
 Run `./build.sh` before the sandbox tests. For reproducible builds of the three application contracts,
 use `./build.sh --reproducible`; that path requires Docker and a clean committed working tree.
@@ -208,8 +214,8 @@ The active spec and implementation handoffs now share one direction. Old stack/N
 drafts, custom-controller source snapshots, unused NFT sets, template icons and abandoned UI
 components have been removed. Dated security/legal reviews and policy copies remain evidence.
 
-Current release gaps are oracle Intents settlement, quarterly Council claims, the real treasury
-and execution-delay route, external funding/identity/exit integration, and backend recovery.
+Current release gaps are quarterly Council claims, the real treasury and its owner handover,
+external funding/identity/exit integration, and backend recovery.
 Financial UI actions remain disabled until those interfaces are reviewed.
 
 Contract code, tests, build scripts and CI were inspected without modification during this pass.

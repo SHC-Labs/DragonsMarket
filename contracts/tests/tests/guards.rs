@@ -45,7 +45,7 @@ const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 7] = [
     ("market", "ext_verifier", &["mt_transfer", "mt_transfer_call"]),
     ("market", "ext_oracle", &["register_market"]),
     ("council", "ext_verifier", &["mt_transfer"]),
-    ("oracle", "ext_ft", &["ft_transfer"]),
+    ("oracle", "ext_verifier", &["mt_transfer"]),
     ("oracle", "ext_market", &["set_outcome"]),
     ("oracle", "ext_council", &["draw", "unlock_case"]),
     ("upgrade", "", &[]),
@@ -274,6 +274,59 @@ fn no_contract_code_calls_a_verifier_admin_method() {
                     );
                 }
             }
+        }
+    }
+}
+
+// The oracle holds bonds in its own Intents account. Money reaches it through the verifier's mt_on_transfer and leaves by one
+// mt_transfer, from withdraw_bond, to the account that owns the claim. It never speaks NEP-141 and never starts a transfer call.
+#[test]
+fn the_oracle_takes_bonds_through_the_verifier_and_pays_them_out_by_one_mt_transfer() {
+    let sources = sources_of("oracle");
+    let code: String = sources.iter().map(|(_, code)| code.as_str()).collect();
+    assert!(
+        code.contains("pub fn mt_on_transfer("),
+        "the oracle has no verifier hook"
+    );
+    for nep141 in [
+        "ft_on_transfer",
+        "ft_transfer",
+        "ft_balance_of",
+        "ext_ft",
+        "bond_token",
+        "mt_transfer_call",
+        "mt_batch_transfer",
+    ] {
+        assert!(!code.contains(nep141), "the oracle code names {nep141}");
+    }
+    assert_eq!(
+        code.matches(".mt_transfer(").count(),
+        1,
+        "the oracle pays out by exactly one verifier call, in withdraw_bond"
+    );
+    let withdraw = code
+        .split("pub fn withdraw_bond(")
+        .nth(1)
+        .expect("the oracle has withdraw_bond")
+        .split("pub fn on_bond_withdrawn(")
+        .next()
+        .unwrap();
+    assert!(
+        withdraw.contains(".mt_transfer(") && withdraw.contains("env::predecessor_account_id()"),
+        "the payout is made from withdraw_bond, to the caller's own claim"
+    );
+}
+
+// Bonds and juror pay are not holder revenue. The Council's revenue message never appears in the oracle's code.
+#[test]
+fn the_oracle_never_names_holder_revenue() {
+    for (path, code) in sources_of("oracle") {
+        for (n, line) in code.lines().enumerate() {
+            assert!(
+                !line.to_lowercase().contains("revenue"),
+                "{path:?}:{}: the oracle code names revenue: {line}",
+                n + 1
+            );
         }
     }
 }

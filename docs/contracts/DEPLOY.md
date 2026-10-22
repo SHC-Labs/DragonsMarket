@@ -52,12 +52,15 @@ that the complete production journey has passed. The [verifier proof](INTENTS-PR
 
 ## 3. Administration and upgrades
 
-Sensitive changes require the agreed minimum 72-hour post-approval delay. Trezu voting duration
-is not a substitute. Verify the exact DAO/delay ownership chain and every possible bypass.
+DECIDED (owner, 21 October 2026): sensitive changes use Trezu/Sputnik member approvals, and the
+DAO voting period is the only delay. SputnikDAO executes a proposal at the approval that reaches
+the threshold, so there is no exit window after approval. Verify that the DAO is the owner of
+every contract, that its policy matches the
+[recommended policy](specs/owner-and-keeper.md#7-recommended-dao-policy) and every possible bypass.
 
 - [ ] Test allowed and denied proposal/target calls through the selected deployment.
 - [ ] Verify upgrade staging, deploy/migrate, failure recovery and published code hashes.
-- [ ] Prove cancellation/recovery behaviour and restrictions on ownership changes.
+- [ ] Prove failed-proposal retry, proposal expiry and restrictions on ownership changes.
 - [ ] Check owner handover on every application contract and reconcile pending-owner state.
 - [ ] Prove the upgrade path before removing deployment keys; verify the resulting key list.
 - [ ] Confirm routine operators cannot redirect fees or spend backing.

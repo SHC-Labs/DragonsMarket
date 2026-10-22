@@ -5,7 +5,7 @@
 | Field | Value |
 | --- | --- |
 | Date | 2026-10-21 |
-| Status | Draft. Section 2 is DECIDED by the owner. Sections 5, 7 and 9 are PROPOSED |
+| Status | Draft. Section 2 is DECIDED by the owner (voting period as the only delay, 2026-10-21). Sections 5, 7 and 9 are PROPOSED |
 | Scope | Owner and operator methods of `market`, `oracle` and `council`, `contracts/keeper/treasury.mjs`, `contracts/keeper/keeper.mjs` |
 | Source | Working tree on top of commit `6cad02e`, SputnikDAO source at revision `5434a59dec23ee0c49df8c8c4350c208a7e75b0b` (version 2.3.1), read 2026-10-21 |
 | Index | [README.md](README.md) |
@@ -32,7 +32,7 @@
 
 The three contracts treat their owner as a plain account. Nothing in them depends on a DAO, and a source guard fails the build if any contract names a governance contract. That part is done.
 
-Two things are not done. First, `treasury.mjs` protects the DAO with a deny-list of five method names. A run against it in this task showed that it prepares proposals for `set_operator`, `set_fee_rate_bps`, `set_nft_contract`, `add_publisher` and `set_no_decision_recipient`, and its vote helper blocks only three of the 17 Sputnik proposal kinds (`ChangePolicy`, `UpgradeSelf`, `UpgradeRemote`), so it lets a member approve every membership change and every other policy change without a check. It also refuses `upgrade`, so no code upgrade can be prepared at all. Section 5 replaces it with an allow-list. Second, the keeper has no reconciliation, no verifier health check and no DAO watch (section 9).
+Two things are not done. First, `treasury.mjs` protects the DAO with a deny-list of five method names. A run against it in this task showed that it prepares proposals for `set_operator`, `set_fee_rate_bps`, `set_nft_contract`, `add_publisher` and `set_no_decision_recipient`, and its vote helper blocks only three of the 17 Sputnik proposal kinds (`ChangePolicy`, `UpgradeSelf`, `UpgradeRemote`), so it lets a member approve every membership change and every other policy change without a check. It also refuses `upgrade`, `seal`, `propose_owner`, `accept_owner` and `set_fee_recipients`, with an error that waits for an execution-delay route. The owner decided on 2026-10-21 that no such route will be built, so today no code upgrade, key seal or owner handover can be prepared with the helper at all. Section 5 replaces it with an allow-list that can prepare all of them. Second, the keeper has no reconciliation, no verifier health check and no DAO watch (section 9).
 
 SputnikDAO executes a proposal in the same call as the approval that reaches the threshold. The voting period is a deadline and a window for public visibility. It is not a delay between approval and execution. Section 2 says what that means and what to do about it.
 
@@ -65,27 +65,28 @@ All of this was read in `sputnikdao2/src/proposals.rs` and `policy.rs` at revisi
 
 ### 2.3 What the voting period is, honestly
 
-The product documents say sensitive changes need an enforced delay after approval. The instruction for this task records a different owner decision: the contracts' owner is the DAO and its only delay is the voting period. Given the facts above, that means:
+DECIDED (owner, 2026-10-21): the contracts' owner is the DAO, sensitive administration uses member approvals, and the DAO voting period is the only delay. No enforced delay after approval and no timelock contract will be built. Given the facts above, that means:
 
 1. A proposal is public from the moment it is submitted, because it is a stored record of the DAO that anyone can read with `get_proposal`.
 2. The members can approve it at any time before the period ends. A majority that agrees can approve it in the next block. Nothing forces any wait.
 3. After the period ends, the proposal can no longer be approved. A forgotten proposal therefore cannot be approved months later.
 4. So the voting period gives visibility and a deadline. It gives users no time to leave after a decision, because there is no decision that can be seen before it executes.
 
-Documents that still require a minimum 72-hour delay after approval, and permit a focused delay component: `docs/spec.md:175-178`, `docs/intents-architecture.md:91-93`, `docs/contracts/DEPLOY.md:55-56`, `docs/contracts/governance.md:27-29`, `README.md:44-45`, `PITCH.md:126-127`. The two positions cannot both stand. This section follows the task instruction. The owner decides (README OD-01), and the losing documents are rewritten. This task does not edit them.
+The product documents that required a minimum 72-hour delay after approval (finding F-02 in the [README](README.md#7-findings-from-comparing-docs-code-and-website)) were rewritten to this decision on 2026-10-21. OD-01 is closed.
 
 ### 2.4 What reduces the risk (PROPOSED)
 
-A DAO majority that is captured can upgrade a contract and drain it in one transaction. These steps shrink the exposure without adding a timelock contract:
+A DAO majority that is captured can upgrade a contract and drain it in one transaction. With no delay after approval, these steps are what shrink the exposure. The first three are in the code today (Checked in source: `market/src/lib.rs:414-443`, unit test `withdraw_and_redeem_still_work_while_the_market_is_paused`). The rest are PROPOSED:
 
 | Step | Effect |
 | --- | --- |
 | Exits never pause: the market's `withdraw` and `redeem` ignore `paused`, and the Council has no pause at all | A user can leave any time the code still allows it. A malicious upgrade could remove that, so this is only partial |
-| Public staging: `stage_code` is open to anyone and `is_staged(hash)` is a view | Anyone can read the exact wasm before a vote. The keeper can flag a proposal whose hash was staged less than 24 hours before submission |
+| Public staging: `stage_code` is open to anyone and `is_staged(hash)` is a view. `upgrade` deploys only staged code and sets `upgrade_in_flight`, and `migrate` refuses to run without it | Anyone can read the exact wasm before a vote. A hand-called `migrate` proves nothing. The keeper can flag a proposal whose hash was staged less than 24 hours before submission |
+| Keys sealed only after a proven upgrade: `seal` is refused until `upgrade_proven` | A deploy key cannot be removed before one upgrade has worked through the DAO, so a broken upgrade path is found while the key can still fix it |
 | Policy design (section 7): unanimity for membership, policy and upgrade kinds, four of five for every function call | A single compromised member cannot act alone |
 | The DAO watcher in the keeper (section 9) | An alert when any proposal touches a contract, and a page when its kind or arguments are not on the allow-list |
 | Launch caps: a limit on market size and total value locked, raised in steps (the owner sets initial exposure, DEPLOY.md:88) | Bounds the loss. The caps are an operating control today, not code (AUDIT note I-04) |
-| OPEN: a minimal timelock account as the owner, between the DAO and the contracts | Would add a real delay. It would be a contract the owner account points at, so it is allowed by the "no governance contract" rule, but it is the kind of component the owner chose to retire. Recommended default: not built for testnet or the hackathon. Decide again before caps are lifted |
+| DECIDED 2026-10-21: no timelock account between the DAO and the contracts | Not built. The owner chose the voting period as the only delay. Users who distrust a pending proposal can still withdraw a balance and redeem a resolved position while it is public, but nothing holds a decision back after the last approval |
 
 ---
 
@@ -208,16 +209,18 @@ Facts that matter for building it:
 | --- | --- |
 | `market.set_operator`, `market.set_fee_rate_bps`, `market.stage_code`, `market.withdraw` | Prepared |
 | `council.set_nft_contract`, `oracle.add_publisher`, `oracle.set_no_decision_recipient` | Prepared |
-| `market.upgrade` | Refused, as the unfinished delay route |
+| `market.upgrade` | Refused. The error waits for an execution-delay route that will not be built (owner decision, 2026-10-21) |
 | Vote approve on `AddMemberToRole`, `RemoveMemberFromRole`, `ChangeConfig`, `ChangePolicyUpdateDefaultVotePolicy`, `ChangePolicyAddOrUpdateRole`, `Transfer`, `FactoryInfoUpdate` | Allowed. By reading the code, `SetStakingContract`, `AddBounty`, `BountyDone`, `ChangePolicyRemoveRole`, `ChangePolicyUpdateParameters` and `Vote` are allowed too |
 | Vote approve on a `FunctionCall` to `intents.near` with `mt_transfer` | Allowed |
 | Vote approve on `UpgradeSelf`, `ChangePolicy` | Refused. `UpgradeRemote` is refused too, by reading the code |
 
-A deny-list lets through everything its author did not think of, including every method added later. It also blocks the one upgrade the product needs.
+A deny-list lets through everything its author did not think of, including every method added later. It also blocks the upgrade, the key seal and the owner handover that the product needs, and those blocks served only a delay route the owner decided not to build.
 
 ### 5.2 The allow-list
 
 PROPOSED. The helper refuses everything not listed. An entry names the target contract, the method, the tier, the exact deposit, the gas bounds and a schema for the arguments. There are no wildcards.
+
+Unlike the deny-list, the allow-list prepares every owner method in section 3, including `upgrade`, `seal`, `propose_owner`, `accept_owner` and `set_fee_recipients`. There is no delay gate: those methods are bounded by their argument checks, their `needs` conditions and the DAO policy in section 7. The guard on proposal kinds that change the DAO's policy, membership or code stays (rule 1 below and section 6).
 
 ```js
 export const ALLOWED = {
@@ -307,10 +310,11 @@ PROPOSED. The numbers follow the threshold rule in 2.2 for a role of five member
 | Vote policy for `policy`, `policy_add_or_update_role`, `policy_remove_role`, `policy_update_default_vote_policy`, `policy_update_parameters`, `add_member_to_role`, `remove_member_from_role`, `config`, `upgrade_self`, `upgrade_remote`, `factory_info_update` | `RoleWeight`, quorum 5, threshold `Ratio(1, 1)` | Needs 5 of 5. These change who decides or what code runs the DAO |
 | Permissions | No role holds `*:*`, `*:RemoveProposal` or `*:MoveToHub`. No role holds `add_bounty`, `bounty_done` or `set_vote_token`. `transfer` belongs to the finance role | Narrow the surface |
 | `Finalize` | Held by the approver role | Retry a failed call, expire a stale proposal, recover the bond |
-| `proposal_period` | 72 hours (259,200,000,000,000 ns) | The only deadline. Short enough that approvals are collected together, long enough for members in different time zones. Sputnik's default is 7 days |
+| `proposal_period` | 72 hours (259,200,000,000,000 ns) | The only delay and the only deadline (owner decision, 2026-10-21). It bounds how long a proposal stays public and approvable, not how long anyone waits after approval. Short enough that approvals are collected together, long enough for members in different time zones. Sputnik's default is 7 days |
 | `proposal_bond` | 1 NEAR or more | Limits spam if any role can still add proposals |
 | `Everyone` role | Remove `*:AddProposal` if the interface allows it | Only members propose |
 | Recompute on membership change | Each time a member is added or removed, recompute every `Ratio` | `Ratio(3, 5)` needs 4 of 5 members and still only 4 of 6, so the share of members who must approve falls as the role grows |
+| Majority floor | No vote policy may need fewer than a majority of the approver role, and the role never has one member | Review finding N-01 put this floor in the retired governance contract's code ([AUDIT.md](../AUDIT.md#every-finding-and-where-it-went)). Sputnik does not enforce it, so it is a policy rule here, and the proposed keeper DAO policy check (section 9.2) pages when it is broken. The retired contract's 72-hour timelock floor has no successor |
 
 ---
 

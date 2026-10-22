@@ -5,8 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  advanceCursor, dueActions, formatNear, juryProblems, marginReport, nearToYocto, readCursor, readKeyFile, refuseKeyFlags,
-  resolveKeys, secondJurySize, storageMargin, writeCursor, refuseRetiredController,
+  advanceCursor, dueActions, formatNear, juryProblems, marginReport, nearToYocto, oracleReconciliation, readCursor, readKeyFile,
+  refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, writeCursor, refuseRetiredController,
 } from "./keeper.mjs";
 
 const NOW = 1_000_000n;
@@ -118,7 +118,19 @@ test("fees are swept once they reach the minimum, and never when there are none"
   const [sweep] = sweeps({ feesDue: 1_000n });
   assert.deepEqual([sweep.contract, sweep.args, sweep.gas], ["market", {}, 100n * 10n ** 12n]);
   assert.equal(sweeps({ feesDue: 0n, minSweep: 0n }).length, 0);
-  assert.ok(sweep.gas >= 95n * 10n ** 12n, "sweep_fees refuses less than 95 TGas");
+  assert.ok(sweep.gas >= 87n * 10n ** 12n, "sweep_fees refuses less than 87 TGas");
+});
+
+test("the oracle's books match the verifier, or the verifier holds more, or money is missing", () => {
+  assert.deepEqual(oracleReconciliation({ owed: "10000000", held: "10000000" }), {
+    line: "oracle owes 10000000 and holds 10000000 in the verifier", problem: null,
+  });
+  const surplus = oracleReconciliation({ owed: "10000000", held: "14000000" });
+  assert.match(surplus.line, /^oracle owes 10000000 and holds 14000000 in the verifier, 4000000 more than it owes/);
+  assert.equal(surplus.problem, null, "a surplus is not an incident");
+  const missing = oracleReconciliation({ owed: "10000000", held: "9999999" });
+  assert.equal(missing.problem, "the oracle owes 10000000 but the verifier holds only 9999999 for it: 1 is missing");
+  assert.equal(oracleReconciliation({ owed: "0", held: "0" }).problem, null);
 });
 
 test("the cursor advances over a finished prefix and stops at the first market that is not finished", () => {

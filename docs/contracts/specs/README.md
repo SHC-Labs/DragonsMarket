@@ -42,12 +42,12 @@ Four things stand between this code and the accepted product.
 | The market has no record of pending withdrawals or fee legs, and a lost Council result can be settled only by trusting the owner | R-02, R-03 and R-08 ask for recoverable, visible operations | 2 working days |
 | The DAO tooling is a deny-list of five names, the keeper does no reconciliation, and the website still sends the old NEP-141 transfer | R-07 and R-08, and the website cannot fund or buy at all against the current market | 1.5 days for the keeper and DAO helper, about 4 days for the website |
 
-The instruction for this task records the owner's decision that SputnikDAO owns the contracts and that its voting period is the only delay. SputnikDAO executes a proposal in the same call as the approval that reaches the threshold, so the voting period is public visibility plus a deadline, not a delay after approval. The product documents rewritten at 09:24 to 09:30 on the same day say the opposite: they keep a minimum 72-hour delay after approval and permit a focused delay component (finding F-02). One of the two is wrong, and only the owner can say which. [owner-and-keeper.md](owner-and-keeper.md#2-the-owner-model) says what the policy should be.
+DECIDED (owner, 2026-10-21): SputnikDAO owns the contracts and its voting period is the only delay. No enforced delay after approval will be built. SputnikDAO executes a proposal in the same call as the approval that reaches the threshold, so the voting period is public visibility plus a deadline, not a delay after approval. The product documents that required a 72-hour delay after approval were rewritten to this decision on the same day (finding F-02). [owner-and-keeper.md](owner-and-keeper.md#2-the-owner-model) says what the policy should be.
 
 The biggest gaps between documents, code and website:
 
 1. The oracle's custody (F-01).
-2. The product documents require a 72-hour enforced delay that SputnikDAO cannot give, and the task instruction says no such delay exists (F-02).
+2. The product documents required a 72-hour enforced delay that SputnikDAO cannot give. The owner decided against it and the documents now say so (F-02, DECIDED).
 3. The treasury helper would let a member approve most dangerous proposal kinds (F-03).
 4. The website's buy, challenge and balance code cannot work against the current contracts (F-04, F-05, F-06).
 5. A user without a NEAR wallet cannot call `sell`, `redeem` or `withdraw` (F-11).
@@ -117,7 +117,7 @@ All DECIDED, from [docs/spec.md](../../spec.md#6-collateral-and-custody) section
 | Collateral | Native USDC only. Intents token id `nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`, six decimals. Any other deposit asset is converted to USDC by 1Click at the Intents edge before it reaches a contract |
 | Withdrawals | Pay USDC. The user bears the withdrawal and swap fee |
 | Custody | NEAR Intents, verifier `intents.near` version 0.4.5. The market, oracle and Council each keep funds in their own Intents account, receive through `mt_on_transfer` and pay through cross-contract `mt_transfer` or `mt_transfer_call`. Proved in [INTENTS-PROOF.md](../INTENTS-PROOF.md) |
-| Governance | The custom governance contract is retired. Trezu and SputnikDAO own the market, oracle and Council. The owner is only an `AccountId`. No contract may call, depend on or name a governance contract. The DAO's only delay is its voting period |
+| Governance | The custom governance contract is retired. Trezu and SputnikDAO own the market, oracle and Council. The owner is only an `AccountId`. No contract may call, depend on or name a governance contract. The DAO's only delay is its voting period (owner decision, 2026-10-21) |
 | Revenue | Earned platform fees: 75% to the Trezu project treasury (account configured by the owner, not yet known), 25% to Council-controlled reward backing held in Intents |
 | Holder rewards | Eligible NFT holders claim quarterly. Each entitlement is claimable once through Council-authorised Intents settlement |
 | Separation | Juror pay and dispute bonds stay separate from holder revenue |
@@ -125,7 +125,7 @@ All DECIDED, from [docs/spec.md](../../spec.md#6-collateral-and-custody) section
 | Upgrades | `stage_code`, `upgrade`, `migrate`, `seal` and `upgrade_in_flight` stay |
 | Review fixes | C-01 to C-21 and N-01 to N-10 stay in force ([AUDIT.md](../AUDIT.md#every-finding-and-where-it-went)) |
 
-**Conflict with the product documents.** The Governance row states the delay as the task instruction gave it. `docs/spec.md:175-178` and five other documents (finding F-02) require a minimum 72-hour enforced delay after approval and permit a focused delay component. The specs in this folder follow the instruction. If the owner chooses the documents instead, the change is a small timelock account as the owner ([owner-and-keeper.md](owner-and-keeper.md#24-what-reduces-the-risk-proposed)), and no contract in this folder changes, because every contract treats the owner as an `AccountId`. The helper and the keeper would gain a timelock step.
+**Resolved conflict with the product documents.** Until 2026-10-21, `docs/spec.md` and other product documents (finding F-02) required a minimum 72-hour enforced delay after approval and permitted a focused delay component. The owner decided on 2026-10-21 that the voting period is the only delay, and those documents were rewritten to match. No timelock account will be built. Every contract treats the owner as an `AccountId`, so nothing in this folder changed.
 
 ---
 
@@ -270,7 +270,7 @@ Rules the matrix keeps. The verifier is asked only to transfer (`guards.rs:253`)
 | R-04 | Preserve NFT eligibility, jury selection, case obligations and entitlement records | `nft_on_transfer`, `draw`, `unlock_case` (`council lib.rs:440-491`, `:735`) | PARTIAL | `staking.rs`, `council.rs`, `hardening.rs:267-433` exist | Entitlement records do not exist (R-05) |
 | R-05 | Account for earnings by quarter, each entitlement claimable once through Council-authorised settlement | none | MISSING | The 30-day stream is `council lib.rs:26-29`, `:93-160`, `:576-605` | All of [council.md](council.md#6-the-quarterly-accounting-proposal) |
 | R-06 | Settle bonds and juror pay separately from holder revenue | `settle` (`oracle lib.rs:1179-1250`), `ft_on_transfer` (`:645`), `withdraw_bond` (`:915`) | PARTIAL | Payout math and tests exist (`juror_pay.rs`, unit `oracle lib.rs:1572`) | Custody is NEP-141, not Intents (F-01) |
-| R-07 | Use DAO approvals, enforced delay for sensitive actions, owner handover, no custom governance | owner checks, `propose_owner`, `accept_owner`, `upgrade`, `seal` | PARTIAL | Owner is an `AccountId` (`guards.rs:151`, `:179`). Owner fixture tests `upgrade.rs:130` | No test with a real DAO. The delay is DECIDED not to exist as an enforced delay (F-02). The helper is a deny-list (F-03) |
+| R-07 | Use Trezu/Sputnik member approvals for sensitive administration, with the DAO voting period as the only delay (DECIDED 2026-10-21). Evidence: restricted methods, owner handover, upgrades, key-bypass checks. No custom governance | owner checks, `propose_owner`, `accept_owner`, `upgrade`, `seal` | PARTIAL | Owner is an `AccountId` (`guards.rs:151`, `:179`). Owner fixture tests `upgrade.rs:130` | No test with a real DAO. The helper is a deny-list that refuses `upgrade`, `seal` and the owner handover (F-03) |
 | R-08 | Views, events and services that show available, committed, pending, accrued, claimable, paid and quarter state | `get_balance`, `get_shares`, `get_fees`, `total_owed`, `config`, `get_case`, `claimable_of`, `pending_reward` | PARTIAL | Existing views listed in each spec | No account view, position list, pending state, quarter views, reconciliation views or case list. Several events fire before the transfer is known to have worked (F-14) |
 
 ---
@@ -282,7 +282,7 @@ The code is right where it disagrees with a document. Each finding names the fix
 | ID | Finding | Evidence | Effect | Action |
 | --- | --- | --- | --- | --- |
 | F-01 | The oracle still takes bonds as a NEP-141 transfer and the source guard and test harness pin that | `oracle lib.rs:17`, `:194-197`, `:228`, `:645`, `:915-931`. `guards.rs:48`. `common/mod.rs:331-339` | R-06 is not met. Bonds are the last money outside Intents | [oracle.md](oracle.md#8-methods-and-changes-required) |
-| F-02 | Product documents require a minimum 72-hour delay after approval and allow a focused delay component. The DAO executes at approval, and the instruction for this task records the owner's decision that the voting period is the only delay | `spec.md:168`, `:175-178`, `:254`, `:286`. `intents-architecture.md:34`, `:91-93`, `:151`. `DEPLOY.md:55-56`. `governance.md:27-29`. `README.md:44-45`. `PITCH.md:126-127`. `hackathon-plan.md:53`, `:74`. Sputnik `proposals.rs:638-643` | A reader believes users get a warning that nothing provides, or the build omits a control the product documents require | Owner decides (OD-01). Rewrite the documents that lose |
+| F-02 | DECIDED 2026-10-21. Product documents required a minimum 72-hour delay after approval and allowed a focused delay component. The DAO executes at approval (Sputnik `proposals.rs:638-643`), and the owner decided that the voting period is the only delay | Before the rewrite: `spec.md` section 7 and R-07, `intents-architecture.md` (Trezu administration), `DEPLOY.md` section 3, `governance.md`, `README.md`, `PITCH.md`, `hackathon-plan.md` | A reader believed users got an exit window that nothing provides | Done: those documents were rewritten to the decision on 2026-10-21. The helper's delay-based refusals remain in code until the allow-list replaces them (F-03) |
 | F-03 | `treasury.mjs` is a deny-list of five names. A run prepared `set_operator`, `set_fee_rate_bps`, `set_nft_contract`, `add_publisher` and `set_no_decision_recipient`. The vote helper blocks 3 of 17 proposal kinds. It refuses `upgrade`, so no upgrade can be prepared | `treasury.mjs:4`, `:33-35`, `:71-74`. Probe run in this task | A member using the helper can approve membership and policy changes unchecked | [owner-and-keeper.md section 5](owner-and-keeper.md#5-the-allow-list-that-replaces-the-deny-list) |
 | F-04 | The website's buy builder sends `ft_transfer_call` to the token. The market has no `ft_on_transfer` | `web/lib/market.ts:126-132`, `:142-143`. `market lib.rs:715` | A buy would be a plain token transfer to the market account, which has no handler | Verifier `mt_transfer_call` builder ([website-abi.md](website-abi.md#5-market-calls-and-messages)) |
 | F-05 | The challenge message has no answer | `market.ts:172`. `oracle lib.rs:674` | The oracle panics `outcome must be yes, no or void` | Add `:<answer>` |
@@ -328,7 +328,7 @@ Each has a recommended default. A default is what to build if the owner does not
 
 | ID | Decision | Options | Recommended default | Needed by |
 | --- | --- | --- | --- | --- |
-| OD-01 | Enforced delay for owner actions | None, only the voting period (the current decision). A minimal timelock account as owner | Keep the decision for testnet and the hackathon. Cap value at launch. Decide again before caps rise. Rewrite the documents that promise a delay | Before P5 |
+| OD-01 | DECIDED 2026-10-21. Enforced delay for owner actions | None, only the voting period. A minimal timelock account as owner | Decided: none. The voting period is the only delay, and no timelock account will be built. Cap value at launch. The documents that promised a delay were rewritten | Closed |
 | OD-02 | Quarter definition | UTC calendar quarters. Quarters from the launch date | UTC calendar quarters | P4 |
 | OD-03 | Does a seat in its unstake cooldown still earn | Yes until unstaked. No from the request | Yes. The cooldown protects jury integrity, not revenue | P4 |
 | OD-04 | Claim window and unclaimed amounts | Stay claimable, no expiry. Expire to a later pool. Expire to the treasury | No expiry. Claimable from 7 days after the quarter ends | P4 |
@@ -353,7 +353,7 @@ Each has a recommended default. A default is what to build if the owner does not
 
 In order of how much they block.
 
-1. Confirm that the DAO voting period is the only delay (OD-01), and approve the policy numbers (OD-12). The first changes four documents. The second sets the DAO before handover.
+1. Approve the policy numbers (OD-12). They set the DAO before handover. OD-01 is DECIDED: the DAO voting period is the only delay.
 2. Accept or change the quarterly rules (OD-02 to OD-07). They fix what holders are promised: calendar quarters, seat time weighting, claimable 7 days after a quarter ends, no expiry.
 3. Create the Trezu treasury and give the account id (OD-09). No sweep to the treasury is safe before it is verified.
 4. Accept NEAR wallets as the only way to use market write calls in the first release (OD-10), or ask for signed-message authorisation.

@@ -27,7 +27,7 @@ pub const CREATE_FEE: u128 = USD;
 
 pub struct World {
     pub worker: Worker<Sandbox>,
-    // The real NEAR Intents verifier. The market and the council keep their money in their own accounts in it.
+    // The real NEAR Intents verifier. The market, the oracle and the council keep their money in their own accounts in it.
     pub verifier: Contract,
     pub ft: Contract,
     pub market: Contract,
@@ -164,8 +164,8 @@ async fn build(
     oracle
         .call("new")
         .args_json(json!({
-            "owner_id": owner_id, "market_contract": market.id(), "bond_token": ft.id(),
-            "bond": BOND.to_string(), "window_ms": window_ms.to_string(), "panel_deadline_ms": panel_ms.to_string(),
+            "owner_id": owner_id, "market_contract": market.id(), "verifier_id": verifier.id(),
+            "collateral_token_id": collateral_token_id, "bond": BOND.to_string(), "window_ms": window_ms.to_string(), "panel_deadline_ms": panel_ms.to_string(),
             "draw_window_ms": DRAW_WINDOW_MS.to_string(), "council": council.id(), "jury_size": JURY, "draw_delay_blocks": draw_delay_blocks.to_string(),
             "min_proposal_ms": MIN_PROPOSAL_MS.to_string(), "operator_id": owner.id(), "network": NETWORK,
             "price_threshold": PRICE_THRESHOLD, "no_decision_recipient": business.id()
@@ -174,9 +174,9 @@ async fn build(
         .await?
         .into_result()?;
 
-    // The token needs to know these accounts before they can receive transfers. The market and the council are not among
-    // them: the verifier holds their money, and neither is ever sent the token itself.
-    for c in [verifier.id(), oracle.id(), business.id()] {
+    // The token needs to know these accounts before they can receive transfers. The market, the oracle and the council are not
+    // among them: the verifier holds their money, and none is ever sent the token itself.
+    for c in [verifier.id(), business.id()] {
         owner
             .call(ft.id(), "storage_deposit")
             .args_json(json!({ "account_id": c, "registration_only": true }))
@@ -325,22 +325,12 @@ pub async fn is_seat(w: &World, who: &AccountId) -> bool {
         .unwrap()
 }
 
-// Sends `amount` of the token to a contract with a message. The oracle takes the token itself. The market and the council
-// take it through the verifier: the token goes into the sender's own Intents account first, then an mt_transfer_call moves
-// it to the contract, so a refusal puts it back in the sender's Intents account.
+// Sends `amount` of the token to a contract with a message. The market, the oracle and the council take it through the
+// verifier: the token goes into the sender's own Intents account first, then an mt_transfer_call moves it to the contract, so a
+// refusal puts it back in the sender's Intents account.
 pub async fn ft_call(w: &World, from: &Account, to: &AccountId, amount: u128, msg: &str) -> anyhow::Result<()> {
-    if to == w.oracle.id() {
-        from.call(w.ft.id(), "ft_transfer_call")
-            .args_json(json!({ "receiver_id": to, "amount": amount.to_string(), "msg": msg }))
-            .deposit(NearToken::from_yoctonear(1))
-            .gas(Gas::from_tgas(200))
-            .transact()
-            .await?
-            .into_result()?;
-    } else {
-        deposit_to_intents(w, from, from.id(), amount).await?;
-        intents_call(w, from, to, amount, msg).await?.into_result()?;
-    }
+    deposit_to_intents(w, from, from.id(), amount).await?;
+    intents_call(w, from, to, amount, msg).await?.into_result()?;
     Ok(())
 }
 
@@ -419,9 +409,9 @@ pub async fn unpause_transfers(w: &World) -> anyhow::Result<()> {
     verifier_admin(w, "pa_unpause_feature", json!({ "key": "mt_transfer" })).await
 }
 
-// All the collateral an account has outside the market, the oracle and the council: its tokens plus its Intents balance. A
-// payout from the market lands in the Intents balance and a bond comes back as tokens, so a test that follows one person's
-// money across both reads this.
+// All the collateral an account has outside the market, the oracle and the council: its tokens plus its Intents balance. Every
+// payout from the three lands in the Intents balance, and what a test starts with is tokens, so a test that follows one
+// person's money across both reads this.
 pub async fn holdings(w: &World, who: &AccountId) -> u128 {
     ft_balance(w, who).await + intents_balance(w, who).await
 }
@@ -434,6 +424,20 @@ pub async fn assert_reconciled(w: &World) {
         intents_balance(w, w.market.id()).await,
         "the market's total_owed differs from its balance in the verifier"
     );
+}
+
+// The oracle's books must match what the verifier holds for it. Only valid while no payout is in flight.
+pub async fn assert_oracle_reconciled(w: &World) {
+    assert_eq!(
+        oracle_total_owed(w).await,
+        intents_balance(w, w.oracle.id()).await,
+        "the oracle's total_owed differs from its balance in the verifier"
+    );
+}
+
+pub async fn oracle_total_owed(w: &World) -> u128 {
+    let owed: String = w.oracle.view("total_owed").await.unwrap().json().unwrap();
+    u128::from_str(&owed).unwrap()
 }
 
 pub async fn ft_balance(w: &World, who: &AccountId) -> u128 {
@@ -572,6 +576,18 @@ pub async fn challenge(w: &World, who: &Account, id: u64) -> anyhow::Result<()> 
 
 pub async fn challenge_with(w: &World, who: &Account, id: u64, answer: &str) -> anyhow::Result<()> {
     ft_call(w, who, w.oracle.id(), BOND, &format!("challenge:{id}:{answer}")).await
+}
+
+// Returns the logs of the whole call, the verifier's payout and the callback included.
+pub async fn withdraw_bond(w: &World, who: &Account) -> anyhow::Result<Vec<String>> {
+    let r = who
+        .call(w.oracle.id(), "withdraw_bond")
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(r.logs().iter().map(|l| l.to_string()).collect())
 }
 
 pub async fn claimable(w: &World, who: &AccountId) -> u128 {

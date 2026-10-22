@@ -13,8 +13,8 @@ verifier and claims and unstakes are paid out of the Council's own account in it
 receives revenue as `mt_on_transfer` (caller the verifier, token id the configured one, message
 `revenue`) and pays with `mt_transfer` of 1 yocto from this contract, with no signed intent and no
 key registered in the verifier. NFT staking (NEP-171), eligibility and reward-liability accounting
-are unchanged. The quarterly claim gate, the 75/25 allocation with the Trezu treasury and the
-owner delay for upgrades (R-07) are not built here. A quarterly claim gate is not implied by the
+are unchanged. The quarterly claim gate and the 75/25 allocation with the Trezu treasury are not
+built here. The DAO voting period is the only delay before an owner action (decided 2026-10-21, R-07). A quarterly claim gate is not implied by the
 current streamed accrual.
 
 Source: `council/src/lib.rs`, with the shared upgrade helpers in `upgrade/src/lib.rs`. Written
@@ -433,8 +433,9 @@ anything but 1 (`migrate expects version 1`), then reads the version 1 struct. I
 layout from bytes. A version 2 build keeps the version 1 struct as `StateV1`, reads that, builds its
 state and writes `state_version: 2`.
 
-SputnikDAO runs a passed proposal at once, so no delay is enforced between approval and an upgrade yet
-(requirement R-07, not built). This contract has no pause, so
+SputnikDAO runs a proposal in the same call as the approval that reaches its threshold. By owner
+decision (2026-10-21, R-07) the voting period is the only delay, and no delay after approval will be
+built. This contract has no pause, so
 `request_unstake`, `unstake` and `claim` work at all times except for a seat serving on an open
 case, and an upgrade does not touch them. The staked seats and their revenue accounting are in the
 state that `migrate` reads, and the sandbox test checks that a seat's record and the seat count are
@@ -442,8 +443,8 @@ identical after an upgrade.
 
 Measured in the sandbox for a 249 KB build: `upgrade` burns 30 TGas in all, 17 of them the deploy
 and migrate batch, and `seal` burns 2. The accepted deployment controls are in
-[DEPLOY.md](DEPLOY.md#3-administration-and-upgrades). Trezu/Sputnik execution and the required
-delay still need their own integration evidence.
+[DEPLOY.md](DEPLOY.md#3-administration-and-upgrades). Trezu/Sputnik execution still needs its own
+integration evidence.
 
 ---
 

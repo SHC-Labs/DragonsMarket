@@ -30,8 +30,7 @@ NEAR Intents holds fungible funds while application contracts enforce their perm
 | Market | Fund positions, maintain backing, price trades, settle outcomes and allocate fees |
 | Oracle | Resolve cases and account for dispute bonds/juror payments |
 | Council | Stake eligible NFTs, enforce case duties and control holder reward entitlements |
-| Trezu/Sputnik | Treasury membership, approvals and project administration |
-| Delay mechanism | Enforce the required post-approval protection for sensitive changes |
+| Trezu/Sputnik | Treasury membership, approvals and project administration. Its voting period is the only delay |
 | Backend/keeper/indexer | Route requests, observe operations, persist recovery state and reconcile |
 | Website | Show verifiable state and prepare reviewed user actions |
 
@@ -88,9 +87,18 @@ Trezu/Sputnik replaces the custom governance contract. The treasury has not been
 configured. Actual membership, thresholds, account IDs, permissions and ownership handover need
 verification before use.
 
-Sensitive administrative changes retain a minimum 72-hour post-approval delay. Trezu's voting
-window is not that delay. Claude must select or implement a reviewed execution mechanism and
-prove that direct calls, deployment keys and upgrades cannot bypass it.
+DECIDED (owner, 21 October 2026): sensitive administrative changes use Trezu/Sputnik member
+approvals, and the DAO voting period is the only delay. No post-approval delay or delay component
+will be built. SputnikDAO executes a proposal in the same call as the approval that reaches the
+threshold (`proposals.rs` lines 638 to 643 at revision `5434a59dec23ee0c49df8c8c4350c208a7e75b0b`).
+The voting period therefore makes a proposal public while approvals arrive, and the proposal
+expires unexecuted if the threshold is not reached in time. It is not an exit window after a decision.
+
+User protection rests on facts that need no delay: `withdraw` and `redeem` never pause, upgrades
+deploy only publicly staged code, and access keys are sealed only after a proven upgrade. The
+PROPOSED DAO policy (four of five for function calls, unanimity for membership and policy) is in
+[the owner model](contracts/specs/owner-and-keeper.md#7-recommended-dao-policy). Claude must prove
+that direct calls, deployment keys and upgrades cannot bypass DAO ownership.
 
 The [treasury handoff](contracts/governance.md) describes the proposal-preparation helper and
 pending work. It does not sign or submit transactions. Treasury voting and Council case voting
@@ -130,7 +138,7 @@ Source inspection on 21 October 2026; no contract build or test was run for this
 | Market | Verifier-backed transfers, internal positions and 25/75 fee sweep | Complete user identity/funding/exit journey and verified recipient configuration |
 | Council | Intents revenue receipt and payments, NFT staking and streamed rewards | Quarter accounting and claim gate |
 | Oracle | NEP-141 bond and payment paths | Intents bond/juror settlement |
-| Treasury | Proposal/vote preparation helpers; custom governance removed | Real DAO, delay mechanism, ownership handover and integration tests |
+| Treasury | Proposal/vote preparation helpers; custom governance removed | Real DAO and policy, allow-list helper, ownership handover and integration tests |
 | Frontend | Read-oriented adapters, disabled financial writes | Final DTOs, quote/sign/receipt/recovery integration |
 
 See [market](contracts/market.md), [Council](contracts/council.md), [oracle](contracts/oracle.md)
@@ -148,7 +156,7 @@ For [R-01 through R-08](spec.md#requirements-to-implementation-map), deliver:
 3. Sell, redeem, bond, fee and reward settlement with failed-operation recovery.
 4. Reconciliation across verifier funds, positions and liabilities, including backend outages.
 5. Quarterly Council accounting and single-use claims with boundary and stake-change tests.
-6. Verified treasury membership and the enforced delay/ownership path.
+6. Verified treasury membership and policy, and the proven DAO ownership path.
 7. A migration or fresh-deployment plan for each changed state layout and liability.
 8. Frontend integration and a demonstrated funding-to-exit journey using the selected build.
 

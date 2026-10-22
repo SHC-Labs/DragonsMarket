@@ -12,8 +12,8 @@
 //
 // `run` needs an account with a little NEAR for gas. The calls it makes move no money of the keeper's own, and none
 // of them attach a deposit, so a function call access key is enough. `check` reads only. It reports whether the
-// council can seat a jury and a second jury, and how much NEAR each contract account has left after paying for the
-// storage it uses, and exits 1 if anything is wrong.
+// council can seat a jury and a second jury, whether the oracle's total_owed matches what the verifier holds for it, and how
+// much NEAR each contract account has left after paying for the storage it uses, and exits 1 if anything is wrong.
 //
 // The secret key is never taken from the command line, where it would sit in the process list and shell history.
 // Give it as the environment variable KEEPER_KEY, or as --key-file naming a file that only its owner can read
@@ -53,7 +53,7 @@ const DEFAULT_MIN_MARGIN_NEAR = "5";
 // In the collateral token's smallest unit. 10,000,000 is 10 tokens at 6 decimals. It only keeps the keeper from
 // paying for a sweep of dust.
 const DEFAULT_MIN_SWEEP = 10_000_000n;
-// sweep_fees refuses less than 95 TGas.
+// sweep_fees refuses less than 87 TGas.
 const SWEEP_GAS_TGAS = 100;
 
 // ---- what is due -------------------------------------------------------------------------------------------------
@@ -138,10 +138,11 @@ async function rpc(url, method, params) {
   return body.result;
 }
 
-async function view(url, account, method, args = {}) {
+// Reads at the last final block, or at `blockId` (a height) when two views must agree on one block.
+async function view(url, account, method, args = {}, blockId) {
   const result = await rpc(url, "query", {
     request_type: "call_function",
-    finality: "final",
+    ...(blockId === undefined ? { finality: "final" } : { block_id: blockId }),
     account_id: account,
     method_name: method,
     args_base64: Buffer.from(JSON.stringify(args)).toString("base64"),
@@ -327,9 +328,27 @@ export function marginReport(accounts, minMargin) {
   return { lines, problems };
 }
 
+// The oracle's books against what the verifier holds in its account, both read at one finalized block. Bonds are all the oracle
+// keeps there, so the verifier holding less than total_owed means money is missing. More is surplus nobody is credited for, or a
+// payout on its way.
+export function oracleReconciliation({ owed, held }) {
+  const surplus = BigInt(held) - BigInt(owed);
+  const extra = surplus > 0n ? `, ${surplus} more than it owes (surplus nobody is credited for, or a payout in flight)` : "";
+  return {
+    line: `oracle owes ${owed} and holds ${held} in the verifier${extra}`,
+    problem: surplus < 0n ? `the oracle owes ${owed} but the verifier holds only ${held} for it: ${-surplus} is missing` : null,
+  };
+}
+
 async function check(opts) {
   const minMargin = nearToYocto(opts["min-margin"] ?? DEFAULT_MIN_MARGIN_NEAR);
   const oracle = await view(opts.rpc, opts.oracle, "config");
+  const block = await rpc(opts.rpc, "block", { finality: "final" });
+  const at = block.header.height;
+  const books = oracleReconciliation({
+    owed: await view(opts.rpc, opts.oracle, "total_owed", {}, at),
+    held: await view(opts.rpc, oracle.verifier, "mt_balance_of", { account_id: opts.oracle, token_id: oracle.collateral_token_id }, at),
+  });
   const owners = new Set();
   for (let from = 0; ; from += PAGE) {
     const tokens = await view(opts.rpc, opts.council, "staked_tokens", { from_index: from, limit: PAGE });
@@ -339,6 +358,8 @@ async function check(opts) {
   const problems = juryProblems({ jurySize: oracle.jury_size, holders: owners.size });
   if (oracle.publishers.length < oracle.price_threshold) problems.push(`${oracle.publishers.length} price publishers but ${oracle.price_threshold} must sign: no price market can open`);
   console.log(`jury size ${oracle.jury_size} then ${secondJurySize(oracle.jury_size)}, ${owners.size} different seat holders, ${oracle.publishers.length} publishers (${oracle.price_threshold} must sign)`);
+  console.log(books.line);
+  if (books.problem) problems.push(books.problem);
 
   const named = [["market", opts.market], ["oracle", opts.oracle], ["council", opts.council]];
   if (opts.treasury) named.push(["treasury", opts.treasury]);

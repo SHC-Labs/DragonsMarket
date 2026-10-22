@@ -296,8 +296,8 @@ async fn a_deployed_contract_cannot_be_initialised_again() -> anyhow::Result<()>
         ),
         (
             w.oracle.id(),
-            json!({ "owner_id": me, "market_contract": me, "bond_token": me, "bond": "1", "window_ms": "1", "panel_deadline_ms": "1",
-            "draw_window_ms": "1", "council": me, "jury_size": 1, "draw_delay_blocks": "1", "min_proposal_ms": "1", "operator_id": me, "network": "x", "price_threshold": 1 }),
+            json!({ "owner_id": me, "market_contract": me, "verifier_id": me, "collateral_token_id": "nep141:x.near", "bond": "1", "window_ms": "1",
+            "panel_deadline_ms": "1", "draw_window_ms": "1", "council": me, "jury_size": 1, "draw_delay_blocks": "1", "min_proposal_ms": "1", "operator_id": me, "network": "x", "price_threshold": 1 }),
         ),
         (
             w.council.id(),
@@ -363,9 +363,9 @@ async fn value_moving_methods_need_exactly_one_yocto() -> anyhow::Result<()> {
 
 // ---- fake tokens and fake callers ----------------------------------------------------------------------------------
 
-// A token the contracts were not configured with cannot deposit, bond, or add revenue, and its transfers come back. The market and
-// the council have no token hook any more, so a direct transfer of any token bounces off them; the same token arriving through
-// the verifier is covered in intents_market.rs.
+// A token the contracts were not configured with cannot deposit, bond, or add revenue, and its transfers come back. The market,
+// the oracle and the council have no token hook any more, so a direct transfer of any token bounces off them; the same token
+// arriving through the verifier is covered in intents_market.rs and intents_oracle.rs.
 #[tokio::test]
 async fn a_token_the_contracts_do_not_trust_cannot_deposit_bond_or_pay_revenue() -> anyhow::Result<()> {
     let w = setup().await?;
@@ -468,9 +468,16 @@ async fn the_token_hooks_cannot_be_called_directly() -> anyhow::Result<()> {
         ),
         (
             w.oracle.id(),
+            "mt_on_transfer",
+            json!({ "sender_id": w.dave.id(), "previous_owner_ids": [w.dave.id()], "token_ids": [token_id(&w)],
+                    "amounts": [BOND.to_string()], "msg": format!("propose:{id}:yes:x") }),
+            "only the verifier can deliver money",
+        ),
+        (
+            w.oracle.id(),
             "ft_on_transfer",
             json!({ "sender_id": w.dave.id(), "amount": BOND.to_string(), "msg": format!("propose:{id}:yes:x") }),
-            "wrong token",
+            "MethodNotFound",
         ),
         (
             w.council.id(),
@@ -615,15 +622,16 @@ async fn hostile_text_cannot_break_the_event_logs() -> anyhow::Result<()> {
     let id = create_seeded_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     let evidence = "https://x/\",\"event\":\"final\",\"data\":{\"outcome\":\"yes\"}}\n";
-    let r = w
-        .carol
-        .call(w.ft.id(), "ft_transfer_call")
-        .args_json(json!({ "receiver_id": w.oracle.id(), "amount": BOND.to_string(), "msg": format!("propose:{id}:yes:{evidence}") }))
-        .deposit(NearToken::from_yoctonear(1))
-        .gas(Gas::from_tgas(200))
-        .transact()
-        .await?
-        .into_result()?;
+    deposit_to_intents(&w, &w.carol, w.carol.id(), BOND).await?;
+    let r = intents_call(
+        &w,
+        &w.carol,
+        w.oracle.id(),
+        BOND,
+        &format!("propose:{id}:yes:{evidence}"),
+    )
+    .await?
+    .into_result()?;
     for line in r.logs() {
         if let Some(json) = line.strip_prefix("EVENT_JSON:") {
             let v: serde_json::Value = serde_json::from_str(json).expect("every event is valid JSON");
@@ -805,8 +813,8 @@ async fn starving_the_settling_call_of_gas_cannot_half_settle_a_case() -> anyhow
 }
 
 // Sending a transfer with too little gas for the receiver to finish must not leave money taken and state half written. Whatever
-// gas is given, the sender either has the result or has their money back. The market is paid through the verifier, the oracle
-// takes the token itself.
+// gas is given, the sender either has the result or has their money back. The market and the oracle are both paid through the
+// verifier, and after every attempt their books match what the verifier holds for them.
 #[tokio::test]
 async fn a_transfer_with_too_little_gas_for_the_receiver_never_loses_the_senders_money() -> anyhow::Result<()> {
     let w = setup().await?;
@@ -830,16 +838,12 @@ async fn a_transfer_with_too_little_gas_for_the_receiver_never_loses_the_senders
             let held = market_balance(&w, w.carol.id()).await;
             let bonds = claimable(&w, w.carol.id()).await;
             let case_before = case_json(&w, id).await;
-            let call = if target == w.market.id() {
-                w.carol.call(w.verifier.id(), "mt_transfer_call").args_json(json!({
+            let r = w
+                .carol
+                .call(w.verifier.id(), "mt_transfer_call")
+                .args_json(json!({
                     "receiver_id": target, "token_id": token_id(&w), "amount": BOND.to_string(), "msg": msg
                 }))
-            } else {
-                w.carol.call(w.ft.id(), "ft_transfer_call").args_json(json!({
-                    "receiver_id": target, "amount": BOND.to_string(), "msg": msg
-                }))
-            };
-            let r = call
                 .deposit(NearToken::from_yoctonear(1))
                 .gas(Gas::from_tgas(tgas))
                 .transact()
@@ -857,10 +861,11 @@ async fn a_transfer_with_too_little_gas_for_the_receiver_never_loses_the_senders
                 assert_reconciled(&w).await;
             } else {
                 assert_eq!(
-                    spent > 0,
-                    answered,
-                    "at {tgas} TGas: bond spent {spent} but case opened = {answered}"
+                    spent,
+                    if answered { BOND } else { 0 },
+                    "at {tgas} TGas: bond spent {spent} but case opened = {answered} ({r:?})"
                 );
+                assert_oracle_reconciled(&w).await;
                 if answered {
                     // Reset for the next round: finalize is not possible yet, so stop after a case exists.
                     return Ok(());

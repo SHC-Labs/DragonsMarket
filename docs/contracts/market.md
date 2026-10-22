@@ -10,8 +10,8 @@ arrives through the verifier's `mt_transfer_call`, which calls `mt_on_transfer` 
 through `mt_transfer` and `mt_transfer_call` from this contract, with no signed intent and no key
 registered in the verifier. The sweep already splits 25% to `revenue_pool` (the Council) and 75% to
 `business_wallet`, so the accepted 75/25 allocation fits by setting `business_wallet` to the Trezu
-treasury with `set_fee_recipients`. Quarterly Council claims, the owner delay for upgrades (R-07)
-and treasury verification are not built here. Oracle bonds still use a NEP-141 token and are the
+treasury with `set_fee_recipients`. Quarterly Council claims and treasury verification are not
+built here. The DAO voting period is the only delay before an owner action (decided 2026-10-21, R-07). Oracle bonds still use a NEP-141 token and are the
 next phase.
 
 Source: `market/src/lib.rs` (the contract) and `market/src/curve.rs` (the pricing maths). Written
@@ -35,8 +35,9 @@ These are required capabilities, not claims that new methods already exist.
 - Expose position backing, user availability, fee liabilities and operation status through reviewed
   views/events. Existing NEP-141 balance reads must not stand in for verifier-held funds.
 - Migrate owner-authorised settings and upgrades to the verified Trezu/Sputnik execution path. The
-  owner is just an account here, so nothing in the contract is specific to a DAO. The delay between
-  approval and execution (R-07) is not built.
+  owner is just an account here, so nothing in the contract is specific to a DAO. DECIDED
+  2026-10-21: no delay between approval and execution will be built. The DAO voting period is the
+  only delay (R-07).
 
 The handoff must specify the exact ABI, state layout, permissions, events, migration and failure
 recovery. Existing method signatures can change if needed to meet the target; retain regression
@@ -93,7 +94,7 @@ outcome from it.
 | ---------------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | oracle                                                     | Registers every new market with it, and is the only account allowed to set an outcome. |
 | council                                                    | Receives 25% of the trading fees as revenue for its staked NFT seats.                  |
-| The owner (the DAO)                                        | Trezu/SputnikDAO. It holds the owner role. SputnikDAO has no delay between approval and execution. |
+| The owner (the DAO)                                        | Trezu/SputnikDAO. It holds the owner role. SputnikDAO executes a proposal at the approval that reaches its threshold, and its voting period is the only delay (decided 2026-10-21). |
 | The NEAR Intents verifier (in tests the real `defuse` build) | Holds every unit of backing in this contract's own account. The collateral is `nep141:<token>` inside it, in tests the `mock-ft` token. |
 
 Money enters market when a user calls `mt_transfer_call` on the verifier with this contract as the
@@ -109,7 +110,7 @@ There are four kinds of caller. The first three are stored accounts, the fourth 
 
 | Role     | Set by                                         | Can do                                                                                                                                                                                                                                                                               |
 | -------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Owner    | `new`, then `propose_owner` and `accept_owner` | Everything the operator can, plus `set_operator`, `propose_owner`, `set_fee_recipients`, `set_fee_rate_bps`, `set_create_fee`, `reconcile_revenue`, `upgrade` and `seal`. In a real deployment this is the DAO, so each of these needs a DAO proposal. SputnikDAO has no delay between approval and execution, and the delay is a separate requirement (R-07) that is not built. |
+| Owner    | `new`, then `propose_owner` and `accept_owner` | Everything the operator can, plus `set_operator`, `propose_owner`, `set_fee_recipients`, `set_fee_rate_bps`, `set_create_fee`, `reconcile_revenue`, `upgrade` and `seal`. In a real deployment this is the DAO, so each of these needs a DAO proposal. SputnikDAO executes a proposal at the approval that reaches its threshold. Its voting period is the only delay, by owner decision (R-07). |
 | Operator | `new`, then `set_operator` (owner only)        | Routine running: `create_market`, `retry_register`, `halt` (but not in the last 24 hours before a market closes, see "Void"), `resume`, `set_paused`, `claim_residual`, and seeding a market. Cannot move fees, change owner, change the operator, or touch user money.              |
 | Oracle   | `new` (fixed, no setter)                       | Only `set_outcome`.                                                                                                                                                                                                                                                                  |
 | Anyone   | n/a                                            | Trade, deposit, withdraw, redeem, register for storage (for themselves or for someone else) and unregister, `void_if_unresolved` (a grace period after `resolve_by`), `sweep_fees`, `stage_code` (paying for the storage), and every view.                                           |
@@ -344,7 +345,7 @@ build.
 | Step    | What happens                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Stage   | Anyone calls `stage_code` with the wasm as the input. The contract answers with the sha256. Different code cannot overwrite it because the key is the hash.                                                                                                                                                                                                                                     |
-| Propose | The DAO proposes a `function_call` to `upgrade` with `{"code_hash":"<base58>"}`. SputnikDAO runs it as soon as it passes, so no delay is enforced yet. The delay is requirement R-07 and is not built.                                                                                                                                                                                                                                          |
+| Propose | The DAO proposes a `function_call` to `upgrade` with `{"code_hash":"<base58>"}`. The proposal is public while members vote. SputnikDAO runs it in the same call as the approval that reaches the threshold, and it fails if the threshold is not reached before the voting period ends. There is no delay after approval, by owner decision (R-07).                                                                                                                                                                                                                                          |
 | Execute | `upgrade` checks the caller is the owner and that 100 TGas are attached (`attach at least 100 TGas to upgrade`), takes the staged wasm out of storage, sets `upgrade_in_flight`, and sends one batch to this account: deploy, then `migrate`. A `migrate` that panics reverts the deploy and the old code stays. The staged copy is gone either way, so a failed upgrade stages the code again. |
 | Prove   | `migrate` refuses to run unless `upgrade_in_flight` is set (`migrate runs only inside an upgrade`), then clears it and sets `upgrade_proven`. A hand-called `migrate` therefore proves nothing. When the batch fails, the old code keeps the mark set and the next `upgrade` sets it again. `config` shows both flags with `state_version`.                                                     |
 | Seal    | `seal(public_key)` deletes an access key. It is refused until `upgrade_proven` is true (`prove the upgrade path before deleting keys`), so keys are deleted only after one upgrade has worked on this chain.                                                                                                                                                                                    |
@@ -356,14 +357,14 @@ struct. It never guesses a layout from bytes. A version 2 build keeps the versio
 
 Withdraw and redeem stay unpausable: `set_paused` does not touch them, an upgrade does not touch
 them, and neither does `halt`. A user who does not trust a pending upgrade can withdraw a balance
-and redeem a resolved position at any time, so the exit does not depend on the delay once it exists. Open positions stay in the market until it
+and redeem a resolved position at any time, so that exit does not depend on any delay. Open positions stay in the market until it
 resolves or they are sold while trading is open. The unit test
 `withdraw_and_redeem_still_work_while_the_market_is_paused` checks both calls on a paused contract.
 
 Measured in the sandbox for a 289 KB build: `upgrade` burns 34 TGas in all, 20 of them the deploy
 and migrate batch, and `seal` burns 2. The accepted deployment controls are in
-[DEPLOY.md](DEPLOY.md#3-administration-and-upgrades). Trezu/Sputnik execution and the required
-delay still need their own integration evidence.
+[DEPLOY.md](DEPLOY.md#3-administration-and-upgrades). Trezu/Sputnik execution still needs its own
+integration evidence.
 
 ---
 

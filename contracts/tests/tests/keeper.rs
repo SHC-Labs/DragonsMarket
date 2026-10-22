@@ -446,3 +446,41 @@ async fn the_deploy_check_reports_what_each_account_has_left_after_storage_and_w
     assert!(!out.contains("treasury "), "{out}");
     Ok(())
 }
+
+#[tokio::test]
+async fn the_deploy_check_reconciles_the_oracle_with_what_the_verifier_holds_for_it() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let (out, _) = keeper(&w, &["check"]).await;
+    assert!(out.contains("oracle owes 0 and holds 0 in the verifier\n"), "{out}");
+
+    let id = create_seeded_market(&w, 120).await?;
+    skip_secs(&w.worker, 130).await;
+    propose(&w, &w.carol, id, "yes").await?;
+    let (out, _) = keeper(&w, &["check"]).await;
+    assert!(
+        out.contains(&format!("oracle owes {BOND} and holds {BOND} in the verifier\n")),
+        "{out}"
+    );
+
+    // A plain deposit to the oracle's account is credited to nobody: the verifier holds more than the oracle owes, which is not a
+    // problem.
+    w.carol
+        .call(w.ft.id(), "ft_transfer_call")
+        .args_json(json!({ "receiver_id": w.verifier.id(), "amount": (3 * USD).to_string(), "msg": w.oracle.id() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    let (out, _) = keeper(&w, &["check"]).await;
+    assert!(
+        out.contains(&format!(
+            "oracle owes {BOND} and holds {} in the verifier, {} more than it owes",
+            BOND + 3 * USD,
+            3 * USD
+        )),
+        "{out}"
+    );
+    assert!(!out.contains("PROBLEM: the oracle owes"), "{out}");
+    Ok(())
+}

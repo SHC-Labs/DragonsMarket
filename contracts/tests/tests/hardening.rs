@@ -22,8 +22,8 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
         ),
         (
             "oracle",
-            json!({ "owner_id": other, "market_contract": other, "bond_token": other, "bond": "1", "window_ms": "1000",
-                    "panel_deadline_ms": "1000", "draw_window_ms": "1000", "council": other, "jury_size": 3,
+            json!({ "owner_id": other, "market_contract": other, "verifier_id": other, "collateral_token_id": "nep141:token.test.near",
+                    "bond": "1", "window_ms": "1000", "panel_deadline_ms": "1000", "draw_window_ms": "1000", "council": other, "jury_size": 3,
                     "draw_delay_blocks": "1", "min_proposal_ms": "1000", "operator_id": other, "network": NETWORK,
                     "price_threshold": 1, "no_decision_recipient": other }),
         ),
@@ -714,15 +714,16 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
 
     let message = format!("price:v1:{}:{NETWORK}:{id}:{close_at}:10500:2", w.oracle.id());
     let entries = [signed_entry(&keys[2], &message), signed_entry(&keys[0], &message)];
-    let r = w
-        .carol
-        .call(w.ft.id(), "ft_transfer_call")
-        .args_json(json!({ "receiver_id": w.oracle.id(), "amount": BOND.to_string(), "msg": format!("price:{id}:10500:{}", entries.join(",")) }))
-        .deposit(NearToken::from_yoctonear(1))
-        .gas(Gas::from_tgas(200))
-        .transact()
-        .await?
-        .into_result()?;
+    deposit_to_intents(&w, &w.carol, w.carol.id(), BOND).await?;
+    let r = intents_call(
+        &w,
+        &w.carol,
+        w.oracle.id(),
+        BOND,
+        &format!("price:{id}:10500:{}", entries.join(",")),
+    )
+    .await?
+    .into_result()?;
     let logs: Vec<String> = r.logs().iter().map(|l| l.to_string()).collect();
     let proposed = &events_named(&logs, "proposed")[0];
     assert_eq!(

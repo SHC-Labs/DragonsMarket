@@ -24,9 +24,13 @@ The treasury handles member roles, approval thresholds and approved project spen
 75% of earned platform fees. Council-controlled rewards receive 25%, with quarterly claims and
 backing in Intents. Treasury votes do not replace Council jury decisions.
 
-Sensitive administrative changes require the agreed minimum 72-hour delay after approval.
-Trezu's voting period only limits the time available to collect votes. Select or implement a
-reviewed delay path and verify ownership, upgrades, cancellation, recovery and access-key control.
+DECIDED (owner, 21 October 2026): sensitive administrative changes use Trezu/Sputnik member
+approvals, and the voting period is the only delay. No post-approval delay will be built.
+SputnikDAO executes a proposal in the same call as the approval that reaches the threshold, so
+the voting period gives public visibility and a deadline, not an exit window after approval. The
+reasoning, the protections that do not depend on a delay and the PROPOSED DAO policy are in
+[the owner model](specs/owner-and-keeper.md#2-the-owner-model). Verify ownership, upgrades,
+failed-call recovery and access-key control against a real SputnikDAO.
 
 The custom contract is absent from the active workspace, build and test fixtures. Its methods
 are not the target administration ABI. Past findings remain in [AUDIT.md](AUDIT.md).
@@ -39,8 +43,12 @@ are not the target administration ABI. Past findings remain in [AUDIT.md](AUDIT.
 `add_proposal` and `act_proposal`. It requires an explicit treasury account and proposal bond,
 preserves the proposal kind for voting, and does not sign or submit a transaction.
 
-Sensitive proposal/approval preparation is disabled until the execution-delay route is ready.
-Local owner fixtures test application permissions and upgrades; they do not prove real DAO
+Today the helper uses a deny-list: it refuses to prepare or approve `upgrade`, `seal`,
+`propose_owner`, `accept_owner` and `set_fee_recipients`, and lets every other method through.
+That refusal was written for a delay route that will not be built. PROPOSED: replace it with the
+allow-list in [the owner model](specs/owner-and-keeper.md#5-the-allow-list-that-replaces-the-deny-list),
+which can prepare those owner methods and keeps the guard on proposal kinds that change the DAO
+policy or membership. Local owner fixtures test application permissions and upgrades; they do not prove real DAO
 membership, voting or execution behaviour.
 
 The keeper's `--treasury` option observes account funding. It does not configure the DAO or move
@@ -52,7 +60,7 @@ ownership. The retired `--governance` option is rejected.
 
 - [ ] Create the Trezu treasury and verify its actual account, code, policy and member roles.
 - [ ] Specify supported administrative actions, arguments, deposits, gas and receipt handling.
-- [ ] Implement and test the required delay and bypass protections.
+- [ ] Replace the helper's deny-list with the allow-list and test that keys and direct calls cannot bypass DAO ownership.
 - [ ] Prove owner handover for market, oracle and Council, including recovery from failed steps.
 - [ ] Configure the verified 75% recipient through that reviewed path.
 - [ ] Check authority over treasury Intents balances and separation from user/reward backing.

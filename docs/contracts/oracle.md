@@ -1,36 +1,33 @@
 # oracle
 
-Target decision, 2026-10-20: Trezu/SputnikDAO replaces custom governance for administration.
-The owner references below describe the existing prototype; actual ownership and sensitive-action
-delays need a verified migration path. Oracle outcomes, Council jury rules, dispute bonds and
-juror compensation remain separate from the 75% treasury / 25% holder-reward allocation.
-Their fungible settlement remains subject to [Intents-held custody](../intents-architecture.md).
+Status, 2026-10-21, Intents migration phase I3: dispute bonds and juror pay are held in the oracle's own account
+inside the [NEAR Intents](../intents-architecture.md) verifier. Bonds arrive through the verifier's
+`mt_transfer_call` and leave through its `mt_transfer`. The oracle holds no token of its own and never calls a
+NEP-141 contract. The owner is an account id, the DAO (Trezu and SputnikDAO), and the DAO's voting period is the
+only delay: nothing in this contract waits between an approval and its execution. Bonds and juror pay stay
+separate from the 75% treasury and 25% holder-reward split of platform fees, which the market sends and the
+Council holds.
 
-Custody decision, 2026-10-19: this is an implementation manual for the existing contract. The target
-[Intents-held custody](../intents-architecture.md) also covers dispute bonds and juror payments. The
-NEP-141 bond/payment methods below remain current-code behavior and need explicit settlement
-migration; outcome and voting rules are not replaced by Intents.
-
-Source: `oracle/src/lib.rs`, with the shared upgrade helpers in `upgrade/src/lib.rs`. Written
-2026-10-18 from the code as it stands, upgrade path and owner settings added 2026-10-19, the
-no-decision recipient, the deadline refusal and the upgrade mark added 2026-10-20. For current behaviour, follow the code. For required target behaviour, follow the accepted
-spec and the implementation requirements below; differences are work to complete.
+Source: `oracle/src/lib.rs`, with the shared upgrade helpers in `upgrade/src/lib.rs`. Written 2026-10-18 from the
+code as it stood, upgrade path and owner settings added 2026-10-19, the no-decision recipient, the deadline
+refusal and the upgrade mark added 2026-10-20, the Intents money path added 2026-10-21. For current behaviour,
+follow the code. For required behaviour, follow the accepted spec.
 
 ---
 
-## Required changes for the product target
+## Requirements met and not built
 
 See [requirements R-04, R-06, R-07 and R-08](../spec.md#requirements-to-implementation-map).
 
-- Retain the published propose, challenge, jury, commit/reveal and finalisation rules.
-- Add or adapt Intents-backed bond and juror-payment settlement with authenticated beneficiaries,
-  separate liabilities and recoverable operation states. Holder revenue is a different allocation.
-- Preserve Council case/seat accounting while migrating administrative authority to the reviewed
-  Trezu/Sputnik path. Treasury membership must not grant juror voting rights.
-- Publish the reviewed case, bond and payment DTOs/events needed by the website and keeper.
+| Requirement | State |
+| --- | --- |
+| R-04, the propose, challenge, jury, commit and reveal rules | Unchanged by the migration and still tested |
+| R-06, bonds and juror pay settle separately from holder revenue, inside Intents | Built. Bonds arrive by `mt_on_transfer` and are paid by `mt_transfer` from the oracle's own Intents account. A source guard fails if the oracle code names holder revenue |
+| R-07, the owner is a DAO account | The owner is an `AccountId` and no custom governance exists. No test runs a real SputnikDAO |
+| R-08, views for the website and keeper | `total_owed` is built. A case list, bond totals and a pending payout view are not |
 
-Exact methods and storage changes belong in the implementation proposal. An existing NEP-141
-payment method that cannot satisfy Intents-held custody must be adapted or replaced.
+Specified in [the oracle spec](specs/oracle.md) and not built: `payout_bond(account)`, which would let a keeper pay a
+DAO recipient without a proposal, `list_cases`, `bond_totals`, and a `bond_received` event.
 
 ---
 
@@ -86,8 +83,8 @@ It also holds the bonds, and pays them out, together with the jurors' pay, when 
 | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | market                                       | Registers each new market here, and receives the final outcome from here. Only market may register markets.                        |
 | council                                      | Supplies the jury. oracle asks it to draw jurors from staked NFT seats, and tells it to release them and which jurors never voted. |
-| governance                                   | Intended owner, so changes need a member vote and a timelock.                                                                      |
-| The bond token (NEP-141, in tests `mock-ft`) | What bonds and juror pay are paid in. Normally the same token the market uses.                                                     |
+| The owner (the DAO)                          | An account id, normally a SputnikDAO. Its voting period is the only delay before a setting or an upgrade takes effect.   |
+| The Intents verifier                         | Holds every bond in this contract's own Intents account. Calls `mt_on_transfer` to deliver a bond and pays one out when this contract calls its `mt_transfer`. The collateral is one token id, the one the market uses (in tests `mock-ft`). |
 
 ---
 
@@ -95,10 +92,10 @@ It also holds the bonds, and pays them out, together with the jurors' pay, when 
 
 | Role            | Set by                                         | Can do                                                                                                                                                                                                                                                                                                                                      |
 | --------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Owner           | `new`, then `propose_owner` and `accept_owner` | `set_jury_size`, `set_bond`, `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms`, `set_draw_delay_blocks`, `set_operator`, `set_no_decision_recipient`, `add_publisher`, `set_price_threshold`, `propose_owner`, `upgrade`, `seal`, and everything the operator can do. Normally the governance contract. |
+| Owner           | `new`, then `propose_owner` and `accept_owner` | `set_jury_size`, `set_bond`, `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms`, `set_draw_delay_blocks`, `set_operator`, `set_no_decision_recipient`, `add_publisher`, `set_price_threshold`, `propose_owner`, `upgrade`, `seal`, and everything the operator can do. Normally the DAO. |
 | Operator        | `new`, then `set_operator` (owner only)        | Only `remove_publisher`. It exists so a leaked price-signing key can be cut off in one call instead of waiting out a vote.                                                                                                                                                                                                                  |
 | Market contract | `new` (fixed)                                  | Only `register_market`.                                                                                                                                                                                                                                                                                                                     |
-| Bond token      | `new` (fixed)                                  | Only `ft_on_transfer`, which is how bonds arrive.                                                                                                                                                                                                                                                                                           |
+| Verifier        | `new` (fixed)                                  | Only `mt_on_transfer`, which is how bonds arrive.                                                                                                                                                                                                                                                                                           |
 | Jurors          | Drawn per case by council                      | `commit_vote` and `reveal_vote` on the case they were drawn for.                                                                                                                                                                                                                                                                            |
 | Anyone          | n/a                                            | Propose, challenge and answer prices (by sending a bond), `resolve_draw`, `finalize`, `resolve_by_deadline`, `retry_apply`, `retry_unlock`, `withdraw_bond` (their own), `stage_code` (paying for the storage), and every view.                                                                                                             |
 
@@ -112,10 +109,11 @@ anyone else gets `Method new is private`.
 
 | Argument                | Meaning                                                                                                                                                                                                                                                                                                  |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `owner_id`              | The owner. Normally governance.                                                                                                                                                                                                                                                                          |
+| `owner_id`              | The owner, normally the DAO account.                                                                                                                                                                                                                                                                     |
 | `market_contract`       | The market contract.                                                                                                                                                                                                                                                                                     |
-| `bond_token`            | The token bonds are paid in.                                                                                                                                                                                                                                                                             |
-| `bond`                  | The bond amount, in raw token units. Every proposal and price submission must send exactly the current bond, and a challenge must send the bond its case was proposed with. Must be above zero.                                                                                                          |
+| `verifier_id`           | The Intents verifier account. Only it may deliver a bond, and every bond and payout is held there.                                                                                                                                                                                                       |
+| `collateral_token_id`   | The exact id of the collateral in the verifier, `nep141:<token contract>`. A value that does not start with `nep141:` is refused, because no other form has a balance. USDC on mainnet is `nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`. |
+| `bond`                  | The bond amount, in collateral units (six decimals for USDC). Every proposal and price submission must send exactly the current bond, and a challenge must send the bond its case was proposed with. Must be above zero.                                                                                                          |
 | `window_ms`             | How long the challenge window lasts after a proposal, in milliseconds.                                                                                                                                                                                                                                   |
 | `panel_deadline_ms`     | How long a jury has once it is seated, in milliseconds. The first half is for committing votes, the second half for revealing them.                                                                                                                                                                      |
 | `draw_window_ms`        | How long after a challenge, or after a jury fails to decide, a jury can still be drawn, in milliseconds. Must be above zero.                                                                                                                                                                             |
@@ -126,7 +124,7 @@ anyone else gets `Method new is private`.
 | `operator_id`           | The operator.                                                                                                                                                                                                                                                                                            |
 | `network`               | A word naming the network, such as `mainnet`. Signed into every price so a testnet signature is useless on mainnet. Must not be empty or contain a colon.                                                                                                                                                |
 | `price_threshold`       | How many publishers must sign the same price. At least 1.                                                                                                                                                                                                                                                |
-| `no_decision_recipient` | The account credited with the challenger's half bond when neither jury decided and no juror revealed. Normally the business wallet the market knows, which can differ from the owner. The owner changes it with `set_no_decision_recipient`. It has to be able to receive the bond token to withdraw it. |
+| `no_decision_recipient` | The account credited with the challenger's half bond when neither jury decided and no juror revealed. Normally the Trezu treasury, which can differ from the owner. The owner changes it with `set_no_decision_recipient`. It needs no registration anywhere: its share is paid into its own Intents account when it calls `withdraw_bond`. |
 
 The bond, the windows and the draw delay are set here and changed later by the owner (see "The
 owner's settings"). The tests use a 60 second window, a 60 second draw window and a 120 second
@@ -174,14 +172,15 @@ leaves the market unable to trade.
 
 ### 2. Someone proposes
 
-After the market closes, anyone can send exactly the bond to this contract with a message naming the
-answer (see "Messages"). The case opens as `proposed` and the challenge window starts.
+After the market closes, anyone can move exactly the bond from their own Intents balance to this contract
+with the verifier's `mt_transfer_call` and a message naming the answer (see "Messages"). The case opens as
+`proposed` and the challenge window starts.
 
 A proposal is refused unless: it carries exactly the current bond; the market is registered and has
 closed; the evidence text is at most 512 bytes; there is still time for a full challenge window, two
 jury rounds (each a draw window and a full panel deadline) and a 30 second buffer before the
-market's `resolve_by`; and no answer was proposed before. If any rule fails the bond goes straight
-back to the sender.
+market's `resolve_by`; and no answer was proposed before. If any rule fails the verifier
+returns the whole bond to the sender's Intents balance.
 
 ### 3. Nobody challenges
 
@@ -190,8 +189,8 @@ goes back to them to withdraw, and the answer is written to market.
 
 ### 4. Someone challenges
 
-Within the window, a different account sends exactly the bond with the message
-`challenge:<market>:<yes|no|void>`. The answer must differ from the proposed one, so a challenge
+Within the window, a different account moves exactly the bond to this contract through the verifier with the
+message `challenge:<market>:<yes|no|void>`. The answer must differ from the proposed one, so a challenge
 always names a second answer. The case becomes `disputed` in round 0. It records the challenger's
 answer, the jury size as the setting is at that moment, the last moment a jury can be drawn
 (`draw_by`, the challenge time plus the draw window), and the block height from which a jury may be
@@ -264,8 +263,8 @@ A case that settles with no decision resolves a price market to the answer its p
 and an event market to Void. The bonds are paid as in "Who gets paid what": the proposer gets their
 bond back, and half the challenger's bond goes to the jurors who revealed, in either round, split
 equally, and half to the proposer. With no juror having revealed, the jurors' half goes to the
-no-decision recipient, set in `new` and changed by the owner. It used to go to the owner, which is
-governance, and governance can use it only through a further proposal that calls `withdraw_bond`.
+no-decision recipient, set in `new` and changed by the owner. The owner is never paid. A recipient that is a
+DAO collects with a proposal that calls `withdraw_bond` with 1 yocto and at least 33 TGas.
 
 ### 9. Settling
 
@@ -279,7 +278,7 @@ council is told to release the jury, or both juries if there was a second round.
 
 Let B be the bond.
 
-| Case ends as                                                                                       | Proposer                              | Challenger                 | Jurors                                            | Owner     |
+| Case ends as                                                                                       | Proposer                              | Challenger                 | Jurors                                            | No-decision recipient |
 | -------------------------------------------------------------------------------------------------- | ------------------------------------- | -------------------------- | ------------------------------------------------- | --------- |
 | Unchallenged and final                                                                             | B back                                | n/a                        | n/a                                               | n/a       |
 | Disputed, a majority decided, the proposal was upheld (the jury's outcome equals the proposed one) | 2B minus the jurors' share            | nothing                    | The jurors' share                                 | nothing   |
@@ -299,9 +298,12 @@ jurors' half when no one revealed so that it leaves the two parties whatever the
 accounts that propose and challenge each other to stall a market end down by at least the jurors'
 share, a quarter of a bond when a jury decides and half a bond when none does.
 
-Money is credited to a per-account balance (`claimable_of`) and taken out with `withdraw_bond`,
-which sends it as tokens. The balance is zeroed before the transfer and restored if the transfer
-fails. The recipient must be registered with the token.
+Money is credited to a per-account balance (`claimable_of`) and taken out with `withdraw_bond`. It
+stays in the oracle's own Intents account until then. `withdraw_bond` zeroes the caller's balance,
+then has the oracle send an `mt_transfer` of 1 yocto through the verifier to the caller's own Intents
+account. The account is always the one that owns the claim: nobody can name another receiver. If the
+verifier refuses (its pause or an account lock), the callback gives the balance back and logs
+`bond_payout_failed`. The receiver needs no registration anywhere.
 
 Two behaviours worth knowing. If a proposer proposes Void and nobody decides, the case resolves
 Void, which is the answer they proposed, but they do not win both bonds: the jurors' half still
@@ -375,8 +377,8 @@ registered now.
 A price market carries a price rule (observation time, strike, decimals, direction), set by market
 and locked into the market's rule hash. Here is how its answer is produced.
 
-1. At or after the observation time, anyone can submit a price with `ft_transfer_call` (message
-   below) and the usual bond.
+1. At or after the observation time, anyone can submit a price with the verifier's `mt_transfer_call`
+   (message below) and the usual bond.
 2. The contract rebuilds what a publisher would have signed: the text
    `price:v1:<this contract>:<network>:<market id>:<observation time>:<price>:<decimals>`.
    Everything except the price is fixed by the market and the deployment, so one signature is good
@@ -416,7 +418,8 @@ Adding a key or changing the threshold grants or changes power over prices, so i
 Removing a key only takes power away, so the faster operator may do it.
 
 A submission with all 10 signing burned about 4.5 TGas here (9.4 in all) and worked with 30 TGas
-attached.
+attached to a direct call. Through the verifier, which keeps about 21 TGas of what is attached, a wallet's
+100 TGas leaves the oracle's receipt about 79.
 
 The off-chain publisher service that reads exchange prices and signs them is not built; until it
 exists price markets can be created and answered by hand, but nothing produces the signatures.
@@ -425,9 +428,26 @@ exists price markets can be created and answered by hand, but nothing produces t
 
 ## Messages: how bonds arrive
 
-Everything that needs a bond is a `ft_transfer_call` of exactly `bond` tokens to this contract. The
-`msg` says what to do. Only the bond token may call `ft_on_transfer`; anything else is refused with
-"wrong token". Any problem makes the call panic and the token returns the money.
+Everything that needs a bond is a `mt_transfer_call` on the verifier, sent by the person who holds the money, with
+this contract as the receiver, exactly `bond` units of the collateral token id and 1 yocto attached. The verifier
+moves the amount from the sender's Intents balance to this contract's and then calls `mt_on_transfer`. The `msg`
+says what to do. The hook runs these checks in this order, and any failure panics, which makes the verifier return
+the whole amount to the sender:
+
+| Check | Refusal |
+| --- | --- |
+| The caller is the verifier this contract was started with | `only the verifier can deliver money` |
+| One token id and one amount | `exactly one token and amount` |
+| The token id is the configured collateral id | `wrong token` |
+| `previous_owner_ids` is exactly the sender, so the money was the sender's own | `the money must come from the sender's own balance` |
+| The amount is above zero | `amount must be positive` |
+| The amount is the bond (the case's own bond for a challenge) | `send exactly the bond` |
+
+The sender the hook credits is the one the verifier reports, so a bond can only be posted from the account that owns
+the money. The hook answers `["0"]`, which keeps the whole amount. A plain deposit never reaches the hook, in any
+message form: the verifier credits the oracle's account and tells nobody, so that money is surplus no one is
+credited for (see "Things to know"). A direct NEP-141 transfer to this contract bounces, because it has no
+`ft_on_transfer`.
 
 | `msg`                                                            | What it does                                                                                                                |
 | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
@@ -457,7 +477,7 @@ Everything that needs a bond is a `ft_transfer_call` of exactly `bond` tokens to
 | `remove_publisher(key)`                                                               | Operator or owner                    | See above.                                                                                                                                                                                                                                                                                        |
 | `set_price_threshold(threshold)`                                                      | Owner                                | See above.                                                                                                                                                                                                                                                                                        |
 | `register_market(market_id, close_at, resolve_by, rule_hash, price_rule)`             | Market contract only                 | Records a market. Calling it twice for the same market changes nothing.                                                                                                                                                                                                                           |
-| `ft_on_transfer(sender_id, amount, msg)`                                              | Bond token only                      | Receives bonds.                                                                                                                                                                                                                                                                                   |
+| `mt_on_transfer(sender_id, previous_owner_ids, token_ids, amounts, msg)`               | The verifier only                    | Receives bonds. Checks as in "Messages", answers `["0"]`.                                                                                                                                                                                                                                         |
 | `resolve_draw(market_id)`                                                             | Anyone                               | Asks council to draw the jury for the case's current round. Needs the case disputed, no jury yet, the draw height reached, and the time not past `draw_by`. Reserves 250 TGas for the draw, so it refuses less than 275 TGas (`attach at least 275 TGas: the jury draw reads every staked seat`). |
 | `commit_vote(market_id, commitment)` (payable, 1 yocto)                               | A juror on that case                 | Commits a hidden vote, once, during the commit phase.                                                                                                                                                                                                                                             |
 | `reveal_vote(market_id, outcome, salt, reason)` (payable, 1 yocto)                    | A juror who committed                | Reveals the vote during the reveal phase, for the proposed answer or the challenger's. May settle the case, so it refuses less than 80 TGas at the top, even for a reveal that will not settle.                                                                                                   |
@@ -465,15 +485,15 @@ Everything that needs a bond is a `ft_transfer_call` of exactly `bond` tokens to
 | `resolve_by_deadline(market_id)`                                                      | Anyone, once `resolve_by` has passed | Settles whatever is settleable, or has the market resolve Void when there is no case. Refuses a case that still has time. Refuses less than 80 TGas.                                                                                                                                              |
 | `retry_apply(market_id)`                                                              | Anyone                               | Sends the final outcome to the market again.                                                                                                                                                                                                                                                      |
 | `retry_unlock(market_id)`                                                             | Anyone                               | Tells council to release the juries again. Refuses less than 35 TGas.                                                                                                                                                                                                                             |
-| `withdraw_bond()` (payable, 1 yocto)                                                  | Anyone, for their own balance        | Sends the caller's whole claimable balance as tokens.                                                                                                                                                                                                                                             |
+| `withdraw_bond()` (payable, 1 yocto)                                                  | Anyone, for their own balance        | Sends the caller's whole claimable balance to the caller's own Intents account by `mt_transfer`. Refuses less than 33 TGas.                                                                                                                                                                       |
 | `on_drawn`, `on_applied`, `on_bond_withdrawn`                                         | The contract itself                  | Callbacks.                                                                                                                                                                                                                                                                                        |
 
 ---
 
 ## The owner's settings
 
-Six settings can be changed by the owner, which in a real deployment means a governance vote and its
-timelock. Each has the same check as `new` (above zero) and each logs an event. A seventh,
+Six settings can be changed by the owner, which in a real deployment means a DAO proposal. Its voting period is the
+only delay. Each has the same check as `new` (above zero) and each logs an event. A seventh,
 `set_no_decision_recipient(recipient)`, takes an account, applies to cases that settle from then on,
 and logs `no_decision_recipient_set`.
 
@@ -493,14 +513,14 @@ deadline of that market use them. So a longer setting cannot make a registered m
 and a shorter one does not hurry a market that was given more time. The draw delay is the one
 setting that is not stored per market, and it has no upper bound, as in `new`: a very large value
 would make every jury draw impossible before its `draw_by`, and the case would end with no decision.
-Governance should not set it near the draw window.
+The owner should not set it near the draw window.
 
 ---
 
 ## Upgrading this contract
 
 No access key can replace this code outside a vote, and no deleted key can freeze it. The owner
-(governance) calls `upgrade` with the hash of a build that anyone staged with `stage_code`. The call
+(the DAO) calls `upgrade` with the hash of a build that anyone staged with `stage_code`. The call
 needs at least 100 TGas (`attach at least 100 TGas to upgrade`), takes the staged wasm out of
 storage and sends one batch to this account: deploy, then `migrate`. A `migrate` that panics reverts
 the deploy and the old code stays. The staged copy is gone either way, so a failed upgrade stages
@@ -521,13 +541,15 @@ here, is a layout change and so needs a version bump and a `StateV1` once anythi
 
 Open cases and registered markets are part of the state `migrate` reads, so they survive an upgrade
 unchanged. The sandbox test checks that a case is identical before and after. Bonds waiting in
-`claimable` stay withdrawable: `withdraw_bond` is not paused by anything and is not touched by an
-upgrade.
+`claimable` stay withdrawable: `withdraw_bond` is not paused by anything in this contract and is not
+touched by an upgrade. The upgrade does not move money: the bonds stay in this contract's Intents
+account, and the books that describe them (`claimable`, `claimable_total` and `bonds_held`) are part of
+the state `migrate` reads.
 
 Measured in the sandbox for a 281 KB build: `upgrade` burns 33 TGas in all, 19 of them the deploy
 and migrate batch, and `seal` burns 2. The accepted deployment controls are in
-[DEPLOY.md](DEPLOY.md#3-administration-and-upgrades). Trezu/Sputnik execution and the required
-delay still need their own integration evidence.
+[DEPLOY.md](DEPLOY.md#3-administration-and-upgrades). Trezu/Sputnik execution still needs its own
+integration evidence.
 
 ---
 
@@ -538,8 +560,9 @@ delay still need their own integration evidence.
 | `is_staged(code_hash)`       | Whether a wasm with that sha256 is staged.                                                                                                                                                                                                                                                      |
 | `get_case(market_id)`        | The case, or nothing. Fields below.                                                                                                                                                                                                                                                             |
 | `get_market_info(market_id)` | What was registered: close, resolve_by, rule hash, price rule, and the three windows the market was registered with.                                                                                                                                                                            |
-| `claimable_of(account_id)`   | An account's withdrawable bonds and juror pay.                                                                                                                                                                                                                                                  |
-| `config()`                   | state version, upgrade proven, upgrade in flight, owner, pending owner, market, bond token, bond, window, panel deadline, draw window, council, jury size, draw delay, minimum proposal time, minimum gap, operator, network, the publisher keys, the threshold, and the no-decision recipient. |
+| `claimable_of(account_id)`   | An account's withdrawable bonds and juror pay.                                                                                                                                                                                                                                                    |
+| `total_owed()`               | Everything this contract owes, in collateral units: the bonds sitting in cases that are not final plus everything claimable. At rest it equals `mt_balance_of(this contract, collateral token id)` in the verifier. A payout in flight makes the verifier's figure the larger for a block. A smaller one is an incident. |
+| `config()`                   | state version, upgrade proven, upgrade in flight, owner, pending owner, market, verifier, collateral token id, bond, window, panel deadline, draw window, council, jury size, draw delay, minimum proposal time, minimum gap, operator, network, the publisher keys, the threshold, and the no-decision recipient. |
 
 ### The case record
 
@@ -600,6 +623,8 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `final`                           | A case settled                                                                                  | market_id, outcome, ruling (`unchallenged`, `decided` or `no_decision`), juror_pay_each, paid_jurors, delinquent                 |
 | `deadline_void`                   | `resolve_by_deadline` had the market resolve Void, which it does only for a market with no case | market_id                                                                                                                        |
 | `outcome_applied`                 | The market received the outcome                                                                 | market_id                                                                                                                        |
+| `bond_paid`                       | The verifier paid a `withdraw_bond` out, seen by the callback                                    | account, amount                                                                                                                  |
+| `bond_payout_failed`              | The verifier refused the payout and the callback gave the balance back                          | account, amount                                                                                                                  |
 
 ---
 
@@ -608,7 +633,7 @@ Each logs `EVENT_JSON:` and JSON of the form
 | Message                                                                                                                                                                                                                                             | Cause                                                                                                                |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `owner only` / `operator or owner only` / `market contract only` / `not the proposed owner`                                                                                                                                                         | Access refusals.                                                                                                     |
-| `wrong token`                                                                                                                                                                                                                                       | `ft_on_transfer` from something other than the bond token.                                                           |
+| `only the verifier can deliver money` / `exactly one token and amount` / `wrong token` / `the money must come from the sender's own balance` / `amount must be positive` | A delivery to `mt_on_transfer` that is not one bond of the collateral token from the sender's own balance, or that did not come from the verifier. |
 | `send exactly the bond`                                                                                                                                                                                                                             | The wrong amount.                                                                                                    |
 | `bad market id` / `bad price` / `unknown action` / `outcome must be yes, no or void`                                                                                                                                                                | A malformed message. A challenge with no answer is one.                                                              |
 | `market is not registered`                                                                                                                                                                                                                          | The market was never registered here.                                                                                |
@@ -625,7 +650,7 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `challenge window is still open` / `the panel still has time` / `already final`                                                                                                                                                                     | `finalize` at the wrong moment.                                                                                      |
 | `the answer deadline has not passed` / `already resolved`                                                                                                                                                                                           | `resolve_by_deadline` too early, or for a market whose final answer the market already has.                          |
 | `nothing to apply` / `no settled dispute to unlock`                                                                                                                                                                                                 | Retrying something not needed.                                                                                       |
-| `nothing to withdraw`                                                                                                                                                                                                                               | No balance.                                                                                                          |
+| `nothing to withdraw`                                                                                                                                                                                                                                | No balance.                                                                                                          |
 | `resolve_by is too soon after close_at for a case to finish`                                                                                                                                                                                        | A market refused at registration.                                                                                    |
 | `not enough price publishers are configured`                                                                                                                                                                                                        | A price market with too few publishers.                                                                              |
 | `a price market is answered with a signed price` / `not a price market`                                                                                                                                                                             | Wrong submission type.                                                                                               |
@@ -647,7 +672,9 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `Method <name> is private`                                                                                                                                                                                                                          | A callback, or `new`, called by anyone but the contract's own account.                                               |
 | `attach at least 80 TGas: a call that settles a case sends the answer to the market and releases the juries`                                                                                                                                        | `reveal_vote`, `finalize` or `resolve_by_deadline` with less than the settling floor.                                |
 | `attach at least 275 TGas: the jury draw reads every staked seat`                                                                                                                                                                                   | `resolve_draw` with less than the draw floor.                                                                        |
-| `attach at least 35 TGas: each jury's release gets an equal share of what is attached`                                                                                                                                                              | `retry_unlock` with less than its floor.                                                                             |
+| `attach at least 35 TGas: each jury's release gets an equal share of what is attached` | `retry_unlock` with less than its floor. |
+| `attach at least 33 TGas: a withdrawal sends the payout and then settles it` | `withdraw_bond` with less than its floor. |
+| `the collateral token id must look like nep141:<token>` | `new` with a collateral id that is not in the exact `nep141:` form. |
 
 ---
 
@@ -659,7 +686,8 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `on_drawn`                           | 15 TGas                                                                                                                             |
 | Writing the outcome to market        | 20 TGas, plus a 10 TGas callback                                                                                                    |
 | Releasing a jury (`unlock_case`)     | 15 TGas for each jury, so two calls after a second round. Measured at most 8.9 TGas for a 21-juror case where every juror forfeits. |
-| Bond withdrawal transfer             | 15 TGas, plus a 10 TGas callback                                                                                                    |
+| A bond through the verifier          | The verifier keeps about 21 TGas of what is attached and the oracle's receipt gets the rest. Proposing or challenging opened the case with 22 TGas attached and did not with 21, and the receipt burns 1.9 TGas. A wallet attaches 100. The oracle enforces no floor here: a call that runs short fails in the oracle and the verifier refunds the sender. |
+| Bond withdrawal transfer             | 15 TGas for the verifier's `mt_transfer`, which burned 3.9, plus a 10 TGas callback                                                |
 | `migrate` in the upgrade batch       | 30 TGas reserved (the batch of deploy and migrate burned 19 for a 281 KB build)                                                     |
 | `upgrade`                            | At least 100 TGas attached; 33 burned in all for a 281 KB build                                                                     |
 
@@ -674,6 +702,7 @@ steps of 2 where a number is given.
 | `resolve_by_deadline`      | 80    | 60, as above                                               | the same code path as `finalize`; the void path was run at the floor | not searched                                                                          |
 | `resolve_draw`             | 275   | 265: the draw 250 and `on_drawn` 15                        | 2.3 here, 14 in all with 34 seats staked                             | 270                                                                                   |
 | `retry_unlock`             | 35    | none fixed: the caller's gas is shared by the two releases | 3.0                                                                  | not searched; each release gets 15 at the floor, and the largest release measured 6.1 |
+| `withdraw_bond`            | 33    | 25: the payout 15 and its callback 10                      | 2.4 in the oracle's largest receipt, 3.9 in the verifier, 8 in all                     | 29 (28 and less failed whole, with the claimable untouched)                                                                        |
 
 A reveal that does not settle burns about 4 TGas and still has to meet the 80 floor, because the
 call cannot know at the top whether it will settle. The 30 TGas common as a wallet default is not
@@ -686,8 +715,10 @@ the sandbox at the floor.
 
 ## Security properties checked by tests
 
-Every restricted method refuses a stranger; every callback refuses a direct call; a token other than
-the bond token cannot bond; malformed messages bounce with the money back; a copied commitment
+Every restricted method refuses a stranger; every callback refuses a direct call; the verifier hook refuses
+every caller but the verifier, another token id, a batch, a zero amount and money that was not the sender's
+own, and a direct call to it opens no case; a plain deposit to the oracle's account is surplus and credits
+nobody; malformed messages bounce with the money back from the verifier; a copied commitment
 cannot be revealed by the copier; a challenge that names the proposed answer is refused and a vote
 for a third outcome is refused; a bogus challenge costs the attacker the whole bond; a no-decision
 with no juror revealing pays the recipient and never the owner; a market never reaches its deadline
@@ -700,6 +731,14 @@ always pays out exactly two bonds (randomized over 400 cases) and only to jurors
 jury drawn at the last allowed moment still gets its full time; a limited-access key cannot commit
 or reveal; and a signature is good for exactly one price of one market, network and contract, with
 each field of the signed text checked by changing it.
+
+After every finished step of a full dispute, and of a dispute nobody decided, `total_owed` equals what the
+verifier holds for the oracle, through every payee withdrawing; a payout the verifier refuses (an account
+lock or a paused transfer) gives the balance back and the books stay equal; juror pay and the
+no-decision share come out of the oracle's own account and leave the Council's balance and its revenue
+count unchanged; the oracle registers no key in the verifier and keeps predecessor authentication on; and
+source guards fail if the oracle code names a NEP-141 call, a transfer call, any verifier admin method or
+holder revenue.
 
 Every owner setting refuses a stranger, the operator and a zero; a market registered before a
 setting change keeps its windows for the proposal, the draw and the panel deadline, including the
@@ -725,7 +764,13 @@ floor refuses one TGas less and works at the floor, in the largest case the suit
 | The oracle pays its own storage                                       | Cases, votes and balances are stored at the oracle's expense, about a quarter of a NEAR for a case with 21 maximum-length reasons. Its account must be funded.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | A keeper outage is tested for two cases                               | Nobody calls anything from a proposal to a second past `resolve_by`. An unchallenged proposal is then applied as the answer by the first `resolve_by_deadline`, the proposer's bond is back, winners redeem, and the market's own void stays shut. A dispute nobody drew a jury for ends in a Void at the same call, with the bonds split as a no-decision splits them. Other outages are not tested: for example a jury that is seated and silent when the deadline passes.                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | What the tests do not cover                                           | The sandbox is a single shard, so receipt ordering across shards, cross-shard latency and gas under congestion are untested. There has been no testnet soak.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| Keys                                                                  | Until `seal` has run, the deploy key can replace this code outside every vote. After it, only a governance upgrade can. A sealed contract with a broken upgrade path cannot be fixed, so prove one upgrade first.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Where the money is | Every bond sits in this contract's own account in the Intents verifier, and nowhere else. The verifier's pause and account-lock roles can stop every payout. A locked oracle account keeps receiving bonds it cannot pay out, so the keeper watches `is_account_locked` and the deployment should not advertise proposing while the account is locked. A payout the verifier refuses is given back to the claimable and logged as `bond_payout_failed`. |
+| Surplus | A plain deposit to the oracle's account, in any message form including the old notify form, is credited to the oracle by the verifier and tells the oracle nothing. No method credits it to anyone and `total_owed` leaves it out, so the verifier balance minus `total_owed` is the surplus. Nothing spends it either. |
+| Reconciling | `total_owed` is the bonds in cases that are not final plus everything claimable. At rest it equals `mt_balance_of(oracle, collateral token id)`. A payout in flight, or a bond whose hook has not run yet, makes the verifier's figure larger for a block. A smaller figure is an incident. The keeper's `check` compares the two at one finalized block. |
+| No unresolved payout state | `mt_transfer` returns nothing and runs as one verifier receipt, so an error means nothing moved and the callback gives the claimable back. The oracle never uses `mt_transfer_call`, the call whose result can be lost, so it has no counterpart of the market's `revenue_unresolved`. If the callback itself ran out of gas (it gets 10 TGas and the oracle burns under 3) the claimable would stay at zero with the money still in the account. That shows as surplus, and nothing can pay it twice. |
+| Who can collect a payout | Only the account that owns a claim, by calling `withdraw_bond` with 1 yocto. There is no push payout, so a DAO that is the no-decision recipient needs a proposal for each collection. |
+| The verifier is trusted | Bond custody depends on the verifier's own roles and code, which the oracle cannot change. The sandbox tests run the verifier bytes whose hash `intents.near` had when [INTENTS-PROOF.md](INTENTS-PROOF.md) was written. The real USDC token and mainnet behaviour were not run. |
+| Keys                                                                  | Until `seal` has run, the deploy key can replace this code outside every vote. After it, only a DAO upgrade can. A sealed contract with a broken upgrade path cannot be fixed, so prove one upgrade first.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | A challenged price market keeps the signed price when no jury decides | After two rounds without a majority an event market resolves Void, and a price market resolves to the price the publishers signed, because a signed price from `price_threshold` publishers is objective evidence. The consequence: if `price_threshold` publishers are compromised together and sign a wrong price, an honest challenger needs an active jury majority to overturn it. Juror apathy is enough for the wrong price to stand, where before it produced a Void. The assumption is a design choice. Keep it explicit and watch it: put it in the Terms' risk section, alert on every `challenged` event of a price market, and keep `price_threshold` at 2 or more with the publishers on different operators and infrastructure. Making a price market Void in that case is a one-line change in `close_round`, at the cost of bringing back the cheap Void for price markets. |
-| Website                                                               | A challenge has to send the case's own `bond`, not the bond in `config()`, once the owner has changed it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Website                                                               | A challenge has to send the case's own `bond`, not the bond in `config()`, once the owner has changed it. A bond is a `mt_transfer_call` on the verifier with 1 yocto attached and the token id from `config()`, never a transfer to a token contract: a NEP-141 transfer to the oracle bounces.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | No outside audit                                                      | The only review is the self-review in `AUDIT.md`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
