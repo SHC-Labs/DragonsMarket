@@ -1,5 +1,9 @@
 /* Tailwind v4 mapping of the design tokens. Import after tokens.css.
    Utilities: bg-canvas, bg-surface, bg-raised, text-fg, text-muted, border-border, text-yes, text-council, rounded-md ... */
+/* Only brand colours exist as utilities; the stock Tailwind palette is removed. */
+@theme {
+  --color-*: initial;
+}
 @theme inline {
   --color-canvas: var(--bg);
   --color-surface: var(--surface);

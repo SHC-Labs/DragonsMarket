@@ -9,6 +9,7 @@
     "lint": "eslint",
     "tokens": "node scripts/generate-tokens.mjs",
     "test": "vitest run",
+    "check:brand": "node scripts/check-brand.mjs",
     "e2e": "playwright test",
     "serve": "node scripts/serve.mjs",
     "build:dev": "bash scripts/build-dev.sh",

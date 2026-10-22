@@ -13,7 +13,7 @@
 .partner-primary { display: inline-flex; align-items: center; gap: var(--s-3); min-height: var(--control-lg); margin-top: var(--s-7); padding: 0 var(--s-6); border: 1px solid color-mix(in oklab, var(--accent) 70%, var(--brand)); border-radius: var(--r-sm); background: var(--accent-fill); color: var(--on-accent); font-weight: 500; text-decoration: none; box-shadow: 0 1px 0 rgb(255 255 255 / 0.18) inset, 0 12px 28px -12px var(--glow-brand); transition: background var(--dur-2), box-shadow var(--dur-2), transform var(--dur-1); }
 .partner-primary:hover { background: var(--accent-fill-hover); box-shadow: 0 1px 0 rgb(255 255 255 / 0.18) inset, 0 16px 36px -12px var(--glow-brand); }
 .partner-primary:active { transform: scale(0.98); }
-.partner-hero-art { position: relative; margin: 0; min-width: 0; border-radius: var(--r-lg); overflow: hidden; border: 1px solid var(--line); box-shadow: var(--elev-3), 0 30px 90px -30px color-mix(in oklab, #3b5bff 45%, transparent); transform: perspective(1200px) rotateY(-4deg); transition: transform var(--dur-5) var(--ease-out); }
+.partner-hero-art { position: relative; margin: 0; min-width: 0; border-radius: var(--r-lg); overflow: hidden; border: 1px solid var(--line); box-shadow: var(--elev-3), 0 30px 90px -30px color-mix(in oklab, var(--partner-blue) 45%, transparent); transform: perspective(1200px) rotateY(-4deg); transition: transform var(--dur-5) var(--ease-out); }
 .partner-hero-art:hover { transform: perspective(1200px) rotateY(0deg); }
 .partner-hero-art > img { display: block; width: 100%; height: auto; aspect-ratio: 5 / 3; object-fit: cover; object-position: 44% center; }
 .partner-games { padding: var(--section-space) 0; border-top: 1px solid var(--line); }

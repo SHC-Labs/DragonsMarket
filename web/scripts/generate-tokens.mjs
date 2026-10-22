@@ -23,6 +23,7 @@ const vars = (prefix, group) => Object.entries(group).map(([k, v]) => `  --${pre
 const fonts = Object.entries(tokens.font).map(([role, f]) => `  --font-${role}-stack: var(${f.variable}), "${f.family}", ${f.fallback};`);
 const scale = [
   ...vars('brand-', Object.fromEntries(Object.entries(tokens.brand).map(([k, v]) => [k, v.value]))),
+  ...vars('partner-', Object.fromEntries(Object.entries(tokens.partner).map(([k, v]) => [k, v.value]))),
   ...fonts,
   ...vars('fs-', tokens.size), ...vars('lh-', tokens.leading), ...vars('track-', tokens.tracking),
   ...vars('s-', tokens.space), ...vars('r-', tokens.radius), ...vars('control-', tokens.control),

@@ -53,6 +53,12 @@
   --brand-mint-deep: #23734d;
   --brand-night: #0b080e;
   --brand-bone: #f0edf2;
+  --partner-spark: #ff8a3d;
+  --partner-flare: #ff3d6e;
+  --partner-smoke: #7b4fa8;
+  --partner-gold: #ffd166;
+  --partner-cyan: #3ad8ff;
+  --partner-blue: #3b5bff;
   --font-display-stack: var(--font-funnel), "Funnel Display", var(--font-sans-stack);
   --font-sans-stack: var(--font-plex), "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono-stack: var(--font-plex-mono), "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
