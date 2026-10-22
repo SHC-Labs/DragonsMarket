@@ -334,6 +334,19 @@ async fn the_keeper_sweeps_fees_once_they_reach_the_minimum_with_keys_scoped_to_
     Ok(())
 }
 
+// The keeper reads the last final block, which trails the tip further on a loaded runner than the fixed wait in
+// `run_keeper` allows for. Run the check again, moving the chain on, until it shows the state the test just set.
+async fn check_showing(w: &World, expected: &str) -> (String, bool) {
+    const ATTEMPTS: usize = 8;
+    for _ in 1..ATTEMPTS {
+        let (out, ok) = keeper(w, &["check"]).await;
+        if out.contains(expected) {
+            return (out, ok);
+        }
+    }
+    keeper(w, &["check"]).await
+}
+
 #[tokio::test]
 async fn the_deploy_check_reports_whether_the_council_can_seat_a_jury_and_a_second_one() -> anyhow::Result<()> {
     let w = setup().await?;
@@ -366,7 +379,7 @@ async fn the_deploy_check_reports_whether_the_council_can_seat_a_jury_and_a_seco
         .transact()
         .await?
         .into_result()?;
-    let (out, ok) = keeper(&w, &["check"]).await;
+    let (out, ok) = check_showing(&w, "jury size 5 then").await;
     assert!(
         !ok && out.contains("PROBLEM") && out.contains("7 are needed to be safe"),
         "{out}"
@@ -379,7 +392,7 @@ async fn the_deploy_check_reports_whether_the_council_can_seat_a_jury_and_a_seco
         .transact()
         .await?
         .into_result()?;
-    let (out, ok) = keeper(&w, &["check"]).await;
+    let (out, ok) = check_showing(&w, "jury size 7 then").await;
     assert!(!ok && out.contains("every draw will fail"), "{out}");
 
     // Back to 3 with 12 different holders: both juries and both parties fit.
@@ -390,13 +403,13 @@ async fn the_deploy_check_reports_whether_the_council_can_seat_a_jury_and_a_seco
         .await?
         .into_result()?;
     add_seat_holders(&w, 6).await?;
-    let (out, ok) = keeper(&w, &["check"]).await;
+    let (out, ok) = check_showing(&w, "11 different seat holders").await;
     assert!(
         !ok && out.contains("11 different seat holders") && out.contains("12 are needed (3 + 7 + 2)"),
         "{out}"
     );
     add_seat_holders(&w, 1).await?;
-    let (out, ok) = keeper(&w, &["check"]).await;
+    let (out, ok) = check_showing(&w, "12 different seat holders").await;
     assert!(
         ok && out.contains("12 different seat holders") && out.trim_end().ends_with("ok"),
         "{out}"
