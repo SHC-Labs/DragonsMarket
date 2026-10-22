@@ -380,3 +380,6 @@
   .lockup-x { animation: blade-draw 380ms var(--ease-out) 650ms both; }
   .lockup-x-b { animation-delay: 800ms; }
 }
+
+/* Partnerships keeps its original mint glow around the Dragons' mark. */
+.partnership-page { --council: var(--crest); --council-tint: color-mix(in oklab, var(--crest) 14%, transparent); --glow-council: color-mix(in oklab, var(--crest) 22%, transparent); }

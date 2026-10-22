@@ -1,5 +1,5 @@
 {
-  "description": "Canonical shipped palette. Generate app/palette.css with npm run tokens.",
+  "description": "Canonical shipped palette: one purple theme on every page. Generate app/palette.css with npm run tokens.",
   "themes": {
     "dark": {
       "bg": "#0b080e",
@@ -15,9 +15,9 @@
       "on-accent": "#ffffff",
       "accent-hover": "#8b4093",
       "focus": "#d4a2db",
-      "council": "#a8dfc0",
-      "council-soft": "#193c29",
-      "on-council": "#112c1d",
+      "council": "#d4a2db",
+      "council-soft": "#2f0e35",
+      "on-council": "#1a0b1e",
       "yes": "#e7c2f7",
       "yes-soft": "#290036",
       "no": "#2fa39a",
@@ -44,7 +44,8 @@
       "category-world-bg": "#243b41",
       "category-world-ink": "#a9d1d9",
       "category-other-bg": "#35323c",
-      "category-other-ink": "#c7c3d0"
+      "category-other-ink": "#c7c3d0",
+      "crest": "#a8dfc0"
     },
     "light": {
       "bg": "#fbfafc",
@@ -60,8 +61,8 @@
       "on-accent": "#ffffff",
       "accent-hover": "#570068",
       "focus": "#6e0183",
-      "council": "#23734d",
-      "council-soft": "#dcefe2",
+      "council": "#6e0183",
+      "council-soft": "#f0e5f3",
       "on-council": "#ffffff",
       "yes": "#5c0f6b",
       "yes-soft": "#f0e5f3",
@@ -89,93 +90,9 @@
       "category-world-bg": "#e6f0f2",
       "category-world-ink": "#356875",
       "category-other-bg": "#eceaef",
-      "category-other-ink": "#60566d"
+      "category-other-ink": "#60566d",
+      "crest": "#23734d"
     }
   },
-  "sections": {
-    "council": {
-      "dark": {
-        "bg": "#070d0a",
-        "surface": "#101a14",
-        "raised": "#14221a",
-        "border": "#263d2f",
-        "border-input": "#608c70",
-        "text": "#edf5ee",
-        "text-muted": "#b8ccbe",
-        "brand": "#a8dfc0",
-        "brand-soft": "#133722",
-        "accent": "#a8dfc0",
-        "on-accent": "#112c1d",
-        "accent-hover": "#93cdaa",
-        "focus": "#a8dfc0",
-        "council": "#a8dfc0",
-        "council-soft": "#193c29",
-        "on-council": "#112c1d",
-        "info": "#b8ccbe",
-        "info-soft": "#14221a"
-      },
-      "light": {
-        "bg": "#f4faf6",
-        "surface": "#ffffff",
-        "raised": "#e6f1e9",
-        "border": "#c5d9cb",
-        "border-input": "#688c74",
-        "text": "#142d1e",
-        "text-muted": "#4d6957",
-        "brand": "#18613d",
-        "brand-soft": "#dcefe2",
-        "accent": "#23734d",
-        "on-accent": "#ffffff",
-        "accent-hover": "#1c5e3f",
-        "focus": "#23734d",
-        "council": "#23734d",
-        "council-soft": "#dcefe2",
-        "on-council": "#ffffff",
-        "info": "#4d6957",
-        "info-soft": "#e6f1e9"
-      }
-    },
-    "watchlist": {
-      "dark": {
-        "bg": "#0c1511",
-        "surface": "#14221a",
-        "raised": "#17281e",
-        "border": "#2c4837",
-        "border-input": "#608c70",
-        "text": "#edf5ee",
-        "text-muted": "#b8ccbe",
-        "brand": "#a8dfc0",
-        "brand-soft": "#133722",
-        "accent": "#a8dfc0",
-        "on-accent": "#112c1d",
-        "accent-hover": "#93cdaa",
-        "focus": "#a8dfc0",
-        "council": "#a8dfc0",
-        "council-soft": "#193c29",
-        "on-council": "#112c1d",
-        "info": "#b8ccbe",
-        "info-soft": "#17281e"
-      },
-      "light": {
-        "bg": "#f4faf6",
-        "surface": "#ffffff",
-        "raised": "#e6f1e9",
-        "border": "#c5d9cb",
-        "border-input": "#688c74",
-        "text": "#142d1e",
-        "text-muted": "#4d6957",
-        "brand": "#18613d",
-        "brand-soft": "#dcefe2",
-        "accent": "#23734d",
-        "on-accent": "#ffffff",
-        "accent-hover": "#1c5e3f",
-        "focus": "#23734d",
-        "council": "#23734d",
-        "council-soft": "#dcefe2",
-        "on-council": "#ffffff",
-        "info": "#4d6957",
-        "info-soft": "#e6f1e9"
-      }
-    }
-  }
+  "sections": {}
 }

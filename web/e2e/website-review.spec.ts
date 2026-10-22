@@ -39,7 +39,7 @@ test("placeholder ticket makes no quote or transaction request",async({page})=>{
   expect(calls.some(c=>/quote_buy|quote_sell|broadcast/.test(c))).toBe(false);
 });
 
-test("Council has a complete green palette, shared fonts and responsive Dragons Market branding",async({page})=>{
+test("Council shares the purple venue palette, shared fonts and responsive Dragons Market branding",async({page})=>{
   for(const theme of ["dark","light"]){
     await page.goto("/");
     await page.evaluate(t=>{localStorage.setItem("council-theme",t);document.documentElement.dataset.theme=t;window.dispatchEvent(new Event("theme-change"));},theme);
@@ -47,12 +47,13 @@ test("Council has a complete green palette, shared fonts and responsive Dragons 
     const font=await page.getByRole("heading",{level:1}).evaluate(e=>getComputedStyle(e).fontFamily);
     const main=page.getByRole("navigation",{name:"Main",exact:true}).filter({visible:true});
     await main.getByRole("link",{name:"Council",exact:true}).click();
-    await expect(page.locator("html")).toHaveAttribute("data-palette","council");
+    await expect(page.locator("html")).toHaveAttribute("data-palette","venue");
     await expect(page.getByRole("heading",{level:1})).toHaveText("Dragon Council");
     expect(await page.getByRole("heading",{level:1}).evaluate(e=>getComputedStyle(e).fontFamily)).toBe(font);
-    expect(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor)).not.toBe(venueBg);
-    await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content",theme==="dark"?"#070d0a":"#f4faf6");
-    expect(await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue("--raised").trim())).toBe(theme==="dark"?"#14221a":"#e6f1e9");
+    // 2026-10-21: the team asked for one purple theme on every page; Council no longer switches to green.
+    expect(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor)).toBe(venueBg);
+    await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content",theme==="dark"?"#0b080e":"#fbfafc");
+    expect(await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue("--raised").trim())).toBe(theme==="dark"?"#210f26":"#f2edf4");
     await expect(page.getByRole("link",{name:"Dragons Market home"})).toHaveCount(2);
     await expect(page.locator(".site-brand .brand-mark")).toHaveCount(2);
     expect(await page.locator(".brand-mark").first().evaluate(e=>getComputedStyle(e).maskImage)).toContain("/brand/dragon-crest.png");
@@ -62,9 +63,9 @@ test("Council has a complete green palette, shared fonts and responsive Dragons 
     const results=await new AxeBuilder({page}).withTags(["wcag2a","wcag2aa","wcag21aa","wcag22aa"]).analyze();
     expect(results.violations).toEqual([]);
     await page.reload();
-    await expect(page.locator("html")).toHaveAttribute("data-palette","council");
+    await expect(page.locator("html")).toHaveAttribute("data-palette","venue");
     await page.getByRole("button",{name:`Switch to ${theme==="dark"?"light":"dark"} theme`}).click();
-    await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content",theme==="dark"?"#f4faf6":"#070d0a");
+    await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content",theme==="dark"?"#fbfafc":"#0b080e");
     await page.getByRole("button",{name:`Switch to ${theme} theme`}).click();
     await main.getByRole("link",{name:"Markets",exact:true}).click();
     await expect.poll(()=>page.evaluate(()=>getComputedStyle(document.body).backgroundColor)).toBe(venueBg);

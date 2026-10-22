@@ -46,7 +46,7 @@
 
 /* Brand: the dragon crest recoloured through its silhouette, and the Sora wordmark. */
 .site-brand { display: inline-flex; align-items: center; gap: 0.6rem; color: var(--text); text-decoration: none; white-space: nowrap; }
-.brand-mark { display: block; flex-shrink: 0; width: 2rem; height: 2.4rem; background: var(--council); mask: url("/brand/dragon-crest.png") center / contain no-repeat; -webkit-mask: url("/brand/dragon-crest.png") center / contain no-repeat; }
+.brand-mark { display: block; flex-shrink: 0; width: 2rem; height: 2.4rem; background: var(--crest); mask: url("/brand/dragon-crest.png") center / contain no-repeat; -webkit-mask: url("/brand/dragon-crest.png") center / contain no-repeat; }
 .site-brand-header .brand-mark { width: 2.2rem; height: 2.65rem; filter: drop-shadow(0 0 12px var(--glow-council)); transition: transform var(--dur-4) var(--ease-emph); }
 .site-brand-header:hover .brand-mark { transform: rotate(-6deg) scale(1.06); }
 .brand-wordmark { font-family: var(--font-brand-stack); font-size: 1.125rem; font-weight: 600; letter-spacing: -0.045em; line-height: 1.2; }
@@ -111,7 +111,7 @@
 
 /* Recovery screens (missing page, missing market) */
 .page-header { position: relative; display: grid; justify-items: start; gap: var(--s-4); max-width: 40rem; padding: var(--s-11) 0 var(--s-9); }
-.page-header::before { content: ""; width: 3.5rem; height: 4.2rem; background: var(--council); mask: url("/brand/dragon-crest.png") center / contain no-repeat; -webkit-mask: url("/brand/dragon-crest.png") center / contain no-repeat; filter: drop-shadow(0 0 24px var(--glow-council)); }
+.page-header::before { content: ""; width: 3.5rem; height: 4.2rem; background: var(--crest); mask: url("/brand/dragon-crest.png") center / contain no-repeat; -webkit-mask: url("/brand/dragon-crest.png") center / contain no-repeat; filter: drop-shadow(0 0 24px var(--glow-council)); }
 .page-header-copy { min-width: 0; }
 .page-title { margin: 0; font-size: var(--fs-4xl); font-weight: 400; line-height: var(--lh-tight); letter-spacing: var(--track-display); }
 .page-description { margin: var(--s-3) 0 0; color: var(--text-muted); font-size: var(--fs-lg); line-height: var(--lh-body); overflow-wrap: anywhere; }
