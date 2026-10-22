@@ -54,8 +54,12 @@ const STATE_VERSION: u16 = 1;
 // Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
 const NEP141_PREFIX: &str = "nep141:";
 // Settling a case still takes one more cross-contract hop (apply) to reach the market. This keeps a case that used
-// its full allotted time clear of resolve_by, after which anyone can send the market its deadline answer.
-const APPLY_BUFFER_NS: u64 = 30_000_000_000;
+// its full allotted time clear of resolve_by, after which anyone can send the market its deadline answer. The owner can
+// change it within the range below, for markets registered afterwards. Under 5 seconds the hop could miss the room it
+// is meant to leave, and over 5 minutes every market would need an absurd gap between close_at and resolve_by.
+const DEFAULT_APPLY_BUFFER_NS: u64 = 30_000_000_000;
+const MIN_APPLY_BUFFER_NS: u64 = 5_000_000_000;
+const MAX_APPLY_BUFFER_NS: u64 = 300_000_000_000;
 // The council keeps one jury per key. A case's first jury is kept under the market id and its second under this bit
 // set on the id, so the two can never be taken for each other.
 const SECOND_ROUND_KEY: u64 = 1 << 63;
@@ -65,17 +69,27 @@ const MAX_REASON: usize = 1000;
 const MAX_PANEL: usize = 21;
 const MAX_SALT: usize = 64;
 // A submission with all 10 signing burned 4.5 TGas in this contract, 9.4 in all, and worked with 30 TGas attached
-// (measured in the sandbox).
-const MAX_PUBLISHERS: usize = 10;
+// (measured in the sandbox). The owner can change the limit within the range below: 25 publishers is the most that
+// keeps a submission inside its gas, and a limit of 1 is the least a price can be signed with.
+const DEFAULT_MAX_PUBLISHERS: u32 = 10;
+const MIN_MAX_PUBLISHERS: u32 = 1;
+const MAX_MAX_PUBLISHERS: u32 = 25;
 // The most market ids list_cases looks at in one call.
 const MAX_LIST_CASES: u32 = 50;
 // Of the loser's bond in a decided dispute, the share the jurors who revealed and sat with the majority split.
-// The rest goes to the winner.
-const JUROR_SHARE_BPS: u128 = 2_500;
+// The rest goes to the winner. The owner can change it for cases proposed afterwards, within the range below: under 5%
+// a juror is paid too little to be worth the stake, and over 50% the winner of a dispute would net less than the
+// loser's bond they were owed.
+const DEFAULT_JUROR_SHARE_BPS: u32 = 2_500;
+const MIN_JUROR_SHARE_BPS: u32 = 500;
+const MAX_JUROR_SHARE_BPS: u32 = 5_000;
 // Of the challenger's bond when neither jury decided, the share the jurors who revealed split. The rest goes to the
 // proposer. With no juror having revealed, this share goes to the no-decision recipient instead, so it always leaves the
-// two parties.
-const NO_DECISION_JUROR_SHARE_BPS: u128 = 5_000;
+// two parties. Changeable like the share above. At least 10% so a jury that reveals is paid something, and at most all of
+// it, which still leaves the proposer their own bond back.
+const DEFAULT_NO_DECISION_JUROR_SHARE_BPS: u32 = 5_000;
+const MIN_NO_DECISION_JUROR_SHARE_BPS: u32 = 1_000;
+const MAX_NO_DECISION_JUROR_SHARE_BPS: u32 = 10_000;
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
@@ -137,6 +151,8 @@ pub struct MarketInfo {
     window_ns: U64,
     panel_deadline_ns: U64,
     draw_window_ns: U64,
+    // The room left for apply() to land, as set when the market was registered.
+    apply_buffer_ns: U64,
 }
 
 impl MarketInfo {
@@ -200,6 +216,11 @@ pub struct Case {
     final_outcome: Option<Outcome>,
     applied: bool,
     challenged_at: U64,
+    // The shares of the bonds that go to jurors, as set when the answer was proposed. The case pays out on these, so a
+    // new setting touches only new cases. The first is of the loser's bond in a decided dispute, the second of the
+    // challenger's bond when no jury decided.
+    juror_share_bps: u32,
+    no_decision_share_bps: u32,
     // Set when a disputed case settles: the drawn jurors of either round who did not vote. The Council takes the
     // revenue their seats earned while serving. Kept on the case so retry_unlock sends the same list.
     delinquent: Vec<AccountId>,
@@ -279,6 +300,13 @@ pub struct OracleContract {
     collateral_token_id: String,
     bond: u128,
     window_ns: u64,
+    // The room left for apply() to land. Copied onto each market when it is registered.
+    apply_buffer_ns: u64,
+    // Copied onto each case when it is proposed, so a change never touches an open case. In basis points of the bond.
+    juror_share_bps: u32,
+    no_decision_share_bps: u32,
+    // The most publishers that can be added. Lowering it removes none; it only stops more being added.
+    max_publishers: u32,
     // How long each jury has once it is seated, the commit phase and then the reveal phase.
     panel_deadline_ns: u64,
     // How long after a challenge, or after the first jury fails, a jury can still be drawn.
@@ -471,6 +499,10 @@ impl OracleContract {
             collateral_token_id,
             bond: bond.0,
             window_ns: window_ms.0 * NS_PER_MS,
+            apply_buffer_ns: DEFAULT_APPLY_BUFFER_NS,
+            juror_share_bps: DEFAULT_JUROR_SHARE_BPS,
+            no_decision_share_bps: DEFAULT_NO_DECISION_JUROR_SHARE_BPS,
+            max_publishers: DEFAULT_MAX_PUBLISHERS,
             panel_deadline_ns: panel_deadline_ms.0 * NS_PER_MS,
             draw_window_ns: draw_window_ms.0 * NS_PER_MS,
             min_proposal_ns: min_proposal_ms.0 * NS_PER_MS,
@@ -579,6 +611,52 @@ impl OracleContract {
         self.draw_delay_blocks = draw_delay_blocks.0;
     }
 
+    // Applies to cases proposed from now on. A case already proposed pays out on the shares it was proposed with. The
+    // first is of the loser's bond in a decided dispute, the second of the challenger's bond when no jury decided.
+    pub fn set_juror_shares(&mut self, decided_bps: u32, no_decision_bps: u32) {
+        self.only_owner();
+        require!(
+            (MIN_JUROR_SHARE_BPS..=MAX_JUROR_SHARE_BPS).contains(&decided_bps),
+            "the decided juror share must be between 500 and 5000 basis points"
+        );
+        require!(
+            (MIN_NO_DECISION_JUROR_SHARE_BPS..=MAX_NO_DECISION_JUROR_SHARE_BPS).contains(&no_decision_bps),
+            "the no decision juror share must be between 1000 and 10000 basis points"
+        );
+        emit(
+            "juror_shares_set",
+            json!({ "decided_bps": decided_bps, "no_decision_bps": no_decision_bps }),
+        );
+        self.juror_share_bps = decided_bps;
+        self.no_decision_share_bps = no_decision_bps;
+    }
+
+    // Applies to markets registered from now on. A registered market keeps the buffer it was registered with.
+    pub fn set_apply_buffer_ms(&mut self, apply_buffer_ms: U64) {
+        self.only_owner();
+        require!(
+            (MIN_APPLY_BUFFER_NS / NS_PER_MS..=MAX_APPLY_BUFFER_NS / NS_PER_MS).contains(&apply_buffer_ms.0),
+            "the apply buffer must be between 5 seconds and 5 minutes"
+        );
+        emit("apply_buffer_set", json!({ "apply_buffer_ms": apply_buffer_ms }));
+        self.apply_buffer_ns = apply_buffer_ms.0 * NS_PER_MS;
+    }
+
+    // Live. It never removes a publisher, and it cannot go below the number that must sign a price.
+    pub fn set_max_publishers(&mut self, max_publishers: u32) {
+        self.only_owner();
+        require!(
+            (MIN_MAX_PUBLISHERS..=MAX_MAX_PUBLISHERS).contains(&max_publishers),
+            "the publisher limit must be between 1 and 25"
+        );
+        require!(
+            max_publishers >= self.price_threshold,
+            "the publisher limit cannot be below the number that must sign"
+        );
+        emit("max_publishers_set", json!({ "max_publishers": max_publishers }));
+        self.max_publishers = max_publishers;
+    }
+
     // Two steps, so a mistyped account cannot lock the owner out: nothing changes until the new owner accepts.
     pub fn propose_owner(&mut self, new_owner: AccountId) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
@@ -619,8 +697,8 @@ impl OracleContract {
         require!(key.curve_type() == CurveType::ED25519, "publishers use ed25519 keys");
         require!(!self.publishers.contains(&key), "already a publisher");
         require!(
-            self.publishers.len() < MAX_PUBLISHERS,
-            "there can be at most 10 publishers"
+            self.publishers.len() < self.max_publishers as usize,
+            &format!("there can be at most {} publishers", self.max_publishers)
         );
         emit("publisher_added", json!({ "key": key }));
         self.publishers.push(key);
@@ -699,6 +777,7 @@ impl OracleContract {
                 window_ns: U64(self.window_ns),
                 panel_deadline_ns: U64(self.panel_deadline_ns),
                 draw_window_ns: U64(self.draw_window_ns),
+                apply_buffer_ns: U64(self.apply_buffer_ns),
             },
         );
         emit("market_registered", json!({ "market_id": market_id.0.to_string() }));
@@ -1116,7 +1195,9 @@ impl OracleContract {
                 "draw_window_ns": self.draw_window_ns.to_string(), "council": self.council,
                 "jury_size": self.jury_size, "draw_delay_blocks": self.draw_delay_blocks.to_string(),
                 "min_proposal_ns": self.min_proposal_ns.to_string(),
-                "min_resolve_gap_ns": self.min_resolve_gap_ns().to_string(), "operator": self.operator,
+                "min_resolve_gap_ns": self.min_resolve_gap_ns().to_string(),
+                "apply_buffer_ns": self.apply_buffer_ns.to_string(), "juror_share_bps": self.juror_share_bps,
+                "no_decision_share_bps": self.no_decision_share_bps, "max_publishers": self.max_publishers, "operator": self.operator,
                 "network": self.network, "publishers": self.publishers, "price_threshold": self.price_threshold,
                 "no_decision_recipient": self.no_decision_recipient })
     }
@@ -1188,11 +1269,11 @@ impl OracleContract {
     }
 
     // The least a market registered now must leave between close_at and resolve_by: time to propose, then the longest a
-    // case can take, then room for apply() to land (see APPLY_BUFFER_NS).
+    // case can take, then room for apply() to land (see DEFAULT_APPLY_BUFFER_NS).
     fn min_resolve_gap_ns(&self) -> u64 {
         self.min_proposal_ns
             + case_span_ns(self.window_ns, self.draw_window_ns, self.panel_deadline_ns)
-            + APPLY_BUFFER_NS
+            + self.apply_buffer_ns
     }
 
     fn case(&self, id: u64) -> Case {
@@ -1225,7 +1306,7 @@ impl OracleContract {
         // A case must be able to finish, challenge and both juries included, with room left for apply() to land,
         // before the market's deadline answer is due.
         require!(
-            now + info.case_span_ns() + APPLY_BUFFER_NS <= info.resolve_by.0,
+            now + info.case_span_ns() + info.apply_buffer_ns.0 <= info.resolve_by.0,
             "too late to propose, the market will be voided at its deadline"
         );
         require!(!self.cases.contains_key(&id), "an answer was already proposed");
@@ -1255,6 +1336,8 @@ impl OracleContract {
                 final_outcome: None,
                 applied: false,
                 challenged_at: U64(0),
+                juror_share_bps: self.juror_share_bps,
+                no_decision_share_bps: self.no_decision_share_bps,
                 delinquent: vec![],
             },
         );
@@ -1301,7 +1384,7 @@ impl OracleContract {
         let info = self.market_info(id);
         let now = env::block_timestamp();
         let round_ns = info.draw_window_ns.0 + info.panel_deadline_ns.0;
-        if case.round == 0 && now + round_ns + APPLY_BUFFER_NS <= info.resolve_by.0 {
+        if case.round == 0 && now + round_ns + info.apply_buffer_ns.0 <= info.resolve_by.0 {
             case.round = 1;
             case.jury_size = (2 * case.jury_size + 1).min(MAX_PANEL as u32);
             case.draw_by = U64(now + info.draw_window_ns.0);
@@ -1353,6 +1436,8 @@ impl OracleContract {
         let delinquent = case.delinquent.clone();
         let round = case.round;
         let bond = case.bond.0;
+        let juror_share_bps = u128::from(case.juror_share_bps);
+        let no_decision_share_bps = u128::from(case.no_decision_share_bps);
         self.cases.insert(id, case);
         // The bonds that were put into this case are all handed out below, to the accounts that earned them.
         self.bonds_held -= if challenger.is_some() { 2 * bond } else { bond };
@@ -1364,7 +1449,7 @@ impl OracleContract {
                 // The loser's bond: a quarter shared by the majority jurors, the rest to the winner with the winner's own
                 // bond. The division rounds down and the winner keeps the remainder, so the two bonds are paid out exactly.
                 let winner = if outcome == proposed { proposer } else { c };
-                let pool = bond * JUROR_SHARE_BPS / 10_000;
+                let pool = bond * juror_share_bps / 10_000;
                 juror_pay = pool / majority.len() as u128;
                 for juror in &majority {
                     self.add_claimable(juror, juror_pay);
@@ -1377,7 +1462,7 @@ impl OracleContract {
                 // and neither found for them: half of their bond goes to the jurors who revealed, the rest to the
                 // proposer. With no juror having revealed, the no-decision recipient holds that half, so a pair of accounts
                 // that propose and challenge each other loses it whatever the juries do.
-                let pool = bond * NO_DECISION_JUROR_SHARE_BPS / 10_000;
+                let pool = bond * no_decision_share_bps / 10_000;
                 if revealed.is_empty() {
                     let recipient = self.no_decision_recipient.clone();
                     self.add_claimable(&recipient, pool);
@@ -1453,6 +1538,10 @@ mod tests {
     const COUNCIL: &str = "council.near";
     const RECIPIENT: &str = "biz.near";
     const NETWORK: &str = "testnet";
+    // The settings every test oracle starts with.
+    const APPLY_BUFFER_NS: u64 = DEFAULT_APPLY_BUFFER_NS;
+    const JUROR_SHARE_BPS: u128 = DEFAULT_JUROR_SHARE_BPS as u128;
+    const NO_DECISION_JUROR_SHARE_BPS: u128 = DEFAULT_NO_DECISION_JUROR_SHARE_BPS as u128;
 
     fn acct(name: &str) -> AccountId {
         name.parse().unwrap()
@@ -1545,6 +1634,7 @@ mod tests {
             window_ns: U64(WINDOW),
             panel_deadline_ns: U64(PANEL),
             draw_window_ns: U64(DRAW_WINDOW),
+            apply_buffer_ns: U64(DEFAULT_APPLY_BUFFER_NS),
         }
     }
 
@@ -1633,6 +1723,8 @@ mod tests {
                 final_outcome: None,
                 applied: false,
                 challenged_at: U64(0),
+                juror_share_bps: DEFAULT_JUROR_SHARE_BPS,
+                no_decision_share_bps: DEFAULT_NO_DECISION_JUROR_SHARE_BPS,
                 delinquent: vec![],
             },
         );
@@ -4333,5 +4425,248 @@ mod tests {
             o.total_owed(),
         );
         assert_eq!(before, after);
+    }
+
+    // ---- the policy settings the DAO can tune -------------------------------------------------------------------
+
+    #[test]
+    fn the_policy_settings_start_at_the_values_that_used_to_be_fixed() {
+        let c = fresh_oracle().config();
+        assert_eq!(c["apply_buffer_ns"], "30000000000");
+        assert_eq!(c["juror_share_bps"], 2_500);
+        assert_eq!(c["no_decision_share_bps"], 5_000);
+        assert_eq!(c["max_publishers"], 10);
+        assert_eq!(c["min_resolve_gap_ns"], MIN_GAP.to_string());
+    }
+
+    #[test]
+    fn the_policy_settings_refuse_a_stranger_and_the_operator() {
+        let mut o = fresh_oracle();
+        for who in ["stranger.near", OPERATOR] {
+            act_unpaid(who, 5);
+            assert!(
+                refusal(|| o.set_juror_shares(2_500, 5_000)).contains("owner only"),
+                "{who}"
+            );
+            assert!(
+                refusal(|| o.set_apply_buffer_ms(U64(30_000))).contains("owner only"),
+                "{who}"
+            );
+            assert!(refusal(|| o.set_max_publishers(10)).contains("owner only"), "{who}");
+        }
+    }
+
+    #[test]
+    fn the_juror_shares_refuse_values_outside_their_range_at_both_ends() {
+        let mut o = fresh_oracle();
+        act_unpaid(OWNER, 5);
+        for decided in [499, 5_001] {
+            let message = refusal(|| o.set_juror_shares(decided, 5_000));
+            assert!(
+                message.contains("decided juror share must be between 500 and 5000"),
+                "{decided}: {message}"
+            );
+        }
+        for none in [999, 10_001] {
+            let message = refusal(|| o.set_juror_shares(2_500, none));
+            assert!(
+                message.contains("no decision juror share must be between 1000 and 10000"),
+                "{none}: {message}"
+            );
+        }
+        o.set_juror_shares(500, 1_000);
+        o.set_juror_shares(5_000, 10_000);
+        assert_eq!(o.config()["juror_share_bps"], 5_000);
+    }
+
+    #[test]
+    fn the_juror_shares_show_in_config_and_emit_their_event() {
+        let mut o = fresh_oracle();
+        act_unpaid(OWNER, 5);
+        o.set_juror_shares(1_000, 2_000);
+        let c = o.config();
+        assert_eq!(c["juror_share_bps"], 1_000);
+        assert_eq!(c["no_decision_share_bps"], 2_000);
+        assert_eq!(
+            logged("juror_shares_set"),
+            vec![near_sdk::serde_json::json!({ "decided_bps": 1_000, "no_decision_bps": 2_000 })]
+        );
+    }
+
+    fn open_dispute(o: &mut OracleContract, id: u64) {
+        o.markets.insert(
+            id,
+            MarketInfo {
+                resolve_by: U64(MARKET_DEADLINE),
+                ..base_info()
+            },
+        );
+        act_as(VERIFIER, SECOND);
+        deliver(o, "carol.near", BOND, &format!("propose:{id}:yes:https://x"));
+        act_as(VERIFIER, CHALLENGED_AT);
+        deliver(o, "dave.near", BOND, &format!("challenge:{id}:no"));
+    }
+
+    // All three jurors are seated and revealed, so a ruling of either kind has jurors to pay.
+    fn jurors_revealed(o: &mut OracleContract, id: u64) {
+        let mut case = o.case(id);
+        case.panel = JURORS.iter().map(|j| acct(j)).collect();
+        case.seated = true;
+        case.votes = JURORS
+            .iter()
+            .map(|j| Vote {
+                juror: acct(j),
+                outcome: Outcome::No,
+                reason: "r".into(),
+            })
+            .collect();
+        o.cases.insert(id, case);
+    }
+
+    #[test]
+    fn a_case_pays_the_juror_shares_it_was_proposed_with() {
+        let mut o = oracle_with_bond(BOND);
+        open_dispute(&mut o, 0);
+        open_dispute(&mut o, 1);
+        act_unpaid(OWNER, 3 * SECOND);
+        o.set_juror_shares(1_000, 2_000);
+        open_dispute(&mut o, 2);
+        open_dispute(&mut o, 3);
+        assert_eq!(
+            (o.case(0).juror_share_bps, o.case(0).no_decision_share_bps),
+            (2_500, 5_000)
+        );
+        assert_eq!(
+            (o.case(2).juror_share_bps, o.case(2).no_decision_share_bps),
+            (1_000, 2_000)
+        );
+        for id in 0..4 {
+            jurors_revealed(&mut o, id);
+        }
+        act_as("anyone.near", 100 * SECOND);
+        o.settle(0, Outcome::No, Ruling::Decided);
+        let old = BOND * 2_500 / 10_000 / 3;
+        assert_eq!(owed(&o, "j0.near"), old);
+        o.settle(2, Outcome::No, Ruling::Decided);
+        let new = BOND * 1_000 / 10_000 / 3;
+        assert_eq!(owed(&o, "j0.near"), old + new);
+        o.settle(1, Outcome::Void, Ruling::NoDecision);
+        assert_eq!(owed(&o, "j1.near"), old + new + BOND * 5_000 / 10_000 / 3);
+        o.settle(3, Outcome::Void, Ruling::NoDecision);
+        assert_eq!(
+            owed(&o, "j2.near"),
+            old + new + BOND * 5_000 / 10_000 / 3 + BOND * 2_000 / 10_000 / 3
+        );
+    }
+
+    #[test]
+    fn get_case_shows_the_shares_and_list_cases_does_not() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        let case = near_sdk::serde_json::to_value(o.get_case(U64(0))).unwrap();
+        assert_eq!(case["juror_share_bps"], 2_500);
+        assert_eq!(case["no_decision_share_bps"], 5_000);
+        let row = near_sdk::serde_json::to_value(o.list_cases(U64(0), 1)).unwrap();
+        assert!(row[0].get("juror_share_bps").is_none() && row[0].get("no_decision_share_bps").is_none());
+        act_unpaid(OWNER, 5);
+        o.set_juror_shares(500, 1_000);
+        let case = near_sdk::serde_json::to_value(o.get_case(U64(0))).unwrap();
+        assert_eq!(case["juror_share_bps"], 2_500, "an open case keeps its shares");
+    }
+
+    #[test]
+    fn the_apply_buffer_refuses_values_outside_its_range_at_both_ends() {
+        let mut o = fresh_oracle();
+        act_unpaid(OWNER, 5);
+        for ms in [4_999, 300_001] {
+            let message = refusal(|| o.set_apply_buffer_ms(U64(ms)));
+            assert!(message.contains("between 5 seconds and 5 minutes"), "{ms}: {message}");
+        }
+        o.set_apply_buffer_ms(U64(5_000));
+        assert_eq!(o.config()["apply_buffer_ns"], "5000000000");
+        o.set_apply_buffer_ms(U64(300_000));
+        assert_eq!(o.config()["apply_buffer_ns"], "300000000000");
+        assert_eq!(logged("apply_buffer_set").last().unwrap()["apply_buffer_ms"], "300000");
+    }
+
+    #[test]
+    fn a_market_keeps_the_apply_buffer_it_was_registered_with() {
+        let mut o = fresh_oracle();
+        act_as(MARKET, 0);
+        o.register_market(U64(0), U64(1_000), U64(1_000 + MIN_GAP), "hash".to_string(), None);
+        act_unpaid(OWNER, 1);
+        o.set_apply_buffer_ms(U64(60_000));
+        assert_eq!(
+            o.config()["min_resolve_gap_ns"],
+            (MIN_GAP - APPLY_BUFFER_NS + 60 * SECOND).to_string(),
+            "new markets need the new buffer"
+        );
+        act_as(MARKET, 2);
+        let refused = refusal(|| {
+            o.register_market(U64(1), U64(1_000), U64(1_000 + MIN_GAP), "hash".to_string(), None);
+        });
+        assert!(refused.contains("too soon after close_at"), "{refused}");
+        o.register_market(
+            U64(1),
+            U64(1_000),
+            U64(1_000 + MIN_GAP + 30 * SECOND),
+            "hash".to_string(),
+            None,
+        );
+        assert_eq!(o.market_info(0).apply_buffer_ns.0, APPLY_BUFFER_NS);
+        assert_eq!(o.market_info(1).apply_buffer_ns.0, 60 * SECOND);
+        // The old market still fits a case with its own 30 second buffer.
+        act_as(VERIFIER, 1_000 + PROPOSAL_TIME);
+        deliver(&mut o, "carol.near", 1, "propose:0:yes:https://x");
+        // The new one does not fit the same moment with its 60 second buffer.
+        act_as(VERIFIER, 1_000 + PROPOSAL_TIME + 30 * SECOND + 1);
+        let late = refusal(|| {
+            deliver(&mut o, "carol.near", 1, "propose:1:yes:https://x");
+        });
+        assert!(late.contains("too late to propose"), "{late}");
+    }
+
+    #[test]
+    fn the_publisher_limit_refuses_values_outside_its_range_and_below_the_signers_needed() {
+        let mut o = fresh_oracle();
+        act_unpaid(OWNER, 5);
+        for n in [0, 26] {
+            let message = refusal(|| o.set_max_publishers(n));
+            assert!(message.contains("between 1 and 25"), "{n}: {message}");
+        }
+        let message = refusal(|| o.set_max_publishers(1));
+        assert!(
+            message.contains("cannot be below the number that must sign"),
+            "{message}"
+        );
+        o.set_max_publishers(25);
+        o.set_max_publishers(2);
+        assert_eq!(o.config()["max_publishers"], 2);
+        assert_eq!(logged("max_publishers_set").last().unwrap()["max_publishers"], 2);
+    }
+
+    #[test]
+    fn lowering_the_publisher_limit_blocks_the_next_add_and_keeps_those_there() {
+        let (mut o, _) = price_oracle(true);
+        act_unpaid(OWNER, 5);
+        o.set_max_publishers(2);
+        assert_eq!(o.config()["publishers"].as_array().unwrap().len(), 3);
+        let message = refusal(|| o.add_publisher(public(&signing_key(40))));
+        assert!(message.contains("there can be at most 2 publishers"), "{message}");
+        o.set_max_publishers(4);
+        o.add_publisher(public(&signing_key(40)));
+        assert_eq!(o.config()["publishers"].as_array().unwrap().len(), 4);
+        let message = refusal(|| o.add_publisher(public(&signing_key(41))));
+        assert!(message.contains("there can be at most 4 publishers"), "{message}");
+    }
+
+    #[test]
+    fn a_raised_publisher_limit_lets_more_than_ten_be_added() {
+        let (mut o, _) = price_oracle(true);
+        act_unpaid(OWNER, 5);
+        o.set_max_publishers(25);
+        for seed in 10..32 {
+            o.add_publisher(public(&signing_key(seed)));
+        }
+        assert_eq!(o.config()["publishers"].as_array().unwrap().len(), 25);
     }
 }

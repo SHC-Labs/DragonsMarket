@@ -92,7 +92,7 @@ It also holds the bonds, and pays them out, together with the jurors' pay, when 
 
 | Role            | Set by                                         | Can do                                                                                                                                                                                                                                                                                                                                      |
 | --------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Owner           | `new`, then `propose_owner` and `accept_owner` | `set_jury_size`, `set_bond`, `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms`, `set_draw_delay_blocks`, `set_operator`, `set_no_decision_recipient`, `add_publisher`, `set_price_threshold`, `propose_owner`, `upgrade`, `seal`, and everything the operator can do. Normally the DAO. |
+| Owner           | `new`, then `propose_owner` and `accept_owner` | `set_jury_size`, `set_bond`, `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms`, `set_draw_delay_blocks`, `set_juror_shares`, `set_apply_buffer_ms`, `set_max_publishers`, `set_operator`, `set_no_decision_recipient`, `add_publisher`, `set_price_threshold`, `propose_owner`, `upgrade`, `seal`, and everything the operator can do. Normally the DAO. |
 | Operator        | `new`, then `set_operator` (owner only)        | Only `remove_publisher`. It exists so a leaked price-signing key can be cut off in one call instead of waiting out a vote.                                                                                                                                                                                                                  |
 | Market contract | `new` (fixed)                                  | Only `register_market`.                                                                                                                                                                                                                                                                                                                     |
 | Verifier        | `new` (fixed)                                  | Only `mt_on_transfer`, which is how bonds arrive.                                                                                                                                                                                                                                                                                           |
@@ -178,7 +178,7 @@ with the verifier's `mt_transfer_call` and a message naming the answer (see "Mes
 
 A proposal is refused unless: it carries exactly the current bond; the market is registered and has
 closed; the evidence text is at most 512 bytes; there is still time for a full challenge window, two
-jury rounds (each a draw window and a full panel deadline) and a 30 second buffer before the
+jury rounds (each a draw window and a full panel deadline) and the market's apply buffer (30 seconds at the start) before the
 market's `resolve_by`; and no answer was proposed before. If any rule fails the verifier
 returns the whole bond to the sender's Intents balance.
 
@@ -255,7 +255,7 @@ the case is final. The case moves to round 1 once, and only once.
 
 If the second round also ends with no majority, or the first round ends too late for a second to
 finish before the market's `resolve_by` (the oracle checks that a draw window, a panel deadline and
-the 30 second buffer still fit), the case settles with no decision.
+the market's apply buffer still fit), the case settles with no decision.
 
 ### 8. No decision
 
@@ -293,12 +293,13 @@ Let B be the bond.
 | Disputed, neither jury decided, no juror revealed                                                  | B back, plus half of B                | nothing                    | n/a                                               | Half of B |
 | Disputed, no jury could be drawn in either round (`no_jury`)                                       | B back                                | B back                     | n/a                                               | nothing   |
 
-In a decided dispute the jurors' share is 25% of one bond, split equally among the jurors who
+In a decided dispute the jurors' share is 25% of one bond at the start (`juror_share_bps`), split equally among the jurors who
 revealed and sat with the final outcome, in either round. It is rounded down per juror and the
 winner keeps the remainder, so exactly two bonds are paid out. A juror who revealed with the
-minority, or did not reveal, gets nothing.
+minority, or did not reveal, gets nothing. The two shares are copied onto the case when it is
+proposed, so `set_juror_shares` never changes what an open case pays.
 
-When nobody decided, the challenger's half-bond split among the jurors who revealed is rounded down
+When nobody decided, the challenger's half-bond (`no_decision_share_bps`, 50% at the start) split among the jurors who revealed is rounded down
 per juror and the proposer keeps the remainder. All jurors of both rounds who revealed share it,
 whichever answer they voted for, because they all did the work. The no-decision recipient holds the
 jurors' half when no one revealed so that it leaves the two parties whatever the juries do: two
@@ -353,7 +354,7 @@ or a jury still inside its deadline, it refuses
 it.
 
 The timing rules leave no such case at `resolve_by`: a proposal must fit the window, two rounds and
-a 30 second buffer before it, and a second round only starts if it fits. A randomized test over
+the market's apply buffer before it, and a second round only starts if it fits. A randomized test over
 windows, proposal times, challenge times, seating times (up to 10 seconds after the last allowed
 block) and finalize times checks that no registered market reaches `resolve_by` with a case that is
 not settleable. The market's own `void_if_unresolved` is only for an oracle that is gone: it stays
@@ -367,15 +368,15 @@ market whose proposal was a moment from final.
 When a market is registered, the oracle requires `resolve_by` to be at least this far after the
 moment the answer is first possible:
 
-`min_proposal + challenge window + 2 x (draw window + panel deadline) + 30 seconds`
+`min_proposal + challenge window + 2 x (draw window + panel deadline) + apply buffer`
 
 For an event market the moment is `close_at`. For a price market it is the observation time. The 2
 counts both jury rounds, each with its own draw window. Markets with less room are refused, because
 no case could ever finish in them and the only ending would be a Void at the deadline. `config()`
 shows the figure as `min_resolve_gap_ns`. The proposal guard uses the market's own stored windows
 from the moment of the proposal, so a market always has time for the longest case, even after the
-owner has lengthened the settings. `min_resolve_gap_ns` in `config()` is the figure for markets
-registered now.
+owner has lengthened the settings or the apply buffer. `min_resolve_gap_ns` in `config()` is the
+figure for markets registered now. The apply buffer is 30 seconds at the start.
 
 ---
 
@@ -417,14 +418,15 @@ should do so promptly.
 
 | Method                           | Who               | Notes                                                                            |
 | -------------------------------- | ----------------- | -------------------------------------------------------------------------------- |
-| `add_publisher(key)`             | Owner             | An ed25519 public key in NEAR format (`ed25519:...`). At most 10. No duplicates. |
+| `add_publisher(key)`             | Owner             | An ed25519 public key in NEAR format (`ed25519:...`). At most `max_publishers` (10 at the start). No duplicates. |
 | `remove_publisher(key)`          | Operator or owner | Immediate. Refused if it would leave fewer publishers than `price_threshold`.    |
 | `set_price_threshold(threshold)` | Owner             | Between 1 and the number of publishers.                                          |
+| `set_max_publishers(max_publishers)` | Owner         | Between 1 and 25, and not below `price_threshold`. Lowering it removes no one.   |
 
 Adding a key or changing the threshold grants or changes power over prices, so it is the owner's.
 Removing a key only takes power away, so the faster operator may do it.
 
-A submission with all 10 signing burned about 4.5 TGas here (9.4 in all) and worked with 30 TGas
+A submission with all 10 signing (the start limit) burned about 4.5 TGas here (9.4 in all) and worked with 30 TGas
 attached to a direct call. Through the verifier, which keeps about 21 TGas of what is attached, a wallet's
 100 TGas leaves the oracle's receipt about 79.
 
@@ -475,6 +477,9 @@ credited for (see "Things to know"). A direct NEP-141 transfer to this contract 
 | `set_bond(bond)`                                                                      | Owner                                | Above zero. Applies to cases proposed afterwards.                                                                                                                                                                                                                                                 |
 | `set_window_ms`, `set_panel_deadline_ms`, `set_draw_window_ms`, `set_min_proposal_ms` | Owner                                | Each above zero. Apply to markets registered afterwards.                                                                                                                                                                                                                                          |
 | `set_draw_delay_blocks(blocks)`                                                       | Owner                                | Applies to challenges and second rounds from now on. Zero is allowed, as in `new`.                                                                                                                                                                                                                |
+| `set_juror_shares(decided_bps, no_decision_bps)`                                      | Owner                                | `decided_bps` 500 to 5000, `no_decision_bps` 1000 to 10000. Applies to cases proposed afterwards. A case keeps the shares it was proposed with.                                                                                                                                                   |
+| `set_apply_buffer_ms(apply_buffer_ms)`                                                | Owner                                | 5000 to 300000 (5 seconds to 5 minutes). Applies to markets registered afterwards.                                                                                                                                                                                                                |
+| `set_max_publishers(max_publishers)`                                                  | Owner                                | 1 to 25, and not below `price_threshold`. Live. Lowering it removes no publisher, it only blocks adding past the limit.                                                                                                                                                                           |
 | `stage_code()` (payable)                                                              | Anyone                               | The call input is a wasm. It is stored under its own sha256, which is returned. The deposit pays for the storage (1 NEAR per 100 KB) and the surplus is refunded. Attach 100 TGas, because 250 KB burns about 31.                                                                                 |
 | `upgrade(code_hash)`                                                                  | Owner                                | Deploys the staged wasm with that sha256 and runs its `migrate`, in one batch. Needs at least 100 TGas attached.                                                                                                                                                                                  |
 | `migrate()`                                                                           | The contract itself                  | Runs in the new code in the same batch as the deploy. Refuses unless `upgrade` marked the upgrade in flight. Reads the state as the one layout it knows, clears the mark, sets `upgrade_proven`, returns the state.                                                                               |
@@ -500,9 +505,10 @@ credited for (see "Things to know"). A direct NEP-141 transfer to this contract 
 ## The owner's settings
 
 Six settings can be changed by the owner, which in a real deployment means a DAO proposal. Its voting period is the
-only delay. Each has the same check as `new` (above zero) and each logs an event. A seventh,
-`set_no_decision_recipient(recipient)`, takes an account, applies to cases that settle from then on,
-and logs `no_decision_recipient_set`.
+only delay. Each has the same check as `new` (above zero) and each logs an event. `set_no_decision_recipient(recipient)`
+takes an account, applies to cases that settle from then on, and logs `no_decision_recipient_set`. Three more policy
+settings start at the values that used to be fixed, and each has a hard range so a bad vote cannot brick the contract:
+the juror shares, the apply buffer and the publisher limit (table below the first).
 
 | Setting               | Method                                     | Event                | Reaches                                                                                                                                        |
 | --------------------- | ------------------------------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -512,15 +518,22 @@ and logs `no_decision_recipient_set`.
 | Draw window           | `set_draw_window_ms(draw_window_ms)`       | `draw_window_set`    | Markets registered afterwards.                                                                                                                 |
 | Minimum proposal time | `set_min_proposal_ms(min_proposal_ms)`     | `min_proposal_set`   | Markets registered afterwards. It only counts at registration.                                                                                 |
 | Draw delay            | `set_draw_delay_blocks(draw_delay_blocks)` | `draw_delay_set`     | Challenges and second rounds from now on.                                                                                                      |
+| Juror shares          | `set_juror_shares(decided_bps, no_decision_bps)` | `juror_shares_set`   | Cases proposed afterwards. A case keeps the shares it was proposed with, and settles on them. Ranges: 500 to 5000 and 1000 to 10000.           |
+| Apply buffer          | `set_apply_buffer_ms(apply_buffer_ms)`     | `apply_buffer_set`   | Markets registered afterwards. Range: 5000 to 300000 ms.                                                                                       |
+| Publisher limit       | `set_max_publishers(max_publishers)`       | `max_publishers_set` | Live. Range: 1 to 25, and not below `price_threshold`. Removes no publisher.                                                                   |
 
-A market keeps the windows it was registered with. They are stored in its registration record
-(`get_market_info` shows `window_ns`, `panel_deadline_ns` and `draw_window_ns`), and the minimum gap
+A market keeps the windows and the apply buffer it was registered with. They are stored in its registration record
+(`get_market_info` shows `window_ns`, `panel_deadline_ns`, `draw_window_ns` and `apply_buffer_ns`), and the minimum gap
 check at registration, the proposal guard, the challenge window, every `draw_by` and every jury
 deadline of that market use them. So a longer setting cannot make a registered market unanswerable,
 and a shorter one does not hurry a market that was given more time. The draw delay is the one
 setting that is not stored per market, and it has no upper bound, as in `new`: a very large value
 would make every jury draw impossible before its `draw_by`, and the case would end with no decision.
 The owner should not set it near the draw window.
+
+Everything else stays a constant, because it bounds gas or storage: the gas floors, the text length limits,
+the largest jury (21, which bounds the gas of a draw), the largest `list_cases` page, the `nep141:` prefix
+and the state version.
 
 ---
 
@@ -566,12 +579,12 @@ integration evidence.
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `is_staged(code_hash)`       | Whether a wasm with that sha256 is staged.                                                                                                                                                                                                                                                      |
 | `get_case(market_id)`        | The case, or nothing. Fields below.                                                                                                                                                                                                                                                             |
-| `get_market_info(market_id)` | What was registered: close, resolve_by, rule hash, price rule, and the three windows the market was registered with.                                                                                                                                                                            |
+| `get_market_info(market_id)` | What was registered: close, resolve_by, rule hash, price rule, and the three windows and the apply buffer the market was registered with.                                                                                                                                                                            |
 | `claimable_of(account_id)`   | An account's withdrawable bonds and juror pay.                                                                                                                                                                                                                                                    |
 | `total_owed()`               | Everything this contract owes, in collateral units: the bonds sitting in cases that are not final plus everything claimable. At rest it equals `mt_balance_of(this contract, collateral token id)` in the verifier. A payout in flight makes the verifier's figure the larger for a block. A smaller one is an incident. |
 | `list_cases(from_market_id, limit)` | A summary of each case among `limit` consecutive market ids from `from_market_id`, at most 50 ids per call: market id, stage, proposed, challenger answer, round, final outcome, applied, revealed vote count, window end, draw deadline, panel deadline. An id without a case is skipped, so a page can be shorter than `limit` and the caller advances by `limit`. |
 | `bond_totals()` | `bonds_held`, `claimable` and `total`, where `total` is what `total_owed` returns. There is no pending payouts figure yet. |
-| `config()`                   | state version, upgrade proven, upgrade in flight, owner, pending owner, market, verifier, collateral token id, bond, window, panel deadline, draw window, council, jury size, draw delay, minimum proposal time, minimum gap, operator, network, the publisher keys, the threshold, and the no-decision recipient. |
+| `config()`                   | state version, upgrade proven, upgrade in flight, owner, pending owner, market, verifier, collateral token id, bond, window, panel deadline, draw window, council, jury size, draw delay, minimum proposal time, minimum gap, apply buffer, the two juror shares, the publisher limit, operator, network, the publisher keys, the threshold, and the no-decision recipient. |
 
 ### The case record
 
@@ -585,6 +598,7 @@ integration evidence.
 | `round`                            | 0 for the first jury, 1 for the second.                                                                                                               |
 | `jury_size`                        | How many jurors the current round draws. Fixed when the round starts.                                                                                 |
 | `challenged_at`                    | When it was challenged.                                                                                                                               |
+| `juror_share_bps`, `no_decision_share_bps` | The shares of the bonds that go to jurors, in basis points, as set when the case was proposed. `list_cases` does not show them.                       |
 | `draw_by`                          | The last moment the current round's jury can be drawn.                                                                                                |
 | `draw_after_height`                | The block height from which the jury may be drawn.                                                                                                    |
 | `commit_ends_at`, `panel_deadline` | The end of the commit phase and the end of the reveal phase of the sitting jury. Both are 0 until a jury is seated, and count from the moment it was. |
@@ -616,6 +630,9 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `min_proposal_set`                | `set_min_proposal_ms`                                                                           | min_proposal_ms                                                                                                                  |
 | `draw_window_set`                 | `set_draw_window_ms`                                                                            | draw_window_ms                                                                                                                   |
 | `draw_delay_set`                  | `set_draw_delay_blocks`                                                                         | draw_delay_blocks                                                                                                                |
+| `juror_shares_set`                | `set_juror_shares`                                                                              | decided_bps, no_decision_bps                                                                                                     |
+| `apply_buffer_set`                | `set_apply_buffer_ms`                                                                           | apply_buffer_ms                                                                                                                  |
+| `max_publishers_set`              | `set_max_publishers`                                                                            | max_publishers                                                                                                                   |
 | `code_staged`                     | `stage_code`                                                                                    | code_hash, bytes, by                                                                                                             |
 | `upgrade_sent`                    | `upgrade`                                                                                       | code_hash                                                                                                                        |
 | `migrated`                        | `migrate`, in the new code                                                                      | state_version                                                                                                                    |
@@ -665,7 +682,10 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `a price market is answered with a signed price` / `not a price market`                                                                                                                                                                             | Wrong submission type.                                                                                               |
 | `the observation time has not come`                                                                                                                                                                                                                 | A price submitted too early.                                                                                         |
 | `not enough valid publisher signatures` / `a publisher signed twice` / `not a publisher` / `a signature does not match` / `bad publisher key` / `a signature is <publisher key>.<hex>` / `a signature is 128 hex characters` / `a signature is hex` | A bad price submission.                                                                                              |
-| `publishers use ed25519 keys` / `already a publisher` / `there can be at most 10 publishers`                                                                                                                                                        | Bad `add_publisher`.                                                                                                 |
+| `publishers use ed25519 keys` / `already a publisher` / `there can be at most <n> publishers`                                                                                                                                                        | Bad `add_publisher`.                                                                                                 |
+| `the decided juror share must be between 500 and 5000 basis points` / `the no decision juror share must be between 1000 and 10000 basis points`                                                                                                      | Bad `set_juror_shares`.                                                                                              |
+| `the apply buffer must be between 5 seconds and 5 minutes`                                                                                                                                                                                           | Bad `set_apply_buffer_ms`.                                                                                           |
+| `the publisher limit must be between 1 and 25` / `the publisher limit cannot be below the number that must sign`                                                                                                                                     | Bad `set_max_publishers`.                                                                                            |
 | `that would leave fewer publishers than must sign`                                                                                                                                                                                                  | `remove_publisher` below the threshold.                                                                              |
 | `the threshold must be between 1 and the number of publishers`                                                                                                                                                                                      | Bad threshold.                                                                                                       |
 | `jury size must be odd and at most 21`                                                                                                                                                                                                              | Bad jury size.                                                                                                       |

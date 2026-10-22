@@ -34,7 +34,7 @@ Changes against the text above:
 | Fee recipients | `new` takes `revenue_pool` and `business_wallet` | `new` takes neither. They are `None` until the owner calls `set_fee_recipients(revenue_pool, treasury)`, and `sweep_fees` refuses until then. The two must differ |
 | The split | Constants 2,500 and 7,500 | `revenue_share_bps`, 2,500 to start, owner-settable from 1,000 to 5,000 (`set_revenue_share_bps`). The treasury gets the rest, so the whole fee is always accounted for |
 | Minimum sweep and first id | `set_min_sweep` only | Also `set_next_sweep_id`, which can only move up. `min_sweep` is 1 to 100,000,000 and starts at 1,000,000 |
-| Settle and reconcile waits | 10 minutes and one hour | Constants (`SETTLE_WAIT_MINUTES`, `RECONCILE_WAIT_MINUTES`), not owner settings: they are safety waits, not choices |
+| Settle and reconcile waits | 10 minutes and one hour | Stored, 10 and 60 minutes to start, owner-settable with `set_sweep_timing` within hard ranges (reconcile never under settle) |
 
 ---
 
@@ -80,7 +80,7 @@ The market lists binary questions, prices every trade on a constant-product curv
 
 | Role | Set by | Powers |
 | --- | --- | --- |
-| Owner | `new`, then `propose_owner` and `accept_owner` | `upgrade`, `seal`, `propose_owner`, `set_operator`, `set_fee_recipients`, `set_fee_rate_bps`, `set_create_fee`, `reconcile_revenue`, and everything the operator can do. DECIDED: the owner is the Trezu or SputnikDAO account, which the contract treats as a plain `AccountId` |
+| Owner | `new`, then `propose_owner` and `accept_owner` | `upgrade`, `seal`, `propose_owner`, `set_operator`, `set_fee_recipients`, `set_fee_rate_bps`, `set_create_fee`, `set_void_rules`, `set_sweep_timing`, `set_open_price_bounds`, `set_max_positions`, `set_fee_limits`, `reconcile_revenue`, and everything the operator can do. DECIDED: the owner is the Trezu or SputnikDAO account, which the contract treats as a plain `AccountId` |
 | Operator | `set_operator`, owner only | `create_market`, `retry_register`, `halt` (not in the last 24 hours before close), `resume`, `set_paused`, `claim_residual`, and seeding through the verifier |
 | Oracle | `new`, no setter | `set_outcome` only |
 | Verifier | `new`, no setter | `mt_on_transfer` only |

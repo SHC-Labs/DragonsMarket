@@ -116,7 +116,7 @@ There are four kinds of caller. The first three are stored accounts, the fourth 
 
 | Role     | Set by                                         | Can do                                                                                                                                                                                                                                                                               |
 | -------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Owner    | `new`, then `propose_owner` and `accept_owner` | Everything the operator can, plus `set_operator`, `propose_owner`, `set_fee_recipients`, `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id`, `set_fee_rate_bps`, `set_create_fee`, `reconcile_leg`, `upgrade` and `seal`. In a real deployment this is the DAO, so each of these needs a DAO proposal. SputnikDAO executes a proposal at the approval that reaches its threshold. Its voting period is the only delay, by owner decision (R-07). |
+| Owner    | `new`, then `propose_owner` and `accept_owner` | Everything the operator can, plus `set_operator`, `propose_owner`, `set_fee_recipients`, `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id`, `set_fee_rate_bps`, `set_create_fee`, `set_void_rules`, `set_sweep_timing`, `set_open_price_bounds`, `set_max_positions`, `set_fee_limits`, `reconcile_leg`, `upgrade` and `seal`. In a real deployment this is the DAO, so each of these needs a DAO proposal. SputnikDAO executes a proposal at the approval that reaches its threshold. Its voting period is the only delay, by owner decision (R-07). |
 | Operator | `new`, then `set_operator` (owner only)        | Routine running: `create_market`, `retry_register`, `halt` (but not in the last 24 hours before a market closes, see "Void"), `resume`, `set_paused`, `claim_residual`, and seeding a market. Cannot move fees, change owner, change the operator, or touch user money.              |
 | Oracle   | `new` (fixed, no setter)                       | Only `set_outcome`.                                                                                                                                                                                                                                                                  |
 | Anyone   | n/a                                            | Trade, deposit, withdraw, redeem, register for storage (for themselves or for someone else) and unregister, `void_if_unresolved` (a grace period after `resolve_by`), `sweep_fees`, `stage_code` (paying for the storage), and every view.                                           |
@@ -153,7 +153,9 @@ contract is deployed, so the owner sets both recipients afterwards with `set_fee
 
 Starting values: trade fee rate 200 basis points (2%), creation fee 1,000,000 units, Council share
 of a sweep 2,500 basis points (25%), minimum sweep 1,000,000 units, first sweep id 1, not paused, no
-markets, no fee recipients.
+markets, no fee recipients. The other policy values start at the numbers shown under "Owner and operator
+management": Void rules 24 hours and 7 days, sweep waits 10, 60 and 60 minutes, opening prices 10,000 to 990,000,
+20 positions, and fee limits 500, 10,000,000, 1,000, 5,000 and 100,000,000.
 
 Deploy and initialise in one batch signed by the contract account, and check afterwards that the
 owner is yours. A deploy with no init in the batch leaves nothing open to a stranger, but it leaves
@@ -186,8 +188,8 @@ the contract unusable until its own account calls `new`.
 5. After close, someone proposes an outcome through oracle. Once the oracle has a final answer it
    calls `set_outcome`. If nothing has resolved the market by `resolve_by`, anyone asks the oracle
    for its deadline answer (`resolve_by_deadline`), which settles what can be settled and voids the
-   rest. `void_if_unresolved` on this contract opens 7 days after `resolve_by`, for an oracle that
-   is gone.
+   rest. `void_if_unresolved` on this contract opens a grace period after `resolve_by` (7 days to start), for an
+   oracle that is gone.
 6. Holders call `redeem` to turn shares into balance, and `withdraw` to take the balance out as
    tokens. The operator or owner calls `claim_residual` to move whatever the pool still holds to the
    business wallet.
@@ -231,10 +233,17 @@ well.
 | Resolution source          | 300 bytes                                                                                                |
 | Void policy                | 500 bytes                                                                                                |
 | Category and subcategory   | 1 to 32 characters, lowercase letters, digits and hyphens only                                           |
-| Shares entries per account | 20 (each market and side an account holds counts as one). The operator and the owner are not held to it. |
+| Shares entries per account | 20 to start, owner-settable from 5 to 100 (each market and side an account holds counts as one). The operator and the owner are not held to it. |
 | Price history per market   | 120 points                                                                                               |
 | `list_markets` page        | at most 50 per call                                                                                      |
 | Pool size                  | each side at most 1,000,000,000,000,000 units (10^15)                                                    |
+
+Policy values the owner can change (the DAO, by proposal) are listed under "Owner and operator management", each with a hard
+range so a bad vote cannot brick the contract. Everything else here stays a compile-time constant: the gas floors, the text
+length caps, the storage deposit, the pool size, the price history length, the `nep141:` prefix, the state version and the
+10,000 basis point denominator. Gas floors are what the calls measurably burn, the length caps and history length bound what
+a trade rewrites, the deposit and pool size bound storage and overflow, and the others are part of the data layout, so
+none is a policy choice.
 
 ---
 
@@ -260,11 +269,16 @@ well.
 | `accept_owner()`                                    | The proposed account | Completes the handover. Two steps so a mistyped account cannot lock everyone out. Until it is accepted, the old owner keeps full power.                         |
 | `set_operator(operator_id)`                         | Owner                | Replaces the operator, effective at once.                                                                                                                       |
 | `set_fee_recipients(revenue_pool, treasury)`        | Owner                | Sets where fees go: the Council and the treasury, which must be different accounts. A sweep refuses until it is called. Takes effect for the next sweep and also for any amount still owed to the old recipients, which is sent to whoever is set at sweep time. |
-| `set_revenue_share_bps(revenue_share_bps)`          | Owner                | Sets the Council's share of every later sweep, from 1,000 to 5,000 basis points. The treasury gets the rest, so the whole of every fee is always accounted for. A sweep already made keeps its split. |
-| `set_min_sweep(min_sweep)`                          | Owner                | Sets the least a sweep acts on, from 1 to 100,000,000 units. |
+| `set_revenue_share_bps(revenue_share_bps)`          | Owner                | Sets the Council's share of every later sweep, between the stored floor and ceiling (1,000 to 5,000 basis points to start). The treasury gets the rest, so the whole of every fee is always accounted for. A sweep already made keeps its split. |
+| `set_min_sweep(min_sweep)`                          | Owner                | Sets the least a sweep acts on, from 1 to the stored ceiling (100,000,000 units to start). |
 | `set_next_sweep_id(next_sweep_id)`                  | Owner                | Moves the id of the next sweep up, never down. A sweep id is used once and the Council refuses a repeat, so a market that replaces an old one starts above the ids the Council has taken. |
-| `set_fee_rate_bps(fee_rate_bps)`                    | Owner                | Sets the trade fee rate. Refused above 500 (5%). Zero is allowed. Applies from the next trade.                                                                  |
-| `set_create_fee(create_fee)`                        | Owner                | Sets the fee taken from each market's seed. Refused above 10,000,000 units (10 tokens). Zero is allowed. Applies from the next seed.                            |
+| `set_fee_rate_bps(fee_rate_bps)`                    | Owner                | Sets the trade fee rate. Refused above the stored ceiling (500, 5%, to start). Zero is allowed. Applies from the next trade.                                                                  |
+| `set_create_fee(create_fee)`                        | Owner                | Sets the fee taken from each market's seed. Refused above the stored ceiling (10,000,000 units, 10 tokens, to start). Zero is allowed. Applies from the next seed.                            |
+| `set_void_rules(price_window_ns, grace_ns)`         | Owner                | Sets the Void price window (1 hour to 7 days, 24 hours to start) and the Void grace after `resolve_by` (1 to 60 days, 7 days to start), for markets created after the call. A market keeps the two values it was created with. |
+| `set_sweep_timing(settle_wait_minutes, reconcile_wait_minutes, min_interval_minutes)` | Owner | Sets the wait before `settle_leg` (1 to 1,440 minutes, 10 to start), the wait before `reconcile_leg` (10 to 10,080 minutes, 60 to start, never under the settle wait) and the least time between two sweeps (1 to 1,440 minutes, 60 to start). Applies to every sweep, including those already made. |
+| `set_open_price_bounds(min, max)`                   | Owner                | Sets the Yes prices a market can be seeded at, in millionths. Min at least 1,000, max at most 999,000, min below max. Starts at 10,000 and 990,000. Applies from the next seed. |
+| `set_max_positions(max_positions)`                  | Owner                | Sets how many share entries an ordinary account can hold, from 5 to 100 (20 to start). Positions already held stay. The operator and owner are still exempt. |
+| `set_fee_limits(max_fee_rate_bps, max_create_fee, min_revenue_share_bps, max_revenue_share_bps, max_min_sweep)` | Owner | Sets the ceilings and floors the fee setters check against. Hard ranges: fee rate ceiling at most 2,000 basis points, creation fee ceiling at most 100,000,000 units, Council share floor at least 500 and ceiling at most 9,000 with the floor below the ceiling, sweep minimum ceiling from 1 to 1,000,000,000. Starts at 500, 10,000,000, 1,000, 5,000 and 100,000,000. Refused when the current fee rate, creation fee, Council share or sweep minimum would fall outside the new limit, so the value is moved first. |
 | `reconcile_leg(sweep_id, leg, arrived)`             | Owner                | Decides a fee leg (`council` or `treasury`) that is still pending or unresolved an hour after its sweep. See "Revenue whose result was lost". |
 | `upgrade(code_hash)`                                | Owner                | Deploys the staged wasm with that sha256 and runs its `migrate`, in one batch. Needs at least 100 TGas attached. See "Upgrading this contract".                 |
 | `seal(public_key)`                                  | Owner                | Deletes that access key from this account. Refused until an upgrade has gone through `migrate`.                                                                 |
@@ -548,11 +562,11 @@ cost does not grow with the number of markets.
 ## Void
 
 A market becomes Void when the oracle says so, including through `resolve_by_deadline`, or when
-`void_if_unresolved` is called 7 days after `resolve_by`.
+`void_if_unresolved` is called after the grace period past `resolve_by` (7 days to start).
 
 A Void pays each Yes share the market's closing Yes price and each No share the rest, so a pair of
 one Yes and one No share always pays exactly 1. The closing price is the Yes price averaged over
-trading time across the last 24 hours before `close_at`, or since the market opened if that was
+trading time across the Void price window before `close_at` (24 hours to start), or since the market opened if that was
 later. Time while the market is halted does not count, in the price or in the time it is divided by,
 so halting a market right after a pump does not leave the pumped price holding the average. A market
 with no trading time in that window, for example one halted for its whole last day, pays the average
@@ -649,7 +663,7 @@ at 30%), resolve each as Yes, No or Void, and redeem and claim the residual in b
 
 | View                                                         | Returns                                                                                                                                                                                                                                         |
 | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `config()`                                                   | state version, upgrade proven, upgrade in flight, owner, pending owner, operator, oracle, verifier, collateral token id, paused, sells paused, number of markets, storage deposit, position cap, fee rate, creation fee, revenue pool and treasury (null until set), the Council's and the treasury's share in basis points, minimum sweep, next sweep id, revenue unresolved |
+| `config()`                                                   | state version, upgrade proven, upgrade in flight, owner, pending owner, operator, oracle, verifier, collateral token id, paused, sells paused, number of markets, storage deposit, position cap, fee rate, creation fee, revenue pool and treasury (null until set), the Council's and the treasury's share in basis points, minimum sweep, next sweep id, revenue unresolved, Void price window and grace (ns), settle wait, reconcile wait and sweep interval (minutes), lowest and highest opening price, and the fee limits (fee rate ceiling, creation fee ceiling, Council share floor and ceiling, sweep minimum ceiling) |
 | `get_market(market_id)`                                      | One market: id, title, rule text, source, void policy, category, subcategory, rule hash, price rule, close and resolve times, status, registered, seeded, outcome, void price, Yes and No price, locked                                         |
 | `list_markets(from_index, limit)`                            | A page of markets (limit capped at 50)                                                                                                                                                                                                          |
 | `get_history(market_id)`                                     | The price log: time and Yes price for each point                                                                                                                                                                                                |
@@ -690,6 +704,11 @@ Every state change logs one line starting `EVENT_JSON:` followed by JSON of the 
 | `next_sweep_id_set`       | `set_next_sweep_id`                                                   | next_sweep_id                                     |
 | `fee_rate_set`            | `set_fee_rate_bps`                                                    | fee_rate_bps                                      |
 | `create_fee_set`          | `set_create_fee`                                                      | create_fee                                        |
+| `void_rules_set`          | `set_void_rules`                                                      | price_window_ns, grace_ns                         |
+| `sweep_timing_set`        | `set_sweep_timing`                                                    | settle_wait_minutes, reconcile_wait_minutes, min_interval_minutes |
+| `open_price_bounds_set`   | `set_open_price_bounds`                                               | min, max                                          |
+| `max_positions_set`       | `set_max_positions`                                                   | max_positions                                     |
+| `fee_limits_set`          | `set_fee_limits`                                                      | max_fee_rate_bps, max_create_fee, min_revenue_share_bps, max_revenue_share_bps, max_min_sweep |
 | `residual_claimed`        | `claim_residual`                                                      | market_id, amount, to                             |
 | `outcome_set`             | `set_outcome`, or `void_if_unresolved` (which adds `"by":"deadline"`) | market_id, outcome                                |
 | `deposit`                 | a deposit                                                             | account, amount                                   |
@@ -730,7 +749,7 @@ All big numbers in event data are strings.
 | `the collateral token id must look like nep141:<token>`                                                                                                          | `new` with a token id in the wrong form.                                                               |
 | `paused`                                                                                                                                                         | The contract is paused.                                                                                |
 | `sells are paused`                                                                                                                                               | `sell` while the owner has set `set_sells_paused(true)`.                                               |
-| `wait an hour since the last sweep`                                                                                                                              | `sweep_fees` within `MIN_SWEEP_INTERVAL_NS` of the previous sweep.                                     |
+| `wait an hour since the last sweep` / `wait <n> minutes since the last sweep`                                                                                    | `sweep_fees` within the sweep interval of the previous sweep (the first form while the interval is 60 minutes). |
 | `do the storage deposit first`                                                                                                                                   | The account has not registered (also for a seeder who would hold shares).                              |
 | `market is not registered with the oracle yet`                                                                                                                   | Trading or seeding before the oracle accepted it.                                                      |
 | `market has no liquidity yet`                                                                                                                                    | Trading before it was seeded.                                                                          |
@@ -740,14 +759,20 @@ All big numbers in event data are strings.
 | `cannot buy that amount` / `cannot sell that amount`                                                                                                             | Zero, too large for the pool, or too small to cover the fee.                                           |
 | `min shares must be above zero`                                                                                                                                  | A buy with a floor of zero.                                                                            |
 | `not enough balance` / `not enough shares`                                                                                                                       | Spending more than you hold.                                                                           |
-| `too many positions, redeem or sell one first`                                                                                                                   | Over 20 share entries, for an account that is neither operator nor owner.                              |
+| `too many positions, redeem or sell one first`                                                                                                                   | At the position cap (20 to start), for an account that is neither operator nor owner.                              |
 | `already seeded` / `already registered` / `already resolved` / `already claimed`                                                                                 | A step done twice. `resume` of a market that has an outcome says `already resolved` too.               |
 | `the seed must be more than the creation fee` / `seed too large` / `the seed is too small to open at that price`                                                 | Bad seed size.                                                                                         |
-| `the starting price must be between 1% and 99%` / `bad starting price`                                                                                           | Bad opening price.                                                                                     |
-| `the fee rate is capped at 500 basis points` / `the creation fee is capped at 10 units`                                                                          | Fee ceilings.                                                                                          |
+| `the starting price must be between <min> and <max> millionths` / `bad starting price`                                                                           | Bad opening price (1% to 99% to start).                                                                |
+| `the fee rate is capped at <n> basis points` / `the creation fee is capped at <n> units of the collateral`                                                       | Fee ceilings (500 and 10,000,000 to start).                                                            |
+| `the void price window must be between 1 hour and 7 days` / `the void grace period must be between 1 day and 60 days`                                            | `set_void_rules` out of range.                                                                         |
+| `the settle wait must be between 1 and 1440 minutes` / `the reconcile wait must be between 10 and 10080 minutes` / `the reconcile wait cannot be shorter than the settle wait` / `the sweep interval must be between 1 and 1440 minutes` | `set_sweep_timing` out of range.        |
+| `the lowest opening price cannot be under 1000` / `the highest opening price cannot be over 999000` / `the lowest opening price must be below the highest`         | `set_open_price_bounds` out of range.                                                                  |
+| `the position cap must be between 5 and 100`                                                                                                                     | `set_max_positions` out of range.                                                                      |
+| `the fee rate ceiling cannot be over 2000 basis points` / `the creation fee ceiling cannot be over 100000000` / `the Council share floor cannot be under 500 basis points` / `the Council share ceiling cannot be over 9000 basis points` / `the Council share floor must be below its ceiling` / `the sweep minimum ceiling must be between 1 and 1000000000` | `set_fee_limits` out of its hard range. |
+| `the current fee rate is above that ceiling, lower the fee rate first` / `the current creation fee is above that ceiling, lower the creation fee first` / `the current Council share is outside those limits, move the share first` / `the current sweep minimum is above that ceiling, lower the sweep minimum first` | `set_fee_limits` that would leave a current value outside the new limit. |
 | `market has not closed`                                                                                                                                          | The oracle tried to resolve early.                                                                     |
 | `market already resolved differently`                                                                                                                            | A second, conflicting outcome.                                                                         |
-| `the answer deadline and the 7 day grace period have not passed`                                                                                                 | `void_if_unresolved` too early.                                                                        |
+| `the answer deadline and the <n> day grace period have not passed`                                                                                               | `void_if_unresolved` too early (7 days to start).                                                      |
 | `not resolved` / `not resolved yet` / `nothing to redeem`                                                                                                        | Claiming or redeeming too soon, or with nothing held.                                                  |
 | `text is too long` / `<field> is required` / `category and subcategory must be lowercase slugs of up to 32 characters`                                           | Bad market text.                                                                                       |
 | `close_at must be in the future` / `resolve_by must be after close_at`                                                                                           | Bad market times.                                                                                      |

@@ -147,7 +147,7 @@ interface OwedView { balances: U128; locked: U128; fees: U128; revenue_due: U128
 | `get_sweep`, `list_sweeps` | `{sweep_id: U64}`, `{from_index: U64, limit: U64}` | `SweepView \| null`, `SweepView[]` | NEW |
 | `in_flight`, `owed_breakdown` | `{}` | `InFlightView`, `OwedView` | NEW |
 
-`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `create_fee: U128`, `revenue_pool`, `business_wallet` (NEW name `treasury`), `revenue_unresolved: U128`.
+`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `create_fee: U128`, `revenue_pool`, `business_wallet` (NEW name `treasury`), `revenue_unresolved: U128`, `void_price_window_ns: U64`, `void_grace_ns: U64`, `settle_wait_minutes: number`, `reconcile_wait_minutes: number`, `min_sweep_interval_minutes: number`, `min_open_price: U128`, `max_open_price: U128`, `max_fee_rate_bps: number`, `max_create_fee: U128`, `min_revenue_share_bps: number`, `max_revenue_share_bps: number`, `max_min_sweep: U128`. `max_positions` is the stored cap.
 
 ---
 
@@ -210,10 +210,10 @@ interface Case {                               // oracle.get_case   EXISTING
   round: number; jury_size: number; draw_by: U64; draw_after_height: U64;
   commit_ends_at: U64; panel_deadline: U64; panel: AccountId[]; first_panel: AccountId[];
   commits: Commit[]; votes: Vote[]; final_outcome: Outcome | null; applied: boolean;
-  challenged_at: U64; delinquent: AccountId[];
+  challenged_at: U64; juror_share_bps: number; no_decision_share_bps: number; delinquent: AccountId[];
 }
 interface OracleMarketInfo { close_at: U64; resolve_by: U64; rule_hash: string; price_rule: PriceRule | null;
-                             window_ns: U64; panel_deadline_ns: U64; draw_window_ns: U64 }
+                             window_ns: U64; panel_deadline_ns: U64; draw_window_ns: U64; apply_buffer_ns: U64 }
 ```
 
 BUILT (`list_cases`, `bond_totals`):
@@ -241,7 +241,7 @@ interface BondTotals { bonds_held: U128; claimable: U128; total: U128 }   // tot
 
 `list_cases` looks at `limit` consecutive market ids from `from_market_id`, clamped to 50, and returns a row for each id that has a case. An id without a case is skipped, so a page can hold fewer than `limit` rows and the caller advances by `limit`. `votes` is the count of revealed votes.
 
-`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `market`, `bond_token` (NEW: `verifier`, `collateral_token_id`), `bond: U128`, `window_ns`, `panel_deadline_ns`, `draw_window_ns`, `min_proposal_ns`, `min_resolve_gap_ns` (all `U64`), `council`, `jury_size: number`, `draw_delay_blocks: U64`, `operator`, `network: string`, `publishers: string[]`, `price_threshold: number`, `no_decision_recipient`.
+`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `market`, `bond_token` (NEW: `verifier`, `collateral_token_id`), `bond: U128`, `window_ns`, `panel_deadline_ns`, `draw_window_ns`, `min_proposal_ns`, `min_resolve_gap_ns`, `apply_buffer_ns` (all `U64`), `council`, `jury_size: number`, `draw_delay_blocks: U64`, `operator`, `network: string`, `publishers: string[]`, `price_threshold: number`, `no_decision_recipient`, `juror_share_bps: number`, `no_decision_share_bps: number`, `max_publishers: number`.
 
 ### 6.3 Calls and messages
 
@@ -318,7 +318,7 @@ interface RewardTotals { total_received: U128; total_paid: U128; pending_claims:
 | `received_of` | `{sweep_id: U64}` | `{amount: U128, quarter: number, at: U64} \| null` | NEW |
 | `reward_totals` | `{}` | `RewardTotals` | NEW |
 
-`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `oracle`, `nft_contract`, `verifier`, `collateral_token_id`, `cooldown_ns: U64`, `max_seats_per_account: number`, `allowlist_enabled: boolean`, `allowed_range: {first: U64, last: U64} \| null`, `total_received: U128`, `stream_ns`, `stream_remaining`, `stream_ends_at`. The three `stream_*` fields are REMOVED. NEW: `market`, `close_grace_ns`, `next_to_finalize`, `last_tick`.
+`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `oracle`, `nft_contract`, `verifier`, `collateral_token_id`, `cooldown_ns: U64`, `max_seats_per_account: number`, `allowlist_enabled: boolean`, `allowed_range: {first: U64, last: U64} \| null`, `total_received: U128`, `stream_ns`, `stream_remaining`, `stream_ends_at`. The three `stream_*` fields are REMOVED. NEW: `market`, `close_grace_ns`, `reconcile_wait_ns`, `next_to_finalize`, `last_tick`.
 
 ### 7.3 Calls
 
@@ -390,7 +390,7 @@ The site shows a sentence from `web/lib/errors.ts`. It matches the panic text wi
 | Pattern the site matches today | Contract strings it catches |
 | --- | --- |
 | `has not closed` | market `market has not closed`, oracle `the market has not closed yet` |
-| `market is closed`, `market is resolved`, `market is halted`, `paused`, `sells are paused`, `wait an hour since the last sweep` | market |
+| `market is closed`, `market is resolved`, `market is halted`, `paused`, `sells are paused`, `wait an hour since the last sweep` (or `wait <n> minutes since the last sweep`) | market |
 | `too many positions`, `min shares must be above zero`, `price moved`, `not enough balance`, `not enough shares` | market |
 | `storage deposit` | market `do the storage deposit first` |
 | `wrong token` | market, oracle, council |

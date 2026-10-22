@@ -105,6 +105,11 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | NEW `set_min_sweep` | Owner | `min_sweep: U128` | 0 | 30 TGas | 1 | At most 100,000,000 |
 | `set_paused` | Operator or owner | `paused: bool` | 0 | 30 TGas | 1 | Emergency stop for buys, deposits and seeds. Sells and exits stay open |
 | `set_sells_paused` | Owner | `sells_paused: bool` | 0 | 30 TGas | 1 | Stops `sell`. Withdraw and redeem stay open |
+| `set_void_rules` | Owner | `price_window_ns: U64`, `grace_ns: U64` | 0 | 30 TGas | 1 | Void price window 1 hour to 7 days, void grace 1 to 60 days. Applies to markets created afterwards |
+| `set_sweep_timing` | Owner | `settle_wait_minutes`, `reconcile_wait_minutes`, `min_interval_minutes` (u32) | 0 | 30 TGas | 1 | Settle wait 1 to 1440, reconcile wait 10 to 10080 and not below the settle wait, sweep interval 1 to 1440. Live |
+| `set_open_price_bounds` | Owner | `min: U128`, `max: U128` | 0 | 30 TGas | 1 | Opening price range within 1000 to 999000 millionths, min below max. Live |
+| `set_max_positions` | Owner | `max_positions: u32` | 0 | 30 TGas | 1 | 5 to 100. Positions already held stay |
+| `set_fee_limits` | Owner | `max_fee_rate_bps`, `max_create_fee`, `min_revenue_share_bps`, `max_revenue_share_bps`, `max_min_sweep` | 0 | 30 TGas | 1 | The ceilings and floors the fee setters check against, each inside a hard range. Refused if it would leave a current value outside |
 | `halt`, `resume` | Operator or owner | `market_id: U64`, `reason: String` | 0 | 30 TGas | 1 | The operator cannot halt in the last 24 hours before close |
 | `create_market`, `retry_register`, `claim_residual` | Operator or owner | as in market.md | 0 | 100 TGas for `create_market` | 1 | Routine. The operator normally calls them |
 | `set_operator` | Owner | `operator_id: AccountId` | 0 | 30 TGas | 2 | Changes who can seed, halt and pause |
@@ -124,6 +129,9 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms` | Owner | `U64` milliseconds | 0 | 30 TGas | 1 | Apply to markets registered afterwards. The Council cooldown must stay at least the window plus the panel deadline |
 | `set_draw_delay_blocks` | Owner | `U64` | 0 | 30 TGas | 1 | |
 | `set_jury_size` | Owner | `jury_size: u32` | 0 | 30 TGas | 1 | Odd, at most 21 |
+| `set_juror_shares` | Owner | `decided_bps: u32`, `no_decision_bps: u32` | 0 | 30 TGas | 1 | 500 to 5000 and 1000 to 10000. Applies to cases proposed afterwards |
+| `set_apply_buffer_ms` | Owner | `apply_buffer_ms: U64` | 0 | 30 TGas | 1 | 5 seconds to 5 minutes. Applies to markets registered afterwards |
+| `set_max_publishers` | Owner | `max_publishers: u32` | 0 | 30 TGas | 1 | 1 to 25, not below the price threshold. Removes no one |
 | `remove_publisher` | Operator or owner | `key: PublicKey` | 0 | 30 TGas | 1 | Only removes power |
 | `set_operator` | Owner | `operator_id: AccountId` | 0 | 30 TGas | 2 | |
 | `set_no_decision_recipient` | Owner | `recipient: AccountId` | 0 | 30 TGas | 2 | Receives the jurors' half when nobody revealed. Should be the treasury |
@@ -143,6 +151,7 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `set_token_range` | Owner | `first: U64`, `last: U64` | 0 | 30 TGas | 2 | |
 | `set_allowlist_enabled` | Owner | `enabled: bool` | 0 | 30 TGas | 2 | Off lets any token of the collection stake |
 | `reconcile_claim` | Owner | `quarter: u32`, `token_id`, `owner`, `paid: bool` | 0 | 30 TGas | 2 | Decides a claim whose payout callback never arrived, an hour after the claim. The owner checks the verifier's events first |
+| `set_reconcile_wait_ns` | Owner | `reconcile_wait_ns: U64` | 0 | 30 TGas | 2 | 10 minutes to 7 days. Live |
 | `set_nft_contract` | Owner | `nft_contract: AccountId` | 0 | 30 TGas | 2 | Only while nothing is staked |
 | NEW `set_market` | Owner | `market: AccountId` | 0 | 30 TGas | 2 | Changes the only revenue sender |
 | `upgrade`, `seal`, `propose_owner`, `accept_owner` | as the market | | 0 | as the market | 3 | |
@@ -239,6 +248,11 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | market | `reconcile_revenue` | `amount`: U128 above 0, `arrived`: boolean | 0 | 5 to 30 |
 | market | `set_paused` | `paused`: boolean | 0 | 5 to 30 |
 | market | `set_sells_paused` | `sells_paused`: boolean | 0 | 5 to 30 |
+| market | `set_void_rules` | `price_window_ns`, `grace_ns`: decimal strings in range | 0 | 5 to 30 |
+| market | `set_sweep_timing` | three integers in range, settle wait not above reconcile wait | 0 | 5 to 30 |
+| market | `set_open_price_bounds` | `min`, `max`: decimal strings in range, min not above max | 0 | 5 to 30 |
+| market | `set_max_positions` | integer 5 to 100 | 0 | 5 to 30 |
+| market | `set_fee_limits` | five values in range, share floor not above ceiling | 0 | 5 to 30 |
 | market | `halt` | `market_id`: U64, `reason`: non-blank text up to 500 bytes | 0 | 5 to 30 |
 | market | `resume`, `claim_residual` | `market_id`: U64 | 0 | 5 to 30 |
 | market | `retry_register` | `market_id`: U64 | 0 | 50 to 150, 100 attached |
@@ -248,6 +262,9 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | oracle | `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms` | U64 from 1 to 18,446,744,073,709, the most whose product with 1,000,000 fits a U64 | 0 | 5 to 30 |
 | oracle | `set_draw_delay_blocks` | U64 | 0 | 5 to 30 |
 | oracle | `set_jury_size` | odd integer 1 to 21 | 0 | 5 to 30 |
+| oracle | `set_juror_shares` | `decided_bps` 500 to 5000, `no_decision_bps` 1000 to 10000 | 0 | 5 to 30 |
+| oracle | `set_apply_buffer_ms` | decimal string 5000 to 300000 | 0 | 5 to 30 |
+| oracle | `set_max_publishers` | integer 1 to 25 | 0 | 5 to 30 |
 | oracle | `set_no_decision_recipient` | `recipient` must be the treasury | 0 | 5 to 30 |
 | oracle | `add_publisher`, `remove_publisher` | `key`: an ed25519 key | 0 | 5 to 30 |
 | oracle | `set_price_threshold` | integer 1 to 10 | 0 | 5 to 30 |
@@ -260,6 +277,7 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | council | `clear_token_range` | none | 0 | 5 to 30 |
 | council | `set_allowlist_enabled` | `enabled`: boolean | 0 | 5 to 30 |
 | council | `reconcile_claim` | `quarter`: integer, `token_id`: text, `owner`: account, `paid`: boolean | 0 | 5 to 30 |
+| council | `set_reconcile_wait_ns` | decimal string 600e9 to 604800e9 | 0 | 5 to 30 |
 
 The ceilings in the table (500, 10,000,000, the text limits, 21, 10 and 100) are copied from constants in the contract source, and the 100 TGas floor of `upgrade` from `upgrade::GAS_UPGRADE`. A test reads the source and fails when one of them differs.
 

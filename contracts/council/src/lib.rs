@@ -24,7 +24,11 @@ const MAX_ALLOW_BATCH: usize = 100;
 const NS_PER_SEC: u64 = 1_000_000_000;
 const NS_PER_DAY: u64 = 86_400 * NS_PER_SEC;
 // How long a claim can sit pending before the owner may decide it by hand, which leaves its payout callback time to arrive.
-const RECONCILE_WAIT_NS: u64 = 3_600 * NS_PER_SEC;
+// The owner can move it between the bounds: under 10 minutes the callback may still be on its way, and over 7 days a
+// seat locked out by a stuck claim waits too long for its money.
+const DEFAULT_RECONCILE_WAIT_NS: u64 = 3_600 * NS_PER_SEC;
+const MIN_RECONCILE_WAIT_NS: u64 = 600 * NS_PER_SEC;
+const MAX_RECONCILE_WAIT_NS: u64 = 7 * NS_PER_DAY;
 // A finished quarter waits this long before it can be finalized, so a case that crossed its end can settle first and a silent
 // juror's forfeit still counts. Claims open when the quarter is finalized. The owner can move it between the bounds.
 const DEFAULT_CLOSE_GRACE_NS: u64 = 7 * NS_PER_DAY;
@@ -345,6 +349,8 @@ pub struct CouncilContract {
     earning: u32,
     // How long after a quarter ends it can be finalized, and so when its claims open.
     close_grace_ns: u64,
+    // How long a claim must be pending before reconcile_claim can decide it.
+    reconcile_wait_ns: u64,
     // Seat time is counted up to here. The quarters from `next_to_finalize` on are the ones not final yet.
     last_tick: u64,
     next_to_finalize: u32,
@@ -452,6 +458,7 @@ impl CouncilContract {
             open_juries: BTreeMap::new(),
             earning: 0,
             close_grace_ns: DEFAULT_CLOSE_GRACE_NS,
+            reconcile_wait_ns: DEFAULT_RECONCILE_WAIT_NS,
             last_tick: now,
             next_to_finalize: quarter_containing(now),
             quarters: LookupMap::new(Key::Quarters),
@@ -566,6 +573,20 @@ impl CouncilContract {
             json!({ "close_grace_ns": close_grace_ns.0.to_string() }),
         );
         self.close_grace_ns = close_grace_ns.0;
+    }
+
+    // How long a claim must be pending before the owner can decide it by hand. It applies to every claim from now on.
+    pub fn set_reconcile_wait_ns(&mut self, reconcile_wait_ns: U64) {
+        self.only_owner();
+        require!(
+            (MIN_RECONCILE_WAIT_NS..=MAX_RECONCILE_WAIT_NS).contains(&reconcile_wait_ns.0),
+            "the reconcile wait must be between 10 minutes and 7 days"
+        );
+        emit(
+            "reconcile_wait_set",
+            json!({ "reconcile_wait_ns": reconcile_wait_ns.0.to_string() }),
+        );
+        self.reconcile_wait_ns = reconcile_wait_ns.0;
     }
 
     // The only account whose sweeps count as revenue. Revenue refuses until this is set.
@@ -889,8 +910,11 @@ impl CouncilContract {
             .cloned()
             .unwrap_or_else(|| env::panic_str("no claim is pending for that seat"));
         require!(
-            env::block_timestamp() >= claim.requested_at.saturating_add(RECONCILE_WAIT_NS),
-            "wait 60 minutes after the claim before reconciling"
+            env::block_timestamp() >= claim.requested_at.saturating_add(self.reconcile_wait_ns),
+            &format!(
+                "wait {} minutes after the claim before reconciling",
+                self.reconcile_wait_ns / (60 * NS_PER_SEC)
+            )
         );
         let mut data = self.close_claim(quarter, token_id, owner, claim, paid);
         data["paid"] = json!(paid);
@@ -1114,6 +1138,7 @@ impl CouncilContract {
                 "owner": self.owner, "pending_owner": self.pending_owner, "oracle": self.oracle, "nft_contract": self.nft_contract,
                 "market": self.market, "verifier": self.verifier, "collateral_token_id": self.collateral_token_id,
                 "cooldown_ns": self.cooldown_ns.to_string(), "close_grace_ns": self.close_grace_ns.to_string(),
+                "reconcile_wait_ns": self.reconcile_wait_ns.to_string(),
                 "max_seats_per_account": self.max_seats_per_account, "allowlist_enabled": self.allowlist_enabled,
                 "allowed_range": self.current_range().map(|(first, last)| json!({ "first": first.to_string(), "last": last.to_string() })),
                 "total_received": self.total_received.to_string(), "next_to_finalize": self.next_to_finalize,
@@ -1471,6 +1496,7 @@ mod tests {
     const VERIFIER: &str = "intents.near";
     const MARKET: &str = "market.near";
     const COLLATERAL_ID: &str = "nep141:usd.near";
+    const RECONCILE_WAIT_NS: u64 = DEFAULT_RECONCILE_WAIT_NS;
     const COOLDOWN_NS: u64 = 60_000_000_000;
     const SECOND: u64 = NS_PER_SEC;
     const DAY: u64 = NS_PER_DAY;
@@ -2885,6 +2911,68 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn the_owner_sets_the_reconcile_wait_within_its_bounds() {
+        let mut c = council();
+        assert_eq!(c.config()["reconcile_wait_ns"], DEFAULT_RECONCILE_WAIT_NS.to_string());
+        act_as(OWNER);
+        c.set_reconcile_wait_ns(U64(MIN_RECONCILE_WAIT_NS));
+        let event = last_event();
+        assert_eq!(event["event"], "reconcile_wait_set");
+        assert_eq!(event["data"]["reconcile_wait_ns"], MIN_RECONCILE_WAIT_NS.to_string());
+        c.set_reconcile_wait_ns(U64(MAX_RECONCILE_WAIT_NS));
+        assert_eq!(c.config()["reconcile_wait_ns"], MAX_RECONCILE_WAIT_NS.to_string());
+        for bad in [0, MIN_RECONCILE_WAIT_NS - 1, MAX_RECONCILE_WAIT_NS + 1] {
+            assert_eq!(
+                refusal(|| c.set_reconcile_wait_ns(U64(bad))),
+                "the reconcile wait must be between 10 minutes and 7 days",
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_owner_sets_the_reconcile_wait() {
+        let mut c = council();
+        for who in ["a.near", ORACLE, MARKET] {
+            act_as(who);
+            assert_eq!(
+                refusal(|| c.set_reconcile_wait_ns(U64(DEFAULT_RECONCILE_WAIT_NS))),
+                "owner only",
+                "{who}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_longer_reconcile_wait_refuses_a_reconcile_the_old_wait_would_allow() {
+        let mut c = stuck_claim();
+        act_as(OWNER);
+        c.set_reconcile_wait_ns(U64(2 * DEFAULT_RECONCILE_WAIT_NS));
+        set_time(clock() + RECONCILE_WAIT_NS);
+        assert_eq!(
+            refusal(|| c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false)),
+            "wait 120 minutes after the claim before reconciling"
+        );
+        set_time(clock() + RECONCILE_WAIT_NS);
+        c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false);
+        assert_eq!(last_event()["event"], "claim_reconciled");
+    }
+
+    #[test]
+    fn a_shorter_reconcile_wait_lets_the_owner_decide_sooner() {
+        let mut c = stuck_claim();
+        act_as(OWNER);
+        c.set_reconcile_wait_ns(U64(MIN_RECONCILE_WAIT_NS));
+        set_time(clock() + MIN_RECONCILE_WAIT_NS - 1);
+        assert!(
+            refusal(|| c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false))
+                .starts_with("wait 10 minutes")
+        );
+        set_time(clock() + 1);
+        c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false);
     }
 
     #[test]

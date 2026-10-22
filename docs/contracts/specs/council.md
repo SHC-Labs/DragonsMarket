@@ -77,7 +77,7 @@ Section 6 is the concrete proposal. In one paragraph: quarters are UTC calendar 
 
 | Role | Set by | Powers |
 | --- | --- | --- |
-| Owner | `new`, `propose_owner` and `accept_owner`. DECIDED: the DAO | `upgrade`, `seal`, `propose_owner`, `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract` (only with nothing staked), `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`. NEW: `set_close_grace_ns`, `set_market` |
+| Owner | `new`, `propose_owner` and `accept_owner`. DECIDED: the DAO | `upgrade`, `seal`, `propose_owner`, `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract` (only with nothing staked), `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`. NEW: `set_close_grace_ns`, `set_market`, `set_reconcile_wait_ns` |
 | Oracle | `new`, no setter | `draw` and `unlock_case` only |
 | Seat owner | Staking | `request_unstake`, `unstake`, and the claim of their own seats |
 | NFT contract | `new`, `set_nft_contract` | `nft_on_transfer` only |
@@ -137,6 +137,7 @@ EXISTING (`council/src/lib.rs:169-213`).
 | --- | --- | --- |
 | `market` | `AccountId` | NEW. The only revenue sender |
 | `close_grace_ns` | `u64` | NEW. Wait after a quarter ends before it can be finalized. Default 7 days, bounds 1 to 30 days |
+| `reconcile_wait_ns` | `u64` | NEW. How long a claim must be pending before `reconcile_claim`. Default 1 hour, owner range 10 minutes to 7 days |
 | `last_tick` | `u64` | NEW. Nanosecond time up to which seat time has been added to the quarter books |
 | `first_quarter`, `next_to_finalize` | `u32` | NEW. Oldest quarter with a book and the next one to finalize |
 | `quarters` | `LookupMap<u32, QuarterBook>` | NEW. One book per quarter from `first_quarter` to the current one, with no gaps |
@@ -401,6 +402,7 @@ Views today: `total_received` (`:665`), `seat_count` (`:669`), `jury_of(case_key
 | `unstake` CHANGED | Seat owner | `token_id` | `Promise` | exactly 1 | 33 TGas floor | Books the span, removes the stake, returns the NFT, no payout. Refuses `book this seat first` when the span exceeds 8 quarters | `unstaked`, `unstake_failed` |
 | `unlock_case` CHANGED | Oracle | as above | none | none | 15 TGas | Forfeits weight (6.5) | `seat_time_forfeited`, `forfeit_skipped` |
 | `set_close_grace_ns(close_grace_ns: U64)` NEW | Owner | nanoseconds | none | none | none | Between 1 day and 30 days | `close_grace_set` |
+| `set_reconcile_wait_ns(reconcile_wait_ns: U64)` NEW | Owner | nanoseconds | none | none | none | Between 10 minutes and 7 days. Live. `reconcile_claim` reads it | `reconcile_wait_set` |
 | `set_market(market: AccountId)` NEW | Owner | account | none | none | none | Changes the only revenue sender | `market_set` |
 
 Every owner row is a plain `AccountId` check. No row names or calls a governance contract (guard test `guards.rs:179-191`).
@@ -467,6 +469,7 @@ Envelope: `EVENT_JSON:{"standard":"council","version":"1.0.0","event":"<name>","
 | `claim_requested` | `quarter`, `token_id`, `owner`, `amount` | NEW |
 | `claim_paid` | `quarter`, `token_id`, `owner`, `amount` | NEW |
 | `close_grace_set`, `market_set`, `nft_contract_set` | the new value | NEW |
+| `reconcile_wait_set` | `reconcile_wait_ns` | NEW |
 | `cooldown_set`, `max_seats_per_account_set`, `tokens_allowed`, `token_range_set`, `token_range_cleared`, `allowlist_set` | the changed value | EXISTING |
 | `owner_proposed`, `owner_changed`, `code_staged`, `upgrade_sent`, `migrated`, `seal_sent` | as the market | EXISTING |
 
