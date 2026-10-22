@@ -6,7 +6,7 @@ import http from "node:http";
 import { existsSync, writeFileSync } from "node:fs";
 
 const PORT = Number(process.env.MOCK_CHAIN_PORT ?? 3030);
-const MARKET = "market.test.near", ORACLE = "oracle.test.near", TOKEN = "ft.test.near";
+const MARKET = "market.test.near", ORACLE = "oracle.test.near", TOKEN = "ft.test.near", VERIFIER = "intents.test.near";
 const SEC = 1_000_000_000n, DAY = 86_400n * SEC, USD = 1_000_000n;
 const now = () => BigInt(Date.now()) * 1_000_000n;
 const started = now();
@@ -123,7 +123,7 @@ const views = {
     config: () => ({ bond: String(50n * USD), window_ns: String(600n * SEC), panel_deadline_ns: String(1800n * SEC), council: "council.test.near", jury_size: 3, draw_delay_blocks: "5" }),
     claimable_of: () => "0",
   },
-  [TOKEN]: { ft_balance_of: ({ account_id }) => (account_id === ALICE ? String(2_874_250_000n) : "0") },
+  [VERIFIER]: { mt_balance_of: ({ account_id }) => (account_id === ALICE ? String(2_874_250_000n) : "0") },
 };
 
 function handle(body) {
@@ -141,7 +141,7 @@ function handle(body) {
 // The e2e specs read the chain layout from contracts/dev-chain.json; write one unless a real chain already did.
 const layout = new URL("../../contracts/dev-chain.json", import.meta.url);
 if (!existsSync(layout)) writeFileSync(layout, JSON.stringify({
-  mock: true, rpc: `http://127.0.0.1:${PORT}`, market: MARKET, oracle: ORACLE, token: TOKEN, count: markets.length,
+  mock: true, rpc: `http://127.0.0.1:${PORT}`, market: MARKET, oracle: ORACLE, token: TOKEN, verifier: VERIFIER, count: markets.length,
   markets: { open: 0, proposed: 1, disputed: 2, verdict: 3, nobody: 4, final_yes: 5 },
   accounts: { owner: "owner.test.near", alice: ALICE, bob: "bob.test.near", carol: "carol.test.near", dave: "dave.test.near", jurors },
 }, null, 2));
