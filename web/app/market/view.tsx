@@ -11,6 +11,9 @@ import { CountUp } from "@/components/CountUp";
 import { RulesBlock } from "@/components/RulesBlock";
 import { Resolution } from "@/components/Resolution";
 import { MarketSeal } from "@/components/MarketSeal";
+import { CategoryEmblem, trackPanel } from "@/components/CategoryEmblem";
+import { CategoryGlyph, categoryColours } from "@/components/MarketIcon";
+import { Embers } from "@/components/Embers";
 import { TradeTicket } from "@/components/TradeTicket";
 import { Clock, Coin } from "@/components/icons";
 import { config } from "@/lib/config";
@@ -59,7 +62,9 @@ export function MarketPageView() {
       <div className="market-detail-layout">
         <MarketHeading m={m} stage={view.stage} />
 
-        <section className="price-panel" aria-label="Price">
+        <section className="price-panel" aria-label="Price" style={categoryColours(m.category)} onPointerMove={trackPanel}>
+          <Embers height={0.7} intensity={0.9} speed={0.4} spark="--icon-ink" smoke="--icon-ink" />
+          <CategoryEmblem category={m.category} sub={m.subcategory} />
           <div className="price-panel-head">
             <div className="price-panel-figure">
               {done ? (
@@ -117,6 +122,7 @@ function MarketHeading({ m, stage }: { m: MarketView; stage: string | null }) {
           <div className="min-w-0">
             <div className="market-detail-meta">
               <StateBadge status={m.status} caseStage={stage} />
+              <span className="category-chip" style={categoryColours(m.category)}><CategoryGlyph category={m.category} sub={m.subcategory} size={15} />{labelOf(m.category, m.subcategory).category}</span>
               <span><Clock size={15} />Closes <span className="num">{formatDateTime(m.close_at)}</span></span>
               <span><Coin size={15} /><span className="num">{formatMoney(m.locked)}</span> {config.tokenSymbol} in play</span>
               {m.outcome && <span className="market-detail-result">Result: {resultWord(m)}</span>}
