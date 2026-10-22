@@ -4,15 +4,19 @@ Target decision, 2026-10-20: Trezu/SputnikDAO replaces custom governance. Earned
 allocate 75% to the Trezu treasury and 25% to Council-controlled NFT rewards backed in Intents.
 See [the architecture](../intents-architecture.md).
 
+Status, 2026-10-21, fee split built (R-03): a sweep records both legs under a sweep id before it
+sends either, each leg has its own status, the Council takes each sweep id once, and a lost Council
+result is settled from the Council's own record. The treasury and the Council's account are not
+written in the code and are not arguments of `new`: the owner sets them with `set_fee_recipients`,
+and a sweep refuses until it has. The 75/25 split is a share in basis points the owner can move
+(2,500 to start). `business_wallet` is now `treasury`. State version 2. See "Fees".
+
 Status, 2026-10-20, phase I2 of the Intents migration: the money path in this manual is the NEAR
 Intents path. The market keeps all its backing in its own account inside the Intents verifier. Money
 arrives through the verifier's `mt_transfer_call`, which calls `mt_on_transfer` here, and leaves
 through `mt_transfer` and `mt_transfer_call` from this contract, with no signed intent and no key
-registered in the verifier. The sweep already splits 25% to `revenue_pool` (the Council) and 75% to
-`business_wallet`, so the accepted 75/25 allocation fits by setting `business_wallet` to the Trezu
-treasury with `set_fee_recipients`. Quarterly Council claims and treasury verification are not
-built here. The DAO voting period is the only delay before an owner action (decided 2026-10-21, R-07). Oracle bonds still use a NEP-141 token and are the
-next phase.
+registered in the verifier. The DAO voting period is the only delay before an owner action
+(decided 2026-10-21, R-07). Oracle bonds still use a NEP-141 token and are the next phase.
 
 Source: `market/src/lib.rs` (the contract) and `market/src/curve.rs` (the pricing maths). Written
 2026-10-18 from the code as it stands, including everything added that day. The upgrade path was
@@ -30,8 +34,10 @@ These are required capabilities, not claims that new methods already exist.
 - Done in I2: position issuance and release are backed by the market's own Intents account, funded
   by `mt_transfer_call` and paid by `mt_transfer`. Still open: single-use operation references and
   authenticated settlement for signed intents, which this contract does not accept.
-- Separate earned fees from backing and record the 75% treasury / 25% Council allocation. Track
-  each transfer leg through pending, confirmed, failed or unresolved states without duplication.
+- Done 2026-10-21 (R-03): earned fees are separate from backing, the 75% treasury / 25% Council
+  allocation is recorded per sweep, and each transfer leg moves through pending, settled, refused or
+  unresolved without duplication. Not built here: verifying the treasury account on chain (the owner
+  and the helper in `contracts/keeper` check it before `set_fee_recipients`).
 - Expose position backing, user availability, fee liabilities and operation status through reviewed
   views/events. Existing NEP-141 balance reads must not stand in for verifier-held funds.
 - Migrate owner-authorised settings and upgrades to the verified Trezu/Sputnik execution path. The
@@ -110,7 +116,7 @@ There are four kinds of caller. The first three are stored accounts, the fourth 
 
 | Role     | Set by                                         | Can do                                                                                                                                                                                                                                                                               |
 | -------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Owner    | `new`, then `propose_owner` and `accept_owner` | Everything the operator can, plus `set_operator`, `propose_owner`, `set_fee_recipients`, `set_fee_rate_bps`, `set_create_fee`, `reconcile_revenue`, `upgrade` and `seal`. In a real deployment this is the DAO, so each of these needs a DAO proposal. SputnikDAO executes a proposal at the approval that reaches its threshold. Its voting period is the only delay, by owner decision (R-07). |
+| Owner    | `new`, then `propose_owner` and `accept_owner` | Everything the operator can, plus `set_operator`, `propose_owner`, `set_fee_recipients`, `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id`, `set_fee_rate_bps`, `set_create_fee`, `reconcile_leg`, `upgrade` and `seal`. In a real deployment this is the DAO, so each of these needs a DAO proposal. SputnikDAO executes a proposal at the approval that reaches its threshold. Its voting period is the only delay, by owner decision (R-07). |
 | Operator | `new`, then `set_operator` (owner only)        | Routine running: `create_market`, `retry_register`, `halt` (but not in the last 24 hours before a market closes, see "Void"), `resume`, `set_paused`, `claim_residual`, and seeding a market. Cannot move fees, change owner, change the operator, or touch user money.              |
 | Oracle   | `new` (fixed, no setter)                       | Only `set_outcome`.                                                                                                                                                                                                                                                                  |
 | Anyone   | n/a                                            | Trade, deposit, withdraw, redeem, register for storage (for themselves or for someone else) and unregister, `void_if_unresolved` (a grace period after `resolve_by`), `sweep_fees`, `stage_code` (paying for the storage), and every view.                                           |
@@ -120,9 +126,10 @@ wait on a DAO proposal. If it is stolen, the damage is limited: the thief can ha
 pause the contract, but cannot take money, redirect fees, or keep the key, because the owner can
 replace it. Users can still withdraw and redeem while the contract is paused or a market is halted.
 
-Two accounts are not roles but matter: `revenue_pool` (the council contract, receives 25% of fees)
-and `business_wallet` (receives 75% of fees and the leftover of resolved markets). Only the owner
-can change them.
+Two accounts are not roles but matter: `revenue_pool` (the council contract, receives the Council's
+share of fees, 25% to start) and `treasury` (receives the rest of the fees and the leftover of
+resolved markets). Neither is set at deploy. Only the owner sets and changes them, and a sweep refuses
+until it has.
 
 ---
 
@@ -140,11 +147,13 @@ deployed the contract.
 | `oracle_id`        | The oracle contract.                                |
 | `verifier_id`      | The Intents verifier that holds the backing, `intents.near` on mainnet. |
 | `collateral_token_id` | The collateral's exact id in the verifier, `nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1` (native USDC) on mainnet. Must start with `nep141:` (`the collateral token id must look like nep141:<token>`). The bare contract id and other spellings have no balance in the verifier. |
-| `revenue_pool`     | Where 25% of fees go. Normally council.             |
-| `business_wallet`  | Where 75% of fees and resolved-market leftovers go. |
 
-Starting values: trade fee rate 200 basis points (2%), creation fee 1,000,000 units, not paused, no
-markets.
+`new` takes no fee recipient. The treasury is the Trezu account, which does not exist when the
+contract is deployed, so the owner sets both recipients afterwards with `set_fee_recipients`.
+
+Starting values: trade fee rate 200 basis points (2%), creation fee 1,000,000 units, Council share
+of a sweep 2,500 basis points (25%), minimum sweep 1,000,000 units, first sweep id 1, not paused, no
+markets, no fee recipients.
 
 Deploy and initialise in one batch signed by the contract account, and check afterwards that the
 owner is yours. A deploy with no init in the batch leaves nothing open to a stranger, but it leaves
@@ -250,15 +259,19 @@ well.
 | `propose_owner(new_owner)`                          | Owner                | Names a new owner. Nothing changes yet.                                                                                                                         |
 | `accept_owner()`                                    | The proposed account | Completes the handover. Two steps so a mistyped account cannot lock everyone out. Until it is accepted, the old owner keeps full power.                         |
 | `set_operator(operator_id)`                         | Owner                | Replaces the operator, effective at once.                                                                                                                       |
-| `set_fee_recipients(revenue_pool, business_wallet)` | Owner                | Changes where fees go. Takes effect for the next sweep and also for any amount still owed to the old recipients, which is sent to whoever is set at sweep time. |
+| `set_fee_recipients(revenue_pool, treasury)`        | Owner                | Sets where fees go: the Council and the treasury, which must be different accounts. A sweep refuses until it is called. Takes effect for the next sweep and also for any amount still owed to the old recipients, which is sent to whoever is set at sweep time. |
+| `set_revenue_share_bps(revenue_share_bps)`          | Owner                | Sets the Council's share of every later sweep, from 1,000 to 5,000 basis points. The treasury gets the rest, so the whole of every fee is always accounted for. A sweep already made keeps its split. |
+| `set_min_sweep(min_sweep)`                          | Owner                | Sets the least a sweep acts on, from 1 to 100,000,000 units. |
+| `set_next_sweep_id(next_sweep_id)`                  | Owner                | Moves the id of the next sweep up, never down. A sweep id is used once and the Council refuses a repeat, so a market that replaces an old one starts above the ids the Council has taken. |
 | `set_fee_rate_bps(fee_rate_bps)`                    | Owner                | Sets the trade fee rate. Refused above 500 (5%). Zero is allowed. Applies from the next trade.                                                                  |
 | `set_create_fee(create_fee)`                        | Owner                | Sets the fee taken from each market's seed. Refused above 10,000,000 units (10 tokens). Zero is allowed. Applies from the next seed.                            |
-| `reconcile_revenue(amount, arrived)`                | Owner                | Settles revenue that `on_revenue_sent` could not account for. See "Revenue whose result was lost". Refused for zero and for more than is unresolved.            |
+| `reconcile_leg(sweep_id, leg, arrived)`             | Owner                | Decides a fee leg (`council` or `treasury`) that is still pending or unresolved an hour after its sweep. See "Revenue whose result was lost". |
 | `upgrade(code_hash)`                                | Owner                | Deploys the staged wasm with that sha256 and runs its `migrate`, in one batch. Needs at least 100 TGas attached. See "Upgrading this contract".                 |
 | `seal(public_key)`                                  | Owner                | Deletes that access key from this account. Refused until an upgrade has gone through `migrate`.                                                                 |
 
 The ceilings (5% and 10 units) are written into the code, so even a captured owner cannot set a
-fee above them.
+fee above them. The bounds of the Council's share (10% to 50%) and of the minimum sweep are written
+there too.
 
 ### Code
 
@@ -277,9 +290,9 @@ fee above them.
 | `halt(market_id, reason)`                                                                                                  | Operator or owner | Stops trading in one market, with a recorded reason. Redemption after resolution still works. Brings the closing-price average up to date before halting.                                      | Not operator or owner; market already resolved; the caller is the operator and the market closes within 24 hours or has closed (`a halt in the last day before close is an owner action`). The owner can halt at any time.                                                                               |
 | `resume(market_id)`                                                                                                        | Operator or owner | Lifts a halt. Brings the closing-price average up to date first, so the halted time counts for nothing.                                                                                        | Not operator or owner; market already resolved.                                                                                                                                                                                                                                                              |
 | `set_paused(paused)`                                                                                                       | Operator or owner | Stops all new trades, deposits and seeding in every market. Withdrawals and redemptions keep working.                                                                                          | Not operator or owner.                                                                                                                                                                                                                                                                                       |
-| `claim_residual(market_id)`                                                                                                | Operator or owner | After resolution, moves what the pool holds beyond what holders are owed into the business wallet's balance inside this contract. Can be done once per market, before or after holders redeem. | Not resolved; already claimed.                                                                                                                                                                                                                                                                               |
+| `claim_residual(market_id)`                                                                                                | Operator or owner | After resolution, moves what the pool holds beyond what holders are owed into the treasury's due bucket (`treasury_due`). The next sweep pays it on the treasury leg, whole and not split with the Council. Can be done once per market, before or after holders redeem. | Not resolved; already claimed.                                                                                                                                                                                                                                                                               |
 
-The business wallet then takes the money out like any user, with `withdraw`.
+The treasury needs no proposal to collect it: the next sweep sends it.
 
 ### The oracle's methods
 
@@ -297,7 +310,9 @@ The business wallet then takes the money out like any user, with `withdraw`.
 | `sell(market_id, side, collateral_out, max_shares_in)` (payable, 1 yocto) | Sells shares back to the pool. You name how much collateral you want out, and the contract works out how many shares that costs. Needs exactly 1 yoctoNEAR.                                                                                                                                                                                                                                  |
 | `redeem(market_id)`                                                       | After resolution, converts all the caller's shares in that market into balance. No deadline.                                                                                                                                                                                                                                                                                                 |
 | `withdraw(amount)` (payable, 1 yocto)                                     | Pays `amount` of the caller's balance into the caller's own Intents account with an `mt_transfer` of 1 yocto from this contract. The balance is reduced first and restored if the verifier's transfer fails (event `withdraw_failed`). Needs exactly 1 yoctoNEAR attached. It pays only the caller, so a mistyped target cannot lose money.                                                                                                                                                                                                                             |
-| `sweep_fees()`                                                            | Splits collected fees 25% and 75% and sends them through the verifier. See "Fees".                                                                                                                                                                                                                                                                                                                                |
+| `sweep_fees()`                                                            | Splits collected fees between the Council and the treasury, records both legs under a sweep id, and sends them through the verifier. Returns the sweep id, or null when there was too little to act on. See "Fees".                                                                                                                                                                                                                                |
+| `settle_leg(sweep_id)`                                                    | Asks the Council what it recorded under a sweep id, for a Council leg whose result was lost, ten minutes or more after the sweep. A record settles the leg and no record makes the amount due again. See "Revenue whose result was lost".                                                                                                                                                                                                                                |
+| `get_sweep(sweep_id)`, `list_sweeps(from_index, limit)` (views)           | One sweep record, or a page of them by id, oldest first, at most 50.                                                                                                                                                                                                                                                                                                                                |
 
 `buy` and `sell` and the token-message trades all use the same rules, below.
 
@@ -351,7 +366,7 @@ build.
 | Seal    | `seal(public_key)` deletes an access key. It is refused until `upgrade_proven` is true (`prove the upgrade path before deleting keys`), so keys are deleted only after one upgrade has worked on this chain.                                                                                                                                                                                    |
 
 The state struct starts with `state_version: u16`, 1 today. `migrate` reads the first two bytes of
-the stored state and refuses anything but 1 (`migrate expects version 1`), then reads the version 1
+the stored state and refuses anything but 1 (`migrate expects version 2`), then reads the version 1
 struct. It never guesses a layout from bytes. A version 2 build keeps the version 1 struct as
 `StateV1`, reads that, builds its state and writes `state_version: 2`.
 
@@ -432,63 +447,97 @@ must equal shares outstanding.
 
 ### Sweeping
 
-Anyone can call `sweep_fees`. It splits the bucket 25% to the revenue pool (the Council) and 75% to
-the business wallet, both rounded down so any remainder stays in the bucket. It then pays both
-amounts out of this contract's Intents account. The Council's part is an `mt_transfer_call` with
-the message `revenue`, so the Council counts it. The business wallet's part is a plain `mt_transfer`.
-Calling it twice at once pays out once. The 25% and 75% are constants in the code, and the two
-recipients are settings (`set_fee_recipients`), so pointing the 75% at a treasury account needs no
-new code. Payouts go only to the accounts those settings and the callers' own records name: the
-verifier does not check that a receiver exists, so a mistyped recipient would lose the money.
+Anyone can call `sweep_fees`. It refuses until the owner has set the recipients
+(`the fee recipients are not set, the owner must call set_fee_recipients before a sweep`). It does
+nothing, and takes no id, when `fees` plus `revenue_due` plus `treasury_due` is below `min_sweep`
+(1,000,000 units to start), or when both legs would be empty.
 
-The sweep refuses less than 87 TGas (`attach at least 87 TGas: a sweep sends the Council its part
-and the business wallet its part`). That is 42 for the Council's transfer call (22 for the verifier's
-own part and 20 for the Council's receipt), 15 and 10 for the business wallet's transfer and its
-callback, 10 for the Council's callback and 10 for the call itself. Measured in the sandbox: the
-verifier needs about 21 TGas attached to `mt_transfer_call` before the receiver gets any, and the
-Council took revenue with 22 and burned 1.6 TGas. The sweep itself burns about 3 TGas in the market
-and about 20 in all.
+Otherwise it splits the bucket by the Council's share in basis points, rounding both parts down:
+
+```text
+council  = fees * revenue_share_bps / 10000       (rounded down)
+treasury = fees * (10000 - revenue_share_bps) / 10000
+carry    = fees - council - treasury               (0 or 1 unit, stays in fees)
+```
+
+The carry is at most one unit and goes to neither leg. It stays in `fees` and joins the next sweep.
+Each leg then adds what earlier refused legs left in its due bucket. At the starting 2,500: 1,095,193
+units give 273,798 to the Council, 821,394 to the treasury and 1 left in `fees`; 7 give 1, 5 and 1;
+3 give 0, 2 and 1.
+
+The sweep takes the next sweep id, writes the record (the account, amount and status of both legs,
+and what was carried) and zeroes both due buckets, all before either transfer is sent. A transfer
+that fails changes only its own leg and its own bucket. The Council's leg is an `mt_transfer_call`
+with the message `revenue:<sweep id>`, so the Council counts it once. The treasury's leg is a plain
+`mt_transfer`. Calling `sweep_fees` twice at once pays out once. Payouts go only to the accounts the
+owner set: the verifier does not check that a receiver exists, so a mistyped recipient would lose the
+money.
+
+| Leg status   | Meaning                                                                                      |
+| ------------ | -------------------------------------------------------------------------------------------- |
+| `pending`    | The transfer is sent and its callback has not run.                                           |
+| `settled`    | The recipient has the money. A leg with nothing in it starts here.                           |
+| `refused`    | The verifier gave the money back. The amount is in its due bucket for the next sweep.        |
+| `unresolved` | No usable report came and nobody can tell where the money is. Only the Council leg can be.  |
+
+A callback acts on a leg only while it is `pending`, so a callback that runs twice, or after the owner
+has decided the leg, changes nothing.
+
+The sweep refuses less than 87 TGas (`attach at least 87 TGas: a sweep sends the Council its part and
+the treasury its part`). That is 42 for the Council's transfer call (22 for the verifier's own part
+and 20 for the Council's receipt), 15 and 10 for the treasury's transfer and its callback, 10 for the
+Council's callback and 10 for the call itself. Measured in the sandbox: the verifier needs about 21 TGas attached to `mt_transfer_call` before the receiver gets any, and the Council took revenue with 22 and burned 2.0 TGas in its quarterly receipt. The sweep itself burns 3.4 TGas in the market and 22 in all, at the 87 TGas floor, with both legs arriving.
 
 What the verifier reports back is the amount the receiver kept, one entry for the one token. The
 callback reads it like this:
 
 | Report | Meaning | What the market does |
 | --- | --- | --- |
-| `[amount]` | The Council kept all of it. | Nothing is due. |
-| `[kept]` below the amount | The Council returned part. The verifier refunded that part here. | The difference goes back to `revenue_due` (event `fee_transfer_failed`). |
-| `[0]` | The Council panicked or has no contract, or returned a malformed answer. The verifier refunded all of it here. | The whole amount goes back to `revenue_due` (event `fee_transfer_failed`). |
-| An error, or a list that is not one entry | The verifier's own receipt failed (paused, locked, out of gas) or its resolve step did, so the market cannot tell where the money is. | The amount goes to `revenue_unresolved` (event `fee_transfer_unresolved`). |
+| `[amount]` | The Council kept all of it. | The leg is `settled` (event `fee_leg_settled`). |
+| `[kept]` below the amount | The Council returned part. The verifier refunded that part here. | The difference goes back to `revenue_due` and the leg is `refused` (event `fee_transfer_failed`). |
+| `[0]` | The Council panicked or has no contract, or returned a malformed answer. The verifier refunded all of it here. | The whole amount goes back to `revenue_due` and the leg is `refused` (event `fee_transfer_failed`). |
+| An error, or a list that is not one entry | The verifier's own receipt failed (paused, locked, out of gas) or its resolve step did, so the market cannot tell where the money is. | The amount goes to `revenue_unresolved` and the leg is `unresolved` (event `fee_transfer_unresolved`). |
 
-The business wallet's `mt_transfer` returns nothing, so an error there means the verifier refused
-and nothing moved: the amount goes back to `business_due` (event `fee_transfer_failed`).
+The treasury's `mt_transfer` returns nothing, so an error there means the verifier refused and
+nothing moved: the leg is `refused` and the amount is back in `treasury_due` (event
+`fee_transfer_failed`). Otherwise it is `settled`.
 
 ### Revenue whose result was lost
 
 When the verifier's own receipt fails, the caller sees an error although the verifier may or may
 not have moved the money. Crediting the amount back to `revenue_due` could then pay it twice, the
 second time out of users' collateral. So `on_revenue_sent` treats a result that never came back as
-unknown. The amount moves to `revenue_unresolved` and the next sweep does not send it. Nothing else
-changes: `fees`, `revenue_due` and `business_due` keep their meaning, and every unit is in exactly
-one of collected, due, unresolved, on its way, or gone.
+unknown. The leg is `unresolved`, the amount moves to `revenue_unresolved` and the next sweep does
+not send it. Every unit is in exactly one of collected, due, unresolved, on its way (a pending leg),
+or gone.
 
-The owner settles it with `reconcile_revenue(amount, arrived)` after comparing the Council's
-`total_received` before and after the sweep. If the Council's total went up by the amount, call it
-with `arrived: true` and the amount is done. If it did not, call it with `arrived: false` and the
-amount becomes due again, so the next sweep sends it. It can be done in parts, and the event
-`revenue_reconciled` records each call. Against the real verifier the usual cause is a paused
-feature or a locked account, where nothing moved, so `arrived: false` is the normal answer. Telling
-the market a transfer arrived when it did not drops it from `total_owed` while the verifier still
-holds it, and the reconciliation shows that as a surplus.
+Anyone settles it with `settle_leg(sweep_id)` ten minutes after the sweep. The market asks the
+Council for `received_of(sweep_id)`. The Council takes each sweep id once, so its answer cannot change
+afterwards. A record means the money arrived: the leg is `settled`. No record means it did not: the
+leg is `refused` and the amount is due again, so the next sweep sends it under a new id. If the
+Council cannot answer, the leg stays unresolved and anyone can ask again.
+
+The owner decides by hand with `reconcile_leg(sweep_id, leg, arrived)`, for a pending or unresolved
+leg of either kind, an hour after the sweep. It is for the case where the Council cannot be asked,
+and the owner must have checked the verifier's events and the recipient's balance first. `arrived:
+true` settles the leg. `arrived: false` makes the amount due again. The event `fee_leg_reconciled`
+records each call. Against the real verifier the usual cause of an unresolved leg is a paused
+feature or a locked account, where nothing moved, so "no record" is the normal answer. Telling the
+market a transfer arrived when it did not drops it from `total_owed` while the verifier still holds
+it, and the reconciliation shows that as a surplus.
 
 ### Reconciling with the verifier
 
 `total_owed()` adds every balance, the collateral locked in every market, the fee bucket,
-`revenue_due`, `business_due` and `revenue_unresolved`. The verifier's
-`mt_balance_of(<market>, <collateral token id>)` read at the same finalized block must equal it.
+`revenue_due`, `treasury_due` and `revenue_unresolved`. A pending leg is out of the books because its
+money is already on its way, so a transfer that has not finished shows as surplus, never as a
+shortfall. The verifier's `mt_balance_of(<market>, <collateral token id>)` read at the same finalized
+block must equal it.
 More in the verifier is surplus that nobody is credited for, and it is never credited automatically,
 not by the operator and not by the owner: there is no credit path. Less in the verifier is an
 incident. A call in flight shows as a difference of one block, so compare again a few blocks later
-before raising anything. The view walks every market, so call it as a view only.
+before raising anything. The view adds a running total of locked collateral (`locked_total`), so its
+cost does not grow with the number of markets.
 
 ---
 
@@ -596,16 +645,17 @@ at 30%), resolve each as Yes, No or Void, and redeem and claim the residual in b
 
 | View                                                         | Returns                                                                                                                                                                                                                                         |
 | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `config()`                                                   | state version, upgrade proven, upgrade in flight, owner, pending owner, operator, oracle, verifier, collateral token id, paused, number of markets, storage deposit, position cap, fee rate, creation fee, revenue pool, business wallet, revenue unresolved |
+| `config()`                                                   | state version, upgrade proven, upgrade in flight, owner, pending owner, operator, oracle, verifier, collateral token id, paused, number of markets, storage deposit, position cap, fee rate, creation fee, revenue pool and treasury (null until set), the Council's and the treasury's share in basis points, minimum sweep, next sweep id, revenue unresolved |
 | `get_market(market_id)`                                      | One market: id, title, rule text, source, void policy, category, subcategory, rule hash, price rule, close and resolve times, status, registered, seeded, outcome, void price, Yes and No price, locked                                         |
 | `list_markets(from_index, limit)`                            | A page of markets (limit capped at 50)                                                                                                                                                                                                          |
 | `get_history(market_id)`                                     | The price log: time and Yes price for each point                                                                                                                                                                                                |
-| `total_owed()`                                               | Everything the contract owes in collateral units: balances, locked collateral, fees, both dues and revenue unresolved. Compare with the verifier's `mt_balance_of` for this account. Walks every market |
+| `total_owed()`                                               | Everything the contract owes in collateral units: balances, locked collateral, fees, both dues and revenue unresolved. Compare with the verifier's `mt_balance_of` for this account. A constant-size sum |
 | `get_balance(account_id)`                                    | An account's withdrawable balance                                                                                                                                                                                                               |
 | `get_shares(market_id, account_id)`                          | The account's Yes shares and No shares in that market                                                                                                                                                                                           |
 | `quote_buy(market_id, side, amount)`                         | Shares you would get and the fee, or zeros if the trade cannot happen                                                                                                                                                                           |
 | `quote_sell(market_id, side, shares)`                        | The most collateral those shares can fetch, the shares actually needed, and the fee                                                                                                                                                             |
-| `get_fees()`                                                 | Collected, owed to the revenue pool, owed to the business wallet, revenue unresolved                                                                                                                                                            |
+| `get_fees()`                                                 | Collected, owed to the revenue pool (`revenue_due`), owed to the treasury (`treasury_due`), revenue unresolved                                                                                                                                  |
+| `get_sweep(sweep_id)`, `list_sweeps(from_index, limit)`      | A sweep record: id, time, the part of the fees it split, what each leg carried, and each leg's account, amount and status. A page is at most 50, oldest first                                                                                   |
 | `storage_balance_bounds()`, `storage_balance_of(account_id)` | NEP-145 views, under "Setup and accounts"                                                                                                                                                                                                       |
 | `is_registered(account_id)`                                  | Whether the account registered                                                                                                                                                                                                                  |
 | `is_staged(code_hash)`                                       | Whether a wasm with that sha256 is staged                                                                                                                                                                                                       |
@@ -628,7 +678,10 @@ Every state change logs one line starting `EVENT_JSON:` followed by JSON of the 
 | `market_halted`           | `halt`                                                                | market_id, reason                                 |
 | `market_resumed`          | `resume`                                                              | market_id                                         |
 | `paused`                  | `set_paused`                                                          | paused                                            |
-| `fee_recipients_set`      | `set_fee_recipients`                                                  | revenue_pool, business_wallet                     |
+| `fee_recipients_set`      | `set_fee_recipients`                                                  | revenue_pool, treasury                            |
+| `revenue_share_set`       | `set_revenue_share_bps`                                               | revenue_share_bps, treasury_share_bps             |
+| `min_sweep_set`           | `set_min_sweep`                                                       | min_sweep                                         |
+| `next_sweep_id_set`       | `set_next_sweep_id`                                                   | next_sweep_id                                     |
 | `fee_rate_set`            | `set_fee_rate_bps`                                                    | fee_rate_bps                                      |
 | `create_fee_set`          | `set_create_fee`                                                      | create_fee                                        |
 | `residual_claimed`        | `claim_residual`                                                      | market_id, amount, to                             |
@@ -640,10 +693,11 @@ Every state change logs one line starting `EVENT_JSON:` followed by JSON of the 
 | `redeemed`                | `redeem`                                                              | market_id, account, amount                        |
 | `withdraw`                | `withdraw`                                                            | account, amount                                   |
 | `withdraw_failed`         | the verifier refused the transfer, balance restored                     | account, amount                                   |
-| `fees_swept`              | `sweep_fees`                                                          | revenue_pool, revenue, business_wallet, business  |
-| `fee_transfer_failed`     | a fee transfer failed, amount owed again                              | to, amount                                        |
-| `fee_transfer_unresolved` | a revenue transfer returned no report, amount parked                  | to, amount                                        |
-| `revenue_reconciled`      | `reconcile_revenue`                                                   | amount, arrived, unresolved (what is left)        |
+| `fees_swept`              | `sweep_fees`                                                          | id, total, revenue_pool, council (leg amount), treasury_account, treasury (leg amount) |
+| `fee_leg_settled`         | a leg ended with the recipient holding the money                      | id, leg, amount                                   |
+| `fee_transfer_failed`     | a fee transfer failed, amount owed again                              | id, leg, to, amount                               |
+| `fee_transfer_unresolved` | a revenue transfer returned no report, amount parked                  | id, to, amount                                    |
+| `fee_leg_reconciled`      | `reconcile_leg`                                                       | id, leg, amount, arrived                          |
 | `registered`              | `storage_deposit` registered an account                               | account, paid_by                                  |
 | `unregistered`            | `storage_unregister`                                                  | account                                           |
 | `code_staged`             | `stage_code`                                                          | code_hash, bytes, by                              |
@@ -695,14 +749,18 @@ All big numbers in event data are strings.
 | `the account is not registered`                                                                                                                                  | `storage_withdraw` by an account that never registered.                                                |
 | `redeem or sell your positions first` / `withdraw your balance first`                                                                                            | `storage_unregister` while the account still holds shares or a balance.                                |
 | `force is not supported, redeem your shares and withdraw your balance first`                                                                                     | `storage_unregister` with `force: true`.                                                               |
-| `that is more than is unresolved` / `amount must be positive`                                                                                                    | `reconcile_revenue` with too much or nothing.                                                          |
-| `attach at least 87 TGas: ...`                                                                                                                                   | `sweep_fees` with less than its floor.                                                                 |
+| `the fee recipients are not set, the owner must call set_fee_recipients before a sweep`                                                                          | `sweep_fees` before the owner has set where fees go.                                                   |
+| `the Council and the treasury must be different accounts`                                                                                                        | `set_fee_recipients` with one account twice.                                                           |
+| `the Council share must be between 1000 and 5000 basis points` / `the sweep minimum must be between 1 and 100000000` / `the next sweep id can only move up`      | The bounds of the owner's settings.                                                                    |
+| `no sweep to settle` / `the leg is not unresolved` / `wait 10 minutes after the sweep before settling`                                                           | `settle_leg` for a sweep that does not exist, a leg that is not unresolved, or too early.              |
+| `the leg is neither pending nor unresolved` / `wait 60 minutes after the sweep before reconciling`                                                               | `reconcile_leg` for a leg that already ended, or too early.                                            |
+| `attach at least 87 TGas: ...` / `attach at least 30 TGas: ...`                                                                                                  | `sweep_fees` or `settle_leg` with less than its floor.                                                 |
 | `Requires attached deposit of exactly 1 yoctoNEAR`                                                                                                               | `withdraw`, `buy` or `sell` without the 1 yocto.                                                       |
 | `attach at least 100 TGas to upgrade`                                                                                                                            | `upgrade` with less gas than the deploy and migrate need.                                              |
 | `no code is staged under that hash`                                                                                                                              | `upgrade` for a hash nobody staged, or one already used.                                               |
 | `attach at least <amount> to pay for the storage` / `the wasm goes in the call input`                                                                            | `stage_code` with too little deposit or no input.                                                      |
 | `prove the upgrade path before deleting keys`                                                                                                                    | `seal` before an upgrade has gone through `migrate`.                                                   |
-| `migrate expects version 1`                                                                                                                                      | `migrate` found state written by another version.                                                      |
+| `migrate expects version 2`                                                                                                                                      | `migrate` found state written by another version.                                                      |
 | `migrate runs only inside an upgrade`                                                                                                                            | `migrate` called without `upgrade` having sent the batch.                                              |
 | `a halt in the last day before close is an owner action`                                                                                                         | The operator tried to halt a market that closes within 24 hours, or has closed.                        |
 | `Method <name> is private`                                                                                                                                       | An internal callback, or `new`, was called by anyone but the contract's own account.                   |
@@ -713,11 +771,12 @@ All big numbers in event data are strings.
 
 | Call                                          | Gas                                                                                     |
 | --------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Verifier `mt_transfer` (withdraw, business fee) | 15 TGas (the verifier burned 3.8 measured) |
+| Verifier `mt_transfer` (withdraw, treasury fee) | 15 TGas (the verifier burned 3.8 measured) |
 | Verifier `mt_transfer_call` (revenue to the Council) | 42 TGas: 22 for the verifier's own part, 20 for the Council's `mt_on_transfer` |
 | Oracle registration                           | 20 TGas                                                                                 |
 | Each callback                                 | 10 TGas                                                                                 |
-| `sweep_fees` in all                           | 77 TGas reserved: 42 for the Council's part, 15 and 10 for the business wallet's, 10 for the Council's callback |
+| `sweep_fees` in all                           | 77 TGas reserved: 42 for the Council's part, 15 and 10 for the treasury's, 10 for the Council's callback |
+| `settle_leg` in all                           | 20 TGas reserved: 10 for the Council's `received_of`, 10 for the callback. It refuses less than 30 TGas. Measured at the floor: 2.4 TGas burned in the market and 6 in all |
 | `migrate` in the upgrade batch                | 30 TGas (the batch of deploy and migrate burned 20 for a 289 KB build)                  |
 
 A caller of `sweep_fees` must attach at least 87 TGas: the 77 it reserves plus 10 for its own work
@@ -743,11 +802,14 @@ upgrade or seal, an unknown hash and too little gas or deposit are refused, seal
 `upgrade_proven`, and `migrate` refuses another state version; withdraw and redeem work on a paused
 contract; a stranger cannot initialise a deployed contract; storage registers for a third party,
 refunds the surplus to the payer, and unregisters only an empty account; a revenue transfer with no
-report is parked and not paid again, a Council that refuses is refunded to due, a locked or paused
-verifier restores every payout, `total_owed` equals the verifier's balance after a whole journey, a
-plain deposit is surplus with no callback, no contract source names a governance crate or a verifier
-admin method, and the owner can return it to due or settle it, with the books
-adding up under random sequences; `sweep_fees` refuses less than its gas floor; the operator key
+report is parked and not paid again, a Council that refuses is refunded to due while the treasury
+leg is paid once, a locked or paused verifier restores every payout, `total_owed` equals the
+verifier's balance after a whole journey, a plain deposit is surplus with no callback, no contract
+source names a governance crate or a verifier admin method or writes an account id, a sweep refuses
+until the recipients are set, the split adds up to the total for every share the owner may set, and a
+parked leg is settled from the Council's record or by the owner, with the books adding up under random
+sequences of sweeps, reports, settlements and reconciliations; `sweep_fees` refuses less than its gas
+floor; the operator key
 cannot take money; random trade sequences never break the invariant or create money.
 
 Details and the measured economic attacks are in `AUDIT.md`.
@@ -761,12 +823,12 @@ Details and the measured economic attacks are in `AUDIT.md`.
 | One token                                   | The contract handles a single collateral token id chosen at deploy, and assumes the token behind it is a plain NEP-141 token with no transfer fee. The planned token is native USDC, `nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1` (spec.md section 6). The sandbox runs `mock-ft`; the literal USDC id was not run. A stablecoin issuer that freezes the verifier's account would freeze every user. |
 | Pause and lock in the verifier              | The verifier's pause manager can stop every `mt_transfer` and `mt_transfer_call` with one call, and a locker can freeze this contract's account. Either makes every payout fail and restore (`withdraw_failed`, `fee_transfer_failed`, `fee_transfer_unresolved`). A pause also makes transfer calls into the market fail, so no deposit is taken. A locked account still receives, so the market can keep taking money it cannot pay out: the keeper should read `is_account_locked` and stop advertising deposits. Redeeming and selling work inside the market meanwhile. |
 | Surplus                                     | Money sent to the market's Intents account without `mt_transfer_call` is never credited. See "Money in" and "Reconciling with the verifier". |
-| Payout targets                              | The verifier does not check that a receiver exists. Payouts go only to the caller of `withdraw`, to `revenue_pool` and to `business_wallet`. Check what you pass to `set_fee_recipients`: a mistyped account takes the money. |
+| Payout targets                              | The verifier does not check that a receiver exists. Payouts go only to the caller of `withdraw`, to `revenue_pool` and to `treasury`. Check what you pass to `set_fee_recipients`: a mistyped account takes the money. |
 | No keys in the verifier                     | The contract never calls `add_public_key`, `disable_auth_by_predecessor_id`, `auth_call`, `execute_intents` or any verifier admin method. Its balance moves only by `mt_transfer` and `mt_transfer_call` from this contract. A source test keeps it that way. |
 | Storage deposit                             | 0.05 NEAR per account. Chosen to cover a balance entry plus 20 share entries. It comes back through `storage_unregister` once the account holds nothing. An unregister while a `withdraw` is still in flight can leave a balance entry behind if the token then refuses that withdraw; the balance is credited back and still withdrawable, and the account registers again to trade.                                                                                                                       |
-| Operator and the owner's seed money         | Seeds are sent from the operator account, and leftovers go to the business wallet, so the business wallet has to refill the operator to keep seeding.                                                                                                                                                                                                                                                                                                                                                       |
+| Operator and the owner's seed money         | Seeds are sent from the operator account, and leftovers go to the treasury, so the treasury has to refill the operator to keep seeding.                                                                                                                                                                                                                                                                                                                                                       |
 | A seeder holds shares                       | When a market is opened away from one half. See "Seeding at a chosen price".                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| The seed is a subsidy                       | A constant-product seeder loses to informed traders by design. The pool's winning-side shares go to the business wallet at resolution, but that does not make the seed back. Budget the seed as a cost of opening the market, not as an investment.                                                                                                                                                                                                                                                         |
+| The seed is a subsidy                       | A constant-product seeder loses to informed traders by design. The pool's winning-side shares go to the treasury at resolution, but that does not make the seed back. Budget the seed as a cost of opening the market, not as an investment.                                                                                                                                                                                                                                                         |
 | Positions are not transferable              | There is no NEP-245 multi-token interface, so a position cannot be sent, lent or used as collateral, and there is no secondary market. The 20-position cap binds ordinary accounts for that reason.                                                                                                                                                                                                                                                                                                         |
 | Nothing caps a market                       | Apart from the size of a pool, no code limits how much a market can hold. The most one market can hold is set by what the operator seeds and by the deposit limits at launch. That is the lever against the cost of corrupting a market (see "One bond cannot scale with market size" in `oracle.md`).                                                                                                                                                                                                      |
 | Halting is a grievance risk                 | A stolen operator key can halt trading until 24 hours before close, and only the owner can halt after that. Users are not locked in after close, and the owner can replace the operator.                                                                                                                                                                                                                                                                                                                    |
@@ -774,6 +836,6 @@ Details and the measured economic attacks are in `AUDIT.md`.
 | Website, 2026-10-20                         | `get_market` and `list_markets` now return `seeded`, and `status` can be `unregistered` or `unseeded` before `open`. In `web/lib/market.ts` the `status` type admits `open`, `closed`, `halted` and `resolved` only, so it needs the two new values, and so does any code that switches on `status`. `isMarketListed` already reads `seeded !== false`, which passed every market while the field was never sent. It now drops unseeded markets, as that line intends. `config` gained `upgrade_in_flight`. |
 | Website                                     | The website still tells users a Void pays half in three places (the Council page FAQ and the portfolio payout calculation and its comment). The contract now pays the closing price. The website also has to attach 1 yoctoNEAR to `buy` and `sell`, and the keeper-facing void now goes through the oracle's `resolve_by_deadline`.                                                                                                                                                                        |
 | Keys                                        | Until `seal` has run, the deploy key can replace this code outside every DAO proposal. After it, only an owner upgrade can. A sealed contract with a broken upgrade path cannot be fixed, so prove one upgrade first.                                                                                                                                                                                                                                                                                           |
-| Keeper                                      | The keeper script sweeps fees: when `collected` plus `revenue_due` plus `business_due` reaches its minimum (`--min-sweep`, 10 tokens at 6 decimals by default) it calls `sweep_fees` with 100 TGas, over the 87 TGas floor. It needs only a function-call key limited to this contract and that one method.                                                                                                                                                                                                 |
+| Keeper                                      | The keeper script sweeps fees: when `collected` plus `revenue_due` plus `treasury_due` reaches its minimum (`--min-sweep`, 10 tokens at 6 decimals by default) it calls `sweep_fees` with 100 TGas, over the 87 TGas floor. It needs only a function-call key limited to this contract and that one method.                                                                                                                                                                                                 |
 | Website and keeper                          | Nothing changes for them from the upgrade path. `config` gained `state_version` and `upgrade_proven`, and now `revenue_unresolved`. `storage_deposit` now returns a `StorageBalance` and takes two optional arguments; the body must be a JSON object, so `{}` still works and an empty body no longer does. The website already sends `{}`.                                                                                                                                                                |
 | No outside audit                            | The only review is the self-review in `AUDIT.md`. One is required before mainnet money beyond a small capped test.                                                                                                                                                                                                                                                                                                                                                                                          |

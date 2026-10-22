@@ -26,11 +26,6 @@ fn burned_by(r: &ExecutionFinalResult, contract: &near_workspaces::AccountId) ->
         .fold(0.0, f64::max)
 }
 
-async fn council_total_received(w: &World) -> u128 {
-    let t: String = w.council.view("total_received").await.unwrap().json().unwrap();
-    t.parse().unwrap()
-}
-
 async fn more_jurors(w: &World, n: usize) -> anyhow::Result<Vec<Account>> {
     let mut all: Vec<Account> = w.jurors.clone();
     while all.len() < n {
@@ -298,7 +293,7 @@ async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_w
     };
     refused(
         sweep_with(86).await?.into_result(),
-        "attach at least 87 TGas: a sweep sends the Council its part and the business wallet its part",
+        "attach at least 87 TGas: a sweep sends the Council its part and the treasury its part",
     );
     assert_eq!(fees(&w).await.0, CREATE_FEE + 95_193, "a refused sweep changed nothing");
     let r = sweep_with(87).await?;
@@ -310,9 +305,9 @@ async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_w
     );
     assert_eq!(fees(&w).await, (1, 0, 0));
     assert_eq!(
-        intents_balance(&w, w.business.id()).await,
+        intents_balance(&w, w.treasury.id()).await,
         821_394,
-        "the business share arrived at the floor"
+        "the treasury share arrived at the floor"
     );
     assert_eq!(
         council_total_received(&w).await,
@@ -323,10 +318,11 @@ async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_w
     let j = &w.jurors[0];
     let token = j.id().to_string();
     send_revenue(&w, 100 * USD).await?;
-    skip_secs(&w.worker, 20).await;
+    let quarter = age_current_quarter(&w).await?;
+    finalize_quarter(&w, quarter).await?;
     let claim_with = |tgas: u64| {
-        j.call(w.council.id(), "claim")
-            .args_json(json!({ "token_id": token }))
+        j.call(w.council.id(), "claim_quarter")
+            .args_json(json!({ "quarter": quarter, "token_id": token }))
             .deposit(NearToken::from_yoctonear(1))
             .gas(Gas::from_tgas(tgas))
             .transact()
@@ -354,19 +350,86 @@ async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_w
             .transact()
     };
     refused(
-        unstake_with(57).await?.into_result(),
-        "attach at least 58 TGas: an unstake pays what the seat earned and then returns the NFT",
+        unstake_with(32).await?.into_result(),
+        "attach at least 33 TGas: an unstake returns the NFT and then settles it",
     );
     assert!(is_seat(&w, j.id()).await, "a refused unstake changed nothing");
-    let r = unstake_with(58).await?;
+    let r = unstake_with(33).await?;
     assert_clean("unstake at its floor", &r);
     println!(
-        "unstake: floor 58, council burnt {:.1} TGas, {} TGas in all",
+        "unstake: floor 33, council burnt {:.1} TGas, {} TGas in all",
         burned_by(&r, w.council.id()),
         r.total_gas_burnt.as_tgas()
     );
     assert!(!is_seat(&w, j.id()).await);
     assert_eq!(nft_owner(&w, &token).await, j.id().to_string());
+    Ok(())
+}
+
+// settle_leg asks the Council one view and reads the answer in a callback; finalize_quarter writes one book and sends nothing.
+#[tokio::test]
+async fn settling_a_lost_leg_and_finalizing_a_quarter_take_the_gas_they_reserve() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let id = create_seeded_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    // The verifier refuses the market's payouts, so the Council's leg is unresolved.
+    lock_account(&w, w.market.id()).await?;
+    sweep(&w, &w.carol).await?;
+    unlock_account(&w, w.market.id()).await?;
+    let swept_at: u64 = w
+        .market
+        .view("get_sweep")
+        .args_json(json!({ "sweep_id": "1" }))
+        .await?
+        .json::<serde_json::Value>()?["at"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+    skip_until(&w, swept_at + (10 * 60 + 5) * 1_000_000_000).await;
+    let settle_with = |tgas: u64| {
+        w.carol
+            .call(w.market.id(), "settle_leg")
+            .args_json(json!({ "sweep_id": "1" }))
+            .gas(Gas::from_tgas(tgas))
+            .transact()
+    };
+    refused(
+        settle_with(29).await?.into_result(),
+        "attach at least 30 TGas: settling asks the Council what it recorded and then reads the answer",
+    );
+    let r = settle_with(30).await?;
+    assert_clean("settle_leg at its floor", &r);
+    println!(
+        "settle_leg: floor 30, market burnt {:.1} TGas, {} TGas in all",
+        burned_by(&r, w.market.id()),
+        r.total_gas_burnt.as_tgas()
+    );
+    let record: serde_json::Value = w
+        .market
+        .view("get_sweep")
+        .args_json(json!({ "sweep_id": "1" }))
+        .await?
+        .json()?;
+    assert_eq!(
+        record["council"]["status"], "refused",
+        "the settle at the floor finished its callback"
+    );
+
+    send_revenue(&w, 10 * USD).await?;
+    let quarter = age_current_quarter(&w).await?;
+    let r = w
+        .bob
+        .call(w.council.id(), "finalize_quarter")
+        .args_json(json!({ "quarter": quarter }))
+        .gas(Gas::from_tgas(30))
+        .transact()
+        .await?;
+    assert_clean("finalize_quarter with 30 TGas", &r);
+    println!(
+        "finalize_quarter: no floor, council burnt {:.1} TGas, {} TGas in all",
+        burned_by(&r, w.council.id()),
+        r.total_gas_burnt.as_tgas()
+    );
     Ok(())
 }
 
@@ -551,14 +614,19 @@ async fn the_gas_the_contracts_reserve_for_the_verifier_covers_what_it_needs() -
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     deposit_to_intents(&w, &w.alice, w.alice.id(), 100 * USD).await?;
 
+    // The Council takes revenue only from its market, so Alice stands in for it while the receipt is measured.
+    set_council_market(&w, w.alice.id()).await?;
     let mut least = None;
-    for tgas in [21u64, 22, 23, 24, 25, 26, 28, 30, 35, TRANSFER_CALL_RESERVE_TGAS, 60] {
+    for (sweep_id, tgas) in [21u64, 22, 23, 24, 25, 26, 28, 30, 35, TRANSFER_CALL_RESERVE_TGAS, 60]
+        .into_iter()
+        .enumerate()
+    {
         let before = council_total_received(&w).await;
         let r = w
             .alice
             .call(w.verifier.id(), "mt_transfer_call")
             .args_json(json!({
-                "receiver_id": w.council.id(), "token_id": token_id(&w), "amount": USD.to_string(), "msg": "revenue"
+                "receiver_id": w.council.id(), "token_id": token_id(&w), "amount": USD.to_string(), "msg": format!("revenue:{sweep_id}")
             }))
             .deposit(NearToken::from_yoctonear(1))
             .gas(Gas::from_tgas(tgas))

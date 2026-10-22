@@ -39,10 +39,35 @@ example DAO names and sandbox keys are not production configuration.
 - [ ] Show committed backing remains controlled inside Intents and reconciles with positions.
 - [ ] Verify buy, sell, Yes/No/Void redemption and available-balance withdrawal.
 - [ ] Complete the oracle bond/juror-payment migration to Intents.
-- [ ] Verify earned-fee allocation: 75% treasury and 25% Council-controlled rewards.
-- [ ] Implement quarterly entitlement/claim rules and prevent repeat or cross-path claims.
+- [ ] Verify earned-fee allocation: 75% treasury and 25% Council-controlled rewards, with the real
+      treasury account (see the configuration order below).
+- [x] Quarterly entitlement and claim rules, with repeat and cross-path claims refused (built
+      2026-10-21, sandbox and unit tests in [AUDIT.md](AUDIT.md#fee-split-and-quarterly-claims-2026-10-21)).
+      A run against the real USDC contract and a real DAO is still open.
 - [ ] Test interrupted callbacks, uncertain transfers, retries, restarts and backend-down recovery.
 - [ ] Verify selected provider fees, slippage, refund behaviour and destination confirmation.
+
+### Configuration order
+
+Nothing the owner still has to choose is written in the contracts or taken by `new`. The market and
+the Council deploy with no fee recipient, no market and no NFT collection, and refuse to sweep, take
+revenue, stake or pay a claim until the owner has set them. Each step below is an owner call, a DAO
+proposal once the DAO owns the contract, and the helper in `contracts/keeper` prepares each one.
+
+| Step | Contract | Call | Notes |
+| ---- | -------- | ---- | ----- |
+| 1 | council | `set_nft_contract(nft_contract)` | Only while nothing is staked. The collection must have a fixed supply with minting closed first. |
+| 2 | council | `allow_tokens(token_ids)` or `set_token_range(first, last)` | The allowlist starts on with nothing allowed. |
+| 3 | council | `set_market(market)` | The market contract. Revenue and claims refuse until it is set. |
+| 4 | council | `set_close_grace_ns(close_grace_ns)` | Optional. 7 days to start, 1 to 30 days allowed. This is the wait after a quarter ends before it can be finalized and claimed. |
+| 5 | market | `set_fee_recipients(revenue_pool, treasury)` | The Council contract and the verified Trezu treasury. A sweep refuses until it is set. Read the treasury account back from the DAO before the proposal. |
+| 6 | market | `set_revenue_share_bps(revenue_share_bps)` | Optional. 2,500 (25% to the Council, 75% to the treasury) to start, 1,000 to 5,000 allowed. |
+| 7 | market | `set_min_sweep(min_sweep)` | Optional. 1,000,000 units to start, 1 to 100,000,000 allowed. |
+| 8 | market | `set_next_sweep_id(next_sweep_id)` | Only when this market replaces an older one that already sent sweeps to the same Council. The Council refuses a sweep id it has taken, so start above the highest. It can only move up. |
+
+Send a small sweep after step 5 and read both Intents balances, the sweep record (`get_sweep`) and
+the Council's `received_of`. The keeper sweeps when fees reach its own threshold (10 units to start),
+which is above the contract's minimum.
 
 Existing market and Council Intents code is part of this work. Its presence does not establish
 that the complete production journey has passed. The [verifier proof](INTENTS-PROOF.md) and

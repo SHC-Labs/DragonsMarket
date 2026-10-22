@@ -10,7 +10,7 @@ fn tok(a: &Account) -> &str {
 
 // Carol proposed Yes and Dave challenged. Two jurors vote No and settle it, the third never votes. Returns the jury as
 // (two who voted, the one who did not), the case, and the logs of the reveal that settled it. 1,000 USD of revenue
-// arrives before the draw and again while the jury serves, and streams to the five seats over 30 days.
+// arrives before the draw and again while the jury serves, in the quarter the chain is in.
 async fn decided_with_one_silent_juror(w: &World) -> anyhow::Result<(Vec<Account>, Account, u64, Vec<String>)> {
     mint(w, w.owner.id(), 10_000 * USD).await?;
     send_revenue(w, 1_000 * USD).await?;
@@ -23,12 +23,10 @@ async fn decided_with_one_silent_juror(w: &World) -> anyhow::Result<(Vec<Account
 
     commit(w, &jury[0], id, "no", "s").await?;
     commit(w, &jury[1], id, "no", "s").await?;
-    // The seat that serves cannot claim, so it cannot get its revenue out before the forfeit.
-    refused(
-        claim(w, &jury[2], tok(&jury[2])).await,
-        "this seat is serving on an open case, claim after it is final",
+    assert!(
+        !stake_of(w, tok(&jury[2])).await["serving"].is_null(),
+        "the seat serves until the case is final"
     );
-    assert!(pending_reward(w, tok(&jury[2])).await > 0);
 
     to_reveal_phase(w, id).await;
     reveal(w, &jury[0], id, "no", "s", "The source says no.").await?;
@@ -59,44 +57,55 @@ async fn the_majority_jurors_split_a_quarter_of_the_losing_bond_and_can_withdraw
     Ok(())
 }
 
+// How long a seat was staked in the quarter, from its entitlement view.
+async fn weight(w: &World, quarter: u32, juror: &Account) -> u128 {
+    u(&entitlement(w, quarter, tok(juror), juror.id()).await["weight_ns"])
+}
+
 #[tokio::test]
-async fn a_juror_who_never_voted_forfeits_the_revenue_earned_while_serving() -> anyhow::Result<()> {
+async fn a_juror_who_never_voted_forfeits_the_seat_time_of_the_case() -> anyhow::Result<()> {
     let w = setup().await?;
     let (voters, silent, id, logs) = decided_with_one_silent_juror(&w).await?;
     assert_eq!(case_json(&w, id).await["delinquent"], json!([silent.id()]));
 
-    // The council took what the silent seat earned while it served and put it back into the stream.
-    let forfeits = events_named(&logs, "revenue_forfeited");
+    // The council took the time the silent seat served out of the quarter: out of the seat's weight and out of the quarter's total.
+    let forfeits = events_named(&logs, "seat_time_forfeited");
     assert_eq!(forfeits.len(), 1, "{logs:?}");
     assert_eq!(forfeits[0]["owner"], json!(silent.id()));
-    let forfeited = u(&forfeits[0]["amount"]);
-    assert!(forfeited > 0, "the seat served while a stream of 1,000 USD ran");
+    let forfeited = u(&forfeits[0]["forfeited_ns"]);
+    assert!(forfeited > 0, "the seat served for the whole case");
     assert!(
         stake_of(&w, tok(&silent)).await["serving"].is_null(),
         "the seat is free again"
     );
+    let current = current_quarter(&w).await;
+    assert_eq!(u(&current["forfeit_ns"]), forfeited);
 
-    // The five seats earned the same from the same stream. The silent one kept what it earned before the draw and has
-    // lost what it earned while serving, which those who voted kept. The two reads are a block apart at most.
+    let quarter = age_current_quarter(&w).await?;
+    finalize_quarter(&w, quarter).await?;
     let (kept, voted) = (
-        pending_reward(&w, tok(&silent)).await,
-        pending_reward(&w, tok(&voters[0])).await,
+        weight(&w, quarter, &silent).await,
+        weight(&w, quarter, &voters[0]).await,
     );
     assert!(voted > kept, "{voted} against {kept}");
     assert!(
-        (voted - kept).abs_diff(forfeited) <= forfeited / 20 + 2,
+        (voted - kept).abs_diff(forfeited) <= forfeited / 4,
         "the silent seat lost {} and the forfeit was {forfeited}",
         voted - kept
     );
     assert!(
-        pending_reward(&w, tok(&voters[1])).await.abs_diff(voted) <= voted / 20 + 2,
+        weight(&w, quarter, &voters[1]).await.abs_diff(voted) <= 30_000_000_000,
         "a juror who voted keeps everything"
     );
 
-    // The silent seat can claim again now that the case is over.
-    register_ft(&w, silent.id()).await?;
-    let paid = claimed_in(&claim(&w, &silent, tok(&silent)).await?);
-    assert!(paid >= kept);
+    // The silent seat claims what is left of its share, and a seat that voted claims more.
+    let (silent_share, voter_share) = (
+        u(&entitlement(&w, quarter, tok(&silent), silent.id()).await["amount"]),
+        u(&entitlement(&w, quarter, tok(&voters[0]), voters[0].id()).await["amount"]),
+    );
+    assert!(voter_share > silent_share);
+    let paid = claimed_in(&claim_quarter(&w, &silent, quarter, tok(&silent)).await?);
+    assert_eq!(paid, silent_share);
     assert_eq!(holdings(&w, silent.id()).await, paid);
     Ok(())
 }
@@ -122,14 +131,16 @@ async fn a_juror_who_committed_but_was_not_given_time_to_reveal_is_not_penalised
     assert_eq!(case_json(&w, id).await["stage"], "final");
 
     assert_eq!(case_json(&w, id).await["delinquent"], json!([]));
-    assert!(events_named(&logs, "revenue_forfeited").is_empty(), "nothing forfeited");
-    let (third, first) = (
-        pending_reward(&w, tok(&jury[2])).await,
-        pending_reward(&w, tok(&jury[0])).await,
-    );
     assert!(
-        third.abs_diff(first) <= first / 20 + 2,
-        "the third juror kept everything it earned: {third} against {first}"
+        events_named(&logs, "seat_time_forfeited").is_empty(),
+        "nothing forfeited"
+    );
+    let quarter = age_current_quarter(&w).await?;
+    finalize_quarter(&w, quarter).await?;
+    let (third, first) = (weight(&w, quarter, &jury[2]).await, weight(&w, quarter, &jury[0]).await);
+    assert!(
+        third.abs_diff(first) <= 30_000_000_000,
+        "the third juror kept all the time it was staked: {third} against {first}"
     );
     Ok(())
 }

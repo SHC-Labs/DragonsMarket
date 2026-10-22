@@ -11,6 +11,32 @@
 | Revision checked | `council/src/lib.rs` sha256 prefix `cc840f4fdbe5caf9` (2510 lines, unchanged between copies, 267 lines differ from `HEAD`) |
 | Index | [README.md](README.md) |
 
+**Build status, 2026-10-21.** BUILT in `contracts/council/src/lib.rs` (state version 2): sections 4.2, 5, 6, 7.2, 8 and 9, with the changes below. Sections 2, 3, 10 and 11 hold as written.
+
+| Item | Built as | Tests |
+| --- | --- | --- |
+| Calendar (6.1, I-C7) | `quarter_containing`, `quarter_start`, `quarter_end`, pure | `the_quarter_table_of_the_spec_holds`, `every_month_boundary_from_1970_to_2100_falls_in_the_right_quarter`, `later_times_never_fall_in_earlier_quarters` |
+| Revenue by sweep id from the market only (5) | `mt_on_transfer` with `revenue:<sweep id>`, `received_of` | `a_sweep_id_is_taken_once_and_the_repeat_is_refused`, `only_the_market_sends_revenue`, `a_message_that_is_not_a_sweep_is_unknown`, sandbox `a_sweep_id_is_taken_once_and_only_the_market_sends_revenue_and_the_verifier_gives_back_the_rest` (I-C6) |
+| Worked examples 1 to 6 (6.11) | unit tests with the real calendar | `example_one_the_baseline_quarter`, `example_two_a_sweep_after_the_boundary_belongs_to_the_next_quarter`, `example_three_a_seat_staked_at_noon_on_the_last_day_earns_a_sliver`, `example_four_a_silent_juror_loses_the_seat_time_of_the_case`, `example_five_a_quarter_with_no_seats_rolls_its_pool_into_the_next`, `example_six_a_failed_claim_can_be_made_again_and_a_paid_one_cannot`. Example 7 is the market's: sandbox `a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_once` |
+| Seat weights, stake changes (6.4) | `advance_quarters`, `book_seat_time`, lazy per-seat booking | `a_share_is_the_staked_time_over_all_staked_time`, `two_spans_of_one_token_by_one_owner_in_a_quarter_add_up_to_one_claim`, `the_token_restaked_by_someone_else_starts_a_span_of_its_own`, `idle_time_is_moved_forward_in_steps_by_anyone`, `a_failed_unstake_restores_the_seat_and_it_counts_again_from_the_restore` |
+| Forfeits as removed weight (6.5) | `unlock_case`, with the forfeit kept in its own map | `a_forfeit_after_the_quarter_is_final_is_skipped_and_says_so`, `a_forfeit_that_crosses_a_boundary_is_split_between_the_quarters_it_touched`, `a_juror_is_penalised_once_and_naming_an_outsider_changes_nothing` |
+| Finalization and the claim window (6.7) | `finalize_quarter`, in order, after the grace period | `a_quarter_is_final_only_after_the_grace_period_and_in_order`, `a_claim_before_the_quarter_is_final_is_refused`, `unclaimed_amounts_stay_claimable_for_good` |
+| Single-use claim record (6.8, I-C4, I-C5) | `claim_quarter`, `on_claim_paid` | `a_callback_that_runs_again_or_late_changes_nothing`, `nobody_claims_for_a_seat_they_did_not_hold`, guard `the_council_pays_reward_money_only_in_a_quarter_claim`, sandbox `a_payout_the_verifier_refuses_leaves_the_claim_open_and_a_paid_claim_cannot_be_made_again`, `fees_go_from_a_sweep_to_a_quarter_to_one_claim_per_seat_and_a_late_claim_is_still_paid` |
+| Conservation, entitlement bound, weight conservation (I-C1 to I-C3) | proptests | `quarters_conserve_every_unit_and_never_pay_a_claim_twice`, `shares_never_exceed_the_pool_and_leave_under_a_unit_a_seat` |
+| Views (8) and events (9) | all of section 8 | `the_quarter_views_show_state_pool_dates_and_what_was_paid`, `an_entitlement_goes_from_accruing_to_closing_to_claimable_to_pending_to_paid`, `an_account_lists_its_entitlements_over_current_and_past_seats`, `reward_totals_track_received_open_final_paid_and_rolled` |
+
+Changes against the text above:
+
+| Item | Spec | Built |
+| --- | --- | --- |
+| `new` | Adds `market_id` and `close_grace_ns`, keeps `nft_contract` | `new` takes none of the three. The collection and the market are `None` until `set_nft_contract` and `set_market`; staking, revenue and claims refuse until then. The grace period starts at 7 days (`set_close_grace_ns`, 1 to 30 days) |
+| Revenue receipt | Ticks seat time and refuses more than 8 quarters of backlog | It only books the revenue to the quarter of receipt. Seat time is moved by stakes, unstakes, `finalize_quarter` and `advance_quarters`, so a late sweep is never refused for idle time |
+| First quarter | `first_quarter` and gap-free books | `next_to_finalize` starts at the quarter of `new`; a quarter nobody touched has no entry and reads as empty, so there are no gaps to keep |
+| Forfeit storage | Subtract from `seat_weight` | A separate `forfeits` map, so releasing a case never needs the seat's whole history counted first and cannot fail |
+| `unstake` | Refuses when more than 8 quarters need booking | The same, `book this seat first`. The gas floor is 33 TGas |
+| `entitlements_of` | Over the account's seats and past seats | Over a list of every token the account has staked (`tokens_of`) |
+| Silent juror | "Goes to the next quarter's pool" in the build brief | The spec text is built: the seat time leaves the quarter's weights, so the other seats' shares in that quarter rise. A quarter already final is not changed |
+
 ---
 
 ## Contents

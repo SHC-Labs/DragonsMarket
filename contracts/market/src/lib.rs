@@ -47,8 +47,23 @@ const MAX_FEE_RATE_BPS: u128 = 500;
 // ponytail: placeholder, 1 unit of the 6-decimal test token, taken out of the seed transfer. The ceiling is 10 units.
 const DEFAULT_CREATE_FEE: u128 = 1_000_000;
 const MAX_CREATE_FEE: u128 = 10_000_000;
-const REVENUE_SHARE_BPS: u128 = 2_500;
-const BUSINESS_SHARE_BPS: u128 = 7_500;
+// Fees are split between the Council (revenue) and the treasury in basis points of 10,000. The accepted decision is 25% to the
+// Council and 75% to the treasury, so 2,500 is the starting share, and the owner can move it between the two bounds. The
+// treasury always gets the rest, so the whole of every fee is accounted for whatever the owner sets.
+const BPS_DENOMINATOR: u128 = 10_000;
+const DEFAULT_REVENUE_SHARE_BPS: u128 = 2_500;
+const MIN_REVENUE_SHARE_BPS: u128 = 1_000;
+const MAX_REVENUE_SHARE_BPS: u128 = 5_000;
+// A sweep with less than this to act on does nothing, so the record count stays bounded by the fees collected. 1 unit of the
+// 6-decimal collateral to start, with a ceiling of 100.
+const DEFAULT_MIN_SWEEP: u128 = 1_000_000;
+const MAX_MIN_SWEEP: u128 = 100_000_000;
+const FIRST_SWEEP_ID: u64 = 1;
+// How long after a sweep its result can be asked for (settle_leg) or overridden by the owner (reconcile_leg). The first lets
+// the Council's receipt finish whatever it is doing, the second leaves a callback an hour to arrive before a person decides.
+const NS_PER_MINUTE: u64 = 60 * 1_000_000_000;
+const SETTLE_WAIT_MINUTES: u64 = 10;
+const RECONCILE_WAIT_MINUTES: u64 = 60;
 // The verifier burned 3.8 TGas for a payout from a contract in the sandbox (INTENTS-PROOF.md), so this is a wide margin.
 const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
 // mt_transfer_call needs 21 TGas attached before the receiver gets any (measured), so the verifier's own part is rounded up
@@ -58,16 +73,21 @@ const GAS_COUNCIL_RECEIPT: Gas = Gas::from_tgas(20);
 const GAS_MT_TRANSFER_CALL: Gas = Gas::from_gas(GAS_VERIFIER_CALL_OVERHEAD.as_gas() + GAS_COUNCIL_RECEIPT.as_gas());
 const GAS_REGISTER: Gas = Gas::from_tgas(20);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
-// A sweep sends the Council's part with its callback and the business wallet's part with its callback, and burns about 3
+// A sweep sends the Council's part with its callback and the treasury's part with its callback, and burns about 3
 // TGas itself.
 const GAS_SWEEP_OVERHEAD: Gas = Gas::from_tgas(10);
 const GAS_SWEEP_FLOOR: Gas = Gas::from_gas(
     GAS_MT_TRANSFER_CALL.as_gas() + GAS_MT_TRANSFER.as_gas() + 2 * GAS_CALLBACK.as_gas() + GAS_SWEEP_OVERHEAD.as_gas(),
 );
+// settle_leg asks the Council one view and reads the answer in a callback.
+const GAS_COUNCIL_VIEW: Gas = Gas::from_tgas(10);
+const GAS_SETTLE_FLOOR: Gas =
+    Gas::from_gas(GAS_COUNCIL_VIEW.as_gas() + GAS_CALLBACK.as_gas() + GAS_SWEEP_OVERHEAD.as_gas());
 // Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
 const NEP141_PREFIX: &str = "nep141:";
-// The layout of the state below. migrate reads exactly this one and refuses any other.
-const STATE_VERSION: u16 = 1;
+// The layout of the state below. migrate reads exactly this one and refuses any other. Version 2 holds the sweep ledger and
+// the optional fee recipients.
+const STATE_VERSION: u16 = 2;
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
@@ -76,6 +96,7 @@ enum Key {
     Balances,
     Accounts,
     Shares,
+    Sweeps,
 }
 
 #[near(serializers=[borsh, json])]
@@ -215,6 +236,81 @@ pub struct SellQuote {
     fee: U128,
 }
 
+// Where a fee leg stands. A leg is pending from the moment its transfer is sent until the callback reports. Settled means the
+// recipient has the money. Refused means the verifier gave it back, so it is due again. Unresolved means no usable report came
+// and nobody can tell where the money is: only the Council leg can be, because only it is a transfer call.
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum LegStatus {
+    Pending,
+    Settled,
+    Refused,
+    Unresolved,
+}
+
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum LegKind {
+    Council,
+    Treasury,
+}
+
+// One of the two payments of a sweep: who it went to, how much, and how it ended. `amount` is the leg's share of the sweep plus
+// whatever earlier refused legs left due.
+#[near(serializers=[borsh, json])]
+#[derive(Clone)]
+pub struct Leg {
+    to: AccountId,
+    amount: U128,
+    status: LegStatus,
+}
+
+// What a sweep did. Both legs are written here before either transfer is sent, so each is accounted for whatever the other does.
+#[near(serializers=[borsh, json])]
+#[derive(Clone)]
+pub struct Sweep {
+    id: U64,
+    at: U64,
+    // The part of `fees` this sweep split. Rounding leaves up to one unit of it in `fees`.
+    total: U128,
+    carried_council: U128,
+    carried_treasury: U128,
+    council: Leg,
+    treasury: Leg,
+}
+
+impl Sweep {
+    fn leg(&self, kind: LegKind) -> &Leg {
+        match kind {
+            LegKind::Council => &self.council,
+            LegKind::Treasury => &self.treasury,
+        }
+    }
+
+    fn leg_mut(&mut self, kind: LegKind) -> &mut Leg {
+        match kind {
+            LegKind::Council => &mut self.council,
+            LegKind::Treasury => &mut self.treasury,
+        }
+    }
+}
+
+// The two accounts fees go to. Both are set together by the owner, and a sweep refuses until they are.
+#[near(serializers=[borsh, json])]
+#[derive(Clone)]
+pub struct FeeRecipients {
+    revenue_pool: AccountId,
+    treasury: AccountId,
+}
+
+// What the Council answers when asked about a sweep it took in.
+#[near(serializers=[json])]
+pub struct CouncilReceipt {
+    amount: U128,
+}
+
 // The NEAR Intents verifier. All the backing sits in this contract's own account there, and it pays out by calling these.
 #[ext_contract(ext_verifier)]
 pub trait Verifier {
@@ -247,6 +343,12 @@ pub trait Oracle {
         rule_hash: String,
         price_rule: Option<PriceRule>,
     );
+}
+
+// What the Council recorded for a sweep id is the evidence settle_leg uses for a transfer whose result was lost.
+#[ext_contract(ext_council)]
+pub trait Council {
+    fn received_of(&self, sweep_id: U64);
 }
 
 #[near(
@@ -290,19 +392,27 @@ pub struct MarketContract {
     accounts: LookupMap<AccountId, u32>,
     // (market, account, 0 = yes / 1 = no) -> shares
     shares: LookupMap<(u64, AccountId, u8), u128>,
-    // The Council registry, which shares its 25% among staked seats.
-    revenue_pool: AccountId,
-    business_wallet: AccountId,
+    // The Council, which shares its part among staked seats, and the treasury. None until the owner sets them, and a sweep
+    // refuses until then, so nothing is sent to an account nobody chose.
+    recipients: Option<FeeRecipients>,
+    // The Council's share of a sweep in basis points. The treasury gets the rest.
+    revenue_share_bps: u128,
     // Collected fees, outside every market's collateral. A sweep splits them into the two dues below and sends
     // those; a transfer that fails goes back to its own due, so one bad recipient never shifts money to the other. A
     // revenue transfer whose result is lost goes to revenue_unresolved below instead.
     fees: u128,
     revenue_due: u128,
-    business_due: u128,
+    treasury_due: u128,
     // Revenue sent to the Council whose result never came back. The token moves the amount before it reports, so a
-    // failed report may mean it arrived. It is neither due nor settled until the owner has compared it with the Council's
-    // total_received and called reconcile_revenue.
+    // failed report may mean it arrived. It is neither due nor settled until settle_leg has read the Council's own record
+    // of the sweep, or the owner has decided with reconcile_leg.
     revenue_unresolved: u128,
+    // The sum of every market's `locked`, kept so total_owed does not walk the markets.
+    locked_total: u128,
+    // The least a sweep acts on, and the id the next sweep takes. Ids only go up, and the Council refuses a repeat.
+    min_sweep: u128,
+    next_sweep_id: u64,
+    sweeps: LookupMap<u64, Sweep>,
 }
 
 // A Yes price of one half, in millionths. What a market with no price points before close falls back to.
@@ -324,6 +434,16 @@ fn opening_pools(amount: u128, yes_price: Option<u128>) -> (u128, u128) {
 // What a holder redeems from a Void: Yes shares at `price_yes`, No shares at the rest. A pair always pays one unit.
 fn void_payout(yes: u128, no: u128, price_yes: u128) -> u128 {
     (yes * price_yes + no * (1_000_000 - price_yes)) / 1_000_000
+}
+
+// The Council's and the treasury's parts of `total`, both rounded down. Together they are `total` less a remainder of 0 or 1
+// that belongs to neither: the two exact parts add up to a whole number, so the two lost fractions add up to 0 or 1. The
+// remainder stays collected and joins the next sweep.
+fn split_fees(total: u128, revenue_share_bps: u128) -> (u128, u128) {
+    (
+        total * revenue_share_bps / BPS_DENOMINATOR,
+        total * (BPS_DENOMINATOR - revenue_share_bps) / BPS_DENOMINATOR,
+    )
 }
 
 fn emit(event: &str, data: near_sdk::serde_json::Value) {
@@ -359,8 +479,6 @@ impl MarketContract {
         oracle_id: AccountId,
         verifier_id: AccountId,
         collateral_token_id: String,
-        revenue_pool: AccountId,
-        business_wallet: AccountId,
     ) -> Self {
         require!(
             collateral_token_id.starts_with(NEP141_PREFIX),
@@ -385,12 +503,16 @@ impl MarketContract {
             balances_total: 0,
             accounts: LookupMap::new(Key::Accounts),
             shares: LookupMap::new(Key::Shares),
-            revenue_pool,
-            business_wallet,
+            recipients: None,
+            revenue_share_bps: DEFAULT_REVENUE_SHARE_BPS,
             fees: 0,
             revenue_due: 0,
-            business_due: 0,
+            treasury_due: 0,
             revenue_unresolved: 0,
+            locked_total: 0,
+            min_sweep: DEFAULT_MIN_SWEEP,
+            next_sweep_id: FIRST_SWEEP_ID,
+            sweeps: LookupMap::new(Key::Sweeps),
         }
     }
 
@@ -619,14 +741,59 @@ impl MarketContract {
         emit("paused", json!({ "paused": paused }));
     }
 
-    pub fn set_fee_recipients(&mut self, revenue_pool: AccountId, business_wallet: AccountId) {
+    // Where fees go: the Council and the treasury. A sweep refuses until this has been called, and the verifier does not
+    // check that a receiver exists, so the owner must give accounts it has verified. Amounts still owed go to the new
+    // accounts too.
+    pub fn set_fee_recipients(&mut self, revenue_pool: AccountId, treasury: AccountId) {
         self.only_owner();
+        require!(
+            revenue_pool != treasury,
+            "the Council and the treasury must be different accounts"
+        );
         emit(
             "fee_recipients_set",
-            json!({ "revenue_pool": revenue_pool, "business_wallet": business_wallet }),
+            json!({ "revenue_pool": revenue_pool, "treasury": treasury }),
         );
-        self.revenue_pool = revenue_pool;
-        self.business_wallet = business_wallet;
+        self.recipients = Some(FeeRecipients { revenue_pool, treasury });
+    }
+
+    // The Council's share of every later sweep. The treasury gets the rest. A sweep that already ran keeps its split.
+    pub fn set_revenue_share_bps(&mut self, revenue_share_bps: u32) {
+        self.only_owner();
+        let share = revenue_share_bps as u128;
+        require!(
+            (MIN_REVENUE_SHARE_BPS..=MAX_REVENUE_SHARE_BPS).contains(&share),
+            format!(
+                "the Council share must be between {MIN_REVENUE_SHARE_BPS} and {MAX_REVENUE_SHARE_BPS} basis points"
+            )
+        );
+        emit(
+            "revenue_share_set",
+            json!({ "revenue_share_bps": revenue_share_bps, "treasury_share_bps": (BPS_DENOMINATOR - share) as u32 }),
+        );
+        self.revenue_share_bps = share;
+    }
+
+    pub fn set_min_sweep(&mut self, min_sweep: U128) {
+        self.only_owner();
+        require!(
+            (1..=MAX_MIN_SWEEP).contains(&min_sweep.0),
+            format!("the sweep minimum must be between 1 and {MAX_MIN_SWEEP}")
+        );
+        emit("min_sweep_set", json!({ "min_sweep": min_sweep }));
+        self.min_sweep = min_sweep.0;
+    }
+
+    // Moves the id of the next sweep up, never down: a sweep id is used once, and a market that replaces an old one must not
+    // start below the ids the Council has already taken.
+    pub fn set_next_sweep_id(&mut self, next_sweep_id: U64) {
+        self.only_owner();
+        require!(
+            next_sweep_id.0 >= self.next_sweep_id,
+            "the next sweep id can only move up"
+        );
+        emit("next_sweep_id_set", json!({ "next_sweep_id": next_sweep_id }));
+        self.next_sweep_id = next_sweep_id.0;
     }
 
     pub fn set_fee_rate_bps(&mut self, fee_rate_bps: u32) {
@@ -646,8 +813,9 @@ impl MarketContract {
         self.create_fee = create_fee.0;
     }
 
-    // After resolution the pool's leftover collateral goes to the business wallet, not the owner: the owner is the
-    // DAO, which has no easy way to spend a balance held here. Users' payouts stay reserved.
+    // After resolution the pool's leftover collateral is due to the treasury, not the owner: the owner is the DAO, which has
+    // no easy way to spend a balance held here. The next sweep pays it on the treasury leg, whole and not split with the
+    // Council. Users' payouts stay reserved.
     pub fn claim_residual(&mut self, market_id: U64) {
         self.only_operator_or_owner();
         let mut m = self.market(market_id.0);
@@ -661,10 +829,12 @@ impl MarketContract {
         m.locked = owed;
         m.residual_claimed = true;
         self.markets.insert(market_id.0, m);
-        self.credit(&self.business_wallet.clone(), residual);
+        self.locked_total -= residual;
+        self.treasury_due += residual;
         emit(
             "residual_claimed",
-            json!({ "market_id": market_id.0.to_string(), "amount": residual.to_string(), "to": self.business_wallet }),
+            json!({ "market_id": market_id.0.to_string(), "amount": residual.to_string(),
+                    "to": self.recipients.as_ref().map(|r| &r.treasury) }),
         );
     }
 
@@ -824,6 +994,7 @@ impl MarketContract {
             m.user_no -= shares_in;
         }
         m.locked -= collateral_out.0;
+        self.locked_total -= collateral_out.0;
         m.record_price();
         self.markets.insert(market_id.0, m);
         self.fees += fee;
@@ -857,6 +1028,7 @@ impl MarketContract {
         m.user_yes -= yes;
         m.user_no -= no;
         m.locked -= payout;
+        self.locked_total -= payout;
         self.markets.insert(market_id.0, m);
         self.credit(&who, payout);
         emit(
@@ -907,122 +1079,191 @@ impl MarketContract {
 
     // ---- fees -----------------------------------------------------------------------------
 
-    // Anyone may call it. Splits the collected fees 25/75, rounding both shares down so the remainder stays
-    // collected, then sends whatever is due. With nothing due it does nothing. It needs at least 87 TGas attached (GAS_SWEEP_FLOOR)
-    // and burns about 20 TGas in all, the verifier's and the Council's receipt included, which does not depend on how many
-    // seats are staked.
-    pub fn sweep_fees(&mut self) {
+    // Anyone may call it. Splits the collected fees between the Council and the treasury by the owner's share, rounding both
+    // parts down so the remainder (0 or 1 unit) stays collected, adds what earlier refused legs left due, records both legs
+    // under a new sweep id, and only then sends them. A sweep with less than min_sweep to act on does nothing and takes no id.
+    // It refuses until the owner has set the recipients. It needs at least 87 TGas attached (GAS_SWEEP_FLOOR) and burns about
+    // 20 TGas in all, the verifier's and the Council's receipt included, which does not depend on how many seats are staked.
+    pub fn sweep_fees(&mut self) -> Option<U64> {
         upgrade::require_gas(
             GAS_SWEEP_FLOOR,
-            "a sweep sends the Council its part and the business wallet its part",
+            "a sweep sends the Council its part and the treasury its part",
         );
-        let revenue = self.fees * REVENUE_SHARE_BPS / 10_000;
-        let business = self.fees * BUSINESS_SHARE_BPS / 10_000;
-        self.fees -= revenue + business;
-        self.revenue_due += revenue;
-        self.business_due += business;
-        let (revenue, business) = (self.revenue_due, self.business_due);
-        if revenue == 0 && business == 0 {
-            return;
+        let recipients = self.recipients.clone().unwrap_or_else(|| {
+            env::panic_str("the fee recipients are not set, the owner must call set_fee_recipients before a sweep")
+        });
+        if self.fees + self.revenue_due + self.treasury_due < self.min_sweep {
+            return None;
         }
+        let (to_council, to_treasury) = split_fees(self.fees, self.revenue_share_bps);
+        let (council, treasury) = (to_council + self.revenue_due, to_treasury + self.treasury_due);
+        if council == 0 && treasury == 0 {
+            return None;
+        }
+        let id = self.next_sweep_id;
+        self.next_sweep_id += 1;
+        let leg = |to: AccountId, amount: u128| Leg {
+            to,
+            amount: U128(amount),
+            status: if amount == 0 {
+                LegStatus::Settled
+            } else {
+                LegStatus::Pending
+            },
+        };
+        let sweep = Sweep {
+            id: U64(id),
+            at: U64(env::block_timestamp()),
+            total: U128(self.fees),
+            carried_council: U128(self.revenue_due),
+            carried_treasury: U128(self.treasury_due),
+            council: leg(recipients.revenue_pool.clone(), council),
+            treasury: leg(recipients.treasury.clone(), treasury),
+        };
+        // Both legs are on the record, and each due is zeroed, before either transfer is sent. A callback puts back only what
+        // did not arrive, in its own bucket.
+        self.fees -= to_council + to_treasury;
+        self.revenue_due = 0;
+        self.treasury_due = 0;
+        self.sweeps.insert(id, sweep.clone());
         emit(
             "fees_swept",
-            json!({ "revenue_pool": self.revenue_pool, "revenue": revenue.to_string(),
-                                   "business_wallet": self.business_wallet, "business": business.to_string() }),
+            json!({ "id": id.to_string(), "total": sweep.total, "revenue_pool": recipients.revenue_pool, "council": sweep.council.amount,
+                    "treasury_account": recipients.treasury, "treasury": sweep.treasury.amount }),
         );
-        // Zero each due before its transfer; the callback restores what did not arrive.
-        if revenue > 0 {
-            self.revenue_due = 0;
+        if council > 0 {
             let _ = ext_verifier::ext(self.verifier.clone())
                 .with_attached_deposit(ONE_YOCTO)
                 .with_static_gas(GAS_MT_TRANSFER_CALL)
                 .mt_transfer_call(
-                    self.revenue_pool.clone(),
+                    recipients.revenue_pool,
                     self.collateral_token_id.clone(),
-                    U128(revenue),
+                    U128(council),
                     None,
                     None,
-                    "revenue".to_string(),
+                    format!("revenue:{id}"),
                 )
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(GAS_CALLBACK)
-                        .on_revenue_sent(U128(revenue)),
+                        .on_revenue_sent(U64(id)),
                 );
         }
-        if business > 0 {
-            self.business_due = 0;
+        if treasury > 0 {
             let _ = ext_verifier::ext(self.verifier.clone())
                 .with_attached_deposit(ONE_YOCTO)
                 .with_static_gas(GAS_MT_TRANSFER)
                 .mt_transfer(
-                    self.business_wallet.clone(),
+                    recipients.treasury,
                     self.collateral_token_id.clone(),
-                    U128(business),
+                    U128(treasury),
                     None,
                     None,
                 )
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(GAS_CALLBACK)
-                        .on_business_sent(U128(business)),
+                        .on_treasury_sent(U64(id)),
                 );
         }
+        Some(U64(id))
     }
 
     // The verifier reports the amount the Council kept, one entry for the one token. A Council that panicked reports 0: the
     // verifier has already refunded the whole amount here, so it is due again. With no usable report the amount is unknown,
     // because the verifier's own resolve step may be what failed and the money may be with the Council already. Crediting
-    // it back to revenue_due could then pay it twice, out of users' collateral, so it waits in revenue_unresolved.
+    // it back to revenue_due could then pay it twice, out of users' collateral, so the leg is unresolved and its amount waits
+    // in revenue_unresolved until settle_leg reads the Council's own record of the sweep.
     #[private]
-    pub fn on_revenue_sent(&mut self, amount: U128, #[callback_result] used: Result<Vec<U128>, PromiseError>) {
+    pub fn on_revenue_sent(&mut self, sweep_id: U64, #[callback_result] used: Result<Vec<U128>, PromiseError>) {
+        if !self.leg_is(sweep_id.0, LegKind::Council, LegStatus::Pending) {
+            return;
+        }
         match used {
-            Ok(used) if used.len() == 1 => {
-                let back = amount.0.saturating_sub(used[0].0);
-                if back > 0 {
-                    self.revenue_due += back;
-                    emit(
-                        "fee_transfer_failed",
-                        json!({ "to": self.revenue_pool, "amount": back.to_string() }),
-                    );
-                }
-            }
-            _ => {
-                self.revenue_unresolved += amount.0;
-                emit(
-                    "fee_transfer_unresolved",
-                    json!({ "to": self.revenue_pool, "amount": amount.0.to_string() }),
-                );
-            }
+            Ok(used) if used.len() == 1 => self.end_leg(sweep_id.0, LegKind::Council, used[0].0),
+            _ => self.park_council_leg(sweep_id.0),
         }
-    }
-
-    // Owner only. Settles an amount that on_revenue_sent could not account for, once the owner has checked the Council: its
-    // total_received counts every revenue transfer it took in. `arrived` true means the Council has it, so the amount is
-    // done. False means it never arrived, so the amount is due again and the next sweep sends it.
-    pub fn reconcile_revenue(&mut self, amount: U128, arrived: bool) {
-        self.only_owner();
-        require!(amount.0 > 0, "amount must be positive");
-        require!(amount.0 <= self.revenue_unresolved, "that is more than is unresolved");
-        self.revenue_unresolved -= amount.0;
-        if !arrived {
-            self.revenue_due += amount.0;
-        }
-        emit(
-            "revenue_reconciled",
-            json!({ "amount": amount.0.to_string(), "arrived": arrived, "unresolved": self.revenue_unresolved.to_string() }),
-        );
     }
 
     #[private]
-    pub fn on_business_sent(&mut self, amount: U128, #[callback_result] result: Result<(), PromiseError>) {
-        if result.is_err() {
-            self.business_due += amount.0;
-            emit(
-                "fee_transfer_failed",
-                json!({ "to": self.business_wallet, "amount": amount.0.to_string() }),
-            );
+    pub fn on_treasury_sent(&mut self, sweep_id: U64, #[callback_result] result: Result<(), PromiseError>) {
+        if !self.leg_is(sweep_id.0, LegKind::Treasury, LegStatus::Pending) {
+            return;
         }
+        let kept = if result.is_ok() {
+            self.sweep(sweep_id.0).treasury.amount.0
+        } else {
+            0
+        };
+        self.end_leg(sweep_id.0, LegKind::Treasury, kept);
+    }
+
+    // Anyone may call it for a Council leg whose result was lost, once the Council's receipt has had time to finish. It asks
+    // the Council what it recorded under the sweep id: a record settles the leg, no record makes the amount due again. The
+    // Council takes a sweep id once, so the answer cannot change afterwards.
+    pub fn settle_leg(&mut self, sweep_id: U64) -> Promise {
+        upgrade::require_gas(
+            GAS_SETTLE_FLOOR,
+            "settling asks the Council what it recorded and then reads the answer",
+        );
+        let sweep = self.sweep(sweep_id.0);
+        require!(
+            sweep.council.status == LegStatus::Unresolved,
+            "the leg is not unresolved"
+        );
+        require!(
+            env::block_timestamp() >= sweep.at.0.saturating_add(SETTLE_WAIT_MINUTES * NS_PER_MINUTE),
+            format!("wait {SETTLE_WAIT_MINUTES} minutes after the sweep before settling")
+        );
+        ext_council::ext(sweep.council.to)
+            .with_static_gas(GAS_COUNCIL_VIEW)
+            .received_of(sweep_id)
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_CALLBACK)
+                    .on_council_checked(sweep_id),
+            )
+    }
+
+    // An error means the Council could not answer, so the leg stays unresolved and anyone can ask again.
+    #[private]
+    pub fn on_council_checked(
+        &mut self,
+        sweep_id: U64,
+        #[callback_result] receipt: Result<Option<CouncilReceipt>, PromiseError>,
+    ) {
+        let Ok(receipt) = receipt else { return };
+        if !self.leg_is(sweep_id.0, LegKind::Council, LegStatus::Unresolved) {
+            return;
+        }
+        self.revenue_unresolved -= self.sweep(sweep_id.0).council.amount.0;
+        self.end_leg(sweep_id.0, LegKind::Council, receipt.map_or(0, |r| r.amount.0));
+    }
+
+    // Owner only, for a leg that is still pending or unresolved an hour after the sweep: the callback never came, or the
+    // Council cannot say what it recorded. `arrived` true means the recipient has the money, so the leg is done. False means
+    // it never arrived, so the amount is due again and the next sweep sends it. The owner must have checked the verifier's
+    // events and the recipient's balance first.
+    pub fn reconcile_leg(&mut self, sweep_id: U64, leg: LegKind, arrived: bool) {
+        self.only_owner();
+        let sweep = self.sweep(sweep_id.0);
+        let (status, amount) = (sweep.leg(leg).status, sweep.leg(leg).amount.0);
+        require!(
+            matches!(status, LegStatus::Pending | LegStatus::Unresolved),
+            "the leg is neither pending nor unresolved"
+        );
+        require!(
+            env::block_timestamp() >= sweep.at.0.saturating_add(RECONCILE_WAIT_MINUTES * NS_PER_MINUTE),
+            format!("wait {RECONCILE_WAIT_MINUTES} minutes after the sweep before reconciling")
+        );
+        if status == LegStatus::Unresolved {
+            self.revenue_unresolved -= amount;
+        }
+        self.end_leg(sweep_id.0, leg, if arrived { amount } else { 0 });
+        emit(
+            "fee_leg_reconciled",
+            json!({ "id": sweep_id.0.to_string(), "leg": leg, "amount": amount.to_string(), "arrived": arrived }),
+        );
     }
 
     // ---- views ----------------------------------------------------------------------------
@@ -1032,19 +1273,34 @@ impl MarketContract {
         upgrade::is_staged(code_hash)
     }
 
+    // revenue_pool and treasury are null until the owner has set the fee recipients, and a sweep refuses until then.
     pub fn config(&self) -> near_sdk::serde_json::Value {
         json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
                 "owner": self.owner, "pending_owner": self.pending_owner, "operator": self.operator, "oracle": self.oracle,
                 "verifier": self.verifier, "collateral_token_id": self.collateral_token_id,
                 "paused": self.paused, "markets": self.next_market_id.to_string(), "storage_deposit": STORAGE_DEPOSIT.as_yoctonear().to_string(),
                 "max_positions": MAX_POSITIONS, "fee_rate_bps": self.fee_rate_bps as u32, "create_fee": self.create_fee.to_string(),
-                "revenue_pool": self.revenue_pool, "business_wallet": self.business_wallet,
+                "revenue_pool": self.recipients.as_ref().map(|r| &r.revenue_pool), "treasury": self.recipients.as_ref().map(|r| &r.treasury),
+                "revenue_share_bps": self.revenue_share_bps as u32, "treasury_share_bps": (BPS_DENOMINATOR - self.revenue_share_bps) as u32,
+                "min_sweep": self.min_sweep.to_string(), "next_sweep_id": self.next_sweep_id.to_string(),
                 "revenue_unresolved": self.revenue_unresolved.to_string() })
     }
 
     pub fn get_fees(&self) -> near_sdk::serde_json::Value {
         json!({ "collected": self.fees.to_string(), "revenue_due": self.revenue_due.to_string(),
-                "business_due": self.business_due.to_string(), "revenue_unresolved": self.revenue_unresolved.to_string() })
+                "treasury_due": self.treasury_due.to_string(), "revenue_unresolved": self.revenue_unresolved.to_string() })
+    }
+
+    pub fn get_sweep(&self, sweep_id: U64) -> Option<Sweep> {
+        self.sweeps.get(&sweep_id.0).cloned()
+    }
+
+    // Sweeps by id from `from_index`, oldest first, at most 50 a call. An id that was skipped with set_next_sweep_id is absent.
+    pub fn list_sweeps(&self, from_index: U64, limit: U64) -> Vec<Sweep> {
+        let end = self.next_sweep_id.min(from_index.0.saturating_add(limit.0.min(50)));
+        (from_index.0..end)
+            .filter_map(|id| self.sweeps.get(&id).cloned())
+            .collect()
     }
 
     pub fn is_registered(&self, account_id: AccountId) -> bool {
@@ -1053,13 +1309,17 @@ impl MarketContract {
 
     // Everything this contract owes, in collateral units: user balances, what is locked in every market, and every fee
     // bucket. The keeper compares it with the verifier's mt_balance_of for this account at the same finalized block. More
-    // there than here is surplus nobody is credited for. Less is an incident. Walks every market, so it is a view only.
+    // there than here is surplus nobody is credited for. Less is an incident. A leg that is pending is out of the books
+    // because its money is already on its way, so an unfinished transfer shows as surplus here and never as a shortfall.
     pub fn total_owed(&self) -> U128 {
-        let locked: u128 = (0..self.next_market_id)
-            .filter_map(|id| self.markets.get(&id))
-            .map(|m| m.locked)
-            .sum();
-        U128(self.balances_total + locked + self.fees + self.revenue_due + self.business_due + self.revenue_unresolved)
+        U128(
+            self.balances_total
+                + self.locked_total
+                + self.fees
+                + self.revenue_due
+                + self.treasury_due
+                + self.revenue_unresolved,
+        )
     }
 
     pub fn get_balance(&self, account_id: AccountId) -> U128 {
@@ -1366,6 +1626,58 @@ impl MarketContract {
             );
     }
 
+    fn sweep(&self, id: u64) -> Sweep {
+        self.sweeps
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("no sweep to settle"))
+    }
+
+    fn leg_is(&self, id: u64, kind: LegKind, status: LegStatus) -> bool {
+        self.sweeps.get(&id).is_some_and(|s| s.leg(kind).status == status)
+    }
+
+    // Ends a leg that was pending or unresolved. `kept` is how much of the leg its recipient has: all of it settles the leg,
+    // anything less refuses it and returns the rest to the leg's own due bucket, which only the next sweep touches.
+    fn end_leg(&mut self, id: u64, kind: LegKind, kept: u128) {
+        let mut sweep = self.sweep(id);
+        let leg = sweep.leg_mut(kind);
+        let back = leg.amount.0.saturating_sub(kept);
+        leg.status = if back == 0 {
+            LegStatus::Settled
+        } else {
+            LegStatus::Refused
+        };
+        let (to, amount) = (leg.to.clone(), leg.amount.0);
+        match kind {
+            LegKind::Council => self.revenue_due += back,
+            LegKind::Treasury => self.treasury_due += back,
+        }
+        self.sweeps.insert(id, sweep);
+        if back == 0 {
+            emit(
+                "fee_leg_settled",
+                json!({ "id": id.to_string(), "leg": kind, "amount": amount.to_string() }),
+            );
+        } else {
+            emit(
+                "fee_transfer_failed",
+                json!({ "id": id.to_string(), "leg": kind, "to": to, "amount": back.to_string() }),
+            );
+        }
+    }
+
+    fn park_council_leg(&mut self, id: u64) {
+        let mut sweep = self.sweep(id);
+        sweep.council.status = LegStatus::Unresolved;
+        self.revenue_unresolved += sweep.council.amount.0;
+        emit(
+            "fee_transfer_unresolved",
+            json!({ "id": id.to_string(), "to": sweep.council.to, "amount": sweep.council.amount }),
+        );
+        self.sweeps.insert(id, sweep);
+    }
+
     fn credit(&mut self, who: &AccountId, amount: u128) {
         let have = self.balances.get(who).copied().unwrap_or(0);
         self.balances.insert(who.clone(), have + amount);
@@ -1414,6 +1726,7 @@ impl MarketContract {
         m.pool_yes = pool_yes;
         m.pool_no = pool_no;
         m.locked = amount;
+        self.locked_total += amount;
         m.seeded = true;
         if pool_yes < amount || pool_no < amount {
             require!(self.accounts.contains_key(seeder), "do the storage deposit first");
@@ -1466,6 +1779,7 @@ impl MarketContract {
             m.user_no += out;
         }
         m.locked += amount - fee;
+        self.locked_total += amount - fee;
         m.record_price();
         self.markets.insert(id, m);
         self.fees += fee;
@@ -1612,7 +1926,7 @@ mod tests {
     const VERIFIER: &str = "intents.near";
     const COLLATERAL_ID: &str = "nep141:usdc.near";
     const COUNCIL: &str = "council.near";
-    const BUSINESS: &str = "business.near";
+    const TREASURY: &str = "treasury.near";
     const USERS: [&str; 3] = ["ann.near", "ben.near", "cat.near"];
     const SEED_UNITS: u128 = 100_000_000; // 100 in 6-decimal units
     const CLOSE: u64 = 10_000;
@@ -1651,8 +1965,17 @@ mod tests {
             .build());
     }
 
-    // Two markets, both seeded, three registered users. Returns the contract and the total tokens received so far.
+    // Two markets, both seeded, three registered users, and the fee recipients set. Returns the contract and the total tokens
+    // received so far.
     fn world() -> (MarketContract, u128) {
+        let (mut c, total_in) = unconfigured_world();
+        act_as(OWNER, 2);
+        c.set_fee_recipients(acct(COUNCIL), acct(TREASURY));
+        (c, total_in)
+    }
+
+    // The same, as it is deployed: nobody has said yet where fees go.
+    fn unconfigured_world() -> (MarketContract, u128) {
         // The mock chain keeps its storage between cases; start each one empty.
         near_sdk::mock::with_mocked_blockchain(|b| {
             let _ = b.take_storage();
@@ -1664,8 +1987,6 @@ mod tests {
             acct(ORACLE),
             acct(VERIFIER),
             COLLATERAL_ID.to_string(),
-            acct(COUNCIL),
-            acct(BUSINESS),
         );
         for _ in 0..2 {
             c.create_market(
@@ -1704,13 +2025,10 @@ mod tests {
     // Every token the contract has received is locked in a market, sitting in someone's balance, or a fee.
     fn assert_conserved(c: &MarketContract, total_in: u128) {
         let locked: u128 = (0..2).map(|id| c.market(id).locked).sum();
-        let balances: u128 = USERS
-            .iter()
-            .chain([&OWNER, &BUSINESS])
-            .map(|u| c.get_balance(acct(u)).0)
-            .sum();
+        let balances: u128 = USERS.iter().chain([&OWNER]).map(|u| c.get_balance(acct(u)).0).sum();
+        assert_eq!(c.locked_total, locked, "locked_total drifted from the markets");
         assert_eq!(
-            locked + balances + c.fees + c.revenue_due + c.business_due + c.revenue_unresolved,
+            locked + balances + c.fees + c.revenue_due + c.treasury_due + c.revenue_unresolved,
             total_in,
             "money was created or lost"
         );
@@ -1860,38 +2178,40 @@ mod tests {
         let (mut c, _) = world();
         c.fees = 1_000_003;
         act_as(USERS[2], 5);
-        c.sweep_fees();
+        assert_eq!(c.sweep_fees(), Some(U64(1)));
         let d = swept();
         assert_eq!(
-            (d["revenue"].as_str(), d["business"].as_str()),
-            (Some("250000"), Some("750002"))
+            (d["council"].as_str(), d["treasury"].as_str(), d["total"].as_str()),
+            (Some("250000"), Some("750002"), Some("1000003"))
         );
         assert_eq!(
-            (c.fees, c.revenue_due, c.business_due),
+            (c.fees, c.revenue_due, c.treasury_due),
             (1, 0, 0),
             "one unit of rounding stays collected"
         );
 
-        // The business wallet refuses its transfer and the Council takes only part of its share.
-        c.on_business_sent(U128(750_002), Err(PromiseError::Failed));
-        c.on_revenue_sent(U128(250_000), Ok(vec![U128(249_000)]));
-        assert_eq!((c.fees, c.revenue_due, c.business_due), (1, 1_000, 750_002));
+        // The treasury refuses its transfer and the Council takes only part of its share.
+        c.on_treasury_sent(U64(1), Err(PromiseError::Failed));
+        c.on_revenue_sent(U64(1), Ok(vec![U128(249_000)]));
+        assert_eq!((c.fees, c.revenue_due, c.treasury_due), (1, 1_000, 750_002));
 
-        // The next sweep resends each due to its own recipient; nothing is split again.
+        // The next sweep resends each due to its own recipient under a new id; nothing is split again.
+        act_as(OWNER, 6);
+        c.set_min_sweep(U128(1));
         act_as(USERS[2], 6);
-        c.sweep_fees();
+        assert_eq!(c.sweep_fees(), Some(U64(2)));
         let d = swept();
         assert_eq!(
-            (d["revenue"].as_str(), d["business"].as_str()),
-            (Some("1000"), Some("750002"))
+            (d["council"].as_str(), d["treasury"].as_str(), d["total"].as_str()),
+            (Some("1000"), Some("750002"), Some("1"))
         );
-        assert_eq!((c.fees, c.revenue_due, c.business_due), (1, 0, 0));
+        assert_eq!((c.fees, c.revenue_due, c.treasury_due), (1, 0, 0));
 
         // Nothing due: a sweep does nothing.
         act_as(USERS[2], 7);
-        c.sweep_fees();
+        assert_eq!(c.sweep_fees(), None);
         assert!(near_sdk::test_utils::get_logs().is_empty());
-        assert_eq!((c.fees, c.revenue_due, c.business_due), (1, 0, 0));
+        assert_eq!((c.fees, c.revenue_due, c.treasury_due), (1, 0, 0));
     }
 
     #[test]
@@ -2480,7 +2800,7 @@ mod tests {
     }
 
     #[test]
-    fn the_residual_goes_to_the_business_wallet_and_not_to_the_owner() {
+    fn the_residual_is_due_to_the_treasury_and_not_credited_to_the_owner() {
         let (mut c, mut total_in) = world();
         step(&mut c, &mut total_in, 0, 0, 0, 10_000_000, 1); // ann buys Yes
         act_as(ORACLE, CLOSE + 1);
@@ -2495,12 +2815,13 @@ mod tests {
         assert!(stranger.is_err(), "only the operator or owner claims");
         act_as(OWNER, CLOSE + 2);
         c.claim_residual(U64(0));
-        assert_eq!(c.get_balance(acct(BUSINESS)).0, residual);
+        assert_eq!(c.treasury_due, residual, "the next sweep pays it on the treasury leg");
         assert_eq!(
             c.get_balance(acct(OWNER)).0,
             0,
             "the owner, which is the DAO, is not credited"
         );
+        assert_eq!(last_event()["data"]["to"], TREASURY);
         assert_eq!(c.market(0).locked, owed, "what users are owed stays reserved");
         assert_conserved(&c, total_in);
     }
@@ -2746,7 +3067,7 @@ mod tests {
         act_as(OWNER, 5);
         c.set_operator(acct("ops.near"));
         act_as("ops.near", 6);
-        c.set_fee_recipients(acct("new-council.near"), acct("new-business.near"));
+        c.set_fee_recipients(acct("new-council.near"), acct("new-treasury.near"));
     }
 
     #[test]
@@ -2888,8 +3209,6 @@ mod tests {
             acct(ORACLE),
             acct(VERIFIER),
             COLLATERAL_ID.to_string(),
-            acct(COUNCIL),
-            acct(BUSINESS),
         );
         let close = 100 * HOUR;
         let id = c
@@ -3318,8 +3637,6 @@ mod tests {
             acct(ORACLE),
             acct(VERIFIER),
             "usdc.near".to_string(),
-            acct(COUNCIL),
-            acct(BUSINESS),
         );
     }
 
@@ -3346,7 +3663,7 @@ mod tests {
             "a deposit is owed to its sender"
         );
         c.revenue_due = 11;
-        c.business_due = 13;
+        c.treasury_due = 13;
         c.revenue_unresolved = 17;
         assert_eq!(c.total_owed().0, total_in + 7_000_000 + 41);
         act_as(USERS[0], 4);
@@ -3425,7 +3742,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sweep_sends_the_council_a_transfer_call_and_the_business_wallet_a_plain_transfer() {
+    fn a_sweep_sends_the_council_a_transfer_call_and_the_treasury_a_plain_transfer() {
         let (mut c, _) = world();
         c.fees = 1_000_000;
         act_as(USERS[2], 5);
@@ -3439,48 +3756,79 @@ mod tests {
         assert_eq!(args["receiver_id"], COUNCIL);
         assert_eq!(args["token_id"], COLLATERAL_ID);
         assert_eq!(args["amount"], "250000");
-        assert_eq!(args["msg"], "revenue");
+        assert_eq!(args["msg"], "revenue:1", "the Council takes each sweep id once");
         let (method, args, deposit, gas) = call_of(to_verifier[1]);
         assert_eq!(method, "mt_transfer");
         assert_eq!((deposit, gas), (1, GAS_MT_TRANSFER.as_gas()));
-        assert_eq!(args["receiver_id"], BUSINESS);
+        assert_eq!(args["receiver_id"], TREASURY);
         assert_eq!(args["amount"], "750000");
     }
 
     // ---- what the verifier's report on a revenue transfer means -----------------------------------------------
 
+    fn legs(c: &MarketContract, id: u64) -> (LegStatus, LegStatus) {
+        let s = c.get_sweep(U64(id)).unwrap();
+        (s.council.status, s.treasury.status)
+    }
+
     #[test]
     fn a_council_that_refused_reports_zero_kept_and_the_whole_amount_is_due_again() {
         let mut c = after_a_sweep();
         act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Ok(vec![U128(0)]));
+        c.on_revenue_sent(U64(1), Ok(vec![U128(0)]));
         assert_eq!((c.revenue_due, c.revenue_unresolved), (250_000, 0));
-        assert_eq!(last_event()["event"], "fee_transfer_failed");
+        assert_eq!(legs(&c, 1).0, LegStatus::Refused);
+        let e = last_event();
+        assert_eq!(e["event"], "fee_transfer_failed");
+        assert_eq!(
+            (e["data"]["leg"].as_str(), e["data"]["id"].as_str()),
+            (Some("council"), Some("1"))
+        );
     }
 
     #[test]
     fn a_council_that_kept_everything_leaves_nothing_due() {
         let mut c = after_a_sweep();
         act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Ok(vec![U128(250_000)]));
+        c.on_revenue_sent(U64(1), Ok(vec![U128(250_000)]));
         assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 0));
+        assert_eq!(legs(&c, 1).0, LegStatus::Settled);
+        assert_eq!(last_event()["event"], "fee_leg_settled");
     }
 
     #[test]
     fn a_report_of_the_wrong_shape_is_unknown_and_parks_the_amount() {
-        let mut c = after_a_sweep();
-        act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Ok(vec![]));
-        c.on_revenue_sent(U128(250_000), Ok(vec![U128(0), U128(0)]));
-        assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 500_000));
+        for report in [Ok(vec![]), Ok(vec![U128(0), U128(0)])] {
+            let mut c = after_a_sweep();
+            act_as("market.near", 6);
+            c.on_revenue_sent(U64(1), report);
+            assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 250_000));
+            assert_eq!(legs(&c, 1).0, LegStatus::Unresolved);
+        }
     }
 
     #[test]
     fn a_report_that_claims_more_than_was_sent_never_creates_money() {
         let mut c = after_a_sweep();
         act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Ok(vec![U128(999_999_999)]));
+        c.on_revenue_sent(U64(1), Ok(vec![U128(999_999_999)]));
         assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 0));
+    }
+
+    // A callback that runs twice, or after the owner has already decided the leg, changes nothing.
+    #[test]
+    fn a_leg_ends_once_whatever_the_callback_does_next() {
+        let mut c = after_a_sweep();
+        act_as("market.near", 6);
+        c.on_revenue_sent(U64(1), Ok(vec![U128(0)]));
+        c.on_revenue_sent(U64(1), Ok(vec![U128(0)]));
+        c.on_revenue_sent(U64(1), Err(PromiseError::Failed));
+        c.on_treasury_sent(U64(1), Err(PromiseError::Failed));
+        c.on_treasury_sent(U64(1), Err(PromiseError::Failed));
+        assert_eq!(
+            (c.revenue_due, c.treasury_due, c.revenue_unresolved),
+            (250_000, 750_000, 0)
+        );
     }
 
     // ---- a revenue transfer whose result is lost ---------------------------------------------------------
@@ -3498,13 +3846,22 @@ mod tests {
         near_sdk::serde_json::from_str(logs.last().unwrap().strip_prefix("EVENT_JSON:").unwrap()).unwrap()
     }
 
+    // The time a sweep made at nanosecond 5 can be settled and reconciled.
+    const SETTLE_AT: u64 = 5 + SETTLE_WAIT_MINUTES * NS_PER_MINUTE;
+    const RECONCILE_AT: u64 = 5 + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE;
+
+    fn lost_report() -> MarketContract {
+        let mut c = after_a_sweep();
+        act_as("market.near", 6);
+        c.on_revenue_sent(U64(1), Err(PromiseError::Failed));
+        c
+    }
+
     #[test]
     fn a_lost_report_parks_the_amount_and_does_not_make_it_due_again() {
-        let mut c = after_a_sweep();
-        assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 0), "the sweep sent it");
-        act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Err(PromiseError::Failed));
+        let mut c = lost_report();
         assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 250_000));
+        assert_eq!(legs(&c, 1).0, LegStatus::Unresolved);
         let e = last_event();
         assert_eq!(e["event"], "fee_transfer_unresolved");
         assert_eq!(
@@ -3516,7 +3873,7 @@ mod tests {
 
         // The next sweep has nothing to send for it, so the same money cannot be paid twice.
         act_as(USERS[2], 7);
-        c.sweep_fees();
+        assert_eq!(c.sweep_fees(), None);
         assert!(
             near_sdk::test_utils::get_logs().is_empty(),
             "nothing is due, so nothing is sent"
@@ -3528,113 +3885,493 @@ mod tests {
     fn a_report_that_says_part_was_kept_still_returns_the_rest_to_due() {
         let mut c = after_a_sweep();
         act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Ok(vec![U128(100_000)]));
+        c.on_revenue_sent(U64(1), Ok(vec![U128(100_000)]));
         assert_eq!((c.revenue_due, c.revenue_unresolved), (150_000, 0));
+        assert_eq!(legs(&c, 1).0, LegStatus::Refused);
         assert_eq!(last_event()["event"], "fee_transfer_failed");
+    }
+
+    // ---- settle_leg: the Council's own record decides ---------------------------------------------------------
+
+    fn settle(c: &mut MarketContract, at: u64) {
+        act_as(USERS[0], at);
+        let _ = c.settle_leg(U64(1));
+    }
+
+    fn council_answers(c: &mut MarketContract, recorded: Option<u128>) {
+        act_as("market.near", SETTLE_AT);
+        c.on_council_checked(
+            U64(1),
+            Ok(recorded.map(|amount| CouncilReceipt { amount: U128(amount) })),
+        );
+    }
+
+    #[test]
+    fn a_leg_whose_result_was_lost_is_settled_when_the_council_recorded_the_sweep() {
+        let mut c = lost_report();
+        settle(&mut c, SETTLE_AT);
+        let sent = receipts();
+        let (method, args, _, gas) = call_of(&sent[0]);
+        assert_eq!((method.as_str(), gas), ("received_of", GAS_COUNCIL_VIEW.as_gas()));
+        assert_eq!(sent[0].receiver_id, acct(COUNCIL));
+        assert_eq!(args["sweep_id"], "1");
+        council_answers(&mut c, Some(250_000));
+        assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 0));
+        assert_eq!(legs(&c, 1).0, LegStatus::Settled);
+        assert_eq!(last_event()["event"], "fee_leg_settled");
+    }
+
+    #[test]
+    fn a_leg_whose_result_was_lost_is_due_again_when_the_council_has_no_record() {
+        let mut c = lost_report();
+        settle(&mut c, SETTLE_AT);
+        council_answers(&mut c, None);
+        assert_eq!((c.revenue_due, c.revenue_unresolved), (250_000, 0));
+        assert_eq!(legs(&c, 1).0, LegStatus::Refused);
+        act_as(OWNER, SETTLE_AT);
+        c.set_min_sweep(U128(1));
+        act_as(USERS[2], SETTLE_AT + 1);
+        assert_eq!(c.sweep_fees(), Some(U64(2)));
+        assert_eq!(c.get_sweep(U64(2)).unwrap().council.amount.0, 250_000);
+        assert_eq!(c.get_sweep(U64(2)).unwrap().carried_council.0, 250_000);
+    }
+
+    #[test]
+    fn a_council_that_cannot_answer_leaves_the_leg_unresolved_to_ask_again() {
+        let mut c = lost_report();
+        settle(&mut c, SETTLE_AT);
+        act_as("market.near", SETTLE_AT);
+        c.on_council_checked(U64(1), Err(PromiseError::Failed));
+        assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 250_000));
+        assert_eq!(legs(&c, 1).0, LegStatus::Unresolved);
+        settle(&mut c, SETTLE_AT + 1);
+    }
+
+    #[test]
+    fn two_answers_to_the_same_question_settle_the_leg_once() {
+        let mut c = lost_report();
+        settle(&mut c, SETTLE_AT);
+        council_answers(&mut c, None);
+        council_answers(&mut c, None);
+        council_answers(&mut c, Some(250_000));
+        assert_eq!((c.revenue_due, c.revenue_unresolved), (250_000, 0));
+    }
+
+    #[test]
+    #[should_panic(expected = "wait 10 minutes after the sweep before settling")]
+    fn a_leg_is_not_settled_before_the_council_had_time_to_finish() {
+        let mut c = lost_report();
+        settle(&mut c, SETTLE_AT - 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "the leg is not unresolved")]
+    fn only_an_unresolved_leg_is_settled() {
+        let mut c = after_a_sweep();
+        settle(&mut c, SETTLE_AT);
+    }
+
+    #[test]
+    #[should_panic(expected = "no sweep to settle")]
+    fn a_sweep_that_never_happened_is_not_settled() {
+        let mut c = lost_report();
+        act_as(USERS[0], SETTLE_AT);
+        let _ = c.settle_leg(U64(2));
+    }
+
+    // ---- reconcile_leg: the owner decides when nothing else can ----------------------------------------------
+
+    fn reconcile(c: &mut MarketContract, leg: LegKind, arrived: bool) {
+        act_as(OWNER, RECONCILE_AT);
+        c.reconcile_leg(U64(1), leg, arrived);
     }
 
     #[test]
     fn the_owner_returns_an_amount_that_never_arrived_to_due_and_the_next_sweep_sends_it_once() {
-        let mut c = after_a_sweep();
-        act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Err(PromiseError::Failed));
-        act_as(OWNER, 7);
-        c.reconcile_revenue(U128(250_000), false);
+        let mut c = lost_report();
+        reconcile(&mut c, LegKind::Council, false);
         assert_eq!((c.revenue_due, c.revenue_unresolved), (250_000, 0));
         let e = last_event();
-        assert_eq!(e["event"], "revenue_reconciled");
+        assert_eq!(e["event"], "fee_leg_reconciled");
         assert_eq!(
             (
                 e["data"]["amount"].as_str(),
                 e["data"]["arrived"].clone(),
-                e["data"]["unresolved"].as_str()
+                e["data"]["leg"].as_str()
             ),
-            (Some("250000"), near_sdk::serde_json::json!(false), Some("0"))
+            (Some("250000"), near_sdk::serde_json::json!(false), Some("council"))
         );
-        act_as(USERS[2], 8);
+        act_as(OWNER, RECONCILE_AT);
+        c.set_min_sweep(U128(1));
+        act_as(USERS[2], RECONCILE_AT + 1);
         c.sweep_fees();
-        assert_eq!(swept()["revenue"], "250000");
+        assert_eq!(swept()["council"], "250000");
         assert_eq!(c.revenue_due, 0);
     }
 
     #[test]
     fn the_owner_settles_an_amount_that_did_arrive_and_it_is_never_sent_again() {
-        let mut c = after_a_sweep();
-        act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Err(PromiseError::Failed));
-        act_as(OWNER, 7);
-        c.reconcile_revenue(U128(250_000), true);
+        let mut c = lost_report();
+        reconcile(&mut c, LegKind::Council, true);
         assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 0));
         assert_eq!(last_event()["data"]["arrived"], true);
-        act_as(USERS[2], 8);
-        c.sweep_fees();
+        assert_eq!(legs(&c, 1).0, LegStatus::Settled);
+        act_as(USERS[2], RECONCILE_AT + 1);
+        assert_eq!(c.sweep_fees(), None);
         assert!(receipts().is_empty());
     }
 
     #[test]
-    fn an_unresolved_amount_can_be_settled_in_parts() {
+    fn a_pending_leg_whose_callback_never_came_is_decided_by_the_owner_after_an_hour() {
+        let mut c = after_a_sweep();
+        reconcile(&mut c, LegKind::Treasury, false);
+        assert_eq!((c.treasury_due, legs(&c, 1).1), (750_000, LegStatus::Refused));
+        // The slow callback arrives after all and finds the leg decided.
+        act_as("market.near", RECONCILE_AT + 1);
+        c.on_treasury_sent(U64(1), Ok(()));
+        assert_eq!((c.treasury_due, legs(&c, 1).1), (750_000, LegStatus::Refused));
+    }
+
+    #[test]
+    #[should_panic(expected = "wait 60 minutes after the sweep before reconciling")]
+    fn the_owner_waits_an_hour_before_deciding() {
+        let mut c = lost_report();
+        act_as(OWNER, RECONCILE_AT - 1);
+        c.reconcile_leg(U64(1), LegKind::Council, true);
+    }
+
+    #[test]
+    #[should_panic(expected = "the leg is neither pending nor unresolved")]
+    fn a_leg_that_ended_cannot_be_reconciled() {
         let mut c = after_a_sweep();
         act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Err(PromiseError::Failed));
-        act_as(OWNER, 7);
-        c.reconcile_revenue(U128(100_000), true);
-        c.reconcile_revenue(U128(50_000), false);
-        assert_eq!((c.revenue_due, c.revenue_unresolved), (50_000, 100_000));
+        c.on_treasury_sent(U64(1), Ok(()));
+        reconcile(&mut c, LegKind::Treasury, false);
     }
 
     #[test]
-    #[should_panic(expected = "that is more than is unresolved")]
-    fn nothing_can_be_reconciled_beyond_what_is_unresolved() {
-        let mut c = after_a_sweep();
-        act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Err(PromiseError::Failed));
-        act_as(OWNER, 7);
-        c.reconcile_revenue(U128(250_001), false);
-    }
-
-    #[test]
-    #[should_panic(expected = "that is more than is unresolved")]
-    fn nothing_can_be_reconciled_when_nothing_is_unresolved() {
-        let mut c = after_a_sweep();
-        act_as(OWNER, 7);
-        c.reconcile_revenue(U128(1), false);
-    }
-
-    #[test]
-    #[should_panic(expected = "amount must be positive")]
-    fn reconciling_zero_is_refused() {
-        let mut c = after_a_sweep();
-        act_as(OWNER, 7);
-        c.reconcile_revenue(U128(0), false);
+    #[should_panic(expected = "no sweep to settle")]
+    fn a_sweep_that_never_happened_is_not_reconciled() {
+        let mut c = lost_report();
+        act_as(OWNER, RECONCILE_AT);
+        c.reconcile_leg(U64(9), LegKind::Council, true);
     }
 
     #[test]
     fn only_the_owner_reconciles() {
-        let mut c = after_a_sweep();
-        act_as("market.near", 6);
-        c.on_revenue_sent(U128(250_000), Err(PromiseError::Failed));
+        let mut c = lost_report();
         act_as(OWNER, 7);
         c.set_operator(acct("ops.near"));
         for who in ["ops.near", USERS[0]] {
-            act_as(who, 8);
-            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.reconcile_revenue(U128(1), false)));
+            act_as(who, RECONCILE_AT);
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                c.reconcile_leg(U64(1), LegKind::Council, false)
+            }));
             assert!(caught.is_err(), "{who} must be refused");
         }
         assert_eq!((c.revenue_due, c.revenue_unresolved), (0, 250_000));
     }
 
+    // ---- the split: exact rounding, a share the owner can move, and a record before any transfer ----------------
+
+    #[test]
+    fn the_split_rounds_both_parts_down_and_leaves_the_remainder_collected() {
+        for (total, council, treasury, carry) in [
+            (1_095_193, 273_798, 821_394, 1),
+            (100, 25, 75, 0),
+            (7, 1, 5, 1),
+            (3, 0, 2, 1),
+            (0, 0, 0, 0),
+        ] {
+            let (c, t) = split_fees(total, DEFAULT_REVENUE_SHARE_BPS);
+            assert_eq!((c, t, total - c - t), (council, treasury, carry), "{total}");
+        }
+    }
+
+    proptest! {
+        // For any total and any share the owner may set, the two parts never exceed the total and the remainder is 0 or 1.
+        #[test]
+        fn the_two_parts_and_the_remainder_always_add_up_to_the_total(
+            total in 0u128..1_000_000_000_000_000_000,
+            share in MIN_REVENUE_SHARE_BPS..=MAX_REVENUE_SHARE_BPS
+        ) {
+            let (council, treasury) = split_fees(total, share);
+            prop_assert!(council + treasury <= total);
+            prop_assert!(total - council - treasury <= 1);
+            prop_assert!(council <= total * share / BPS_DENOMINATOR);
+        }
+    }
+
+    #[test]
+    fn a_sweep_records_both_legs_before_it_sends_either_and_takes_the_next_id() {
+        let (mut c, _) = world();
+        c.fees = 1_095_193;
+        c.revenue_due = 50;
+        c.treasury_due = 70;
+        act_as(USERS[2], 5);
+        assert_eq!(c.sweep_fees(), Some(U64(1)));
+        let s = c.get_sweep(U64(1)).unwrap();
+        assert_eq!(
+            (s.at.0, s.total.0, s.carried_council.0, s.carried_treasury.0),
+            (5, 1_095_193, 50, 70)
+        );
+        assert_eq!(
+            (s.council.amount.0, s.council.status, s.council.to.as_str()),
+            (273_848, LegStatus::Pending, COUNCIL)
+        );
+        assert_eq!(
+            (s.treasury.amount.0, s.treasury.status, s.treasury.to.as_str()),
+            (821_464, LegStatus::Pending, TREASURY)
+        );
+        assert_eq!((c.fees, c.revenue_due, c.treasury_due), (1, 0, 0));
+        let d = swept();
+        assert_eq!(
+            (
+                d["id"].as_str(),
+                d["total"].as_str(),
+                d["council"].as_str(),
+                d["treasury"].as_str()
+            ),
+            (Some("1"), Some("1095193"), Some("273848"), Some("821464"))
+        );
+        assert_eq!(
+            (d["revenue_pool"].as_str(), d["treasury_account"].as_str()),
+            (Some(COUNCIL), Some(TREASURY))
+        );
+        assert_eq!(c.list_sweeps(U64(0), U64(10)).len(), 1);
+        c.fees = 2_000_000;
+        act_as(USERS[2], 6);
+        assert_eq!(c.sweep_fees(), Some(U64(2)));
+        assert_eq!(c.get_sweep(U64(3)).map(|s| s.id), None);
+    }
+
+    #[test]
+    fn a_sweep_below_the_minimum_does_nothing_and_takes_no_id() {
+        let (mut c, _) = world();
+        c.fees = DEFAULT_MIN_SWEEP - 1;
+        act_as(USERS[2], 5);
+        assert_eq!(c.sweep_fees(), None);
+        assert!(near_sdk::test_utils::get_logs().is_empty() && receipts().is_empty());
+        assert_eq!((c.fees, c.next_sweep_id), (DEFAULT_MIN_SWEEP - 1, FIRST_SWEEP_ID));
+        c.fees = DEFAULT_MIN_SWEEP;
+        assert_eq!(c.sweep_fees(), Some(U64(FIRST_SWEEP_ID)));
+    }
+
+    #[test]
+    fn dues_that_a_refusal_left_count_towards_the_minimum() {
+        let (mut c, _) = world();
+        c.fees = 0;
+        c.revenue_due = 400_000;
+        c.treasury_due = DEFAULT_MIN_SWEEP - 400_000;
+        act_as(USERS[2], 5);
+        assert_eq!(c.sweep_fees(), Some(U64(1)));
+        assert_eq!(c.get_sweep(U64(1)).unwrap().total.0, 0);
+    }
+
+    // One unit cannot be split into a whole unit for either leg, so it waits.
+    #[test]
+    fn a_sweep_whose_legs_would_both_be_empty_takes_no_id() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_min_sweep(U128(1));
+        c.fees = 1;
+        assert_eq!(c.sweep_fees(), None);
+        assert_eq!((c.fees, c.next_sweep_id), (1, FIRST_SWEEP_ID));
+    }
+
+    #[test]
+    fn a_leg_with_nothing_in_it_is_settled_and_sends_nothing() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_min_sweep(U128(1));
+        c.fees = 2;
+        act_as(USERS[2], 5);
+        assert_eq!(c.sweep_fees(), Some(U64(1)));
+        assert_eq!(legs(&c, 1), (LegStatus::Settled, LegStatus::Pending));
+        let sent = receipts();
+        assert_eq!(sent.iter().filter(|r| r.receiver_id == acct(VERIFIER)).count(), 1);
+        assert_eq!(c.fees, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "the fee recipients are not set, the owner must call set_fee_recipients before a sweep")]
+    fn a_sweep_refuses_until_the_owner_has_set_where_fees_go() {
+        let (mut c, _) = unconfigured_world();
+        c.fees = 5_000_000;
+        act_as(USERS[2], 5);
+        c.sweep_fees();
+    }
+
+    #[test]
+    fn nothing_moves_and_nothing_is_recorded_while_the_recipients_are_unset() {
+        let (mut c, _) = unconfigured_world();
+        c.fees = 5_000_000;
+        act_as(USERS[2], 5);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.sweep_fees()));
+        assert!(caught.is_err());
+        assert_eq!(
+            (c.fees, c.next_sweep_id, c.config()["treasury"].clone()),
+            (5_000_000, 1, near_sdk::serde_json::Value::Null)
+        );
+        assert_eq!(c.config()["revenue_pool"], near_sdk::serde_json::Value::Null);
+        act_as(OWNER, 6);
+        c.set_fee_recipients(acct(COUNCIL), acct(TREASURY));
+        act_as(USERS[2], 7);
+        assert_eq!(c.sweep_fees(), Some(U64(1)));
+    }
+
+    #[test]
+    fn the_owner_moves_the_council_share_and_the_treasury_gets_the_rest() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_revenue_share_bps(4_000);
+        let e = last_event();
+        assert_eq!(
+            (
+                e["event"].as_str(),
+                e["data"]["revenue_share_bps"].clone(),
+                e["data"]["treasury_share_bps"].clone()
+            ),
+            (
+                Some("revenue_share_set"),
+                near_sdk::serde_json::json!(4_000),
+                near_sdk::serde_json::json!(6_000)
+            )
+        );
+        assert_eq!(
+            (
+                c.config()["revenue_share_bps"].clone(),
+                c.config()["treasury_share_bps"].clone()
+            ),
+            (near_sdk::serde_json::json!(4_000), near_sdk::serde_json::json!(6_000))
+        );
+        c.fees = 1_000_000;
+        act_as(USERS[2], 5);
+        c.sweep_fees();
+        let d = swept();
+        assert_eq!(
+            (d["council"].as_str(), d["treasury"].as_str()),
+            (Some("400000"), Some("600000"))
+        );
+    }
+
+    #[test]
+    fn a_sweep_keeps_the_split_it_was_made_with() {
+        let (mut c, _) = world();
+        c.fees = 1_000_000;
+        act_as(USERS[2], 5);
+        c.sweep_fees();
+        act_as(OWNER, 6);
+        c.set_revenue_share_bps(MAX_REVENUE_SHARE_BPS as u32);
+        let s = c.get_sweep(U64(1)).unwrap();
+        assert_eq!((s.council.amount.0, s.treasury.amount.0), (250_000, 750_000));
+    }
+
+    #[test]
+    fn the_share_stays_between_its_bounds() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_revenue_share_bps(MIN_REVENUE_SHARE_BPS as u32);
+        c.set_revenue_share_bps(MAX_REVENUE_SHARE_BPS as u32);
+        for bad in [
+            0,
+            MIN_REVENUE_SHARE_BPS as u32 - 1,
+            MAX_REVENUE_SHARE_BPS as u32 + 1,
+            10_000,
+            u32::MAX,
+        ] {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.set_revenue_share_bps(bad)));
+            assert!(caught.is_err(), "{bad} must be refused");
+        }
+        assert_eq!(c.revenue_share_bps, MAX_REVENUE_SHARE_BPS);
+    }
+
+    #[test]
+    fn the_minimum_sweep_and_the_first_sweep_id_are_the_owners_to_set_within_bounds() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_min_sweep(U128(MAX_MIN_SWEEP));
+        assert_eq!(last_event()["event"], "min_sweep_set");
+        assert_eq!(c.config()["min_sweep"], MAX_MIN_SWEEP.to_string());
+        for bad in [0, MAX_MIN_SWEEP + 1] {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.set_min_sweep(U128(bad))));
+            assert!(caught.is_err(), "{bad} must be refused");
+        }
+        c.set_next_sweep_id(U64(500));
+        assert_eq!(c.config()["next_sweep_id"], "500");
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.set_next_sweep_id(U64(499))));
+        assert!(caught.is_err(), "an id is never reused");
+        c.set_min_sweep(U128(1));
+        c.fees = 1_000_000;
+        act_as(USERS[2], 5);
+        assert_eq!(c.sweep_fees(), Some(U64(500)));
+    }
+
+    #[test]
+    fn only_the_owner_sets_the_split_the_minimum_and_the_ids() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_operator(acct("ops.near"));
+        let calls: [fn(&mut MarketContract); 3] = [
+            |c| c.set_revenue_share_bps(3_000),
+            |c| c.set_min_sweep(U128(5)),
+            |c| c.set_next_sweep_id(U64(9)),
+        ];
+        for who in ["ops.near", USERS[0]] {
+            for (n, call) in calls.into_iter().enumerate() {
+                act_as(who, 4);
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(&mut c)));
+                assert!(caught.is_err(), "{who} must be refused setter {n}");
+            }
+        }
+        assert_eq!(
+            (c.revenue_share_bps, c.min_sweep, c.next_sweep_id),
+            (DEFAULT_REVENUE_SHARE_BPS, DEFAULT_MIN_SWEEP, FIRST_SWEEP_ID)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "the Council and the treasury must be different accounts")]
+    fn the_council_and_the_treasury_cannot_be_one_account() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_fee_recipients(acct(COUNCIL), acct(COUNCIL));
+    }
+
+    #[test]
+    fn the_recipients_are_the_owners_to_change_and_later_sweeps_follow_them() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_fee_recipients(acct("new-council.near"), acct("new-treasury.near"));
+        assert_eq!(c.config()["revenue_pool"], "new-council.near");
+        assert_eq!(c.config()["treasury"], "new-treasury.near");
+        assert_eq!(last_event()["event"], "fee_recipients_set");
+        c.fees = 1_000_000;
+        act_as(USERS[2], 5);
+        c.sweep_fees();
+        let s = c.get_sweep(U64(1)).unwrap();
+        assert_eq!(
+            (s.council.to.as_str(), s.treasury.to.as_str()),
+            ("new-council.near", "new-treasury.near")
+        );
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
-        // Whatever the transfers report and whenever the owner reconciles, every unit of fee is in exactly one place: still
-        // collected, due, unresolved, on its way out, or gone for good. Nothing is created and nothing is paid twice.
+        // Whatever the transfers report and whenever the owner or anyone settles a leg, every unit of fee is in exactly one
+        // place: still collected, due, unresolved, on its way out, or gone for good. Nothing is created and nothing is paid
+        // twice, and every leg of every sweep ends in settled or refused.
         #[test]
         fn fee_money_is_in_exactly_one_place_whatever_the_transfers_report(
-            ops in proptest::collection::vec((0u8..5, 1u128..5_000_000, 0u8..3), 1..80)
+            ops in proptest::collection::vec((0u8..6, 1u128..5_000_000, 0u8..3), 1..80)
         ) {
             let (mut c, _) = world();
+            act_as(OWNER, 3);
+            c.set_min_sweep(U128(1));
             let (mut added, mut gone) = (c.fees, 0u128);
-            let (mut revenue_out, mut business_out): (Vec<u128>, Vec<u128>) = (vec![], vec![]);
+            let mut on_the_way: Vec<(u64, LegKind, u128)> = vec![];
+            let mut unresolved: Vec<(u64, u128)> = vec![];
             for (op, amount, how) in ops {
                 match op {
                     0 => {
@@ -3643,44 +4380,48 @@ mod tests {
                     }
                     1 => {
                         act_as(USERS[2], 5);
-                        c.sweep_fees();
-                        if let Some(line) = near_sdk::test_utils::get_logs().last() {
-                            let data = near_sdk::serde_json::from_str::<near_sdk::serde_json::Value>(line.strip_prefix("EVENT_JSON:").unwrap()).unwrap()["data"].clone();
-                            let (r, b): (u128, u128) = (data["revenue"].as_str().unwrap().parse().unwrap(), data["business"].as_str().unwrap().parse().unwrap());
-                            if r > 0 { revenue_out.push(r); }
-                            if b > 0 { business_out.push(b); }
+                        if let Some(id) = c.sweep_fees() {
+                            let s = c.get_sweep(id).unwrap();
+                            if s.council.status == LegStatus::Pending { on_the_way.push((id.0, LegKind::Council, s.council.amount.0)); }
+                            if s.treasury.status == LegStatus::Pending { on_the_way.push((id.0, LegKind::Treasury, s.treasury.amount.0)); }
                         }
                     }
-                    2 if !revenue_out.is_empty() => {
-                        let sent = revenue_out.remove(amount as usize % revenue_out.len());
+                    2 if !on_the_way.is_empty() => {
+                        let (id, kind, sent) = on_the_way.remove(amount as usize % on_the_way.len());
                         act_as("market.near", 6);
-                        match how {
-                            0 => { c.on_revenue_sent(U128(sent), Ok(vec![U128(sent)])); gone += sent; }
-                            1 => { let used = sent / 3; c.on_revenue_sent(U128(sent), Ok(vec![U128(used)])); gone += used; }
-                            _ => c.on_revenue_sent(U128(sent), Err(PromiseError::Failed)),
+                        match (kind, how) {
+                            (LegKind::Council, 0) => { c.on_revenue_sent(U64(id), Ok(vec![U128(sent)])); gone += sent; }
+                            (LegKind::Council, 1) => { let used = sent / 3; c.on_revenue_sent(U64(id), Ok(vec![U128(used)])); gone += used; }
+                            (LegKind::Council, _) => { c.on_revenue_sent(U64(id), Err(PromiseError::Failed)); unresolved.push((id, sent)); }
+                            (LegKind::Treasury, 0) => { c.on_treasury_sent(U64(id), Ok(())); gone += sent; }
+                            (LegKind::Treasury, _) => c.on_treasury_sent(U64(id), Err(PromiseError::Failed)),
                         }
                     }
-                    3 if !business_out.is_empty() => {
-                        let sent = business_out.remove(amount as usize % business_out.len());
-                        act_as("market.near", 6);
-                        if how == 0 {
-                            c.on_business_sent(U128(sent), Ok(()));
-                            gone += sent;
-                        } else {
-                            c.on_business_sent(U128(sent), Err(PromiseError::Failed));
-                        }
+                    3 if !unresolved.is_empty() => {
+                        let (id, sent) = unresolved.remove(amount as usize % unresolved.len());
+                        act_as("market.near", 7);
+                        let recorded = if how == 0 { Some(sent) } else { None };
+                        c.on_council_checked(U64(id), Ok(recorded.map(|a| CouncilReceipt { amount: U128(a) })));
+                        gone += recorded.unwrap_or(0);
                     }
-                    4 if c.revenue_unresolved > 0 => {
-                        let part = 1 + amount % c.revenue_unresolved;
-                        act_as(OWNER, 7);
-                        c.reconcile_revenue(U128(part), how == 0);
-                        if how == 0 { gone += part; }
+                    4 if !unresolved.is_empty() => {
+                        let (id, sent) = unresolved.remove(amount as usize % unresolved.len());
+                        act_as(OWNER, 5 + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE);
+                        c.reconcile_leg(U64(id), LegKind::Council, how == 0);
+                        if how == 0 { gone += sent; }
+                    }
+                    5 if !on_the_way.is_empty() => {
+                        let (id, kind, sent) = on_the_way.remove(amount as usize % on_the_way.len());
+                        act_as(OWNER, 5 + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE);
+                        c.reconcile_leg(U64(id), kind, how == 0);
+                        if how == 0 { gone += sent; }
                     }
                     _ => {}
                 }
-                let on_the_way: u128 = revenue_out.iter().chain(business_out.iter()).sum();
-                let held = c.fees + c.revenue_due + c.business_due + c.revenue_unresolved;
-                prop_assert_eq!(held + on_the_way + gone, added, "a unit of fee is missing or counted twice");
+                let sent_not_reported: u128 = on_the_way.iter().map(|(_, _, a)| a).sum();
+                let held = c.fees + c.revenue_due + c.treasury_due + c.revenue_unresolved;
+                prop_assert_eq!(held + sent_not_reported + gone, added, "a unit of fee is missing or counted twice");
+                prop_assert_eq!(c.revenue_unresolved, unresolved.iter().map(|(_, a)| a).sum::<u128>());
             }
         }
     }
@@ -3696,9 +4437,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "attach at least 87 TGas: a sweep sends the Council its part and the business wallet its part"
-    )]
+    #[should_panic(expected = "attach at least 87 TGas: a sweep sends the Council its part and the treasury its part")]
     fn a_sweep_with_less_than_its_floor_is_refused_and_says_how_much() {
         let (mut c, _) = world();
         c.fees = 1_000_000;
@@ -3717,7 +4456,7 @@ mod tests {
         assert_eq!(
             GAS_SWEEP_FLOOR,
             Gas::from_tgas(87),
-            "the Council's 22 and 20, the business wallet's 15 and 10, and 10 for the call itself"
+            "the Council's 22 and 20, the treasury's 15 and 10, and 10 for the call itself"
         );
     }
 
@@ -3852,7 +4591,7 @@ mod tests {
                 migrated.state_version,
                 migrated.market(0).locked
             ),
-            ((true, false), 1, locked)
+            ((true, false), STATE_VERSION, locked)
         );
         assert_eq!(migrated.config()["upgrade_proven"], true);
         assert!(migrated.check_invariant(U64(0)));
@@ -3885,10 +4624,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "migrate expects version 1")]
+    #[should_panic(expected = "migrate expects version 2")]
     fn migrate_refuses_state_written_by_another_version() {
         let (mut c, _) = world();
-        c.state_version = 2;
+        c.state_version = STATE_VERSION + 1;
         env::state_write(&c);
         drop(c);
         act_unpaid(SELF, 5);

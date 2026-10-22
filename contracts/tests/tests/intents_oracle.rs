@@ -301,7 +301,7 @@ async fn the_hook_refuses_an_unauthenticated_call_and_checks_the_delivery_as_wel
             "panel_deadline_ms": PANEL_MS.to_string(), "draw_window_ms": DRAW_WINDOW_MS.to_string(),
             "council": w.council.id(), "jury_size": JURY, "draw_delay_blocks": DRAW_DELAY_BLOCKS.to_string(),
             "min_proposal_ms": MIN_PROPOSAL_MS.to_string(), "operator_id": w.owner.id(), "network": NETWORK,
-            "price_threshold": PRICE_THRESHOLD, "no_decision_recipient": w.business.id()
+            "price_threshold": PRICE_THRESHOLD, "no_decision_recipient": w.treasury.id()
         }))
         .transact()
         .await?
@@ -541,11 +541,11 @@ async fn a_dispute_nobody_decided_pays_the_proposer_and_the_recipient_and_reconc
     let (carol, recipient) = (2 * BOND - BOND / 2, BOND / 2);
     assert_eq!(claimable(&w, w.carol.id()).await, carol);
     assert_eq!(claimable(&w, w.dave.id()).await, 0);
-    assert_eq!(claimable(&w, w.business.id()).await, recipient);
+    assert_eq!(claimable(&w, w.treasury.id()).await, recipient);
 
-    let before = intents_balance(&w, w.business.id()).await;
-    withdraw_bond(&w, &w.business).await?;
-    assert_eq!(intents_balance(&w, w.business.id()).await - before, recipient);
+    let before = intents_balance(&w, w.treasury.id()).await;
+    withdraw_bond(&w, &w.treasury).await?;
+    assert_eq!(intents_balance(&w, w.treasury.id()).await - before, recipient);
     assert_eq!(oracle_total_owed(&w).await, carol);
     assert_oracle_reconciled(&w).await;
     withdraw_bond(&w, &w.carol).await?;

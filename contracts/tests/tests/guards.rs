@@ -41,9 +41,10 @@ const FORBIDDEN_VERIFIER_CALLS: [&str; 28] = [
 
 // Every cross-contract interface a contract declares, and the methods it declares on each. A new target or a new method
 // fails here until it is added on purpose.
-const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 7] = [
+const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 8] = [
     ("market", "ext_verifier", &["mt_transfer", "mt_transfer_call"]),
     ("market", "ext_oracle", &["register_market"]),
+    ("market", "ext_council", &["received_of"]),
     ("council", "ext_verifier", &["mt_transfer"]),
     ("oracle", "ext_verifier", &["mt_transfer"]),
     ("oracle", "ext_market", &["set_outcome"]),
@@ -327,6 +328,50 @@ fn the_oracle_never_names_holder_revenue() {
                 "{path:?}:{}: the oracle code names revenue: {line}",
                 n + 1
             );
+        }
+    }
+}
+
+// Reward money leaves the Council by one path. Its only verifier call is the payout of a claim, so a holder cannot be paid
+// through a second route, and an unstake, a forfeit or a finalization moves no money.
+#[test]
+fn the_council_pays_reward_money_only_in_a_quarter_claim() {
+    let sources = sources_of("council");
+    let code: String = sources.iter().map(|(_, code)| code.as_str()).collect();
+    assert_eq!(
+        code.matches(".mt_transfer(").count(),
+        1,
+        "the Council makes exactly one verifier payout call"
+    );
+    assert_eq!(code.matches("self.pay(").count(), 1, "and one caller of it");
+    let claim = code
+        .split("pub fn claim_quarter(")
+        .nth(1)
+        .expect("the Council has claim_quarter")
+        .split("pub fn on_claim_paid(")
+        .next()
+        .unwrap();
+    assert!(claim.contains("self.pay("), "the payout is made from claim_quarter");
+    for removed in ["pub fn claim(", "pending_reward", "acc_per_seat", "Stream"] {
+        assert!(!code.contains(removed), "the Council code still has {removed}");
+    }
+}
+
+// The fee split is expressed in basis points the owner can set. No account id is written in the market's or the Council's code,
+// so nothing the owner has still to choose is hardcoded.
+#[test]
+fn no_contract_names_an_account_the_owner_has_still_to_choose() {
+    for contract in ["market", "council"] {
+        for (path, code) in sources_of(contract) {
+            for (n, line) in code.lines().enumerate() {
+                for literal in [".near\"", ".testnet\"", "trezu"] {
+                    assert!(
+                        !line.contains(literal),
+                        "{path:?}:{}: an account id is written in the code: {line}",
+                        n + 1
+                    );
+                }
+            }
         }
     }
 }

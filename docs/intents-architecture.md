@@ -115,14 +115,16 @@ remain separate responsibilities.
 | Holder distributions | Quarterly claims through Council-authorised settlement |
 | Juror compensation | Separate oracle case-work entitlement |
 
-Fees are not position backing or bonds. The market's existing `business_wallet` configuration
-names the 75% recipient; it must be set to the verified treasury through the reviewed
-administration path. `revenue_pool` names the Council recipient. Code field names do not imply
-that a treasury account has already been selected.
+Fees are not position backing or bonds. The market's `treasury` setting names the 75% recipient;
+it is not set at deploy and a sweep refuses until the owner has set it to the verified treasury
+through the reviewed administration path, together with `revenue_pool`, the Council recipient. The
+split is a share in basis points the owner can move (2,500 to the Council to start). Code field names
+do not imply that a treasury account has already been selected.
 
-The Council's current stream does not enforce quarterly claims. Quarter boundaries, accrual,
-vesting, no-seat periods, unclaimed balances and failed payments need explicit implementation.
-A reward cannot be paid through two different claim paths.
+The Council books revenue by UTC calendar quarter. A seat earns for the time it was staked inside the
+quarter, a quarter is claimable once its grace period has passed, no-seat quarters roll their pool
+into the next quarter, unclaimed shares never expire and late-arriving fees belong to the quarter they
+arrive in. A reward cannot be paid through two different claim paths.
 
 Oracle bonds and juror payments still need their own Intents migration. Moving those liabilities
 must preserve the case rules and must not take money from holder allocations.
@@ -135,8 +137,8 @@ Source inspection on 21 October 2026; no contract build or test was run for this
 
 | Component | Current source | Gap |
 | --- | --- | --- |
-| Market | Verifier-backed transfers, internal positions and 25/75 fee sweep | Complete user identity/funding/exit journey and verified recipient configuration |
-| Council | Intents revenue receipt and payments, NFT staking and streamed rewards | Quarter accounting and claim gate |
+| Market | Verifier-backed transfers, internal positions and a recorded fee sweep with independent legs | Complete user identity/funding/exit journey and verified recipient configuration |
+| Council | Intents revenue receipt, NFT staking, quarterly entitlements and single-use claims | A run against real funds and a real DAO |
 | Oracle | NEP-141 bond and payment paths | Intents bond/juror settlement |
 | Treasury | Allow-list proposal and vote helpers, not yet run against a real DAO; custom governance removed | Real DAO and policy, ownership handover and integration tests |
 | Frontend | Read-oriented adapters, disabled financial writes | Final DTOs, quote/sign/receipt/recovery integration |

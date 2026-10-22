@@ -115,10 +115,10 @@ async fn a_full_journey_keeps_total_owed_equal_to_the_verifiers_balance() -> any
     assert_reconciled(&w).await;
 
     let council_before = intents_balance(&w, w.council.id()).await;
-    let business_before = intents_balance(&w, w.business.id()).await;
+    let treasury_before = intents_balance(&w, w.treasury.id()).await;
     sweep(&w, &w.carol).await?;
     assert!(intents_balance(&w, w.council.id()).await > council_before);
-    assert!(intents_balance(&w, w.business.id()).await > business_before);
+    assert!(intents_balance(&w, w.treasury.id()).await > treasury_before);
     assert_reconciled(&w).await;
 
     for contract in [w.market.id(), w.council.id()] {
@@ -240,7 +240,7 @@ async fn a_token_id_that_is_not_the_collateral_is_refused_and_refunded() -> anyh
         .await?
         .into_result()?;
     let owed = total_owed(&w).await;
-    for (to, msg) in [(w.market.id(), "deposit"), (w.council.id(), "revenue")] {
+    for (to, msg) in [(w.market.id(), "deposit"), (w.council.id(), "revenue:1")] {
         let r = w
             .dave
             .call(w.verifier.id(), "mt_transfer_call")
@@ -257,7 +257,7 @@ async fn a_token_id_that_is_not_the_collateral_is_refused_and_refunded() -> anyh
     assert_eq!(market_balance(&w, w.dave.id()).await, 0);
     assert_eq!(total_owed(&w).await, owed);
     assert_eq!(
-        stream_remaining(&w).await,
+        council_total_received(&w).await,
         0,
         "no revenue arrived in a token the council does not trust"
     );
@@ -277,8 +277,7 @@ async fn the_hook_checks_the_delivery_as_well_as_the_caller() -> anyhow::Result<
         .call("new")
         .args_json(json!({
             "owner_id": w.owner.id(), "operator_id": w.owner.id(), "oracle_id": w.oracle.id(),
-            "verifier_id": fake_verifier.id(), "collateral_token_id": collateral,
-            "revenue_pool": council.id(), "business_wallet": w.business.id()
+            "verifier_id": fake_verifier.id(), "collateral_token_id": collateral
         }))
         .transact()
         .await?
@@ -286,10 +285,17 @@ async fn the_hook_checks_the_delivery_as_well_as_the_caller() -> anyhow::Result<
     council
         .call("new")
         .args_json(json!({
-            "owner_id": w.owner.id(), "oracle_id": w.oracle.id(), "nft_contract": w.nft.id(),
+            "owner_id": w.owner.id(), "oracle_id": w.oracle.id(),
             "verifier_id": fake_verifier.id(), "collateral_token_id": collateral,
             "cooldown_ns": (COOLDOWN_SECS * 1_000_000_000).to_string(), "max_seats_per_account": 1
         }))
+        .transact()
+        .await?
+        .into_result()?;
+    // The Council takes revenue only from its market, which here is the account the test delivers it as.
+    w.owner
+        .call(council.id(), "set_market")
+        .args_json(json!({ "market": w.alice.id() }))
         .transact()
         .await?
         .into_result()?;
@@ -358,7 +364,14 @@ async fn the_hook_checks_the_delivery_as_well_as_the_caller() -> anyhow::Result<
         .await?;
         refused(r.into_result(), why);
     }
-    let r = deliver(council.id(), vec![alice], vec![collateral], vec!["7000000"], "revenue").await?;
+    let r = deliver(
+        council.id(),
+        vec![alice],
+        vec![collateral],
+        vec!["7000000"],
+        "revenue:1",
+    )
+    .await?;
     assert_eq!(r.into_result()?.json::<Vec<String>>()?, vec!["0".to_string()]);
     let received: String = council.view("total_received").await?.json()?;
     assert_eq!(received, "7000000");
@@ -367,7 +380,7 @@ async fn the_hook_checks_the_delivery_as_well_as_the_caller() -> anyhow::Result<
         vec![alice],
         vec!["nep141:other.test.near"],
         vec!["1"],
-        "revenue",
+        "revenue:2",
     )
     .await?;
     refused(r.into_result(), "wrong token");

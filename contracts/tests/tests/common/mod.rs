@@ -40,7 +40,7 @@ pub struct World {
     pub carol: Account,
     pub dave: Account,
     // Receives 75% of the fees.
-    pub business: Account,
+    pub treasury: Account,
     // Each holds one staked NFT whose token id is their account id. A case's panel is drawn from them.
     pub jurors: Vec<Account>,
 }
@@ -89,16 +89,25 @@ pub async fn setup() -> anyhow::Result<World> {
 
 pub async fn setup_with(window_ms: u64, panel_ms: u64, draw_delay_blocks: u64) -> anyhow::Result<World> {
     let worker = near_workspaces::sandbox().await?;
-    build(worker, window_ms, panel_ms, draw_delay_blocks, None).await
+    build(worker, window_ms, panel_ms, draw_delay_blocks, None, true).await
 }
 
-// The market, the oracle and the council are owned by `owner_id` when given, by w.owner otherwise.
+// As deployed, before the owner has said where fees go: the market has no fee recipients and the Council has no market. The
+// NFT collection is set, because the five jurors are staked.
+pub async fn setup_unconfigured() -> anyhow::Result<World> {
+    let worker = near_workspaces::sandbox().await?;
+    build(worker, WINDOW_MS, PANEL_MS, DRAW_DELAY_BLOCKS, None, false).await
+}
+
+// The market, the oracle and the council are owned by `admin` when given, by w.owner otherwise. `configured` has the owner set
+// the market's fee recipients and the Council's market, which the contracts leave unset.
 async fn build(
     worker: Worker<Sandbox>,
     window_ms: u64,
     panel_ms: u64,
     draw_delay_blocks: u64,
-    owner_id: Option<AccountId>,
+    admin: Option<Account>,
+    configured: bool,
 ) -> anyhow::Result<World> {
     let verifier = worker.dev_deploy(&verifier_wasm()).await?;
     let ft = worker.dev_deploy(&wasm("mock_ft")).await?;
@@ -111,12 +120,13 @@ async fn build(
     let bob = worker.dev_create_account().await?;
     let carol = worker.dev_create_account().await?;
     let dave = worker.dev_create_account().await?;
-    let business = worker.dev_create_account().await?;
+    let treasury = worker.dev_create_account().await?;
     let mut jurors = vec![];
     for _ in 0..5 {
         jurors.push(worker.dev_create_account().await?);
     }
-    let owner_id = owner_id.unwrap_or_else(|| owner.id().clone());
+    let admin = admin.unwrap_or_else(|| owner.clone());
+    let owner_id = admin.id().clone();
 
     verifier
         .call("new")
@@ -141,7 +151,7 @@ async fn build(
         .call("new")
         .args_json(json!({
             "owner_id": owner_id, "operator_id": owner.id(), "oracle_id": oracle.id(), "verifier_id": verifier.id(),
-            "collateral_token_id": collateral_token_id, "revenue_pool": council.id(), "business_wallet": business.id()
+            "collateral_token_id": collateral_token_id
         }))
         .transact()
         .await?
@@ -154,7 +164,7 @@ async fn build(
     council
         .call("new")
         .args_json(json!({
-            "owner_id": owner_id, "oracle_id": oracle.id(), "nft_contract": nft.id(), "verifier_id": verifier.id(),
+            "owner_id": owner_id, "oracle_id": oracle.id(), "verifier_id": verifier.id(),
             "collateral_token_id": collateral_token_id, "cooldown_ns": (COOLDOWN_SECS * 1_000_000_000).to_string(), "max_seats_per_account": MAX_SEATS_PER_ACCOUNT,
             "allowlist_enabled": false
         }))
@@ -168,7 +178,7 @@ async fn build(
             "collateral_token_id": collateral_token_id, "bond": BOND.to_string(), "window_ms": window_ms.to_string(), "panel_deadline_ms": panel_ms.to_string(),
             "draw_window_ms": DRAW_WINDOW_MS.to_string(), "council": council.id(), "jury_size": JURY, "draw_delay_blocks": draw_delay_blocks.to_string(),
             "min_proposal_ms": MIN_PROPOSAL_MS.to_string(), "operator_id": owner.id(), "network": NETWORK,
-            "price_threshold": PRICE_THRESHOLD, "no_decision_recipient": business.id()
+            "price_threshold": PRICE_THRESHOLD, "no_decision_recipient": treasury.id()
         }))
         .transact()
         .await?
@@ -176,7 +186,7 @@ async fn build(
 
     // The token needs to know these accounts before they can receive transfers. The market, the oracle and the council are not
     // among them: the verifier holds their money, and none is ever sent the token itself.
-    for c in [verifier.id(), business.id()] {
+    for c in [verifier.id(), treasury.id()] {
         owner
             .call(ft.id(), "storage_deposit")
             .args_json(json!({ "account_id": c, "registration_only": true }))
@@ -207,6 +217,26 @@ async fn build(
             .await?
             .into_result()?;
     }
+    admin
+        .call(council.id(), "set_nft_contract")
+        .args_json(json!({ "nft_contract": nft.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+    if configured {
+        admin
+            .call(market.id(), "set_fee_recipients")
+            .args_json(json!({ "revenue_pool": council.id(), "treasury": treasury.id() }))
+            .transact()
+            .await?
+            .into_result()?;
+        admin
+            .call(council.id(), "set_market")
+            .args_json(json!({ "market": market.id() }))
+            .transact()
+            .await?
+            .into_result()?;
+    }
     let w = World {
         worker,
         verifier,
@@ -220,7 +250,7 @@ async fn build(
         bob,
         carol,
         dave,
-        business,
+        treasury,
         jurors,
     };
     for j in &w.jurors {
@@ -739,12 +769,9 @@ pub fn events_named(logs: &[String], name: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-// What a claim or an unstake paid, from its revenue_claimed event.
+// What a claim paid, from its claim_paid event.
 pub fn claimed_in(logs: &[String]) -> u128 {
-    events_named(logs, "revenue_claimed")
-        .iter()
-        .map(|e| u(&e["amount"]))
-        .sum()
+    events_named(logs, "claim_paid").iter().map(|e| u(&e["amount"])).sum()
 }
 
 pub async fn mint(w: &World, to: &AccountId, amount: u128) -> anyhow::Result<()> {
@@ -757,14 +784,26 @@ pub async fn mint(w: &World, to: &AccountId, amount: u128) -> anyhow::Result<()>
     Ok(())
 }
 
-// Revenue for the council's seats: the owner sends it.
+// Sweep ids the stand-in market below uses. They start far above the ids the real market takes, so a test can do both.
+static STAND_IN_SWEEP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_000_000);
+
+// Revenue for the council's seats without a market sweep: for a moment the owner stands in for the market, which is the only
+// account the Council takes revenue from, and sends `amount` as a sweep of its own. The market is put back after.
 pub async fn send_revenue(w: &World, amount: u128) -> anyhow::Result<()> {
-    ft_call(w, &w.owner, w.council.id(), amount, "revenue").await
+    set_council_market(w, w.owner.id()).await?;
+    let id = STAND_IN_SWEEP_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ft_call(w, &w.owner, w.council.id(), amount, &format!("revenue:{id}")).await?;
+    set_council_market(w, w.market.id()).await
 }
 
-// Revenue the council has not yet released to its seats, in token units.
-pub async fn stream_remaining(w: &World) -> u128 {
-    u(&config(&w.council).await["stream_remaining"])
+pub async fn set_council_market(w: &World, market: &AccountId) -> anyhow::Result<()> {
+    w.owner
+        .call(w.council.id(), "set_market")
+        .args_json(json!({ "market": market }))
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(())
 }
 
 pub async fn skip_until(w: &World, t_ns: u64) {
@@ -843,10 +882,10 @@ pub async fn sell(
     Ok(())
 }
 
-// (collected, revenue due, business due) in the market.
+// (collected, revenue due, treasury due) in the market.
 pub async fn fees(w: &World) -> (u128, u128, u128) {
     let f: serde_json::Value = w.market.view("get_fees").await.unwrap().json().unwrap();
-    (u(&f["collected"]), u(&f["revenue_due"]), u(&f["business_due"]))
+    (u(&f["collected"]), u(&f["revenue_due"]), u(&f["treasury_due"]))
 }
 
 pub async fn sweep(w: &World, who: &Account) -> anyhow::Result<near_workspaces::result::ExecutionSuccess> {
@@ -858,29 +897,176 @@ pub async fn sweep(w: &World, who: &Account) -> anyhow::Result<near_workspaces::
         .into_result()?)
 }
 
-pub async fn pending_reward(w: &World, token_id: &str) -> u128 {
-    let s: String = w
-        .council
-        .view("pending_reward")
-        .args_json(json!({ "token_id": token_id }))
-        .await
-        .unwrap()
-        .json()
-        .unwrap();
-    s.parse().unwrap()
-}
-
-// Returns the logs of the whole call, the transfer and the callback included.
-pub async fn claim(w: &World, who: &Account, token_id: &str) -> anyhow::Result<Vec<String>> {
+// The council's claim_quarter. Returns the logs of the whole call, the transfer and the callback included.
+pub async fn claim_quarter(w: &World, who: &Account, quarter: u32, token_id: &str) -> anyhow::Result<Vec<String>> {
     let r = who
-        .call(w.council.id(), "claim")
-        .args_json(json!({ "token_id": token_id }))
+        .call(w.council.id(), "claim_quarter")
+        .args_json(json!({ "quarter": quarter, "token_id": token_id }))
         .deposit(NearToken::from_yoctonear(1))
         .gas(Gas::from_tgas(100))
         .transact()
         .await?
         .into_result()?;
     Ok(r.logs().iter().map(|l| l.to_string()).collect())
+}
+
+pub async fn council_total_received(w: &World) -> u128 {
+    let s: String = w.council.view("total_received").await.unwrap().json().unwrap();
+    s.parse().unwrap()
+}
+
+pub async fn current_quarter(w: &World) -> serde_json::Value {
+    w.council.view("current_quarter").await.unwrap().json().unwrap()
+}
+
+pub async fn get_quarter(w: &World, quarter: u32) -> serde_json::Value {
+    w.council
+        .view("get_quarter")
+        .args_json(json!({ "quarter": quarter }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap()
+}
+
+pub async fn entitlement(w: &World, quarter: u32, token_id: &str, who: &AccountId) -> serde_json::Value {
+    w.council
+        .view("get_entitlement")
+        .args_json(json!({ "quarter": quarter, "token_id": token_id, "account_id": who }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap()
+}
+
+pub async fn reward_totals(w: &World) -> serde_json::Value {
+    w.council.view("reward_totals").await.unwrap().json().unwrap()
+}
+
+pub async fn finalize_quarter(w: &World, quarter: u32) -> anyhow::Result<Vec<String>> {
+    let r = w
+        .bob
+        .call(w.council.id(), "finalize_quarter")
+        .args_json(json!({ "quarter": quarter }))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(r.logs().iter().map(|l| l.to_string()).collect())
+}
+
+// The Council's storage keys: the enum prefix, then the Borsh key. Quarters = 5, SeatWeight = 6, Forfeits = 7, Claims = 8,
+// Received = 9. A quarter is a u32 and a sweep id a u64, both little endian.
+const QUARTERS_KEY: u8 = 5;
+const SEAT_WEIGHT_KEY: u8 = 6;
+const FORFEITS_KEY: u8 = 7;
+const RECEIVED_KEY: u8 = 9;
+// The five maps and six totals that follow `next_to_finalize` in the Council's state: five 5-byte map prefixes and six u128.
+const STATE_AFTER_NEXT_TO_FINALIZE: usize = 5 * 5 + 6 * 16;
+
+// ACCELERATED. The sandbox cannot reach the end of a real quarter, which is about two months of blocks away. A test that needs a
+// finished quarter has the Council's books for the quarter it is in filed under the quarter two before it instead, and points
+// `next_to_finalize` there, and sets the grace period to its least. Nothing else is touched: every amount, weight and total is
+// what the contracts wrote, except that the quarter's seat time is set to the sum of the weights counted, because the chain
+// counted seat time and the weights in different blocks and a real quarter would end at one instant. Every seat's staked time
+// is counted first, so the weights exist. Returns the quarter it filed them under.
+pub async fn age_current_quarter(w: &World) -> anyhow::Result<u32> {
+    age_quarter(w, true).await
+}
+
+// The same for a quarter nobody held a seat in: only the revenue moves, and the quarter it moves to has no seat time. The
+// seats stay in the quarter the chain is in.
+pub async fn age_revenue_only(w: &World) -> anyhow::Result<u32> {
+    age_quarter(w, false).await
+}
+
+async fn age_quarter(w: &World, with_seats: bool) -> anyhow::Result<u32> {
+    let current = current_quarter(w).await["quarter"].as_u64().unwrap() as u32;
+    let aged = current - 2;
+    w.owner
+        .call(w.council.id(), "set_close_grace_ns")
+        .args_json(json!({ "close_grace_ns": (24 * 3_600 * 1_000_000_000u64).to_string() }))
+        .transact()
+        .await?
+        .into_result()?;
+    let tokens: Vec<String> = w
+        .council
+        .view("staked_tokens")
+        .args_json(json!({ "from_index": 0, "limit": 1000 }))
+        .await?
+        .json()?;
+    for token in tokens {
+        w.bob
+            .call(w.council.id(), "book_seat_time")
+            .args_json(json!({ "token_id": token }))
+            .transact()
+            .await?
+            .into_result()?;
+    }
+    let state = w.worker.view_state(w.council.id()).await?;
+    let from = current.to_le_bytes();
+    let counted: u128 = state
+        .iter()
+        .filter(|(key, _)| key.first() == Some(&SEAT_WEIGHT_KEY) && key[1..5] == from)
+        .map(|(_, value)| u128::from(u64::from_le_bytes(value[..8].try_into().unwrap())))
+        .sum();
+    for (key, value) in &state {
+        if key.len() < 5 || key[1..5] != from {
+            continue;
+        }
+        let mut moved = key.clone();
+        moved[1..5].copy_from_slice(&aged.to_le_bytes());
+        match key[0] {
+            QUARTERS_KEY => {
+                // QuarterBook = revenue_in: u128, carry_in: u128, seat_ns: u128, ...
+                let mut book = value.clone();
+                if with_seats {
+                    book[32..48].copy_from_slice(&counted.to_le_bytes());
+                    w.worker.patch_state(w.council.id(), &moved, &book).await?;
+                    w.worker
+                        .patch_state(w.council.id(), key, &vec![0u8; value.len()])
+                        .await?;
+                } else {
+                    let mut kept = value.clone();
+                    kept[..16].fill(0);
+                    book[32..].fill(0);
+                    w.worker.patch_state(w.council.id(), &moved, &book).await?;
+                    w.worker.patch_state(w.council.id(), key, &kept).await?;
+                }
+            }
+            SEAT_WEIGHT_KEY | FORFEITS_KEY if with_seats => {
+                w.worker.patch_state(w.council.id(), &moved, value).await?;
+                w.worker
+                    .patch_state(w.council.id(), key, &vec![0u8; value.len()])
+                    .await?;
+            }
+            _ => {}
+        }
+    }
+    for (key, value) in &state {
+        if key.first() == Some(&RECEIVED_KEY) && key.len() == 9 {
+            // Received = amount: u128, quarter: u32, at: u64
+            let mut value = value.clone();
+            if value[16..20] == from {
+                value[16..20].copy_from_slice(&aged.to_le_bytes());
+                w.worker.patch_state(w.council.id(), key, &value).await?;
+            }
+        }
+    }
+    let state_key = b"STATE".to_vec();
+    let mut main = state
+        .get(&state_key)
+        .expect("the Council's state is stored under STATE")
+        .clone();
+    let at = main.len() - STATE_AFTER_NEXT_TO_FINALIZE - 4;
+    assert_eq!(
+        main[at..at + 4],
+        from,
+        "next_to_finalize is not where this helper expects it: the state layout changed"
+    );
+    main[at..at + 4].copy_from_slice(&aged.to_le_bytes());
+    w.worker.patch_state(w.council.id(), &state_key, &main).await?;
+    Ok(aged)
 }
 
 // Lets `who` receive the collateral token.
@@ -900,7 +1086,15 @@ pub async fn register_ft(w: &World, who: &AccountId) -> anyhow::Result<()> {
 pub async fn setup_admin_owned() -> anyhow::Result<(World, Account)> {
     let worker = near_workspaces::sandbox().await?;
     let admin = worker.dev_create_account().await?;
-    let w = build(worker, WINDOW_MS, PANEL_MS, DRAW_DELAY_BLOCKS, Some(admin.id().clone())).await?;
+    let w = build(
+        worker,
+        WINDOW_MS,
+        PANEL_MS,
+        DRAW_DELAY_BLOCKS,
+        Some(admin.clone()),
+        true,
+    )
+    .await?;
     Ok((w, admin))
 }
 

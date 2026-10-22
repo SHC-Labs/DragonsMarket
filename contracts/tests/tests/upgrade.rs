@@ -127,6 +127,15 @@ fn governed_contracts(w: &World) -> Vec<(&'static str, &'static str, &Contract)>
     ]
 }
 
+// The market and the Council are at layout 2 (fee ledger, quarterly books). The oracle is still at 1.
+fn state_version_of(label: &str) -> u32 {
+    if label == "oracle" {
+        1
+    } else {
+        2
+    }
+}
+
 #[tokio::test]
 async fn the_market_the_oracle_and_the_council_upgrade_through_the_configured_owner_and_keep_their_state(
 ) -> anyhow::Result<()> {
@@ -140,7 +149,7 @@ async fn the_market_the_oracle_and_the_council_upgrade_through_the_configured_ow
                 config(target).await["upgrade_proven"].clone(),
                 config(target).await["state_version"].clone()
             ),
-            (json!(false), json!(1)),
+            (json!(false), json!(state_version_of(label))),
             "{label}"
         );
         assert_eq!(config(target).await["upgrade_in_flight"], false, "{label}");
@@ -183,7 +192,7 @@ async fn the_market_the_oracle_and_the_council_upgrade_through_the_configured_ow
         let c = config(target).await;
         assert_eq!(
             (&c["upgrade_proven"], &c["upgrade_in_flight"], &c["state_version"]),
-            (&json!(true), &json!(false), &json!(1)),
+            (&json!(true), &json!(false), &json!(state_version_of(label))),
             "{label}: migrate proved the path and cleared the mark"
         );
     }

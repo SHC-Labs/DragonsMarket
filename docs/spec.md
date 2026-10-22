@@ -247,10 +247,11 @@ The split applies to earned fees, never deposits, position backing, withdrawal l
 bonds. Specify integer rounding and track both transfer legs independently. The configured
 recipient must be verified before transfers are enabled.
 
-Quarterly claims are decided product behaviour. The current 30-day stream and conditional claim
-method do not implement quarterly availability. The contract design must settle the quarter
-calendar, entitlement calculation, vesting, claim windows, no-seat periods, unclaimed balances
-and late-arriving fees. A last-minute stake cannot capture a whole quarter's earnings.
+Quarterly claims are decided product behaviour and are built in the Council (2026-10-21): UTC
+calendar quarters, entitlement by time staked inside the quarter, a claim window that opens once a
+quarter is final (7 days after it ends to start), no-seat quarters rolling their pool into the next,
+unclaimed shares that never expire, and late-arriving fees booked to the quarter they arrive in. A
+last-minute stake earns only the time it was staked.
 
 Claims reserve an entitlement once and complete only after verified settlement. Interrupted
 payouts remain recoverable without reopening an already-paid entitlement. Earnings vary with
@@ -264,9 +265,9 @@ actual fees and eligible participation; no fixed return or payment amount is pro
 | --- | --- | --- | --- |
 | R-01 | Authenticate funding and commit backing inside Intents | Market / settlement | Wrong beneficiaries and replayed events cannot issue positions |
 | R-02 | Buy, sell, redeem and recover interrupted payouts | Market / settlement | Liabilities reconcile and uncertain callbacks cannot pay twice |
-| R-03 | Allocate earned fees 75% treasury / 25% Council | Market / settlement | Exact rounding, recipient verification and independent transfer-leg recovery |
+| R-03 | Allocate earned fees 75% treasury / 25% Council | Market / settlement | Exact rounding, recipient verification and independent transfer-leg recovery. BUILT 2026-10-21 in the contract, treasury account not yet verified on a real DAO |
 | R-04 | Enforce NFT eligibility and case obligations | Council / oracle | Ineligible seats cannot earn or vote; locks and stake changes follow the rules |
-| R-05 | Account for quarters and settle claims once | Council / settlement | Boundary, late-fee, no-seat, repeated-claim and failed-transfer tests |
+| R-05 | Account for quarters and settle claims once | Council / settlement | Boundary, late-fee, no-seat, repeated-claim and failed-transfer tests. BUILT 2026-10-21, sandbox runs of a finished quarter are accelerated |
 | R-06 | Settle bonds and juror pay independently | Oracle / settlement | Every final or failed round reconciles without spending holder allocations |
 | R-07 | Use Trezu/Sputnik member approvals for sensitive administration, with the DAO voting period as the only delay (decided 2026-10-21) | DAO integration | Restricted methods refuse other callers, owner handover, upgrades and key-bypass checks, all with a real SputnikDAO |
 | R-08 | Expose reliable user, quarter and operation state | Views / events / services | UI distinguishes availability, commitments, accrual, claims and confirmed payments |
@@ -299,7 +300,8 @@ They apply to their recorded builds.
 ## 13. Release gates and open details
 
 - [ ] Complete the Intents-backed funding, trade, dispute, redeem and exit journey.
-- [ ] Implement quarterly Council claims and publish participation terms before minting.
+- [x] Implement quarterly Council claims (built 2026-10-21).
+- [ ] Publish participation terms before minting.
 - [ ] Create/verify the treasury, set the DAO policy and prove ownership migration and upgrades.
 - [ ] Validate supported routes, USDC configuration, fees and failure recovery with bounded funding.
 - [ ] Review publisher sources, operational parameters, market exposure caps and incident handling.

@@ -11,6 +11,31 @@
 | Revision checked | `market/src/lib.rs` sha256 prefix `6bed015aa459a237` (4122 lines, copied at 09:22 and compared again at 09:38). Phase I2 is editing this file, see [README section 2](README.md#2-how-to-read-these-specs) |
 | Index | [README.md](README.md) |
 
+**Build status, 2026-10-21.** BUILT in `contracts/market/src/lib.rs` (state version 2): sections 7.2, 7.3, 7.5's `locked_total`, and 7.6. Everything else in this file is unchanged and still PROPOSED. The owner's instruction that nothing the owner still has to choose may be written in the code changed three things against this text, noted where they apply.
+
+| Item | Built as | Tests |
+| --- | --- | --- |
+| Rounding rule, both legs down, carry stays in `fees` (7.2) | `split_fees`, with the Council's share a setting | unit `the_split_rounds_both_parts_down_and_leaves_the_remainder_collected`, proptest `the_two_parts_and_the_remainder_always_add_up_to_the_total` (I-M7), sandbox `a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once` |
+| Sweep ids and records, both legs written before either transfer (7.2) | `sweep_fees` returns `Option<U64>`, `Sweep` with `Leg { to, amount, status }` | unit `a_sweep_records_both_legs_before_it_sends_either_and_takes_the_next_id`, `a_sweep_below_the_minimum_does_nothing_and_takes_no_id`, `a_leg_with_nothing_in_it_is_settled_and_sends_nothing` |
+| Independent leg status, no duplicate on retry (I-M4, I-M8) | `on_revenue_sent(sweep_id)`, `on_treasury_sent(sweep_id)`, each acting only on a `pending` leg | unit `a_leg_ends_once_whatever_the_callback_does_next`, proptest `fee_money_is_in_exactly_one_place_whatever_the_transfers_report`, sandbox `a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_once`, `a_council_that_refuses_the_revenue_gets_it_back_as_due_and_is_not_paid_twice` |
+| `settle_leg` from the Council's `received_of` (7.2) | `settle_leg`, `on_council_checked` | unit `a_leg_whose_result_was_lost_is_settled_when_the_council_recorded_the_sweep`, `a_leg_whose_result_was_lost_is_due_again_when_the_council_has_no_record`, sandbox `a_revenue_transfer_the_verifier_refused_is_parked_and_not_paid_a_second_time` |
+| `reconcile_leg` (7.2, OD-13) | Owner only, both legs, a pending or unresolved leg an hour after the sweep. It takes a `leg` argument and REPLACES `reconcile_revenue`, which would double-account a leg that `settle_leg` also settles and has no amount to act on in a deployment that never had sweeps without ids | unit `the_owner_returns_an_amount_that_never_arrived_to_due_and_the_next_sweep_sends_it_once`, `a_pending_leg_whose_callback_never_came_is_decided_by_the_owner_after_an_hour`, sandbox `settling_an_unresolved_amount_as_arrived_when_it_did_not_shows_up_as_surplus` |
+| `claim_residual` onto the treasury leg (7.3) | `treasury_due`, no split | unit `the_residual_is_due_to_the_treasury_and_not_credited_to_the_owner`, sandbox `flow.rs` |
+| `treasury` rename (7.6, OD-11) | `business_wallet` and `business_due` are `treasury` and `treasury_due` in code, config, events, docs and tests | source guard `no_contract_names_an_account_the_owner_has_still_to_choose` |
+| `locked_total` (7.5) | `total_owed` is a constant-size sum | unit `assert_conserved` in the random trading proptest |
+| `get_sweep`, `list_sweeps` (7.2) | views | sandbox `a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once` |
+
+Not built (still PROPOSED): 7.1 pending withdrawals, 7.4 positions and `get_account`, `owed_breakdown` and `in_flight` from 7.5, the 7.7 gas floors for `retry_apply`, `withdraw` and `retry_register`.
+
+Changes against the text above:
+
+| Item | Spec | Built |
+| --- | --- | --- |
+| Fee recipients | `new` takes `revenue_pool` and `business_wallet` | `new` takes neither. They are `None` until the owner calls `set_fee_recipients(revenue_pool, treasury)`, and `sweep_fees` refuses until then. The two must differ |
+| The split | Constants 2,500 and 7,500 | `revenue_share_bps`, 2,500 to start, owner-settable from 1,000 to 5,000 (`set_revenue_share_bps`). The treasury gets the rest, so the whole fee is always accounted for |
+| Minimum sweep and first id | `set_min_sweep` only | Also `set_next_sweep_id`, which can only move up. `min_sweep` is 1 to 100,000,000 and starts at 1,000,000 |
+| Settle and reconcile waits | 10 minutes and one hour | Constants (`SETTLE_WAIT_MINUTES`, `RECONCILE_WAIT_MINUTES`), not owner settings: they are safety waits, not choices |
+
 ---
 
 ## Contents
