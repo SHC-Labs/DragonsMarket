@@ -40,8 +40,29 @@
 .collection-gallery { padding: 0 0 var(--section-space); }
 .collection-gallery-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: var(--s-2) var(--s-6); margin-bottom: var(--s-6); }
 .collection-gallery-heading p { margin: 0; color: var(--text-muted); font-size: var(--fs-sm); }
-.collection-art-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: clamp(1rem, 2vw, 1.75rem); }
-.collection-tilt-card { margin: 0; min-width: 0; perspective: 800px; }
+.collection-gallery-heading p { margin-left: auto; }
+.collection-toggle { align-self: center; }
+@media (max-width: 767px) {
+  .collection-gallery-heading p { order: 3; flex-basis: 100%; margin-left: 0; }
+  .collection-toggle { margin-left: auto; }
+}
+/* Full-bleed reel; the block padding leaves room for the lifted card and its shadow inside the edge mask. */
+.collection-carousel {
+  --reel-gap: clamp(1rem, 2vw, 1.75rem); --reel-fade: clamp(3rem, 10vw, 12rem);
+  display: flex; width: 100cqw; margin: calc(var(--s-6) * -1) calc(50% - 50cqw); padding-block: var(--s-6); overflow: hidden;
+  mask-image: linear-gradient(90deg, transparent, black var(--reel-fade), black calc(100% - var(--reel-fade)), transparent);
+}
+.collection-art-row { display: flex; flex-shrink: 0; gap: var(--reel-gap); margin: 0; padding: 0 var(--reel-gap) 0 0; list-style: none; animation: collection-run calc(var(--collection-items) * 7s) linear infinite; }
+.collection-carousel:hover .collection-art-row, .collection-gallery:is(:focus-within, [data-paused]) .collection-art-row { animation-play-state: paused; }
+@keyframes collection-run { to { transform: translateX(-100%); } }
+.collection-tilt-card { flex-shrink: 0; width: clamp(13rem, 21vw, 19rem); margin: 0; perspective: 800px; }
+@media (prefers-reduced-motion: reduce) {
+  .collection-art-row { animation: none; padding-left: var(--gutter); }
+  .collection-art-row[aria-hidden] { display: none; }
+  .collection-carousel { overflow-x: auto; scroll-snap-type: x mandatory; mask-image: none; }
+  .collection-tilt-card { scroll-snap-align: start; scroll-margin-left: var(--gutter); }
+  .collection-toggle { display: none; }
+}
 .collection-tilt-image {
   position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface);
   box-shadow: var(--elev-2);
@@ -141,7 +162,6 @@
   .council-hero-copy > p:not(.eyebrow) { font-size: var(--fs-md); }
   .membership-overview { transform: none; padding: var(--s-6); }
   .membership-overview::after { left: var(--s-6); right: var(--s-6); }
-  .collection-art-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .case-list a { grid-template-columns: 1fr; grid-template-areas: "num" "title" "meta" "outcome"; padding: var(--s-4) var(--s-5); }
   .case-outcome { justify-self: start; }
   .council-journey, .council-questions { grid-template-columns: 1fr; gap: var(--s-6); }

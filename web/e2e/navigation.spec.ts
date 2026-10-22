@@ -20,7 +20,7 @@ test("top navigation has one Council entry for membership and disputes", async (
   await expect(main.getByRole("link", { name: "Membership", exact: true })).toHaveCount(0);
   await page.goto("/council");
   await expect(page.getByRole("heading", { name: "Join the Council" })).toBeVisible();
-  await expect(page.locator(".collection-tilt-card img")).toHaveCount(4);
+  await expect(page.getByRole("region", { name: "NFT collection" }).getByRole("img")).toHaveCount(10);
   await expect(page.getByRole("heading", { name: "Cases and results" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Council sections" })).toHaveCount(0);
   await page.getByRole("link", { name: /See how disputes work/ }).click();
