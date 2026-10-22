@@ -23,6 +23,8 @@ const MAX_SEATS: u32 = 1_000;
 const MAX_ALLOW_BATCH: usize = 100;
 const NS_PER_SEC: u64 = 1_000_000_000;
 const NS_PER_DAY: u64 = 86_400 * NS_PER_SEC;
+// How long a claim can sit pending before the owner may decide it by hand, which leaves its payout callback time to arrive.
+const RECONCILE_WAIT_NS: u64 = 3_600 * NS_PER_SEC;
 // A finished quarter waits this long before it can be finalized, so a case that crossed its end can settle first and a silent
 // juror's forfeit still counts. Claims open when the quarter is finalized. The owner can move it between the bounds.
 const DEFAULT_CLOSE_GRACE_NS: u64 = 7 * NS_PER_DAY;
@@ -858,7 +860,7 @@ impl CouncilContract {
         quarter: u32,
         token_id: TokenId,
         owner: AccountId,
-        amount: U128,
+        _amount: U128,
         #[callback_result] result: Result<(), PromiseError>,
     ) {
         let key = (quarter, token_id.clone(), owner.clone());
@@ -868,11 +870,52 @@ impl CouncilContract {
         if claim.status != ClaimStatus::Pending {
             return;
         }
+        let paid = result.is_ok();
+        let data = self.close_claim(quarter, token_id, owner, claim, paid);
+        emit(if paid { "claim_paid" } else { "claim_failed" }, data);
+    }
+
+    // The owner's decision about a claim whose payout callback never arrived, so it stays pending and refuses every retry. It
+    // needs an hour after the claim, which leaves the callback time to land, and the owner checks the verifier's events first:
+    // `paid` true books the payout as made, false deletes the record so the seat can claim again. A callback that comes later
+    // finds no pending claim and changes nothing.
+    pub fn reconcile_claim(&mut self, quarter: u32, token_id: TokenId, owner: AccountId, paid: bool) {
+        self.only_owner();
+        let key = (quarter, token_id.clone(), owner.clone());
+        let claim = self
+            .claims
+            .get(&key)
+            .filter(|c| c.status == ClaimStatus::Pending)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("no claim is pending for that seat"));
+        require!(
+            env::block_timestamp() >= claim.requested_at.saturating_add(RECONCILE_WAIT_NS),
+            "wait 60 minutes after the claim before reconciling"
+        );
+        let mut data = self.close_claim(quarter, token_id, owner, claim, paid);
+        data["paid"] = json!(paid);
+        emit("claim_reconciled", data);
+    }
+
+    // Takes a pending claim out of the in-flight totals and either books it as paid or deletes the record. Both the payout
+    // callback and reconcile_claim end a claim here, so the two cannot disagree about the books. Returns the event data.
+    fn close_claim(
+        &mut self,
+        quarter: u32,
+        token_id: TokenId,
+        owner: AccountId,
+        claim: Claim,
+        paid: bool,
+    ) -> near_sdk::serde_json::Value {
+        let key = (quarter, token_id.clone(), owner.clone());
         let mut book = self.book(quarter);
-        book.pending -= amount.0;
-        self.pending_total -= amount.0;
-        let data = json!({ "quarter": quarter, "token_id": token_id, "owner": owner, "amount": amount.0.to_string() });
-        if result.is_ok() {
+        book.pending -= claim.amount;
+        self.pending_total -= claim.amount;
+        let data =
+            json!({ "quarter": quarter, "token_id": token_id, "owner": owner, "amount": claim.amount.to_string() });
+        if paid {
+            book.paid += claim.amount;
+            self.total_paid += claim.amount;
             self.claims.insert(
                 key,
                 Claim {
@@ -881,14 +924,11 @@ impl CouncilContract {
                     ..claim
                 },
             );
-            book.paid += amount.0;
-            self.total_paid += amount.0;
-            emit("claim_paid", data);
         } else {
             self.claims.remove(&key);
-            emit("claim_failed", data);
         }
         self.quarters.insert(quarter, book);
+        data
     }
 
     // Called by the verifier after an mt_transfer_call, once the money is already in this contract's Intents account. The
@@ -2174,6 +2214,93 @@ mod tests {
         );
     }
 
+    // ---- a claim whose payout callback never arrived ----------------------------------------------------------
+
+    fn clock() -> u64 {
+        CLOCK.with(|c| c.get())
+    }
+
+    fn stuck_claim() -> CouncilContract {
+        let mut c = example_one();
+        finalize(&mut c);
+        claim_without_reply(&mut c, Q4_2026, "1", "seat1.near");
+        c
+    }
+
+    #[test]
+    fn only_the_owner_decides_a_stuck_claim_and_not_before_an_hour() {
+        let mut c = stuck_claim();
+        set_time(clock() + RECONCILE_WAIT_NS - 1);
+        assert_eq!(
+            refusal(|| c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false)),
+            "wait 60 minutes after the claim before reconciling"
+        );
+        act_as("seat1.near");
+        assert_eq!(
+            refusal(|| c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false)),
+            "owner only"
+        );
+        set_time(clock() + 1);
+        assert_eq!(
+            refusal(|| c.reconcile_claim(Q4_2026, "2".into(), acct("seat2.near"), false)),
+            "no claim is pending for that seat"
+        );
+        assert_eq!(c.reward_totals().pending_claims.0, 871_005, "nothing moved");
+    }
+
+    #[test]
+    fn a_stuck_claim_the_owner_finds_unpaid_can_be_claimed_again() {
+        let mut c = stuck_claim();
+        set_time(clock() + RECONCILE_WAIT_NS);
+        c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false);
+        let event = last_event();
+        assert_eq!(
+            (event["event"].as_str(), event["data"]["paid"].as_bool()),
+            (Some("claim_reconciled"), Some(false))
+        );
+        assert_eq!((c.reward_totals().pending_claims.0, c.total_paid), (0, 0));
+        assert_eq!(claim(&mut c, Q4_2026, "1", "seat1.near"), 871_005);
+        assert_eq!(c.total_paid, 871_005);
+    }
+
+    #[test]
+    fn a_stuck_claim_the_owner_finds_paid_is_booked_once_and_a_late_callback_changes_nothing() {
+        let mut c = stuck_claim();
+        set_time(clock() + RECONCILE_WAIT_NS);
+        c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), true);
+        assert_eq!(last_event()["data"]["paid"].as_bool(), Some(true));
+        assert_eq!(
+            (c.reward_totals().pending_claims.0, c.total_paid, c.book(Q4_2026).paid),
+            (0, 871_005, 871_005)
+        );
+        assert_eq!(
+            c.get_entitlement(Q4_2026, "1".into(), acct("seat1.near"))
+                .unwrap()
+                .status,
+            EntitlementStatus::Paid
+        );
+        act_as("council.near");
+        c.on_claim_paid(Q4_2026, "1".into(), acct("seat1.near"), U128(871_005), Ok(()));
+        c.on_claim_paid(
+            Q4_2026,
+            "1".into(),
+            acct("seat1.near"),
+            U128(871_005),
+            Err(PromiseError::Failed),
+        );
+        assert_eq!((c.total_paid, c.book(Q4_2026).paid), (871_005, 871_005));
+        act_paid("seat1.near");
+        assert_eq!(
+            refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
+            "already claimed"
+        );
+        set_time(clock() + 1);
+        assert_eq!(
+            refusal(|| c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false)),
+            "no claim is pending for that seat"
+        );
+    }
+
     // ---- when a quarter can be finalized and claimed ----------------------------------------------------------
 
     #[test]
@@ -3040,7 +3167,7 @@ mod tests {
 
     const CASE_DRAWN_BEFORE_END: u64 = 3 * DAY;
 
-    // The reviewer's scenario with a one day grace period: a juror drawn three days before the quarter ends whose case is
+    // A one day grace period: a juror drawn three days before the quarter ends whose case is
     // still open after the grace.
     fn a_juror_drawn_before_the_quarter_ends() -> (CouncilContract, AccountId) {
         let mut c = council();

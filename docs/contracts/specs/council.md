@@ -5,7 +5,7 @@
 | Field | Value |
 | --- | --- |
 | Date | 2026-10-21 |
-| Status | Draft. Existing rows are checked in source. Section 6 and every row marked NEW or CHANGED are PROPOSED |
+| Status | The quarterly model in section 6 is built. Rows marked NEW or CHANGED describe what was built, and the error and field tables were checked against the source on 2026-10-22 |
 | Scope | `contracts/council/src/lib.rs` |
 | Source | Working tree on top of commit `6cad02e`, read 2026-10-21 09:00 to 09:22 |
 | Revision checked | `council/src/lib.rs` sha256 prefix `cc840f4fdbe5caf9` (2510 lines, unchanged between copies, 267 lines differ from `HEAD`) |
@@ -127,7 +127,7 @@ EXISTING (`council/src/lib.rs:169-213`).
 | `acc_per_seat`, `stream` | `u128`, `Stream` | The 30-day stream. REMOVED by this proposal |
 | `total_received` | `u128` | Every unit of revenue taken in |
 
-`Stake` today: `owner`, `staked_at`, `unlock_requested_at`, `serving`, and three fields hidden from JSON, `serving_since_acc`, `index`, `reward_debt`.
+`Stake` as built: `owner`, `staked_at`, `unlock_requested_at`, `serving`, `booked_to`, and two fields hidden from JSON, `serving_from` and `index`. Before the quarterly change it held `serving_since_acc` and `reward_debt` instead of `booked_to` and `serving_from`.
 
 ### 4.2 Fields after the change (PROPOSED)
 
@@ -395,6 +395,7 @@ Views today: `total_received` (`:665`), `seat_count` (`:669`), `jury_of(case_key
 | `advance_quarters(max_steps: Option<u32>)` NEW | Anyone | steps up to 8 | `u32` quarters advanced | none | 30 TGas | Moves `last_tick` towards now, adding seat time and creating empty books. Does nothing when current | none |
 | `finalize_quarter(quarter: u32)` NEW | Anyone | quarter id | none | none | none | Ticks seat time to the end of the quarter first. Refuses before `ends_at + close_grace_ns`, a quarter that is not `next_to_finalize`, and one already final. Fixes pool and weight, rolls an empty quarter forward | `quarter_finalized` |
 | `claim_quarter(quarter: u32, token_id: TokenId)` NEW | Seat owner | quarter id, token | `Promise` | exactly 1 | 33 TGas floor | Section 6.8 | `claim_requested`, `claim_paid`, `claim_failed` |
+| `reconcile_claim(quarter: u32, token_id: TokenId, owner: AccountId, paid: bool)` NEW | Owner | quarter id, token, claim owner, whether the payout was made | none | none | none | Decides a claim whose payout callback never arrived, an hour after the claim. A late callback changes nothing | `claim_reconciled` |
 | `on_claim_paid(quarter, token_id, owner, amount)` NEW | The account itself | | none | none | 10 TGas | Settles the claim record | `claim_paid`, `claim_failed` |
 | `book_seat_time(token_id: TokenId, max_quarters: Option<u32>)` NEW | Anyone | token, steps up to 8 | `u32` quarters booked | none | 30 TGas | Books the span of a staked token up to the last finished quarter. Needed only for spans longer than 8 quarters | none |
 | `unstake` CHANGED | Seat owner | `token_id` | `Promise` | exactly 1 | 33 TGas floor | Books the span, removes the stake, returns the NFT, no payout. Refuses `book this seat first` when the span exceeds 8 quarters | `unstaked`, `unstake_failed` |
@@ -489,19 +490,19 @@ Envelope: `EVENT_JSON:{"standard":"council","version":"1.0.0","event":"<name>","
 
 ## 11. Errors
 
-Exact panic strings today (Checked in source: `council/src/lib.rs`).
+Exact panic strings as built (checked in source: `council/src/lib.rs`).
 
 | Group | Strings |
 | --- | --- |
 | Access | `owner only`, `oracle only`, `not the proposed owner`, `not your seat`, `not staked`, `wrong NFT contract`, `only the verifier can deliver money` |
 | Delivery | `exactly one token and amount`, `wrong token`, `unknown action` |
 | Staking | `that token is not on the allowlist`, `already staked`, `the council is full`, `that account already holds the most seats allowed` |
-| Unstake and claim | `unstake already requested`, `this seat is serving on an open case`, `request an unstake first`, `the cooldown has not passed`, `this seat is serving on an open case, claim after it is final`, `an unstake is requested, and unstaking pays what the seat earned`, `nothing to claim`, and the gas refusals `attach at least 58 TGas: an unstake pays what the seat earned and then returns the NFT` and `attach at least 33 TGas: a claim sends the payout and then settles it` |
+| Unstake and claim | `unstake already requested`, `this seat is serving on an open case`, `request an unstake first`, `the cooldown has not passed`, `nothing to claim`, and the gas refusals `attach at least 33 TGas: an unstake returns the NFT and then settles it` and `attach at least 33 TGas: a claim sends the payout and then settles it` |
 | Settings | `the cooldown must be positive`, `an account must be allowed at least one seat`, `unstake every seat before changing the NFT contract`, `name at least one token`, `at most 100 tokens in one call`, `the first id must not be above the last`, `the collateral token id must look like nep141:<token>` |
 | Draw | `not enough seat holders to draw a jury: {} eligible, {} needed` |
 | Upgrade | `there is no state to migrate`, `migrate runs only inside an upgrade`, `prove the upgrade path before deleting keys` |
 
-New strings (PROPOSED): `revenue comes from the market only`, `that sweep was already received`, `call advance_quarters first`, `that quarter is not final`, `the quarter cannot be finalized yet`, `finalize the earlier quarter first`, `claim is already pending`, `already claimed`, `book this seat first`, `the grace period must be between 1 and 30 days`.
+Strings added with the quarterly model: `revenue comes from the market only`, `that sweep was already received`, `call advance_quarters first`, `that quarter is not final`, `the quarter cannot be finalized yet`, `finalize the earlier quarter first`, `claim is already pending`, `already claimed`, `book this seat first`, `the grace period must be between 1 and 30 days`, `a jury drawn in this quarter is still open`.
 
 ---
 

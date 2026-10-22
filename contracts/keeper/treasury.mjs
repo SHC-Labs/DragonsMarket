@@ -246,6 +246,7 @@ export const ALLOWED = {
     set_token_range: call({ first: u64(), last: u64() }, { check: ordered("first", "last") }),
     clear_token_range: call({}),
     set_allowlist_enabled: call({ enabled: flag }),
+    reconcile_claim: call({ quarter: integer(U32_MAX), token_id: text(ID_TEXT_MAX), owner: account, paid: flag }),
   },
 };
 

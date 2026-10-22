@@ -142,6 +142,7 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `allow_tokens` | Owner | `token_ids: Vec<String>` | 0 | 30 TGas | 2 | Decides who can earn and serve. At most 100 ids. The arguments of a Sputnik call stay small, so a long list needs several proposals |
 | `set_token_range` | Owner | `first: U64`, `last: U64` | 0 | 30 TGas | 2 | |
 | `set_allowlist_enabled` | Owner | `enabled: bool` | 0 | 30 TGas | 2 | Off lets any token of the collection stake |
+| `reconcile_claim` | Owner | `quarter: u32`, `token_id`, `owner`, `paid: bool` | 0 | 30 TGas | 2 | Decides a claim whose payout callback never arrived, an hour after the claim. The owner checks the verifier's events first |
 | `set_nft_contract` | Owner | `nft_contract: AccountId` | 0 | 30 TGas | 2 | Only while nothing is staked |
 | NEW `set_market` | Owner | `market: AccountId` | 0 | 30 TGas | 2 | Changes the only revenue sender |
 | `upgrade`, `seal`, `propose_owner`, `accept_owner` | as the market | | 0 | as the market | 3 | |
@@ -258,6 +259,7 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | council | `set_token_range` | `first` and `last`: U64, `first` not above `last` | 0 | 5 to 30 |
 | council | `clear_token_range` | none | 0 | 5 to 30 |
 | council | `set_allowlist_enabled` | `enabled`: boolean | 0 | 5 to 30 |
+| council | `reconcile_claim` | `quarter`: integer, `token_id`: text, `owner`: account, `paid`: boolean | 0 | 5 to 30 |
 
 The ceilings in the table (500, 10,000,000, the text limits, 21, 10 and 100) are copied from constants in the contract source, and the 100 TGas floor of `upgrade` from `upgrade::GAS_UPGRADE`. A test reads the source and fails when one of them differs.
 

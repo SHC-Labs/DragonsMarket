@@ -4045,7 +4045,7 @@ mod tests {
         assert_eq!(o.total_owed().0, 2 * BOND - carol);
     }
 
-    // The reviewer's case: the draw could never happen. The system failed, so neither party pays for it.
+    // The draw could never happen. The system failed, so neither party pays for it.
     #[test]
     fn when_no_jury_could_be_drawn_in_either_round_each_party_gets_their_own_bond_back() {
         let mut o = challenged(Outcome::Yes, Outcome::No);

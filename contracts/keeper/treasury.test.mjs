@@ -108,6 +108,7 @@ const SAMPLES = {
     allow_tokens: { token_ids: ["1", "2"] },
     set_token_range: { first: "1", last: "100" },
     clear_token_range: {},
+    reconcile_claim: { quarter: 8107, token_id: "1", owner: "holder.example.near", paid: false },
     set_allowlist_enabled: { enabled: true },
   },
 };

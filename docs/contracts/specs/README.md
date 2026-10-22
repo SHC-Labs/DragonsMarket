@@ -330,14 +330,14 @@ Each has a recommended default. A default is what to build if the owner does not
 | --- | --- | --- | --- | --- |
 | OD-01 | DECIDED 2026-10-21. Enforced delay for owner actions | None, only the voting period. A minimal timelock account as owner | Decided: none. The voting period is the only delay, and no timelock account will be built. Cap value at launch. The documents that promised a delay were rewritten | Closed |
 | OD-02 | Quarter definition | UTC calendar quarters. Quarters from the launch date | UTC calendar quarters | P4 |
-| OD-03 | REVERSED 2026-10-22. Does a seat in its unstake cooldown still earn | Yes until unstaked. No from the request | No. A seat's time stops at its request. Reason: the outside review found that a seat could ask to leave, never unstake, and be paid like a serving seat while never being drawn | Closed |
+| OD-03 | REVERSED 2026-10-22. Does a seat in its unstake cooldown still earn | Yes until unstaked. No from the request | No. A seat's time stops at its request. Reason: a seat could ask to leave, never unstake, and be paid like a serving seat while never being drawn | Closed |
 | OD-04 | Claim window and unclaimed amounts | Stay claimable, no expiry. Expire to a later pool. Expire to the treasury | No expiry. Claimable from 7 days after the quarter ends | P4 |
 | OD-05 | What a silent juror forfeits | Seat time of the serving span, in quarters not yet final. Revenue as today | Seat time, with a 7 day close grace | P4 |
 | OD-06 | Who may send revenue to the Council | The market only, with sweep ids. Anyone | The market only | P3 and P4 |
 | OD-07 | Rounding dust in a quarter | Stays in the Council as unallocated. Rolls into the next pool. Goes to the treasury | Stays. At most 0.001 USDC a quarter | P4 |
 | OD-08 | The residual of a resolved market | All to the treasury. Split 75% and 25% | All to the treasury | P3 |
 | OD-09 | Treasury account and no-decision recipient | The same verified Trezu account for both. Different accounts | The same account. No address is assumed | Before the first mainnet sweep |
-| OD-10 | Identity for market writes | Require a NEAR wallet for v1. Add signed-message authorisation later | NEAR wallet for v1. State it before funding | P8 |
+| OD-10 | Identity for market writes | Require a NEAR wallet for v1. Add signed-message authorisation later | DECIDED 2026-10-22: NEAR wallets only in v1, stated before funding. Version 2 adds wallets from other chains and sends them down the Intents path | Closed |
 | OD-11 | Rename `business_wallet` to `treasury` | Rename now. Keep | Rename now, nothing is deployed | P3 |
 | OD-12 | DAO thresholds | 3 of 5 default, 4 of 5 for function calls, unanimity for membership, policy and upgrades. Other counts | As in [owner-and-keeper.md section 7](owner-and-keeper.md#7-recommended-dao-policy), 72 hour period | Before the handover |
 | OD-13 | Build the owner `settle` fallback `reconcile_leg` for the treasury leg | Build. Skip | Build, about 20 lines | P3 |
@@ -347,7 +347,7 @@ Each has a recommended default. A default is what to build if the owner does not
 | OD-17 | How to test a quarter | Unit tests with controlled time and a patched sandbox state. A shorter quarter in a test-only build | Unit tests and patched state. No test-only constant in the shipped wasm (the audit rejected it) | P4 |
 | OD-18 | The 1Click route | Recipient type, refund type and minimums are not yet measured | Measure one real route before the funding screen ships | P9 |
 
-**Third review changes (2026-10-22).** Oracle: a dispute in which no jury was seated in either round settles as `no_jury`, and each party gets their own bond back (the old half-bond split stays for a seated jury that did not decide). Market: `set_paused` no longer blocks `sell`, the owner-only `set_sells_paused` does, and `sweep_fees` refuses within an hour of the last sweep (`MIN_SWEEP_INTERVAL_NS`).
+**Changes of 2026-10-22.** Oracle: a dispute in which no jury was seated in either round settles as `no_jury`, and each party gets their own bond back (the old half-bond split stays for a seated jury that did not decide). Market: `set_paused` no longer blocks `sell`, the owner-only `set_sells_paused` does, and `sweep_fees` refuses within an hour of the last sweep (`MIN_SWEEP_INTERVAL_NS`).
 
 ---
 
