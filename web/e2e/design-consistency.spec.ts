@@ -23,7 +23,7 @@ test("main pages start with content and keep Dragons Market as the shared brand"
     }
     await page.goto("/council");
     await expect(page.getByRole("navigation", { name: "Council sections" })).toHaveCount(0);
-    await expect(page.locator(".collection-tilt-card img")).toHaveCount(4);
+    await expect(page.getByRole("region", { name: "NFT collection" }).getByRole("img")).toHaveCount(10);
     await page.locator(".membership-faq summary").first().click();
     await expect(page.locator(".membership-faq details").first()).toHaveAttribute("open", "");
     await page.goto("/partnerships");

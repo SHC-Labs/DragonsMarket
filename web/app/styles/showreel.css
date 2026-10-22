@@ -117,7 +117,6 @@
 /* ---------- Light theme: the seal is ink on paper ---------- */
 :root[data-theme="light"] .spotlight-seal { opacity: 0.35; }
 :root[data-theme="light"] .seal-face { fill: color-mix(in oklab, var(--seal-ink) 5%, var(--surface)); }
-.council-membership { overflow-x: clip; }
 @media (max-width: 767px) {
   .case-list a { grid-template-columns: 3rem minmax(0, 1fr); grid-template-areas: "num ref" "num title" "num meta" "num outcome"; }
   .case-seal { align-self: start; width: 3rem; height: 3rem; }
