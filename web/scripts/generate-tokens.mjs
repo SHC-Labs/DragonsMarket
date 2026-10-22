@@ -79,7 +79,7 @@ const front = [
   '---',
 ].join('\n');
 const designUrl = new URL('../DESIGN.md', import.meta.url);
-const body = existsSync(designUrl) ? readFileSync(designUrl, 'utf8').replace(/^---\n[\s\S]*?\n---\n?/, '') : '\n# Dragons Market design\n';
+const body = existsSync(designUrl) ? readFileSync(designUrl, 'utf8').replace(/\r\n/g, '\n').replace(/^(\s*---\n[\s\S]*?\n---\n?)+/, '') : '\n# Dragons Market design\n';
 writeFileSync(designUrl, `${front}\n${body.startsWith('\n') ? body : `\n${body}`}`);
 
 console.log('Generated app/tokens.generated.css and DESIGN.md front matter; contrast checks passed in both themes.');

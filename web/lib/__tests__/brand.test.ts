@@ -31,3 +31,14 @@ describe("brand check", () => {
     expect(rules("app/styles/showreel.css", before).filter(r => r === "raw-colour").length).toBeGreaterThan(5);
   });
 });
+
+describe("generated design files", () => {
+  it("match design/tokens.json, with one DESIGN.md front matter", async () => {
+    const { readFileSync } = await import("node:fs");
+    const read = () => [readFileSync("app/tokens.generated.css", "utf8"), readFileSync("DESIGN.md", "utf8").replace(/\r\n/g, "\n")];
+    const before = read();
+    execFileSync(process.execPath, ["scripts/generate-tokens.mjs"]);
+    expect(read()).toEqual(before);
+    expect(before[1].match(/^version: alpha$/gm)).toHaveLength(1);
+  });
+});
