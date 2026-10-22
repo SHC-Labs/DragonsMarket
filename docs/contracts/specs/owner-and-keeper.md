@@ -82,7 +82,7 @@ A DAO majority that is captured can upgrade a contract and drain it in one trans
 
 | Step | Effect |
 | --- | --- |
-| Exits never pause: the market's `withdraw` and `redeem` ignore `paused`, and the Council has no pause at all | A user can leave any time the code still allows it. A malicious upgrade could remove that, so this is only partial |
+| Exits stay open under the operator: the market's `withdraw` and `redeem` ignore both pause flags, `sell` stops only when the owner sets `sells_paused`, and the Council has no pause at all | A user can leave any time the code still allows it. A malicious upgrade could remove that, so this is only partial |
 | Public staging: `stage_code` is open to anyone and `is_staged(hash)` is a view. `upgrade` deploys only staged code and sets `upgrade_in_flight`, and `migrate` refuses to run without it | Anyone can read the exact wasm before a vote. A hand-called `migrate` proves nothing. The keeper can flag a proposal whose hash was staged less than 24 hours before submission |
 | Keys sealed only after a proven upgrade: `seal` is refused until `upgrade_proven` | A deploy key cannot be removed before one upgrade has worked through the DAO, so a broken upgrade path is found while the key can still fix it |
 | Policy design (section 7): unanimity for membership, policy and upgrade kinds, four of five for every function call | A single compromised member cannot act alone |
@@ -103,7 +103,8 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `set_fee_rate_bps` | Owner | `fee_rate_bps: u32` | 0 | 30 TGas | 1 | Refused above 500 |
 | `set_create_fee` | Owner | `create_fee: U128` | 0 | 30 TGas | 1 | Refused above 10,000,000 |
 | NEW `set_min_sweep` | Owner | `min_sweep: U128` | 0 | 30 TGas | 1 | At most 100,000,000 |
-| `set_paused` | Operator or owner | `paused: bool` | 0 | 30 TGas | 1 | Emergency stop for new trades. Exits stay open |
+| `set_paused` | Operator or owner | `paused: bool` | 0 | 30 TGas | 1 | Emergency stop for buys, deposits and seeds. Sells and exits stay open |
+| `set_sells_paused` | Owner | `sells_paused: bool` | 0 | 30 TGas | 1 | Stops `sell`. Withdraw and redeem stay open |
 | `halt`, `resume` | Operator or owner | `market_id: U64`, `reason: String` | 0 | 30 TGas | 1 | The operator cannot halt in the last 24 hours before close |
 | `create_market`, `retry_register`, `claim_residual` | Operator or owner | as in market.md | 0 | 100 TGas for `create_market` | 1 | Routine. The operator normally calls them |
 | `set_operator` | Owner | `operator_id: AccountId` | 0 | 30 TGas | 2 | Changes who can seed, halt and pause |
@@ -236,6 +237,7 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | market | `set_create_fee` | `create_fee`: U128 0 to 10,000,000 | 0 | 5 to 30 |
 | market | `reconcile_revenue` | `amount`: U128 above 0, `arrived`: boolean | 0 | 5 to 30 |
 | market | `set_paused` | `paused`: boolean | 0 | 5 to 30 |
+| market | `set_sells_paused` | `sells_paused`: boolean | 0 | 5 to 30 |
 | market | `halt` | `market_id`: U64, `reason`: non-blank text up to 500 bytes | 0 | 5 to 30 |
 | market | `resume`, `claim_residual` | `market_id`: U64 | 0 | 5 to 30 |
 | market | `retry_register` | `market_id`: U64 | 0 | 50 to 150, 100 attached |

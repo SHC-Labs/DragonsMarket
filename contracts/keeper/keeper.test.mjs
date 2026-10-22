@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  accessKeyReport, advanceCursor, councilFloor, daoReport, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options,
+  accessKeyReport, advanceCursor, councilFloor, daoReport, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options,
   readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, verifierProblems,
   writeCursor, refuseRetiredController,
 } from "./keeper.mjs";
@@ -317,4 +317,22 @@ test("a key on the command line is refused", () => {
     assert.throws(() => refuseKeyFlags({ [flag]: "ed25519:abc" }), new RegExp(`--${flag} is refused`));
   }
   refuseKeyFlags({ "key-file": "k" });
+});
+
+test("only holders with a seat that is neither serving nor leaving can be drawn", () => {
+  const holders = drawableHolders([
+    { owner: "a.near", unlock_requested_at: null, serving: null },
+    { owner: "a.near", unlock_requested_at: null, serving: null },
+    { owner: "b.near", unlock_requested_at: "1790812800000000000", serving: null },
+    { owner: "c.near", unlock_requested_at: null, serving: "7" },
+    { owner: "d.near", unlock_requested_at: "1", serving: "7" },
+    { owner: "e.near", unlock_requested_at: null, serving: null },
+  ]);
+  assert.deepEqual([...holders].sort(), ["a.near", "e.near"]);
+});
+
+test("a council of leaving holders is short of the drawable holders a jury needs", () => {
+  const stakes = Array.from({ length: 12 }, (_, i) => ({ owner: `h${i}.near`, unlock_requested_at: i < 3 ? "1" : null, serving: null }));
+  assert.equal(juryProblems({ jurySize: 3, holders: drawableHolders(stakes).size }).length, 1, "9 drawable of the 12 needed");
+  assert.equal(juryProblems({ jurySize: 3, holders: drawableHolders(stakes.map((s) => ({ ...s, unlock_requested_at: null }))).size }).length, 0);
 });

@@ -147,7 +147,7 @@ interface OwedView { balances: U128; locked: U128; fees: U128; revenue_due: U128
 | `get_sweep`, `list_sweeps` | `{sweep_id: U64}`, `{from_index: U64, limit: U64}` | `SweepView \| null`, `SweepView[]` | NEW |
 | `in_flight`, `owed_breakdown` | `{}` | `InFlightView`, `OwedView` | NEW |
 
-`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `create_fee: U128`, `revenue_pool`, `business_wallet` (NEW name `treasury`), `revenue_unresolved: U128`.
+`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `create_fee: U128`, `revenue_pool`, `business_wallet` (NEW name `treasury`), `revenue_unresolved: U128`.
 
 ---
 
@@ -385,7 +385,7 @@ The site shows a sentence from `web/lib/errors.ts`. It matches the panic text wi
 | Pattern the site matches today | Contract strings it catches |
 | --- | --- |
 | `has not closed` | market `market has not closed`, oracle `the market has not closed yet` |
-| `market is closed`, `market is resolved`, `market is halted`, `paused` | market |
+| `market is closed`, `market is resolved`, `market is halted`, `paused`, `sells are paused`, `wait an hour since the last sweep` | market |
 | `too many positions`, `min shares must be above zero`, `price moved`, `not enough balance`, `not enough shares` | market |
 | `storage deposit` | market `do the storage deposit first` |
 | `wrong token` | market, oracle, council |
@@ -414,7 +414,7 @@ A transaction that succeeds while the receiver refuses (`mt_transfer_call`) has 
 | `MarketStatus` | `resolved`, `halted`, `closed`, `unregistered`, `unseeded`, `open` | `MarketView.status` |
 | `Outcome` | `yes`, `no`, `void` | everywhere |
 | `Stage` | `proposed`, `disputed`, `final` | `Case.stage` |
-| `Ruling` | `unchallenged`, `decided`, `no_decision` | `final` event |
+| `Ruling` | `unchallenged`, `decided`, `no_decision`, `no_jury` | `final` event |
 | `LegStatus` NEW | `pending`, `settled`, `refused`, `unresolved` | `SweepView` |
 | `QuarterState` NEW | `open`, `closing`, `final` | `QuarterView.state` |
 | `EntitlementStatus` NEW | `accruing`, `closing`, `claimable`, `pending`, `paid` | `EntitlementView.status` |

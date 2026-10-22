@@ -226,9 +226,9 @@ A seat's weight in a quarter is the number of nanoseconds, inside that quarter, 
 
 Rules:
 
-1. A seat counts from the block it is staked until the block it is unstaked. It keeps counting while it serves on a case and while it waits out the unstake cooldown (OPEN, README OD-03). Recommended default: keep counting, because the cooldown protects jury integrity and not revenue.
+1. A seat counts from the block it is staked until the block it is unstaked. It keeps counting while it serves on a case. It stops counting at `request_unstake`, so a seat waiting out the cooldown, or one that asked to leave and stayed, earns nothing after the request (README OD-03, reversed 2026-10-22).
 2. A new stake of the same token by another owner starts a new span with its own weights. The weights are keyed by quarter, token and owner, so both owners can claim their own spans.
-3. Total weight of a quarter, `seat_ns`, is the integral of the staked seat count over the quarter. The contract adds `staked_count * (to - last_tick)` to the right quarter at every stake, unstake and revenue arrival, and once per quarter boundary crossed. `advance_quarters` lets anyone move it forward.
+3. Total weight of a quarter, `seat_ns`, is the integral of the staked seat count over the quarter. The contract adds `earning_count * (to - last_tick)` to the right quarter at every stake, unstake and revenue arrival, and once per quarter boundary crossed. `advance_quarters` lets anyone move it forward.
 4. Per seat weights are booked lazily from `Stake.booked_to`. `unstake`, `claim_quarter`, forfeits and `book_seat_time` book the span up to a point, splitting it across the quarters it covers. A single call books at most 8 quarters, so one span longer than two years needs `book_seat_time` first.
 5. The sum of booked weights of a quarter equals `seat_ns - forfeit_ns` once every seat is booked.
 
@@ -511,7 +511,7 @@ Existing tests were not run in this task.
 
 | Requirement | Evidence that exists | Evidence still required |
 | --- | --- | --- |
-| R-04 eligibility, jury, case locks | `staking.rs`, `council.rs`, `hardening.rs:267-433` (allowlist), unit tests `council lib.rs:1016-1530` | Seat weight keeps counting while a seat serves and while it waits out the cooldown (if OD-03 stands) |
+| R-04 eligibility, jury, case locks | `staking.rs`, `council.rs`, `hardening.rs:267-433` (allowlist), unit tests `council lib.rs:1016-1530` | Seat weight keeps counting while a seat serves and stops at its unstake request (OD-03 reversed) |
 | R-05 quarterly accounting | None. The stream tests (`revenue.rs:188`, `:253`, `attacks.rs:1341`, unit `council lib.rs:1216`, `:1603-1700`) test behaviour that is removed | Every example in 6.11 as a unit test with controlled block times. Boundary vectors in 6.1. Proptests for I-C2 and I-C3. Late arrival, no-seat roll, forfeit before and after finalization, `finalize_quarter` ordering, claim states including a refused transfer with a paused verifier (`pause_transfers` helper exists in `common/mod.rs:414`). Sweep id dedupe against the real verifier. Reconciliation of `C` after a full quarter |
 | R-05 timing in the sandbox | none | A real boundary is about 72 days away and the sandbox cannot skip that far (the audit measured a 72 hour skip as too slow). Use unit tests with controlled timestamps for the calendar, and patch stored timestamps in the sandbox as `relock_seat` does for the money path. Label such runs accelerated. Do not add a test-only constant to the shipped wasm: the audit rejected that |
 | R-03 Council receipt | `revenue.rs:95`, `hardening.rs:606` | A repeated sweep id is refused and refunded. A sender other than the market is refused and refunded |

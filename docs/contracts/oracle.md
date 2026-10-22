@@ -259,6 +259,12 @@ the 30 second buffer still fit), the case settles with no decision.
 
 ### 8. No decision
 
+A case in which no jury was ever seated, because the draw failed or never ran in both rounds, settles as `no_jury`.
+It resolves like a no decision, but each party gets their own bond back and nobody else is paid: a draw that
+cannot happen is the system failing, not the challenger losing. A jury that was seated and never revealed is
+not this case: the case keeps a `seated` flag, set when any round seats a jury, and a seated case settles as
+below.
+
 A case that settles with no decision resolves a price market to the answer its publishers signed,
 and an event market to Void. The bonds are paid as in "Who gets paid what": the proposer gets their
 bond back, and half the challenger's bond goes to the jurors who revealed, in either round, split
@@ -285,6 +291,7 @@ Let B be the bond.
 | Disputed, a majority decided, the proposal was rejected (the challenger's answer won)              | nothing                               | 2B minus the jurors' share | The jurors' share                                 | nothing   |
 | Disputed, neither jury decided, some juror revealed                                                | B back, plus half of B, plus rounding | nothing                    | Half of B, split equally among those who revealed | nothing   |
 | Disputed, neither jury decided, no juror revealed                                                  | B back, plus half of B                | nothing                    | n/a                                               | Half of B |
+| Disputed, no jury could be drawn in either round (`no_jury`)                                       | B back                                | B back                     | n/a                                               | nothing   |
 
 In a decided dispute the jurors' share is 25% of one bond, split equally among the jurors who
 revealed and sat with the final outcome, in either round. It is rounded down per juror and the
@@ -620,7 +627,7 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `draw_failed`                     | A draw was refused or failed                                                                    | market_id, round                                                                                                                 |
 | `vote_committed`                  | A commitment                                                                                    | market_id, juror, commitment                                                                                                     |
 | `vote_revealed`                   | A reveal                                                                                        | market_id, juror, outcome, reason                                                                                                |
-| `final`                           | A case settled                                                                                  | market_id, outcome, ruling (`unchallenged`, `decided` or `no_decision`), juror_pay_each, paid_jurors, delinquent                 |
+| `final`                           | A case settled                                                                                  | market_id, outcome, ruling (`unchallenged`, `decided`, `no_decision` or `no_jury`), juror_pay_each, paid_jurors, delinquent                 |
 | `deadline_void`                   | `resolve_by_deadline` had the market resolve Void, which it does only for a market with no case | market_id                                                                                                                        |
 | `outcome_applied`                 | The market received the outcome                                                                 | market_id                                                                                                                        |
 | `bond_paid`                       | The verifier paid a `withdraw_bond` out, seen by the callback                                    | account, amount                                                                                                                  |

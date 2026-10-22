@@ -84,6 +84,7 @@ Settlement math is unchanged and already built (`oracle/src/lib.rs:1179-1250`). 
 | --- | --- |
 | Unchallenged | The proposer gets their own bond back |
 | Decided by a majority | The loser's bond is split. A quarter, rounded down, is split equally among the jurors who revealed the winning answer. The rest goes to the winner, who also keeps the rounding remainder and their own bond. The loser gets nothing back |
+| No jury ever seated, in either round (added 2026-10-22) | The proposer and the challenger each get their own bond back. Nobody else is paid. The `final` ruling is `no_jury` and the event market is Void as before |
 | No decision after two juries | The proposer gets their own bond back plus the part of the challenger's bond that jurors do not take. Half of the challenger's bond, rounded down, is split equally among every juror who revealed. If nobody revealed, that half goes to `no_decision_recipient` |
 
 `JUROR_SHARE_BPS = 2500` and `NO_DECISION_JUROR_SHARE_BPS = 5000` (`oracle/src/lib.rs:63`, `:67`). PROPOSED: the no-decision recipient is the Trezu treasury. The sandbox harness already sets it to the business account (`tests/tests/common/mod.rs:171`). Juror pay is separate from the holder revenue share. A juror who never votes forfeits the revenue their seat earned while serving. That money never passes through the oracle. The Council handles it in its own accounting ([council.md](council.md#6-the-quarterly-accounting-proposal)).
@@ -294,7 +295,7 @@ Envelope: `EVENT_JSON:{"standard":"oracle","version":"1.0.0","event":"<name>","d
 | `vote_committed` | `market_id`, `juror`, `commitment` | EXISTING |
 | `vote_revealed` | `market_id`, `juror`, `outcome`, `reason` | EXISTING |
 | `escalated` | `market_id`, `jury_size` (number), `draw_by` | EXISTING |
-| `final` | `market_id`, `outcome`, `ruling` (`unchallenged`, `decided`, `no_decision`), `juror_pay_each`, `paid_jurors`, `delinquent` | EXISTING |
+| `final` | `market_id`, `outcome`, `ruling` (`unchallenged`, `decided`, `no_decision`, `no_jury`), `juror_pay_each`, `paid_jurors`, `delinquent` | EXISTING |
 | `outcome_applied` | `market_id` | EXISTING |
 | `deadline_void` | `market_id` | EXISTING |
 | `market_registered` | `market_id` | EXISTING |

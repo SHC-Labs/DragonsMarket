@@ -153,7 +153,7 @@ The first quarter to finalize is the one the contract was created in.
 | Big numbers in JSON        | `U64` and `U128` travel as strings.                                                                                                                                      |
 | Revenue amounts            | Raw units of the collateral token.                                                                                                                                       |
 | Quarters                   | UTC calendar quarters. The id is `year * 4 + (quarter - 1)`, so 2026 Q4 is 8107. A quarter starts at 00:00 UTC on the first day of its first month and ends where the next one starts. A time exactly on a boundary belongs to the new quarter. |
-| Seat time                  | Nanoseconds a seat was staked, inside a quarter. The seat counts from the block it is staked until the block it is unstaked, and it keeps counting through a case and through the cooldown. |
+| Seat time                  | Nanoseconds a seat was staked, inside a quarter. The seat counts from the block it is staked until the block it is unstaked, and it keeps counting through a case. It stops at the request to unstake. |
 | Rounding                   | Each seat's share is the quarter's pool times its seat time over the quarter's total seat time, rounded down. The dust stays in the Council as unallocated backing and is at most one unit per seat. |
 
 ---
@@ -200,17 +200,18 @@ and when the seat was drawn.
 It takes two steps and a wait.
 
 1. `request_unstake(token_id)`. The holder asks to leave. Refused if the seat is serving on an open
-   case or a request is already pending. From now on the seat is not available to be drawn.
+   case or a request is already pending. From now on the seat is not available to be drawn and
+   earns nothing more. Its time so far is counted by this call, which can need `advance_quarters` or
+   `book_seat_time` first after a long idle stretch.
 2. After the cooldown has passed, `unstake(token_id)` with 1 yoctoNEAR attached. The seat's staked
-   time is counted up to now, the seat is removed, and the NFT is returned. Unstaking pays no money,
+   time was counted at the request, the seat is removed, and the NFT is returned. Unstaking pays no money,
    so it never touches reward backing. What the seat earned stays claimable by quarter, whoever holds
    the NFT afterwards, and an NFT sold after unstaking carries nothing with it.
 
 If the NFT transfer fails (for example the collection is broken), the seat is restored, and it can
-be unstaked again without waiting a new cooldown. It starts counting again from the moment it is
-restored, so the time it was out earns nothing, for it or for the other seats.
+be unstaked again without waiting a new cooldown. It keeps its request, so it does not earn again.
 
-Between the request and the unstake the seat still counts as staked time, and it cannot be drawn.
+Between the request and the unstake the seat earns nothing and cannot be drawn.
 
 A seat cannot leave while serving on a case, and a seat that has asked to leave cannot be drawn, so
 no seat is ever both.
@@ -329,6 +330,10 @@ have passed, and quarters finalize in order. It fixes the pool (the quarter's re
 rolled in) and the total seat time less what silent jurors lost, and opens the quarter's claims. A
 quarter with no seat time moves its whole pool into the next quarter, where it joins that pool, and
 has nothing to claim. The money never leaves the Council.
+
+It also refuses while any jury drawn before the quarter's end is still open (`a jury drawn in this
+quarter is still open`), so a silent juror cannot finalize the quarter first and keep seat time the
+forfeit would take. If a release is lost, the quarter can be finalized anyway 30 days after its end.
 
 | State     | Meaning                                                                                      |
 | --------- | -------------------------------------------------------------------------------------------- |
@@ -565,6 +570,7 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `the grace period must be between 1 and 30 days`                                                                                                             | `set_close_grace_ns` out of its bounds.                          |
 | `not staked` / `not your seat`                                                                                                                               | Acting on a seat you do not hold.                                |
 | `unstake already requested` / `request an unstake first` / `the cooldown has not passed`                                                                     | Wrong unstake order or timing.                                   |
+| `a jury drawn in this quarter is still open` / `book this seat first` | `finalize_quarter` while an earlier jury is open (until 30 days after the quarter ends). `book this seat first` on a request or claim after a long idle stretch. |
 | `this seat is serving on an open case`                                                                                                                       | A seat held for a case.                                          |
 | `not enough seat holders to draw a jury: N eligible, M needed`                                                                                               | Too few different holders.                                       |
 | `unstake every seat before changing the NFT contract`                                                                                                        | `set_nft_contract` while seats exist.                            |

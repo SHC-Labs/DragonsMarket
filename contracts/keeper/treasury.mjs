@@ -191,6 +191,7 @@ export const ALLOWED = {
     set_create_fee: call({ create_fee: u128(0n, LIMIT_MARKET.MAX_CREATE_FEE) }),
     reconcile_leg: call({ sweep_id: u64(1n), leg: oneOf("council", "treasury"), arrived: flag }),
     set_paused: call({ paused: flag }),
+    set_sells_paused: call({ sells_paused: flag }),
     halt: call({ market_id: u64(), reason: text(REASON_MAX) }),
     resume: call({ market_id: u64() }),
     claim_residual: call({ market_id: u64() }),

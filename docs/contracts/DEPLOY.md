@@ -117,6 +117,10 @@ The project owner sets initial market exposure and user limits after security an
 Publish mint participation terms, reward eligibility and claim rules before asking users to buy
 an NFT. Earnings and returns must not be guaranteed.
 
+Do not open the venue until `keeper.mjs check` shows enough drawable seat holders (jury size
++ second jury + 2; a seat that is serving or asked to leave does not count). After the contracts
+are sealed, `keeper.mjs check --expect-sealed` is the release gate.
+
 Launch only against evidence for [R-01 through R-08](../spec.md#requirements-to-implementation-map),
 with the implemented limitations disclosed. Publishing, deployment and real-money testing need
 explicit authorisation. This document records requirements and does not perform those actions.

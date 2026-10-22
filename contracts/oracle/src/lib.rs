@@ -189,6 +189,9 @@ pub struct Case {
     // The first jury once a second one has been called for. It cannot sit again, and it is still owed or penalised
     // for what it did.
     first_panel: Vec<AccountId>,
+    // True once any round has seated a jury. A case that never seated one was failed by the system, not by the
+    // parties, so it returns each party's own bond.
+    seated: bool,
     commits: Vec<Commit>,
     // Revealed votes only, from both rounds.
     votes: Vec<Vote>,
@@ -347,6 +350,8 @@ enum Ruling {
     Decided,
     // Neither jury reached a majority in time.
     NoDecision,
+    // No jury could be drawn in either round, so nobody was ever asked.
+    NoJury,
 }
 
 impl Ruling {
@@ -355,6 +360,7 @@ impl Ruling {
             Ruling::Unchallenged => "unchallenged",
             Ruling::Decided => "decided",
             Ruling::NoDecision => "no_decision",
+            Ruling::NoJury => "no_jury",
         }
     }
 }
@@ -788,6 +794,7 @@ impl OracleContract {
                 case.commit_ends_at = U64(seated + panel_deadline_ns / 2);
                 case.panel_deadline = U64(seated + panel_deadline_ns);
                 case.panel = jury;
+                case.seated = true;
                 self.cases.insert(market_id.0, case);
             }
             _ => emit(
@@ -1181,6 +1188,7 @@ impl OracleContract {
                 panel_deadline: U64(0),
                 panel: vec![],
                 first_panel: vec![],
+                seated: false,
                 commits: vec![],
                 votes: vec![],
                 final_outcome: None,
@@ -1251,7 +1259,12 @@ impl OracleContract {
             } else {
                 Outcome::Void
             };
-            self.settle(id, outcome, Ruling::NoDecision);
+            let ruling = if case.seated {
+                Ruling::NoDecision
+            } else {
+                Ruling::NoJury
+            };
+            self.settle(id, outcome, ruling);
         }
     }
 
@@ -1316,6 +1329,11 @@ impl OracleContract {
                     self.add_claimable(&proposer, 2 * bond - juror_pay * revealed.len() as u128);
                 }
                 paid = revealed;
+            }
+            (Some(c), Ruling::NoJury) => {
+                // The draw failed, which is no fault of either party: each gets their own bond back.
+                self.add_claimable(&proposer, bond);
+                self.add_claimable(&c, bond);
             }
             _ => self.add_claimable(&proposer, bond),
         }
@@ -1535,6 +1553,7 @@ mod tests {
                 panel_deadline: U64(DEADLINE),
                 panel: JURORS.iter().map(|j| acct(j)).collect(),
                 first_panel: vec![],
+                seated: true,
                 commits: commits
                     .iter()
                     .map(|j| Commit {
@@ -4015,14 +4034,75 @@ mod tests {
         act_as("anyone.near", DRAW_BY + 1 + PANEL + DRAW_WINDOW + PANEL);
         o.finalize(U64(0));
         let (carol, dave) = (owed(&o, "carol.near"), owed(&o, "dave.near"));
-        assert!(
-            carol > 0 && dave == 0,
-            "the challenger gets nothing back after no decision"
+        assert_eq!(
+            (carol, dave),
+            (BOND, BOND),
+            "no jury was ever seated, so each is owed their own bond"
         );
         act_as("carol.near", 10 * DEADLINE);
         let _ = o.withdraw_bond();
         assert_eq!(mt_transfer_sent().0["receiver_id"], "carol.near");
         assert_eq!(o.total_owed().0, 2 * BOND - carol);
+    }
+
+    // The reviewer's case: the draw could never happen. The system failed, so neither party pays for it.
+    #[test]
+    fn when_no_jury_could_be_drawn_in_either_round_each_party_gets_their_own_bond_back() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        act_as("anyone.near", DRAW_BY + 1);
+        o.finalize(U64(0));
+        assert!(!o.case(0).seated);
+        act_as("anyone.near", DRAW_BY + 1 + PANEL + DRAW_WINDOW + PANEL);
+        o.finalize(U64(0));
+        let case = o.case(0);
+        assert_eq!((case.stage, case.final_outcome), (Stage::Final, Some(Outcome::Void)));
+        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (BOND, BOND));
+        assert_eq!((owed(&o, RECIPIENT), owed(&o, OWNER)), (0, 0));
+        assert_eq!(o.total_owed().0, 2 * BOND, "every unit is still owed to someone");
+        assert_eq!(o.bonds_held, 0);
+        assert_eq!(
+            logged("final"),
+            vec![
+                near_sdk::serde_json::json!({ "market_id": "0", "outcome": "void", "ruling": "no_jury",
+                "juror_pay_each": "0", "paid_jurors": [], "delinquent": [] })
+            ]
+        );
+    }
+
+    // A jury that sat and never revealed is a dispute nobody decided, not a failed draw: the old split stays.
+    #[test]
+    fn a_jury_that_was_seated_but_never_revealed_keeps_the_no_decision_split() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        let over = first_round_that_does_nothing(&mut o, &names(3, "j"));
+        assert!(o.case(0).seated);
+        act_as("anyone.near", over);
+        o.finalize(U64(0));
+        assert!(o.case(0).seated, "the flag survives the escalation");
+        act_as("anyone.near", over + DRAW_WINDOW + 1);
+        o.finalize(U64(0));
+        assert_eq!(o.case(0).stage, Stage::Final);
+        assert_eq!(
+            (owed(&o, "carol.near"), owed(&o, "dave.near"), owed(&o, RECIPIENT)),
+            (BOND + BOND / 2, 0, BOND / 2)
+        );
+        assert_eq!(o.total_owed().0, 2 * BOND);
+        assert_eq!(logged("final")[0]["ruling"], "no_decision");
+    }
+
+    // A jury seated only in the second round counts too.
+    #[test]
+    fn a_jury_seated_only_in_the_second_round_keeps_the_no_decision_split() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        act_as("anyone.near", DRAW_BY + 1);
+        o.finalize(U64(0));
+        let seated_at = DRAW_BY + 1 + SECOND;
+        seat(&mut o, seated_at, &names(7, "k"));
+        assert!(o.case(0).seated);
+        act_as("anyone.near", o.case(0).panel_deadline.0 + 1);
+        o.finalize(U64(0));
+        assert_eq!(o.case(0).stage, Stage::Final);
+        assert_eq!(owed(&o, RECIPIENT), BOND / 2);
+        assert_eq!(logged("final")[0]["ruling"], "no_decision");
     }
 
     #[test]

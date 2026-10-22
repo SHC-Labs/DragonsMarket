@@ -888,6 +888,12 @@ pub async fn fees(w: &World) -> (u128, u128, u128) {
     (u(&f["collected"]), u(&f["revenue_due"]), u(&f["treasury_due"]))
 }
 
+// The market refuses a second sweep within an hour of the last one.
+pub async fn past_sweep_interval(w: &World) {
+    let t = now(&w.worker).await;
+    skip_until(w, t + 3_601 * 1_000_000_000).await;
+}
+
 pub async fn sweep(w: &World, who: &Account) -> anyhow::Result<near_workspaces::result::ExecutionSuccess> {
     Ok(who
         .call(w.market.id(), "sweep_fees")

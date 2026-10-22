@@ -299,6 +299,7 @@ async fn a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_o
     // The owner points the Council at the market again. The retry is a sweep of its own under a new id and carries the
     // refused amount once. The treasury has nothing more to be paid.
     set_council_market(&w, w.market.id()).await?;
+    past_sweep_interval(&w).await;
     sweep(&w, &w.carol).await?;
     assert_eq!(holdings(&w, w.council.id()).await - council_before, 273_798);
     assert_eq!(

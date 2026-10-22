@@ -64,6 +64,9 @@ const FIRST_SWEEP_ID: u64 = 1;
 const NS_PER_MINUTE: u64 = 60 * 1_000_000_000;
 const SETTLE_WAIT_MINUTES: u64 = 10;
 const RECONCILE_WAIT_MINUTES: u64 = 60;
+// The least time between two sweeps. A refused due is retried on purpose, so without this a stranger could sweep it again
+// and again, and every sweep keeps a record. This bounds the records at 24 a day whatever the dues do.
+const MIN_SWEEP_INTERVAL_NS: u64 = 60 * NS_PER_MINUTE;
 // The verifier burned 3.8 TGas for a payout from a contract in the sandbox (INTENTS-PROOF.md), so this is a wide margin.
 const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
 // mt_transfer_call needs 21 TGas attached before the receiver gets any (measured), so the verifier's own part is rounded up
@@ -379,7 +382,10 @@ pub struct MarketContract {
     // The Intents verifier that holds every unit of backing, and the exact id of the collateral in it, "nep141:<token>".
     verifier: AccountId,
     collateral_token_id: String,
+    // Blocks buy, deposit, seed and new markets. The operator can set it. It never blocks sell, withdraw or redeem.
     paused: bool,
+    // Blocks sell. Owner only, so the operator cannot trap open positions.
+    sells_paused: bool,
     // What a trade and a new market pay now. Each applies from the next trade or seed; nothing already paid changes.
     fee_rate_bps: u128,
     create_fee: u128,
@@ -412,6 +418,8 @@ pub struct MarketContract {
     // The least a sweep acts on, and the id the next sweep takes. Ids only go up, and the Council refuses a repeat.
     min_sweep: u128,
     next_sweep_id: u64,
+    // When the last sweep ran, in ns. None until the first one.
+    last_sweep_at: Option<u64>,
     sweeps: LookupMap<u64, Sweep>,
 }
 
@@ -495,6 +503,7 @@ impl MarketContract {
             verifier: verifier_id,
             collateral_token_id,
             paused: false,
+            sells_paused: false,
             fee_rate_bps: DEFAULT_FEE_RATE_BPS,
             create_fee: DEFAULT_CREATE_FEE,
             next_market_id: 0,
@@ -512,6 +521,7 @@ impl MarketContract {
             locked_total: 0,
             min_sweep: DEFAULT_MIN_SWEEP,
             next_sweep_id: FIRST_SWEEP_ID,
+            last_sweep_at: None,
             sweeps: LookupMap::new(Key::Sweeps),
         }
     }
@@ -531,7 +541,8 @@ impl MarketContract {
 
     // Owner only, which is the DAO. SputnikDAO executes a proposal in the call of the approval that reaches its threshold,
     // so the DAO's voting period is the only delay a code change waits out (decided 2026-10-21). Withdraw and redeem never
-    // pause, so the exit is open whatever the code does next. The deploy and migrate are one batch: a migrate that panics
+    // pause. Sell stays open too unless the owner itself has set sells_paused, and the operator's pause does not touch it.
+    // A market the operator has halted does not take sells either. The deploy and migrate are one batch: a migrate that panics
     // puts the old code back. Attach at least 100 TGas.
     pub fn upgrade(&mut self, code_hash: Base58CryptoHash) -> Promise {
         upgrade::require_upgrade_gas();
@@ -734,11 +745,18 @@ impl MarketContract {
         emit("market_resumed", json!({ "market_id": market_id.0.to_string() }));
     }
 
-    // Stops new trades and deposits. Withdrawals and redemptions keep working.
+    // Stops buys, deposits, seeds and new markets. Sells, withdrawals and redemptions keep working.
     pub fn set_paused(&mut self, paused: bool) {
         self.only_operator_or_owner();
         self.paused = paused;
         emit("paused", json!({ "paused": paused }));
+    }
+
+    // Owner only: stops sells. Kept apart from set_paused so the operator cannot take away the way out of an open position.
+    pub fn set_sells_paused(&mut self, sells_paused: bool) {
+        self.only_owner();
+        self.sells_paused = sells_paused;
+        emit("sells_paused", json!({ "sells_paused": sells_paused }));
     }
 
     // Where fees go: the Council and the treasury. A sweep refuses until this has been called, and the verifier does not
@@ -965,7 +983,7 @@ impl MarketContract {
     #[payable]
     pub fn sell(&mut self, market_id: U64, side: String, collateral_out: U128, max_shares_in: U128) {
         assert_one_yocto();
-        require!(!self.paused, "paused");
+        require!(!self.sells_paused, "sells are paused");
         let who = env::predecessor_account_id();
         require!(self.accounts.contains_key(&who), "do the storage deposit first");
         let idx = side_index(&side);
@@ -1081,7 +1099,7 @@ impl MarketContract {
 
     // Anyone may call it. Splits the collected fees between the Council and the treasury by the owner's share, rounding both
     // parts down so the remainder (0 or 1 unit) stays collected, adds what earlier refused legs left due, records both legs
-    // under a new sweep id, and only then sends them. A sweep with less than min_sweep to act on does nothing and takes no id.
+    // under a new sweep id, and only then sends them. A sweep with less than min_sweep to act on does nothing and takes no id. A second sweep within an hour of the last one is refused.
     // It refuses until the owner has set the recipients. It needs at least 87 TGas attached (GAS_SWEEP_FLOOR) and burns about
     // 20 TGas in all, the verifier's and the Council's receipt included, which does not depend on how many seats are staked.
     pub fn sweep_fees(&mut self) -> Option<U64> {
@@ -1100,8 +1118,15 @@ impl MarketContract {
         if council == 0 && treasury == 0 {
             return None;
         }
+        let now = env::block_timestamp();
+        require!(
+            self.last_sweep_at
+                .is_none_or(|last| now >= last.saturating_add(MIN_SWEEP_INTERVAL_NS)),
+            "wait an hour since the last sweep"
+        );
         let id = self.next_sweep_id;
         self.next_sweep_id += 1;
+        self.last_sweep_at = Some(now);
         let leg = |to: AccountId, amount: u128| Leg {
             to,
             amount: U128(amount),
@@ -1113,7 +1138,7 @@ impl MarketContract {
         };
         let sweep = Sweep {
             id: U64(id),
-            at: U64(env::block_timestamp()),
+            at: U64(now),
             total: U128(self.fees),
             carried_council: U128(self.revenue_due),
             carried_treasury: U128(self.treasury_due),
@@ -1278,7 +1303,7 @@ impl MarketContract {
         json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
                 "owner": self.owner, "pending_owner": self.pending_owner, "operator": self.operator, "oracle": self.oracle,
                 "verifier": self.verifier, "collateral_token_id": self.collateral_token_id,
-                "paused": self.paused, "markets": self.next_market_id.to_string(), "storage_deposit": STORAGE_DEPOSIT.as_yoctonear().to_string(),
+                "paused": self.paused, "sells_paused": self.sells_paused, "markets": self.next_market_id.to_string(), "storage_deposit": STORAGE_DEPOSIT.as_yoctonear().to_string(),
                 "max_positions": MAX_POSITIONS, "fee_rate_bps": self.fee_rate_bps as u32, "create_fee": self.create_fee.to_string(),
                 "revenue_pool": self.recipients.as_ref().map(|r| &r.revenue_pool), "treasury": self.recipients.as_ref().map(|r| &r.treasury),
                 "revenue_share_bps": self.revenue_share_bps as u32, "treasury_share_bps": (BPS_DENOMINATOR - self.revenue_share_bps) as u32,
@@ -2198,7 +2223,7 @@ mod tests {
         // The next sweep resends each due to its own recipient under a new id; nothing is split again.
         act_as(OWNER, 6);
         c.set_min_sweep(U128(1));
-        act_as(USERS[2], 6);
+        act_as(USERS[2], 6 + MIN_SWEEP_INTERVAL_NS);
         assert_eq!(c.sweep_fees(), Some(U64(2)));
         let d = swept();
         assert_eq!(
@@ -3930,7 +3955,7 @@ mod tests {
         assert_eq!(legs(&c, 1).0, LegStatus::Refused);
         act_as(OWNER, SETTLE_AT);
         c.set_min_sweep(U128(1));
-        act_as(USERS[2], SETTLE_AT + 1);
+        act_as(USERS[2], SETTLE_AT + MIN_SWEEP_INTERVAL_NS);
         assert_eq!(c.sweep_fees(), Some(U64(2)));
         assert_eq!(c.get_sweep(U64(2)).unwrap().council.amount.0, 250_000);
         assert_eq!(c.get_sweep(U64(2)).unwrap().carried_council.0, 250_000);
@@ -4140,9 +4165,100 @@ mod tests {
         );
         assert_eq!(c.list_sweeps(U64(0), U64(10)).len(), 1);
         c.fees = 2_000_000;
-        act_as(USERS[2], 6);
+        act_as(USERS[2], 6 + MIN_SWEEP_INTERVAL_NS);
         assert_eq!(c.sweep_fees(), Some(U64(2)));
         assert_eq!(c.get_sweep(U64(3)).map(|s| s.id), None);
+    }
+
+    fn refusal(f: impl FnOnce()) -> String {
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err("expected a refusal");
+        err.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
+    // A world where the first user already holds Yes shares in market 0, bought before any pause.
+    fn world_with_a_holder() -> MarketContract {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        c
+    }
+
+    #[test]
+    fn a_second_sweep_inside_the_interval_is_refused_and_one_after_it_works() {
+        let (mut c, _) = world();
+        c.fees = 2_000_000;
+        act_as(USERS[2], 5);
+        assert_eq!(c.sweep_fees(), Some(U64(1)));
+        c.fees = 2_000_000;
+        act_as(USERS[2], 5 + MIN_SWEEP_INTERVAL_NS - 1);
+        let message = refusal(|| {
+            let _ = c.sweep_fees();
+        });
+        assert_eq!(message, "wait an hour since the last sweep");
+        assert_eq!(c.next_sweep_id, 2);
+        act_as(USERS[2], 5 + MIN_SWEEP_INTERVAL_NS);
+        assert_eq!(c.sweep_fees(), Some(U64(2)));
+    }
+
+    // A refused due stays owed and is retried on purpose, so a stranger could keep re-sweeping it. 200 tries in a day make
+    // at most 24 records.
+    #[test]
+    fn two_hundred_sweep_attempts_in_a_day_leave_at_most_24_records() {
+        let (mut c, _) = world();
+        c.revenue_due = DEFAULT_MIN_SWEEP;
+        let step = 24 * MIN_SWEEP_INTERVAL_NS / 200;
+        for i in 0..200u64 {
+            act_as(USERS[2], 5 + i * step);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.sweep_fees()));
+            c.revenue_due = DEFAULT_MIN_SWEEP;
+        }
+        assert!(
+            c.next_sweep_id - FIRST_SWEEP_ID <= 24,
+            "{} records",
+            c.next_sweep_id - FIRST_SWEEP_ID
+        );
+    }
+
+    #[test]
+    fn the_operator_pause_leaves_sell_working_and_blocks_buy_deposit_and_seed() {
+        let mut c = world_with_a_holder();
+        act_as(OWNER, 5);
+        c.set_operator(acct("ops.near"));
+        act_as("ops.near", 6);
+        c.set_paused(true);
+        assert_eq!(c.config()["sells_paused"], false);
+        act_as(USERS[0], 7);
+        c.sell(U64(0), "yes".into(), U128(1_000_000), U128(u128::MAX));
+        act_as(VERIFIER, 8);
+        for msg in ["deposit", "buy:0:yes:1", "seed:1"] {
+            let sender = if msg == "seed:1" { OWNER } else { USERS[0] };
+            let message = refusal(|| drop(receive(&mut c, acct(sender), U128(10_000_000), msg.into())));
+            assert_eq!(message, "paused", "{msg}");
+        }
+    }
+
+    #[test]
+    fn only_the_owner_pauses_sells_and_it_stops_sell_alone() {
+        let mut c = world_with_a_holder();
+        act_as(OWNER, 5);
+        c.set_operator(acct("ops.near"));
+        act_as("ops.near", 6);
+        assert_eq!(refusal(|| c.set_sells_paused(true)), "owner only");
+        act_as(OWNER, 7);
+        c.set_sells_paused(true);
+        assert_eq!(c.config()["sells_paused"], true);
+        act_as(USERS[0], 8);
+        let message = refusal(|| c.sell(U64(0), "yes".into(), U128(1_000_000), U128(u128::MAX)));
+        assert_eq!(message, "sells are paused");
+        act_as(VERIFIER, 9);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "deposit".into());
+        act_as(OWNER, 10);
+        c.set_sells_paused(false);
+        act_as(USERS[0], 11);
+        c.sell(U64(0), "yes".into(), U128(1_000_000), U128(u128::MAX));
     }
 
     #[test]
@@ -4372,6 +4488,7 @@ mod tests {
             let (mut added, mut gone) = (c.fees, 0u128);
             let mut on_the_way: Vec<(u64, LegKind, u128)> = vec![];
             let mut unresolved: Vec<(u64, u128)> = vec![];
+            let mut sweep_clock = 5;
             for (op, amount, how) in ops {
                 match op {
                     0 => {
@@ -4379,7 +4496,8 @@ mod tests {
                         added += amount;
                     }
                     1 => {
-                        act_as(USERS[2], 5);
+                        sweep_clock += MIN_SWEEP_INTERVAL_NS;
+                        act_as(USERS[2], sweep_clock);
                         if let Some(id) = c.sweep_fees() {
                             let s = c.get_sweep(id).unwrap();
                             if s.council.status == LegStatus::Pending { on_the_way.push((id.0, LegKind::Council, s.council.amount.0)); }
@@ -4406,13 +4524,13 @@ mod tests {
                     }
                     4 if !unresolved.is_empty() => {
                         let (id, sent) = unresolved.remove(amount as usize % unresolved.len());
-                        act_as(OWNER, 5 + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE);
+                        act_as(OWNER, sweep_clock + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE);
                         c.reconcile_leg(U64(id), LegKind::Council, how == 0);
                         if how == 0 { gone += sent; }
                     }
                     5 if !on_the_way.is_empty() => {
                         let (id, kind, sent) = on_the_way.remove(amount as usize % on_the_way.len());
-                        act_as(OWNER, 5 + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE);
+                        act_as(OWNER, sweep_clock + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE);
                         c.reconcile_leg(U64(id), kind, how == 0);
                         if how == 0 { gone += sent; }
                     }

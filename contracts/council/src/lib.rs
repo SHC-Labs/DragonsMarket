@@ -15,6 +15,7 @@ use near_sdk::{
     assert_one_yocto, env, ext_contract, near, require, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault,
     Promise, PromiseError, PromiseOrValue, PublicKey,
 };
+use std::collections::BTreeMap;
 
 const MAX_SEATS: u32 = 1_000;
 // Token ids one allow_tokens call may add. Each is a storage write and an entry in the event, so a call stays far below
@@ -96,7 +97,7 @@ pub struct Stake {
     index: u32,
 }
 
-// What one quarter holds. `seat_ns` is the sum over the quarter of the number of seats staked, in seat nanoseconds. It only
+// What one quarter holds. `seat_ns` is the sum over the quarter of the number of seats still earning (staked and not asking to leave), in seat nanoseconds. It only
 // moves when the seat count changes or when advance_quarters is called, so every method that changes the count moves it to
 // the present first.
 #[near(serializers=[borsh])]
@@ -266,6 +267,11 @@ fn quarter_label(quarter: u32) -> String {
     format!("{}Q{}", quarter / 4, quarter % 4 + 1)
 }
 
+// Where a seat's time stops: at `to`, or at its request to unstake if that came first.
+fn counted_until(stake: &Stake, to: u64) -> u64 {
+    stake.unlock_requested_at.map_or(to, |requested| requested.0.min(to))
+}
+
 // How much of [from, to) lies inside the quarter, in nanoseconds.
 fn overlap(quarter: u32, from: u64, to: u64) -> u64 {
     to.min(quarter_end(quarter))
@@ -330,6 +336,11 @@ pub struct CouncilContract {
     tokens_of: LookupMap<AccountId, Vec<TokenId>>,
     // The tokens drawn for each case still open.
     juries: LookupMap<u64, Vec<TokenId>>,
+    // How many open juries were drawn at each time, so finalize_quarter can see whether one drawn before a quarter's end is
+    // still open. One entry per open case at most.
+    open_juries: BTreeMap<u64, u32>,
+    // Staked seats that have not asked to unstake. Only these add seat time: a seat's time stops at its request.
+    earning: u32,
     // How long after a quarter ends it can be finalized, and so when its claims open.
     close_grace_ns: u64,
     // Seat time is counted up to here. The quarters from `next_to_finalize` on are the ones not final yet.
@@ -436,6 +447,8 @@ impl CouncilContract {
             seats_of: LookupMap::new(Key::SeatsOf),
             tokens_of: LookupMap::new(Key::TokensOf),
             juries: LookupMap::new(Key::Juries),
+            open_juries: BTreeMap::new(),
+            earning: 0,
             close_grace_ns: DEFAULT_CLOSE_GRACE_NS,
             last_tick: now,
             next_to_finalize: quarter_containing(now),
@@ -639,6 +652,9 @@ impl CouncilContract {
             stake.serving = Some(case_key);
             stake.serving_from = now;
         }
+        if !jury.is_empty() {
+            *self.open_juries.entry(now).or_insert(0) += 1;
+        }
         self.juries
             .insert(case_key.0, jury.iter().map(|(t, _)| t.clone()).collect());
         jury.into_iter().map(|(_, a)| a).collect()
@@ -651,7 +667,11 @@ impl CouncilContract {
     pub fn unlock_case(&mut self, case_key: U64, delinquent: Vec<AccountId>) {
         require!(env::predecessor_account_id() == self.oracle, "oracle only");
         let now = env::block_timestamp();
-        for t in self.juries.remove(&case_key.0).unwrap_or_default() {
+        let jury = self.juries.remove(&case_key.0).unwrap_or_default();
+        if let Some(drawn_at) = jury.first().and_then(|t| self.stakes.get(t)).map(|s| s.serving_from) {
+            self.close_open_jury(drawn_at);
+        }
+        for t in jury {
             let Some(s) = self.stakes.get_mut(&t) else { continue };
             let (owner, from) = (s.owner.clone(), s.serving_from.max(s.staked_at.0));
             s.serving = None;
@@ -666,9 +686,14 @@ impl CouncilContract {
         let stake = self.callers_stake(&token_id);
         require!(stake.unlock_requested_at.is_none(), "unstake already requested");
         require!(stake.serving.is_none(), "this seat is serving on an open case");
-        let now = env::block_timestamp();
-        stake.unlock_requested_at = Some(U64(now));
         let owner = stake.owner.clone();
+        let now = env::block_timestamp();
+        // The seat's time stops here, so everything up to now is counted before the request is written.
+        self.tick(now);
+        self.book_stake(&token_id, now, MAX_QUARTER_STEPS);
+        require!(self.stakes[&token_id].booked_to.0 >= now, "book this seat first");
+        self.earning -= 1;
+        self.stakes.get_mut(&token_id).unwrap().unlock_requested_at = Some(U64(now));
         emit(
             "unstake_requested",
             json!({ "token_id": token_id, "owner": owner, "unlock_at": (now + self.cooldown_ns).to_string() }),
@@ -676,8 +701,7 @@ impl CouncilContract {
     }
 
     // Returns the NFT and nothing else. What the seat earned stays claimable by quarter, so leaving never touches reward money.
-    // The seat's staked time is counted up to now first, which takes more than one call only after more than eight idle
-    // quarters (see book_seat_time).
+    // The seat's time stopped at its request and was counted then, so nothing is left to count here.
     #[payable]
     pub fn unstake(&mut self, token_id: TokenId) -> Promise {
         upgrade::require_gas(GAS_UNSTAKE_FLOOR, "an unstake returns the NFT and then settles it");
@@ -689,9 +713,6 @@ impl CouncilContract {
         let now = env::block_timestamp();
         require!(now >= requested.0 + self.cooldown_ns, "the cooldown has not passed");
         require!(stake.serving.is_none(), "this seat is serving on an open case");
-        self.tick(now);
-        self.book_stake(&token_id, now, MAX_QUARTER_STEPS);
-        require!(self.stakes[&token_id].booked_to.0 >= now, "book this seat first");
         // Remove it before the transfer; restore it in a callback if the transfer fails.
         let stake = self.remove_stake(&token_id);
         self.return_nft(token_id, stake)
@@ -737,6 +758,11 @@ impl CouncilContract {
         require!(
             env::block_timestamp() >= end.saturating_add(self.close_grace_ns),
             "the quarter cannot be finalized yet"
+        );
+        require!(
+            self.open_juries.keys().next().is_none_or(|drawn| *drawn >= end)
+                || env::block_timestamp() >= end.saturating_add(MAX_CLOSE_GRACE_NS),
+            "a jury drawn in this quarter is still open"
         );
         self.tick(end);
         let mut book = self.book(quarter);
@@ -788,13 +814,15 @@ impl CouncilContract {
             }
         }
         let end = quarter_end(quarter);
-        if self
+        if let Some(until) = self
             .stakes
             .get(&token_id)
-            .is_some_and(|s| s.owner == who && s.booked_to.0 < end)
+            .filter(|s| s.owner == who)
+            .map(|s| counted_until(s, end))
+            .filter(|until| self.stakes[&token_id].booked_to.0 < *until)
         {
             self.book_stake(&token_id, end, MAX_QUARTER_STEPS);
-            require!(self.stakes[&token_id].booked_to.0 >= end, "book this seat first");
+            require!(self.stakes[&token_id].booked_to.0 >= until, "book this seat first");
         }
         let amount = entitlement(book.pool, self.booked_weight(&key), book.weight_total);
         require!(amount > 0, "nothing to claim");
@@ -1090,11 +1118,21 @@ impl NonFungibleTokenReceiver for CouncilContract {
             index: 0,
         };
         self.insert_stake(token_id, stake);
+        self.earning += 1;
         PromiseOrValue::Value(false)
     }
 }
 
 impl CouncilContract {
+    fn close_open_jury(&mut self, drawn_at: u64) {
+        if let Some(open) = self.open_juries.get_mut(&drawn_at) {
+            *open -= 1;
+            if *open == 0 {
+                self.open_juries.remove(&drawn_at);
+            }
+        }
+    }
+
     fn only_owner(&self) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
     }
@@ -1154,8 +1192,8 @@ impl CouncilContract {
         self.stakes.insert(token_id, stake);
     }
 
-    // The seat was not counted while it was out, so it counts again from the moment it is back. This runs in a callback
-    // that must not fail, so seat time moves as far as it can and the seat starts counting from where it got to.
+    // The seat was not counted while it was out, so the time it was out is not booked. It keeps its request, so it does not
+    // earn again and `earning` stays as it is. This runs in a callback that must not fail, so seat time moves as far as it can.
     fn restore_stake(&mut self, token_id: TokenId, mut stake: Stake) {
         self.advance_seat_time(env::block_timestamp(), MAX_QUARTER_STEPS);
         stake.booked_to = U64(self.last_tick);
@@ -1206,7 +1244,7 @@ impl CouncilContract {
     // Adds the seat time of the staked seats from `last_tick` towards `to`, one quarter at a time, at most `max_steps`
     // quarters. It stops at a quarter's end, so `last_tick` is always a place the next call can carry on from.
     fn advance_seat_time(&mut self, to: u64, max_steps: u32) -> u32 {
-        let seats = self.staked.len() as u128;
+        let seats = u128::from(self.earning);
         let mut steps = 0;
         while self.last_tick < to && steps < max_steps {
             let quarter = quarter_containing(self.last_tick);
@@ -1233,6 +1271,7 @@ impl CouncilContract {
         let Some(stake) = self.stakes.get(token_id) else {
             return 0;
         };
+        let to = counted_until(stake, to);
         let (owner, mut at) = (stake.owner.clone(), stake.booked_to.0);
         let mut steps = 0;
         while at < to && steps < max_steps {
@@ -1284,11 +1323,9 @@ impl CouncilContract {
 
     // The same including the staked time not counted yet, for a view.
     fn weight_now(&self, quarter: u32, token_id: &TokenId, owner: &AccountId) -> u128 {
-        let uncounted = self
-            .stakes
-            .get(token_id)
-            .filter(|s| s.owner == *owner)
-            .map_or(0, |s| overlap(quarter, s.booked_to.0, env::block_timestamp()));
+        let uncounted = self.stakes.get(token_id).filter(|s| s.owner == *owner).map_or(0, |s| {
+            overlap(quarter, s.booked_to.0, counted_until(s, env::block_timestamp()))
+        });
         let key = (quarter, token_id.clone(), owner.clone());
         let counted = self.seat_weight.get(&key).copied().unwrap_or(0);
         let lost = self.forfeits.get(&key).copied().unwrap_or(0);
@@ -1297,7 +1334,7 @@ impl CouncilContract {
 
     // Seat time of a quarter as of now: what is counted plus what the staked seats have added since `last_tick`.
     fn seat_ns_now(&self, quarter: u32, book: &QuarterBook) -> u128 {
-        book.seat_ns + self.staked.len() as u128 * u128::from(overlap(quarter, self.last_tick, env::block_timestamp()))
+        book.seat_ns + u128::from(self.earning) * u128::from(overlap(quarter, self.last_tick, env::block_timestamp()))
     }
 
     fn quarter_view(&self, quarter: u32) -> QuarterView {
@@ -1512,11 +1549,11 @@ mod tests {
         let _ = c.unstake(token.into());
     }
 
-    // Leaves at exactly `at`: the request goes in a cooldown earlier.
+    // Asks to leave at exactly `at`, which is where the seat's time stops, and unstakes a cooldown later.
     fn leave_at(c: &mut CouncilContract, token: &str, owner: &str, at: u64) {
-        set_time(at - COOLDOWN_NS);
+        set_time(at);
         leave(c, token, owner);
-        assert_eq!(now(), at);
+        assert_eq!(now(), at + COOLDOWN_NS);
     }
 
     // Finalizes the next quarter at the earliest moment it can be.
@@ -1980,8 +2017,9 @@ mod tests {
         act_with_seed(ORACLE, 1);
         c.draw(U64(1), 2, vec![]);
         revenue(&mut c, 1, 1_000);
-        // The case is still open when the grace period ends, and the quarter is finalized with both seats counted.
-        assert_eq!(finalize(&mut c), Q4_2026);
+        // The case is still open when the longest grace period ends, and the quarter is finalized with both seats counted.
+        set_time(quarter_end(Q4_2026) + MAX_CLOSE_GRACE_NS);
+        c.finalize_quarter(Q4_2026);
         act_as(ORACLE);
         c.unlock_case(U64(1), vec![acct("seat1.near")]);
         let events: Vec<String> = near_sdk::test_utils::get_logs()
@@ -1998,7 +2036,7 @@ mod tests {
         assert_eq!(c.book(Q4_2026).forfeit_ns, 0);
         assert_eq!(
             c.book(Q1_2027).forfeit_ns,
-            u128::from(DEFAULT_CLOSE_GRACE_NS),
+            u128::from(MAX_CLOSE_GRACE_NS),
             "the seat time since the boundary is in a quarter that is still open, so it is lost there"
         );
     }
@@ -2440,11 +2478,13 @@ mod tests {
         set_time(day(60));
         revenue(&mut c, 1, 920_000);
         finalize(&mut c);
-        // a held it 30 days and b held it 62 days of the same token.
-        assert_eq!(entitlement_of(&c, Q4_2026, "1", "a.near"), 300_000);
-        assert_eq!(entitlement_of(&c, Q4_2026, "1", "b.near"), 620_000);
-        assert_eq!(claim(&mut c, Q4_2026, "1", "a.near"), 300_000);
-        assert_eq!(claim(&mut c, Q4_2026, "1", "b.near"), 620_000);
+        // a held it 30 days until its request and b held it 62 days less the cooldown, of the same token.
+        let a_share = 920_000 * 30 * u128::from(DAY) / (92 * u128::from(DAY) - u128::from(COOLDOWN_NS));
+        assert_eq!(entitlement_of(&c, Q4_2026, "1", "a.near"), a_share);
+        let b_share = entitlement_of(&c, Q4_2026, "1", "b.near");
+        assert!(b_share > 619_000 && b_share < 620_000 && a_share + b_share <= 920_000);
+        assert_eq!(claim(&mut c, Q4_2026, "1", "a.near"), a_share);
+        assert_eq!(claim(&mut c, Q4_2026, "1", "b.near"), b_share);
     }
 
     #[test]
@@ -2468,7 +2508,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_unstake_restores_the_seat_and_it_counts_again_from_the_restore() {
+    fn a_failed_unstake_restores_the_seat_and_it_does_not_earn_again() {
         let mut c = council();
         stake(&mut c, "1", "a.near");
         stake(&mut c, "2", "b.near");
@@ -2489,9 +2529,11 @@ mod tests {
         set_time(day(20));
         revenue(&mut c, 1, 1_000_000);
         finalize(&mut c);
-        // Seat 1 counted through its cooldown and missed the hour it was out, seat 2 never left.
+        // Seat 1 counted until its request on day 10 and still has that request, seat 2 never left.
         let book = c.book(Q4_2026);
-        assert_eq!(book.seat_ns, 2 * 92 * u128::from(DAY) - u128::from(3_600 * SECOND));
+        assert_eq!(book.seat_ns, (92 + 10) * u128::from(DAY));
+        assert_eq!(c.earning, 1);
+        assert_eq!(c.stake_of("1".into()).unwrap().unlock_requested_at, Some(U64(day(10))));
         act_paid("a.near");
         c.book_seat_time("1".into(), None);
         c.book_seat_time("2".into(), None);
@@ -2504,22 +2546,18 @@ mod tests {
     }
 
     #[test]
-    fn leaving_after_a_long_idle_stretch_needs_the_time_moved_first() {
+    fn asking_to_leave_after_a_long_idle_stretch_needs_the_time_moved_first() {
         let mut c = council();
         stake(&mut c, "1", "a.near");
-        act_paid("a.near");
-        c.request_unstake("1".into());
         set_time(START + 20 * 92 * DAY);
         act_paid("a.near");
-        assert_eq!(refusal(|| drop(c.unstake("1".into()))), "call advance_quarters first");
+        assert_eq!(refusal(|| c.request_unstake("1".into())), "call advance_quarters first");
     }
 
     #[test]
     fn idle_time_is_moved_forward_in_steps_by_anyone() {
         let mut c = council();
         stake(&mut c, "1", "a.near");
-        act_paid("a.near");
-        c.request_unstake("1".into());
         let far = START + 20 * 92 * DAY;
         set_time(far);
         let target = quarter_containing(far);
@@ -2533,7 +2571,7 @@ mod tests {
         }
         assert!(calls >= 2, "twenty quarters take more than one call of eight");
         act_paid("a.near");
-        assert_eq!(refusal(|| drop(c.unstake("1".into()))), "book this seat first");
+        assert_eq!(refusal(|| c.request_unstake("1".into())), "book this seat first");
         let mut booked = 0;
         while c.stake_of("1".into()).unwrap().booked_to.0 < far {
             act_as("anyone.near");
@@ -2541,6 +2579,8 @@ mod tests {
             assert!(booked <= 3 * 10);
         }
         act_paid("a.near");
+        c.request_unstake("1".into());
+        act_at("a.near", far + COOLDOWN_NS);
         let _ = c.unstake("1".into());
         assert_eq!(c.seat_count(), 0);
         let total_weight: u128 = (Q4_2026..=target)
@@ -2813,7 +2853,7 @@ mod tests {
         // paid, and once every seat is counted the weights of a finished quarter add up to its seat time less its forfeits.
         #[test]
         fn quarters_conserve_every_unit_and_never_pay_a_claim_twice(
-            ops in proptest::collection::vec((0u8..9, 0u32..5, 0u32..3, 1u64..40), 1..90)
+            ops in proptest::collection::vec((0u8..10, 0u32..5, 0u32..3, 1u64..40), 1..90)
         ) {
             let mut c = council();
             let mut staked: BTreeMap<u32, u32> = BTreeMap::new();
@@ -2821,6 +2861,8 @@ mod tests {
             let mut paid_keys: BTreeSet<(u32, u32, u32)> = BTreeSet::new();
             let (mut sent, mut paid, mut sweep, mut case) = (0u128, 0u128, 0u64, 0u64);
             let mut open_cases: Vec<(u64, Vec<AccountId>)> = vec![];
+            // Seats that asked to unstake and stayed, with the time of the request.
+            let mut stayed: BTreeMap<u32, u64> = BTreeMap::new();
             for (op, token, owner, amount) in ops {
                 let (name, who) = (token.to_string(), format!("o{owner}.near"));
                 match op {
@@ -2858,9 +2900,17 @@ mod tests {
                         leave(&mut c, &name, &format!("o{owner_of}.near"));
                         staked.remove(&token);
                     }
+                    9 if staked.contains_key(&token) && !stayed.contains_key(&token) && c.stake_of(name.clone()).is_some_and(|s| s.serving.is_none()) => {
+                        let owner_of = staked[&token];
+                        act_paid(&format!("o{owner_of}.near"));
+                        c.request_unstake(name.clone());
+                        stayed.insert(token, now());
+                    }
                     6 => {
                         let q = c.next_to_finalize;
-                        if now() >= quarter_end(q) + c.close_grace_ns {
+                        let end = quarter_end(q);
+                        let no_early_jury = c.open_juries.keys().next().is_none_or(|drawn| *drawn >= end);
+                        if now() >= end + c.close_grace_ns && (no_early_jury || now() >= end + MAX_CLOSE_GRACE_NS) {
                             act_as("keeper.near");
                             c.advance_quarters(None);
                             if c.last_tick >= quarter_end(q) {
@@ -2902,8 +2952,17 @@ mod tests {
             }
             let tokens: Vec<TokenId> = staked.keys().map(|t| t.to_string()).collect();
             for t in tokens {
-                while c.stake_of(t.clone()).unwrap().booked_to.0 < now() {
+                let until = counted_until(&c.stake_of(t.clone()).unwrap(), now());
+                while c.stake_of(t.clone()).unwrap().booked_to.0 < until {
                     c.book_seat_time(t.clone(), None);
+                }
+            }
+            for (token, requested) in &stayed {
+                prop_assert_eq!(c.earning as usize, staked.len() - stayed.len());
+                for q in quarter_containing(*requested) + 1..=quarter_containing(now()) {
+                    let owner = format!("o{}.near", staked[token]);
+                    let counted = c.seat_weight.get(&(q, token.to_string(), acct(&owner))).copied().unwrap_or(0);
+                    prop_assert_eq!(counted, 0, "a seat that asked to leave kept earning in quarter {}", q);
                 }
             }
             for q in Q4_2026..quarter_containing(now()) {
@@ -2926,6 +2985,129 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- a seat that asked to leave, and a jury still open when a quarter closes ----------------------------------
+
+    #[test]
+    fn a_seat_that_asked_to_leave_earns_only_up_to_its_request() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        set_time(day(10));
+        act_paid("a.near");
+        c.request_unstake("1".into());
+        assert_eq!(c.earning, 1);
+        set_time(day(40));
+        revenue(&mut c, 1, 1_020_000);
+        finalize(&mut c);
+        // Seat 1 never unstakes. It has 10 days of 102, seat 2 has all 92.
+        assert_eq!(c.book(Q4_2026).seat_ns, 102 * u128::from(DAY));
+        assert_eq!(entitlement_of(&c, Q4_2026, "1", "a.near"), 100_000);
+        assert_eq!(entitlement_of(&c, Q4_2026, "2", "b.near"), 920_000);
+        assert_eq!(claim(&mut c, Q4_2026, "1", "a.near"), 100_000);
+        assert_eq!(claim(&mut c, Q4_2026, "2", "b.near"), 920_000);
+    }
+
+    #[test]
+    fn a_leaving_seat_is_paid_nothing_in_the_quarters_after_its_request() {
+        let mut c = council();
+        for (token, owner) in [("1", "a.near"), ("2", "b.near"), ("3", "c.near")] {
+            stake(&mut c, token, owner);
+        }
+        act_paid("a.near");
+        c.request_unstake("1".into());
+        // Three seats are staked and one is leaving, so a jury of three cannot be drawn.
+        act_as(ORACLE);
+        assert_eq!(
+            refusal(|| drop(c.draw(U64(1), 3, vec![]))),
+            "not enough seat holders to draw a jury: 2 eligible, 3 needed"
+        );
+        set_time(quarter_start(Q1_2027) + DAY);
+        revenue(&mut c, 1, 920_000);
+        set_time(quarter_start(Q2_2027) + DAY);
+        finalize(&mut c);
+        finalize(&mut c);
+        assert_eq!(entitlement_of(&c, Q1_2027, "1", "a.near"), 0);
+        assert_eq!(entitlement_of(&c, Q1_2027, "2", "b.near"), 460_000);
+        assert_eq!(entitlement_of(&c, Q1_2027, "3", "c.near"), 460_000);
+        act_paid("a.near");
+        assert_eq!(
+            refusal(|| drop(c.claim_quarter(Q1_2027, "1".into()))),
+            "nothing to claim"
+        );
+    }
+
+    const CASE_DRAWN_BEFORE_END: u64 = 3 * DAY;
+
+    // The reviewer's scenario with a one day grace period: a juror drawn three days before the quarter ends whose case is
+    // still open after the grace.
+    fn a_juror_drawn_before_the_quarter_ends() -> (CouncilContract, AccountId) {
+        let mut c = council();
+        for (token, owner) in [("1", "a.near"), ("2", "b.near"), ("3", "c.near")] {
+            stake(&mut c, token, owner);
+        }
+        act_as(OWNER);
+        c.set_close_grace_ns(U64(MIN_CLOSE_GRACE_NS));
+        set_time(quarter_end(Q4_2026) - CASE_DRAWN_BEFORE_END);
+        act_with_seed(ORACLE, 1);
+        let juror = c.draw(U64(1), 1, vec![]).remove(0);
+        revenue(&mut c, 1, 900_000);
+        (c, juror)
+    }
+
+    #[test]
+    fn a_quarter_waits_for_a_jury_drawn_before_its_end() {
+        let (mut c, juror) = a_juror_drawn_before_the_quarter_ends();
+        set_time(quarter_end(Q4_2026) + MIN_CLOSE_GRACE_NS);
+        assert_eq!(
+            refusal(|| c.finalize_quarter(Q4_2026)),
+            "a jury drawn in this quarter is still open"
+        );
+        // The case ends with the juror silent: the forfeit still lands in the quarter and then it can be finalized.
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![juror]);
+        assert_eq!(c.book(Q4_2026).forfeit_ns, u128::from(CASE_DRAWN_BEFORE_END));
+        c.finalize_quarter(Q4_2026);
+        assert_eq!(c.next_to_finalize, Q1_2027);
+        assert!(c.open_juries.is_empty());
+    }
+
+    #[test]
+    fn a_lost_release_cannot_hold_a_quarter_past_the_longest_grace() {
+        let (mut c, _) = a_juror_drawn_before_the_quarter_ends();
+        set_time(quarter_end(Q4_2026) + MAX_CLOSE_GRACE_NS - 1);
+        assert_eq!(
+            refusal(|| c.finalize_quarter(Q4_2026)),
+            "a jury drawn in this quarter is still open"
+        );
+        set_time(quarter_end(Q4_2026) + MAX_CLOSE_GRACE_NS);
+        c.finalize_quarter(Q4_2026);
+        assert_eq!(c.next_to_finalize, Q1_2027);
+    }
+
+    #[test]
+    fn a_jury_drawn_after_the_quarter_ends_does_not_hold_it() {
+        let (mut c, _) = a_juror_drawn_before_the_quarter_ends();
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![]);
+        set_time(quarter_end(Q4_2026) + 1);
+        act_with_seed(ORACLE, 2);
+        c.draw(U64(2), 1, vec![]);
+        set_time(quarter_end(Q4_2026) + MIN_CLOSE_GRACE_NS);
+        c.finalize_quarter(Q4_2026);
+        assert_eq!(c.next_to_finalize, Q1_2027);
+    }
+
+    #[test]
+    fn releasing_a_case_twice_closes_it_once() {
+        let (mut c, _) = a_juror_drawn_before_the_quarter_ends();
+        act_with_seed(ORACLE, 3);
+        c.draw(U64(2), 1, vec![]);
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![]);
+        c.unlock_case(U64(1), vec![]);
+        assert_eq!(c.open_juries.values().sum::<u32>(), 1);
     }
 
     // ---- attacks: economics -------------------------------------------------------------------------

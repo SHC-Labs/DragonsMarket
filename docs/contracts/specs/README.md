@@ -330,7 +330,7 @@ Each has a recommended default. A default is what to build if the owner does not
 | --- | --- | --- | --- | --- |
 | OD-01 | DECIDED 2026-10-21. Enforced delay for owner actions | None, only the voting period. A minimal timelock account as owner | Decided: none. The voting period is the only delay, and no timelock account will be built. Cap value at launch. The documents that promised a delay were rewritten | Closed |
 | OD-02 | Quarter definition | UTC calendar quarters. Quarters from the launch date | UTC calendar quarters | P4 |
-| OD-03 | Does a seat in its unstake cooldown still earn | Yes until unstaked. No from the request | Yes. The cooldown protects jury integrity, not revenue | P4 |
+| OD-03 | REVERSED 2026-10-22. Does a seat in its unstake cooldown still earn | Yes until unstaked. No from the request | No. A seat's time stops at its request. Reason: the outside review found that a seat could ask to leave, never unstake, and be paid like a serving seat while never being drawn | Closed |
 | OD-04 | Claim window and unclaimed amounts | Stay claimable, no expiry. Expire to a later pool. Expire to the treasury | No expiry. Claimable from 7 days after the quarter ends | P4 |
 | OD-05 | What a silent juror forfeits | Seat time of the serving span, in quarters not yet final. Revenue as today | Seat time, with a 7 day close grace | P4 |
 | OD-06 | Who may send revenue to the Council | The market only, with sweep ids. Anyone | The market only | P3 and P4 |
@@ -346,6 +346,8 @@ Each has a recommended default. A default is what to build if the owner does not
 | OD-16 | Keeper hosting, keys and who is paged | One host and one person. Two hosts | One host and a second person for pages | P6 |
 | OD-17 | How to test a quarter | Unit tests with controlled time and a patched sandbox state. A shorter quarter in a test-only build | Unit tests and patched state. No test-only constant in the shipped wasm (the audit rejected it) | P4 |
 | OD-18 | The 1Click route | Recipient type, refund type and minimums are not yet measured | Measure one real route before the funding screen ships | P9 |
+
+**Third review changes (2026-10-22).** Oracle: a dispute in which no jury was seated in either round settles as `no_jury`, and each party gets their own bond back (the old half-bond split stays for a seated jury that did not decide). Market: `set_paused` no longer blocks `sell`, the owner-only `set_sells_paused` does, and `sweep_fees` refuses within an hour of the last sweep (`MIN_SWEEP_INTERVAL_NS`).
 
 ---
 

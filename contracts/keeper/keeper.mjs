@@ -266,9 +266,9 @@ export function secondJurySize(jurySize) {
 export function juryProblems({ jurySize, holders }) {
   const second = secondJurySize(jurySize);
   const needed = jurySize + second + 2;
-  if (holders < jurySize) return [`only ${holders} different seat holders for a jury of ${jurySize}: every draw will fail and every dispute will end Void`];
-  if (holders < jurySize + 2) return [`${holders} different seat holders for a jury of ${jurySize}: a dispute whose proposer and challenger both hold seats cannot be drawn, so ${jurySize + 2} are needed to be safe`];
-  if (holders < needed) return [`${holders} different seat holders for a jury of ${jurySize}: a first jury that does not decide cannot escalate, because the second jury of ${second} leaves out the first ${jurySize}, the proposer and the challenger, so ${needed} are needed (${jurySize} + ${second} + 2). Until then such a dispute is not decided by a second jury`];
+  if (holders < jurySize) return [`only ${holders} drawable seat holders for a jury of ${jurySize}: every draw will fail and every dispute will end Void`];
+  if (holders < jurySize + 2) return [`${holders} drawable seat holders for a jury of ${jurySize}: a dispute whose proposer and challenger both hold seats cannot be drawn, so ${jurySize + 2} are needed to be safe`];
+  if (holders < needed) return [`${holders} drawable seat holders for a jury of ${jurySize}: a first jury that does not decide cannot escalate, because the second jury of ${second} leaves out the first ${jurySize}, the proposer and the challenger, so ${needed} are needed (${jurySize} + ${second} + 2). Until then such a dispute is not decided by a second jury`];
   return [];
 }
 
@@ -403,15 +403,20 @@ export function councilFloor(totals) {
   return BigInt(totals.total_received) - BigInt(totals.total_paid) - BigInt(totals.pending_claims);
 }
 
-// The floor at one block, and the owners of the seats.
+// The accounts a draw can pick from: those with a seat that is neither serving on a case nor asking to leave.
+export function drawableHolders(stakes) {
+  return new Set(stakes.filter((stake) => stake.unlock_requested_at == null && stake.serving == null).map((stake) => stake.owner));
+}
+
+// The floor at one block, and the owners of the drawable seats.
 async function councilBooks(opts, at) {
-  const owners = new Set();
+  const stakes = [];
   for (let from = 0; ; from += PAGE) {
     const tokens = await view(opts.rpc, opts.council, "staked_tokens", { from_index: from, limit: PAGE }, at);
-    for (const token_id of tokens) owners.add((await view(opts.rpc, opts.council, "stake_of", { token_id }, at)).owner);
+    for (const token_id of tokens) stakes.push(await view(opts.rpc, opts.council, "stake_of", { token_id }, at));
     if (tokens.length < PAGE) break;
   }
-  return { owed: councilFloor(await view(opts.rpc, opts.council, "reward_totals", {}, at)), owners };
+  return { owed: councilFloor(await view(opts.rpc, opts.council, "reward_totals", {}, at)), owners: drawableHolders(stakes) };
 }
 
 // Open proposals of the DAO, newest page first, until a page whose newest proposal is past its voting period.
@@ -453,7 +458,7 @@ async function check(opts) {
 
   const problems = juryProblems({ jurySize: oracle.jury_size, holders: owners.size });
   if (oracle.publishers.length < oracle.price_threshold) problems.push(`${oracle.publishers.length} price publishers but ${oracle.price_threshold} must sign: no price market can open`);
-  console.log(`jury size ${oracle.jury_size} then ${secondJurySize(oracle.jury_size)}, ${owners.size} different seat holders, ${oracle.publishers.length} publishers (${oracle.price_threshold} must sign)`);
+  console.log(`jury size ${oracle.jury_size} then ${secondJurySize(oracle.jury_size)}, ${owners.size} drawable seat holders, ${oracle.publishers.length} publishers (${oracle.price_threshold} must sign)`);
   for (const name of CONTRACTS) {
     console.log(books[name].line);
     if (books[name].problem) problems.push(books[name].problem);

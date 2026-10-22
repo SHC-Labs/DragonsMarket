@@ -65,6 +65,7 @@ const SAMPLES = {
     set_create_fee: { create_fee: "1000000" },
     reconcile_leg: { sweep_id: "3", leg: "council", arrived: true },
     set_paused: { paused: true },
+    set_sells_paused: { sells_paused: true },
     halt: { market_id: "3", reason: "the source is down" },
     resume: { market_id: "3" },
     claim_residual: { market_id: "3" },

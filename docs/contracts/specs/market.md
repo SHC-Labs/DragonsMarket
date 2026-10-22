@@ -143,7 +143,9 @@ All EXISTING (`lib.rs:260-306`) except where marked.
 | `oracle` | `AccountId` | Only caller of `set_outcome` |
 | `verifier` | `AccountId` | Only caller of `mt_on_transfer` |
 | `collateral_token_id` | `String` | Exact `nep141:<contract>` string |
-| `paused` | `bool` | Stops deposits, buys, seeds, new markets. Never stops `withdraw` or `redeem` |
+| `paused` | `bool` | Stops deposits, buys, seeds, new markets. Never stops `sell`, `withdraw` or `redeem` |
+| `sells_paused` | `bool` | Owner only (`set_sells_paused`, event `sells_paused`). Stops `sell` (`sells are paused`). Added 2026-10-22 |
+| `last_sweep_at` | `Option<u64>` | When the last sweep ran. `sweep_fees` refuses within `MIN_SWEEP_INTERVAL_NS` (1 hour) of it: `wait an hour since the last sweep`. Added 2026-10-22 |
 | `fee_rate_bps` | `u128` | Trade fee rate, at most 500 |
 | `create_fee` | `u128` | Creation fee taken from the seed, at most 10,000,000 |
 | `next_market_id` | `u64` | Next id |
@@ -245,7 +247,7 @@ Gas floors are the attached gas the contract itself refuses to run below. Where 
 | `on_registered` (`:576`) | The account itself | `market_id: U64` | none | none | 10 TGas | Marks the market registered when the oracle accepted it | `market_registered` |
 | `halt` (`:587`) | Operator or owner | `market_id: U64`, `reason: String` | none | none | none | Stops trading. The operator cannot halt in the last 24 hours before close, or after close. Refuses a resolved market | `market_halted` |
 | `resume` (`:605`) | Operator or owner | `market_id: U64` | none | none | none | Lifts a halt. Refuses a resolved market | `market_resumed` |
-| `set_paused` (`:616`) | Operator or owner | `paused: bool` | none | none | none | Stops deposits, buys, seeds and market creation | `paused` |
+| `set_paused` (`:616`) | Operator or owner | `paused: bool` | none | none | none | Stops deposits, buys, seeds and market creation. Not `sell` | `paused` |
 | `claim_residual` (`:651`) | Operator or owner | `market_id: U64` | none | none | none | After resolution, moves what the pool holds beyond what holders are owed into the internal balance of `business_wallet`. Once per market. Refuses an unresolved market and a second claim | `residual_claimed` |
 | `set_outcome` (`:674`) | Oracle | `market_id: U64`, `outcome: Outcome` | none | none | 20 TGas reserved by the oracle | Records `yes`, `no` or `void`. Repeating the same answer does nothing. Refuses before close and a different answer | `outcome_set` |
 | `void_if_unresolved` (`:695`) | Anyone | `market_id: U64` | none | none | none | Voids a market 7 days after `resolve_by` when the oracle never answered. Void pays the closing price | `outcome_set` with `by: "deadline"` |
