@@ -318,7 +318,7 @@ async fn the_keeper_sweeps_fees_once_they_reach_the_minimum_with_keys_scoped_to_
         "the sweep paid everything out: {left} {revenue_due} {business_due}"
     );
     assert!(
-        ft_balance(&w, w.business.id()).await >= collected * 3 / 4 - 1,
+        holdings(&w, w.business.id()).await >= collected * 3 / 4 - 1,
         "the business wallet got its 75%"
     );
 
@@ -407,14 +407,15 @@ async fn the_deploy_check_reports_whether_the_council_can_seat_a_jury_and_a_seco
 #[tokio::test]
 async fn the_deploy_check_reports_what_each_account_has_left_after_storage_and_warns_under_the_margin(
 ) -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
-    let governance = g.contract.id().to_string();
-    let (out, _) = keeper(&w, &["check", "--governance", &governance]).await;
+    let w = setup().await?;
+    let treasury = w.worker.dev_create_account().await?;
+    let treasury_id = treasury.id().to_string();
+    let (out, _) = keeper(&w, &["check", "--treasury", &treasury_id]).await;
     for (name, id) in [
         ("market", w.market.id()),
         ("oracle", w.oracle.id()),
         ("council", w.council.id()),
-        ("governance", g.contract.id()),
+        ("treasury", treasury.id()),
     ] {
         let line = out
             .lines()
@@ -431,17 +432,223 @@ async fn the_deploy_check_reports_what_each_account_has_left_after_storage_and_w
     );
 
     // The same accounts under a margin no sandbox account has: each one is a problem.
-    let (out, ok) = keeper(&w, &["check", "--governance", &governance, "--min-margin", "1000"]).await;
+    let (out, ok) = keeper(&w, &["check", "--treasury", &treasury_id, "--min-margin", "1000"]).await;
     assert!(!ok, "{out}");
-    for name in ["market", "oracle", "council", "governance"] {
+    for name in ["market", "oracle", "council", "treasury"] {
         assert!(
             out.contains(&format!("PROBLEM: {name} ")) && out.contains("under the 1000.000 NEAR margin"),
             "{name} missing from:\n{out}"
         );
     }
 
-    // Without --governance only the three accounts are reported.
+    // Without --treasury only the three accounts are reported.
     let (out, _) = keeper(&w, &["check"]).await;
-    assert!(!out.contains("governance "), "{out}");
+    assert!(!out.contains("treasury "), "{out}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_deploy_check_reconciles_the_oracle_with_what_the_verifier_holds_for_it() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let (out, _) = keeper(&w, &["check"]).await;
+    assert!(out.contains("oracle owes 0 and holds 0 in the verifier\n"), "{out}");
+
+    let id = create_seeded_market(&w, 120).await?;
+    skip_secs(&w.worker, 130).await;
+    propose(&w, &w.carol, id, "yes").await?;
+    let (out, _) = keeper(&w, &["check"]).await;
+    assert!(
+        out.contains(&format!("oracle owes {BOND} and holds {BOND} in the verifier\n")),
+        "{out}"
+    );
+
+    // A plain deposit to the oracle's account is credited to nobody: the verifier holds more than the oracle owes, which is not a
+    // problem.
+    w.carol
+        .call(w.ft.id(), "ft_transfer_call")
+        .args_json(json!({ "receiver_id": w.verifier.id(), "amount": (3 * USD).to_string(), "msg": w.oracle.id() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    let (out, _) = keeper(&w, &["check"]).await;
+    assert!(
+        out.contains(&format!(
+            "oracle owes {BOND} and holds {} in the verifier, {} more than it owes",
+            BOND + 3 * USD,
+            3 * USD
+        )),
+        "{out}"
+    );
+    assert!(!out.contains("PROBLEM: the oracle owes"), "{out}");
+    Ok(())
+}
+
+// The text after `prefix` on the line that starts with it, split at the words that separate the two figures.
+fn books_of(out: &str, prefix: &str) -> (u128, u128) {
+    let line = out
+        .lines()
+        .find(|l| l.starts_with(prefix))
+        .unwrap_or_else(|| panic!("no line starting {prefix:?} in:\n{out}"));
+    let rest = &line[prefix.len()..];
+    let (owed, held) = rest.split_once(" and holds ").unwrap();
+    let held = held.split(" in the verifier").next().unwrap();
+    (owed.parse().unwrap(), held.parse().unwrap())
+}
+
+#[tokio::test]
+async fn the_deploy_check_reconciles_all_three_contracts_and_reads_what_the_verifier_says_about_each(
+) -> anyhow::Result<()> {
+    let w = setup().await?;
+    let (out, _) = keeper(&w, &["check"]).await;
+    for line in [
+        "market owes 0 and holds 0 in the verifier\n",
+        "oracle owes 0 and holds 0 in the verifier\n",
+        "council owes at least 0 and holds 0 in the verifier\n",
+        "no keys registered, predecessor authentication on, not locked and mt_transfer running for the market, oracle and council\n",
+        "access keys: market 1, oracle 1, council 1\n",
+    ] {
+        assert!(out.contains(line), "{line:?} missing from:\n{out}");
+    }
+    assert!(
+        !out.contains("is locked") && !out.contains("paused") && !out.contains("public key"),
+        "{out}"
+    );
+
+    // Money in all three: a market with a trade, a bond in the oracle, and a sweep that sends the Council its 25%.
+    let id = create_seeded_market(&w, 120).await?;
+    buy(&w, &w.alice, id, "yes", 100 * USD).await?;
+    skip_secs(&w.worker, 130).await;
+    propose(&w, &w.carol, id, "yes").await?;
+    w.carol
+        .call(w.market.id(), "sweep_fees")
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    // Long enough for the stream to have released some to the five seats, so what they have earned is part of the sum.
+    skip_secs(&w.worker, 600).await;
+    let (out, _) = keeper(&w, &["check"]).await;
+    let (owed, held) = books_of(&out, "market owes ");
+    assert!(owed > 0 && owed == held, "{out}");
+    assert_eq!(books_of(&out, "oracle owes "), (BOND, BOND), "{out}");
+    let (floor, held) = books_of(&out, "council owes at least ");
+    assert!(
+        held > 0 && floor <= held && held - floor <= 6,
+        "the Council holds what the seats and the stream are owed, less one unit of rounding for each of the five seats and the stream: {floor} {held}\n{out}"
+    );
+    assert!(!out.contains("PROBLEM: the"), "{out}");
+
+    // The verifier locks the market: it can still be paid and cannot pay.
+    lock_account(&w, w.market.id()).await?;
+    let (out, ok) = keeper(&w, &["check"]).await;
+    assert!(
+        !ok && out.contains(&format!("PROBLEM: market {} is locked in the verifier", w.market.id())),
+        "{out}"
+    );
+    unlock_account(&w, w.market.id()).await?;
+
+    // The verifier pauses transfers: every payout fails. Its views keep working, so the books are still read.
+    pause_transfers(&w).await?;
+    let (out, ok) = keeper(&w, &["check"]).await;
+    assert!(
+        !ok && out.contains(&format!(
+            "PROBLEM: the verifier {} has mt_transfer paused",
+            w.verifier.id()
+        )),
+        "{out}"
+    );
+    assert!(out.contains("market owes "), "{out}");
+    unpause_transfers(&w).await?;
+
+    // A key registered in the verifier under the Council's account could move its funds.
+    let key = SecretKey::from_random(KeyType::ED25519).public_key();
+    w.council
+        .as_account()
+        .call(w.verifier.id(), "add_public_key")
+        .args_json(json!({ "public_key": key }))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+    let (out, ok) = keeper(&w, &["check"]).await;
+    assert!(
+        !ok && out.contains(&format!(
+            "PROBLEM: council {} has 1 public key registered in the verifier",
+            w.council.id()
+        )),
+        "{out}"
+    );
+
+    // Access keys are a problem only when the contracts are expected to be sealed.
+    assert!(!out.contains("still has"), "{out}");
+    let (out, _) = keeper(&w, &["check", "--expect-sealed"]).await;
+    for (name, who) in [
+        ("market", w.market.id()),
+        ("oracle", w.oracle.id()),
+        ("council", w.council.id()),
+    ] {
+        assert!(
+            out.contains(&format!(
+                "PROBLEM: {name} {who} still has 1 access key: the owner has not sealed it"
+            )),
+            "{out}"
+        );
+    }
+
+    // The oracle turns off authentication by its predecessor in the verifier, and its own payout calls would be refused.
+    w.oracle
+        .as_account()
+        .call(w.verifier.id(), "disable_auth_by_predecessor_id")
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+    let (out, ok) = keeper(&w, &["check"]).await;
+    assert!(
+        !ok && out.contains(&format!(
+            "PROBLEM: oracle {} does not authenticate by predecessor in the verifier",
+            w.oracle.id()
+        )),
+        "{out}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_deploy_check_reports_money_missing_from_the_verifier_only_after_reading_again() -> anyhow::Result<()> {
+    let w = setup().await?;
+    create_seeded_market(&w, 120).await?;
+    let (owed, held) = books_of(&keeper(&w, &["check"]).await.0, "market owes ");
+    assert!(owed > 0 && owed == held);
+
+    // The market's own key takes one unit out of its verifier account without touching its books: the shortfall a deployer
+    // key could cause, and what sealing exists to prevent.
+    w.market
+        .as_account()
+        .call(w.verifier.id(), "mt_transfer")
+        .args_json(json!({ "receiver_id": w.alice.id(), "token_id": token_id(&w), "amount": "1" }))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+    let started = std::time::Instant::now();
+    let (out, ok) = keeper(&w, &["check"]).await;
+    assert!(
+        !ok && out.contains(&format!(
+            "PROBLEM: the market owes {owed} but the verifier holds only {} for it: 1 is missing",
+            owed - 1
+        )),
+        "{out}"
+    );
+    assert!(
+        started.elapsed() > std::time::Duration::from_secs(2),
+        "a shortfall is read again some blocks later before it is reported"
+    );
+    assert!(
+        !out.contains("PROBLEM: the oracle") && !out.contains("PROBLEM: the council"),
+        "{out}"
+    );
     Ok(())
 }

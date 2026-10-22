@@ -3,7 +3,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { MarketCard } from "./MarketCard";
 import { ArrowDown } from "./icons";
 import type { MarketView } from "@/lib/market";
-import type { Pt } from "./PriceChart";
+import type { Pt } from "@/lib/history";
 export function MarketGrid({markets,stages,histories}:{markets:MarketView[];stages:Record<string,string|null>;histories:Record<string,Pt[]>}) {
  const ref=useRef<HTMLDivElement>(null);const[columns,setColumns]=useState(4);const[batches,setBatches]=useState(1);
  // Measured before the first paint, so the grid never shows a frame at the wrong column count.

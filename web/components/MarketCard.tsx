@@ -5,7 +5,7 @@ import { useState, ViewTransition } from "react";
 import { Star, Share2 } from "@/components/icons";
 import { useWallet } from "./WalletProvider";
 import { useWatchlist } from "@/lib/watchlist";
-import { type Pt } from "./PriceChart";
+import type { Pt } from "@/lib/history";
 import { SplitMeter, StateBadge } from "./ui";
 import { MarketIcon } from "./MarketIcon";
 import { labelOf } from "@/lib/categories";
@@ -76,7 +76,7 @@ export function MarketCard({ market: m, stage, index }: { market: MarketView; st
         ) : (
           <div className="market-card-waiting">
             <span className="market-card-waiting-icon" aria-hidden="true" />
-            <p>Trading stopped. {stage === "disputed" ? "The Council is deciding." : stage === "proposed" ? "An answer is waiting for a challenge." : "Waiting for an answer."}</p>
+            <p>Trading stopped. {stage === "disputed" ? "The Council is deciding." : stage === "proposed" ? "An answer has been proposed." : "Waiting for an answer."}</p>
           </div>
         )}
       </div>

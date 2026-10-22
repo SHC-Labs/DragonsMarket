@@ -50,6 +50,6 @@ export function TradeTicket({ market, initialSide = "yes" }: { market: MarketVie
       <div><dt>Fee</dt><dd>Not available yet</dd></div>
     </dl>
     <Button size="lg" disabled aria-describedby="trading-status"><Lock size={17} />Trading coming soon</Button>
-    <p id="trading-status" className="ticket-note">Trading isn’t open yet. Prices, fees and order confirmation will be available here when it opens.</p>
+    <p id="trading-status" className="ticket-note">Trading isn’t open yet. When it opens, you’ll see prices and fees here before confirming an order.</p>
   </aside>;
 }

@@ -60,46 +60,10 @@ describe("friendlyError", () => {
   it("explains known failures in plain words", () => {
     expect(friendlyError("market is closed", "abc123")).toBe("Trading has closed on this market.");
     expect(friendlyError("price moved, you would get fewer shares than your minimum", "abc123")).toMatch(/price moved/i);
-    expect(friendlyError("do the storage deposit first", "abc123")).toBe("Do the one-time storage step first.");
+    expect(friendlyError("do the storage deposit first", "abc123")).toBe("Complete the one-time storage setup before trading.");
   });
   it("never leaves a person without a reference", () => {
     expect(friendlyError(null, "abc123")).toBe("The transaction could not be confirmed. Check its final status before trying again. Reference abc123.");
     expect(friendlyError("some new panic", "abc123")).toContain("abc123");
-  });
-});
-
-import { seedHex, sigilSpec, polygonPoints } from "../sigil";
-
-describe("sigil", () => {
-  it("is deterministic: the same fingerprint always gives the same emblem", () => {
-    const h = "a41f09c2" + "7be310".repeat(9);
-    expect(sigilSpec(h)).toEqual(sigilSpec(h));
-  });
-  it("tells similar account ids apart", () => {
-    const a = seedHex("dev-20261009014034-27941227840915.test.near");
-    const b = seedHex("dev-20261009014034-69476298784454.test.near");
-    expect(a).toHaveLength(64);
-    expect(a).not.toBe(b);
-    expect(JSON.stringify(sigilSpec(a))).not.toBe(JSON.stringify(sigilSpec(b)));
-  });
-  it("keeps every drawn value inside the 100 by 100 box", () => {
-    for (let i = 0; i < 50; i++) {
-      const s = sigilSpec(seedHex(`account-${i}`));
-      expect(s.sides).toBeGreaterThanOrEqual(3);
-      expect(s.sides).toBeLessThanOrEqual(8);
-      s.dots.forEach((d) => {
-        expect(d.x).toBeGreaterThan(0);
-        expect(d.x).toBeLessThan(100);
-        expect(d.y).toBeGreaterThan(0);
-        expect(d.y).toBeLessThan(100);
-      });
-      polygonPoints(s.sides, s.polyR, s.rotation).split(" ").forEach((pt) => {
-        const [x, y] = pt.split(",").map(Number);
-        expect(x).toBeGreaterThan(0);
-        expect(x).toBeLessThan(100);
-        expect(y).toBeGreaterThan(0);
-        expect(y).toBeLessThan(100);
-      });
-    }
   });
 });

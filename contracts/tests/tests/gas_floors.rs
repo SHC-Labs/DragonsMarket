@@ -26,6 +26,11 @@ fn burned_by(r: &ExecutionFinalResult, contract: &near_workspaces::AccountId) ->
         .fold(0.0, f64::max)
 }
 
+async fn council_total_received(w: &World) -> u128 {
+    let t: String = w.council.view("total_received").await.unwrap().json().unwrap();
+    t.parse().unwrap()
+}
+
 async fn more_jurors(w: &World, n: usize) -> anyhow::Result<Vec<Account>> {
     let mut all: Vec<Account> = w.jurors.clone();
     while all.len() < n {
@@ -292,22 +297,30 @@ async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_w
             .transact()
     };
     refused(
-        sweep_with(94).await?.into_result(),
-        "attach at least 95 TGas: a sweep sends the Council its part and the business wallet its part",
+        sweep_with(86).await?.into_result(),
+        "attach at least 87 TGas: a sweep sends the Council its part and the business wallet its part",
     );
     assert_eq!(fees(&w).await.0, CREATE_FEE + 95_193, "a refused sweep changed nothing");
-    let r = sweep_with(95).await?;
+    let r = sweep_with(87).await?;
     assert_clean("sweep_fees at its floor", &r);
     println!(
-        "sweep_fees: floor 95, market burnt {:.1} TGas, {} TGas in all",
+        "sweep_fees: floor 87, market burnt {:.1} TGas, {} TGas in all",
         burned_by(&r, w.market.id()),
         r.total_gas_burnt.as_tgas()
     );
     assert_eq!(fees(&w).await, (1, 0, 0));
-    assert_eq!(ft_balance(&w, w.business.id()).await, 821_394);
+    assert_eq!(
+        intents_balance(&w, w.business.id()).await,
+        821_394,
+        "the business share arrived at the floor"
+    );
+    assert_eq!(
+        council_total_received(&w).await,
+        273_798,
+        "and so did the Council's, so its receipt got the gas it needs at the floor"
+    );
 
     let j = &w.jurors[0];
-    register_ft(&w, j.id()).await?;
     let token = j.id().to_string();
     send_revenue(&w, 100 * USD).await?;
     skip_secs(&w.worker, 20).await;
@@ -329,7 +342,7 @@ async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_w
         burned_by(&r, w.council.id()),
         r.total_gas_burnt.as_tgas()
     );
-    assert!(ft_balance(&w, j.id()).await > 0);
+    assert!(holdings(&w, j.id()).await > 0);
 
     request_unstake(&w, j, &token).await?;
     skip_secs(&w.worker, COOLDOWN_SECS + 1).await;
@@ -376,5 +389,227 @@ async fn the_deadline_answer_refuses_less_than_the_settling_floor() -> anyhow::R
     assert_eq!(market_json(&w, id).await["outcome"], serde_json::Value::Null);
     assert_clean("resolve_by_deadline at its floor", &call(80).await?);
     assert_eq!(market_json(&w, id).await["outcome"], "void");
+    Ok(())
+}
+
+// A bond withdrawal sends the payout and then settles it. Its floor is what it reserves for those, 15 TGas for the verifier's
+// mt_transfer and 10 for the callback, and 8 for its own work.
+#[tokio::test]
+async fn a_bond_withdrawal_refuses_less_than_its_floor_and_works_with_exactly_that() -> anyhow::Result<()> {
+    const PAYOUT_RESERVE_TGAS: f64 = 15.0;
+    let w = setup().await?;
+    let id = create_seeded_market(&w, 120).await?;
+    skip_secs(&w.worker, 130).await;
+    propose(&w, &w.carol, id, "yes").await?;
+    skip_secs(&w.worker, 70).await;
+    finalize(&w, id).await?;
+    assert_eq!(claimable(&w, w.carol.id()).await, BOND);
+
+    let withdraw_with = |tgas: u64| {
+        w.carol
+            .call(w.oracle.id(), "withdraw_bond")
+            .deposit(NearToken::from_yoctonear(1))
+            .gas(Gas::from_tgas(tgas))
+            .transact()
+    };
+    refused(
+        withdraw_with(32).await?.into_result(),
+        "attach at least 33 TGas: a withdrawal sends the payout and then settles it",
+    );
+    assert_eq!(
+        claimable(&w, w.carol.id()).await,
+        BOND,
+        "a refused withdrawal changed nothing"
+    );
+    let before = intents_balance(&w, w.carol.id()).await;
+    let r = withdraw_with(33).await?;
+    assert_clean("withdraw_bond at its floor", &r);
+    let verifier_burnt = burned_by(&r, w.verifier.id());
+    println!(
+        "withdraw_bond: floor 33, oracle burnt {:.1} TGas, verifier burnt {verifier_burnt:.1} against a reserve of {PAYOUT_RESERVE_TGAS}, {} TGas in all",
+        burned_by(&r, w.oracle.id()),
+        r.total_gas_burnt.as_tgas()
+    );
+    assert_eq!(claimable(&w, w.carol.id()).await, 0);
+    assert_eq!(
+        intents_balance(&w, w.carol.id()).await - before,
+        BOND,
+        "the payout arrived at the floor"
+    );
+    assert!(
+        verifier_burnt < PAYOUT_RESERVE_TGAS / 2.0,
+        "a payout burns well under what is reserved for it"
+    );
+    assert_oracle_reconciled(&w).await;
+    Ok(())
+}
+
+// What a wallet has to attach for a bond to get through the verifier into the oracle, measured against the real verifier: the least
+// gas at which the oracle opens the case, for a proposal and for a challenge. The verifier keeps about 21 TGas for itself, the rest
+// is the oracle's receipt. The oracle enforces no floor here: a call that runs short fails in the oracle and the verifier refunds it.
+#[tokio::test]
+async fn a_bond_gets_through_the_verifier_into_the_oracle_with_what_a_wallet_attaches() -> anyhow::Result<()> {
+    const WALLET_TGAS: u64 = 100;
+    let gases = [20u64, 21, 22, 23, 24, 25, 26, 28, 30, 35, 40, 60, WALLET_TGAS];
+    let w = setup_with(600_000, PANEL_MS, DRAW_DELAY_BLOCKS).await?;
+    for who in [&w.carol, &w.dave] {
+        mint(&w, who.id(), 500 * USD).await?;
+        deposit_to_intents(&w, who, who.id(), 200 * USD).await?;
+    }
+    let mut markets = vec![];
+    for _ in gases {
+        markets.push(create_market(&w, 150, 3_600).await?);
+    }
+    let last_close = u(&market_json(&w, *markets.last().unwrap()).await["close_at"]);
+    skip_until(&w, (last_close + 1_000_000_000) as u64).await;
+
+    let attempt = |who: &Account, tgas: u64, msg: String| {
+        let (verifier, who, receiver, token) = (
+            w.verifier.id().clone(),
+            who.clone(),
+            w.oracle.id().clone(),
+            token_id(&w),
+        );
+        async move {
+            who.call(&verifier, "mt_transfer_call")
+                .args_json(json!({
+                    "receiver_id": receiver, "token_id": token, "amount": BOND.to_string(), "msg": msg
+                }))
+                .deposit(NearToken::from_yoctonear(1))
+                .gas(Gas::from_tgas(tgas))
+                .transact()
+                .await
+        }
+    };
+    let mut least_propose = None;
+    for (tgas, id) in gases.iter().zip(&markets) {
+        let r = attempt(
+            &w.carol,
+            *tgas,
+            format!("propose:{id}:yes:https://example.com/evidence"),
+        )
+        .await?;
+        let opened = !case_json(&w, *id).await.is_null();
+        println!(
+            "propose with {tgas} TGas: tx {}, case opened: {opened}, oracle burnt {:.1} TGas, {} TGas in all",
+            if r.is_success() { "ok" } else { "failed" },
+            burned_by(&r, w.oracle.id()),
+            r.total_gas_burnt.as_tgas()
+        );
+        if opened && least_propose.is_none() {
+            least_propose = Some(*tgas);
+        }
+        assert_oracle_reconciled(&w).await;
+    }
+    let mut least_challenge = None;
+    for (tgas, id) in gases.iter().zip(&markets) {
+        if case_json(&w, *id).await.is_null() {
+            intents_call(
+                &w,
+                &w.carol,
+                w.oracle.id(),
+                BOND,
+                &format!("propose:{id}:yes:https://x"),
+            )
+            .await?
+            .into_result()?;
+        }
+        let r = attempt(&w.dave, *tgas, format!("challenge:{id}:no")).await?;
+        let opened = case_json(&w, *id).await["stage"] == "disputed";
+        println!(
+            "challenge with {tgas} TGas: tx {}, challenged: {opened}, oracle burnt {:.1} TGas, {} TGas in all",
+            if r.is_success() { "ok" } else { "failed" },
+            burned_by(&r, w.oracle.id()),
+            r.total_gas_burnt.as_tgas()
+        );
+        if opened && least_challenge.is_none() {
+            least_challenge = Some(*tgas);
+        }
+        assert_oracle_reconciled(&w).await;
+    }
+    let (least_propose, least_challenge) = (
+        least_propose.expect("a proposal gets through with some amount of gas"),
+        least_challenge.expect("a challenge gets through with some amount of gas"),
+    );
+    println!("least gas that worked: propose {least_propose} TGas, challenge {least_challenge} TGas, a wallet attaches {WALLET_TGAS}");
+    assert!(
+        least_propose < WALLET_TGAS && least_challenge < WALLET_TGAS,
+        "the wallet default of {WALLET_TGAS} TGas leaves room"
+    );
+    Ok(())
+}
+
+// How much gas the verifier calls need, measured: the least a mt_transfer_call can carry for the Council to take its revenue, and
+// what a payout and a sweep burn against what the contracts reserve for them. The reserves are GAS_MT_TRANSFER (15 TGas) for a
+// payout, and 22 TGas of the verifier's own overhead plus 20 TGas for the Council's receipt for a transfer call.
+#[tokio::test]
+async fn the_gas_the_contracts_reserve_for_the_verifier_covers_what_it_needs() -> anyhow::Result<()> {
+    const PAYOUT_RESERVE_TGAS: f64 = 15.0;
+    const TRANSFER_CALL_RESERVE_TGAS: u64 = 42;
+    let w = setup().await?;
+    let id = create_seeded_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    deposit_to_intents(&w, &w.alice, w.alice.id(), 100 * USD).await?;
+
+    let mut least = None;
+    for tgas in [21u64, 22, 23, 24, 25, 26, 28, 30, 35, TRANSFER_CALL_RESERVE_TGAS, 60] {
+        let before = council_total_received(&w).await;
+        let r = w
+            .alice
+            .call(w.verifier.id(), "mt_transfer_call")
+            .args_json(json!({
+                "receiver_id": w.council.id(), "token_id": token_id(&w), "amount": USD.to_string(), "msg": "revenue"
+            }))
+            .deposit(NearToken::from_yoctonear(1))
+            .gas(Gas::from_tgas(tgas))
+            .transact()
+            .await?;
+        let took = council_total_received(&w).await - before == USD;
+        println!(
+            "mt_transfer_call into the Council with {tgas} TGas: tx {}, Council took it: {took}, council burnt {:.1} TGas",
+            if r.is_success() { "ok" } else { "failed" },
+            burned_by(&r, w.council.id())
+        );
+        if took && least.is_none() {
+            least = Some(tgas);
+        }
+    }
+    let least = least.expect("the Council takes revenue with some amount of gas");
+    println!(
+        "least gas the Council's receipt worked with: {least} TGas, the contracts reserve {TRANSFER_CALL_RESERVE_TGAS}"
+    );
+    assert!(
+        least <= TRANSFER_CALL_RESERVE_TGAS,
+        "the reserve of {TRANSFER_CALL_RESERVE_TGAS} TGas is below the {least} the Council needs"
+    );
+
+    let balance = 3 * USD;
+    w.alice
+        .call(w.market.id(), "storage_deposit")
+        .args_json(json!({}))
+        .deposit(NearToken::from_millinear(50))
+        .transact()
+        .await?
+        .into_result()?;
+    ft_call(&w, &w.alice, w.market.id(), balance, "deposit").await?;
+    let r = w
+        .alice
+        .call(w.market.id(), "withdraw")
+        .args_json(json!({ "amount": balance.to_string() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?;
+    assert_clean("withdraw", &r);
+    let verifier_burnt = burned_by(&r, w.verifier.id());
+    println!(
+        "withdraw: verifier burnt {verifier_burnt:.1} TGas against a reserve of {PAYOUT_RESERVE_TGAS}, market {:.1}, {} TGas in all",
+        burned_by(&r, w.market.id()),
+        r.total_gas_burnt.as_tgas()
+    );
+    assert!(
+        verifier_burnt < PAYOUT_RESERVE_TGAS / 2.0,
+        "a payout burns well under what is reserved for it"
+    );
     Ok(())
 }

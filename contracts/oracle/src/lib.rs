@@ -11,10 +11,12 @@ use near_sdk::serde_json::json;
 use near_sdk::store::LookupMap;
 use near_sdk::{
     assert_one_yocto, env, ext_contract, near, require, AccountId, BorshStorageKey, CurveType, Gas, NearToken,
-    PanicOnDefault, Promise, PromiseError, PromiseOrValue, PublicKey,
+    PanicOnDefault, Promise, PromiseError, PublicKey,
 };
 
-const GAS_FT_TRANSFER: Gas = Gas::from_tgas(15);
+const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+// The verifier burned 3.8 TGas for a payout from a contract in the sandbox (INTENTS-PROOF.md), so this is a wide margin.
+const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
 const GAS_APPLY: Gas = Gas::from_tgas(20);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
 // Measured against the Council's seat cap; see the note on CouncilContract.
@@ -40,10 +42,17 @@ const GAS_DRAW_FLOOR: Gas = Gas::from_gas(GAS_DRAW.as_gas() + GAS_DRAWN.as_gas()
 // floor leaves each one the 15 that settle gives it.
 const GAS_RETRY_UNLOCK_OVERHEAD: Gas = Gas::from_tgas(5);
 const GAS_RETRY_UNLOCK_FLOOR: Gas = Gas::from_gas(2 * GAS_UNLOCK.as_gas() + GAS_RETRY_UNLOCK_OVERHEAD.as_gas());
+// A bond withdrawal sends the payout and then settles it, and burns about 3 TGas itself. 29 TGas was the least that worked in the
+// sandbox.
+const GAS_WITHDRAW_OVERHEAD: Gas = Gas::from_tgas(8);
+const GAS_WITHDRAW_FLOOR: Gas =
+    Gas::from_gas(GAS_MT_TRANSFER.as_gas() + GAS_CALLBACK.as_gas() + GAS_WITHDRAW_OVERHEAD.as_gas());
 const SETTLE_REASON: &str = "a call that settles a case sends the answer to the market and releases the juries";
 const NS_PER_MS: u64 = 1_000_000;
 // The layout of the state below. migrate reads exactly this one and refuses any other.
 const STATE_VERSION: u16 = 1;
+// Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
+const NEP141_PREFIX: &str = "nep141:";
 // Settling a case still takes one more cross-contract hop (apply) to reach the market. This keeps a case that used
 // its full allotted time clear of resolve_by, after which anyone can send the market its deadline answer.
 const APPLY_BUFFER_NS: u64 = 30_000_000_000;
@@ -191,9 +200,17 @@ pub struct Case {
     delinquent: Vec<AccountId>,
 }
 
-#[ext_contract(ext_ft)]
-pub trait FtCore {
-    fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
+// The NEAR Intents verifier. Bonds arrive in this contract's account there, and payouts are sent out of it.
+#[ext_contract(ext_verifier)]
+pub trait Verifier {
+    fn mt_transfer(
+        &mut self,
+        receiver_id: AccountId,
+        token_id: String,
+        amount: U128,
+        approval: Option<(AccountId, u64)>,
+        memo: Option<String>,
+    );
 }
 
 #[ext_contract(ext_market)]
@@ -222,10 +239,12 @@ pub struct OracleContract {
     // Set by propose_owner. Ownership moves only when this account calls accept_owner.
     pending_owner: Option<AccountId>,
     // The fast key for protective changes: it can remove a price publisher at once. Adding one, and changing how many
-    // must agree, stay with the owner, which is governance.
+    // must agree, stay with the owner, which is the DAO.
     operator: AccountId,
     market: AccountId,
-    bond_token: AccountId,
+    // The Intents verifier that holds every bond, and the exact id of the collateral in it, "nep141:<token>".
+    verifier: AccountId,
+    collateral_token_id: String,
     bond: u128,
     window_ns: u64,
     // How long each jury has once it is seated, the commit phase and then the reveal phase.
@@ -243,13 +262,17 @@ pub struct OracleContract {
     // The keys that sign prices, and how many of them must sign the same price for it to count.
     publishers: Vec<PublicKey>,
     price_threshold: u32,
-    // Where the challenger's half bond goes when neither jury decided and no juror revealed. The owner is governance, which
-    // has no use for a token flow, so this is normally the business wallet.
+    // Where the challenger's half bond goes when neither jury decided and no juror revealed. The owner is the DAO, which
+    // takes no part in the token flow, so this is normally the business wallet.
     no_decision_recipient: AccountId,
     markets: LookupMap<u64, MarketInfo>,
     cases: LookupMap<u64, Case>,
     // Bonds waiting to be withdrawn, by account.
     claimable: LookupMap<AccountId, u128>,
+    // The sum of every entry in claimable, and the bonds sitting in cases that are not final: one after a proposal, two
+    // after a challenge. Kept so total_owed can add them up without walking a map.
+    claimable_total: u128,
+    bonds_held: u128,
 }
 
 fn emit(event: &str, data: near_sdk::serde_json::Value) {
@@ -371,7 +394,8 @@ impl OracleContract {
     pub fn new(
         owner_id: AccountId,
         market_contract: AccountId,
-        bond_token: AccountId,
+        verifier_id: AccountId,
+        collateral_token_id: String,
         bond: U128,
         window_ms: U64,
         panel_deadline_ms: U64,
@@ -385,6 +409,10 @@ impl OracleContract {
         price_threshold: u32,
         no_decision_recipient: AccountId,
     ) -> Self {
+        require!(
+            collateral_token_id.starts_with(NEP141_PREFIX),
+            "the collateral token id must look like nep141:<token>"
+        );
         require!(bond.0 > 0, "bond must be positive");
         require!(
             !network.is_empty() && !network.contains(':'),
@@ -404,7 +432,8 @@ impl OracleContract {
             pending_owner: None,
             operator: operator_id,
             market: market_contract,
-            bond_token,
+            verifier: verifier_id,
+            collateral_token_id,
             bond: bond.0,
             window_ns: window_ms.0 * NS_PER_MS,
             panel_deadline_ns: panel_deadline_ms.0 * NS_PER_MS,
@@ -420,6 +449,8 @@ impl OracleContract {
             markets: LookupMap::new(Key::Markets),
             cases: LookupMap::new(Key::Cases),
             claimable: LookupMap::new(Key::Claimable),
+            claimable_total: 0,
+            bonds_held: 0,
         }
     }
 
@@ -434,8 +465,9 @@ impl OracleContract {
         staged.code_hash
     }
 
-    // Owner only, which is the governance contract, so code changes wait out its vote and timelock. The deploy and
-    // migrate are one batch: a migrate that panics puts the old code back. Attach at least 100 TGas.
+    // Owner only, which is the DAO. SputnikDAO runs a proposal as soon as it passes, so its voting period is the only
+    // delay a code change waits out. The deploy and migrate are one batch: a migrate that panics puts the old code back.
+    // Attach at least 100 TGas.
     pub fn upgrade(&mut self, code_hash: Base58CryptoHash) -> Promise {
         upgrade::require_upgrade_gas();
         self.only_owner();
@@ -546,7 +578,7 @@ impl OracleContract {
         self.no_decision_recipient = recipient;
     }
 
-    // Adding a publisher grants power over prices, so it is the owner's (a governance vote and its timelock).
+    // Adding a publisher grants power over prices, so it is the owner's (a DAO proposal).
     pub fn add_publisher(&mut self, key: PublicKey) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
         require!(key.curve_type() == CurveType::ED25519, "publishers use ed25519 keys");
@@ -637,12 +669,37 @@ impl OracleContract {
         emit("market_registered", json!({ "market_id": market_id.0.to_string() }));
     }
 
-    // Bonds arrive here. Propose: "propose:<market>:<yes|no|void>:<evidence url>". Challenge:
-    // "challenge:<market>:<yes|no|void>", naming the answer the challenger says is right.
+    // Bonds arrive here, from the verifier, after a user's mt_transfer_call (or a signed transfer with a notification), once
+    // the money is already in this contract's Intents account. Propose: "propose:<market>:<yes|no|void>:<evidence url>".
+    // Challenge: "challenge:<market>:<yes|no|void>", naming the answer the challenger says is right.
     // Answer a price market: "price:<market>:<price>:<publisher key>.<signature hex>,<publisher key>.<signature hex>,...".
-    // Panicking makes the token refund the sender.
-    pub fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> PromiseOrValue<U128> {
-        require!(env::predecessor_account_id() == self.bond_token, "wrong token");
+    // The answer is the amounts to hand back, so 0 keeps the whole bond. Panicking makes the verifier refund the sender in
+    // full. A plain deposit never reaches here: it is surplus that nobody is credited for (see total_owed). There is no gas
+    // floor: the verifier keeps about 21 TGas of what is attached, a bond opened its case with 22 attached and not with 21
+    // (sandbox), and a receipt that runs short fails and is refunded.
+    pub fn mt_on_transfer(
+        &mut self,
+        sender_id: AccountId,
+        previous_owner_ids: Vec<AccountId>,
+        token_ids: Vec<String>,
+        amounts: Vec<U128>,
+        msg: String,
+    ) -> Vec<U128> {
+        require!(
+            env::predecessor_account_id() == self.verifier,
+            "only the verifier can deliver money"
+        );
+        require!(
+            token_ids.len() == 1 && amounts.len() == 1,
+            "exactly one token and amount"
+        );
+        require!(token_ids[0] == self.collateral_token_id, "wrong token");
+        require!(
+            previous_owner_ids.as_slice() == [sender_id.clone()],
+            "the money must come from the sender's own balance"
+        );
+        let amount = amounts[0];
+        require!(amount.0 > 0, "amount must be positive");
         let mut parts = msg.splitn(4, ':');
         let action = parts.next().unwrap_or("");
         let id: u64 = parts
@@ -673,7 +730,8 @@ impl OracleContract {
             "challenge" => self.challenge(sender_id, id, parse_outcome(parts.next().unwrap_or(""))),
             _ => env::panic_str("unknown action"),
         }
-        PromiseOrValue::Value(U128(0))
+        self.bonds_held += amount.0;
+        vec![U128(0)]
     }
 
     // Anyone can call this once the draw delay has passed and until the case's draw_by. The seed is the block seed of the
@@ -910,18 +968,23 @@ impl OracleContract {
         }
     }
 
+    // Pays the caller's whole claimable balance into the caller's own Intents account, out of this contract's. The balance
+    // is zeroed first and given back in the callback if the verifier refuses.
     #[payable]
     pub fn withdraw_bond(&mut self) -> Promise {
+        upgrade::require_gas(GAS_WITHDRAW_FLOOR, "a withdrawal sends the payout and then settles it");
         assert_one_yocto();
         let who = env::predecessor_account_id();
         let amount = self.claimable.get(&who).copied().unwrap_or(0);
         require!(amount > 0, "nothing to withdraw");
-        // Zero it before the transfer; restore it in the callback if the transfer fails.
         self.claimable.remove(&who);
-        ext_ft::ext(self.bond_token.clone())
-            .with_attached_deposit(NearToken::from_yoctonear(1))
-            .with_static_gas(GAS_FT_TRANSFER)
-            .ft_transfer(who.clone(), U128(amount), None)
+        self.claimable_total -= amount;
+        // mt_transfer returns nothing, so an error here means the verifier's receipt failed (paused, locked, out of gas) and
+        // nothing moved.
+        ext_verifier::ext(self.verifier.clone())
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(GAS_MT_TRANSFER)
+            .mt_transfer(who.clone(), self.collateral_token_id.clone(), U128(amount), None, None)
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_CALLBACK)
@@ -938,6 +1001,15 @@ impl OracleContract {
     ) {
         if result.is_err() {
             self.add_claimable(&account, amount.0);
+            emit(
+                "bond_payout_failed",
+                json!({ "account": account, "amount": amount.0.to_string() }),
+            );
+        } else {
+            emit(
+                "bond_paid",
+                json!({ "account": account, "amount": amount.0.to_string() }),
+            );
         }
     }
 
@@ -955,6 +1027,13 @@ impl OracleContract {
         U128(self.claimable.get(&account_id).copied().unwrap_or(0))
     }
 
+    // Everything this contract owes, in collateral units: the bonds in cases that are not final and everything waiting to be
+    // withdrawn. The keeper compares it with the verifier's mt_balance_of for this account at the same finalized block. More
+    // there than here is surplus nobody is credited for, or a payout that is in flight. Less is an incident.
+    pub fn total_owed(&self) -> U128 {
+        U128(self.bonds_held + self.claimable_total)
+    }
+
     // Whether a wasm with this sha256 is staged here, for the members to check before they vote to deploy it.
     pub fn is_staged(&self, code_hash: Base58CryptoHash) -> bool {
         upgrade::is_staged(code_hash)
@@ -962,7 +1041,8 @@ impl OracleContract {
 
     pub fn config(&self) -> near_sdk::serde_json::Value {
         json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
-                "owner": self.owner, "pending_owner": self.pending_owner, "market": self.market, "bond_token": self.bond_token,
+                "owner": self.owner, "pending_owner": self.pending_owner, "market": self.market, "verifier": self.verifier,
+                "collateral_token_id": self.collateral_token_id,
                 "bond": self.bond.to_string(), "window_ns": self.window_ns.to_string(),
                 "panel_deadline_ns": self.panel_deadline_ns.to_string(),
                 "draw_window_ns": self.draw_window_ns.to_string(), "council": self.council,
@@ -1064,6 +1144,7 @@ impl OracleContract {
     fn add_claimable(&mut self, who: &AccountId, amount: u128) {
         let have = self.claimable.get(who).copied().unwrap_or(0);
         self.claimable.insert(who.clone(), have + amount);
+        self.claimable_total += amount;
     }
 
     // `signers` are the publishers behind a price answer, empty for any other. They go into the event, which is where the
@@ -1199,6 +1280,8 @@ impl OracleContract {
         let round = case.round;
         let bond = case.bond.0;
         self.cases.insert(id, case);
+        // The bonds that were put into this case are all handed out below, to the accounts that earned them.
+        self.bonds_held -= if challenger.is_some() { 2 * bond } else { bond };
 
         let mut juror_pay = 0;
         let mut paid: Vec<AccountId> = vec![];
@@ -1286,7 +1369,8 @@ mod tests {
     const OWNER: &str = "owner.near";
     const OPERATOR: &str = "ops.near";
     const MARKET: &str = "market.near";
-    const TOKEN: &str = "token.near";
+    const VERIFIER: &str = "intents.near";
+    const COLLATERAL: &str = "nep141:usdc.near";
     const COUNCIL: &str = "council.near";
     const RECIPIENT: &str = "biz.near";
     const NETWORK: &str = "testnet";
@@ -1316,6 +1400,18 @@ mod tests {
             .build());
     }
 
+    // What the verifier hands over after `sender` moved `amount` of the collateral out of their own Intents balance. The caller
+    // acts as the verifier first.
+    fn deliver(o: &mut OracleContract, sender: &str, amount: u128, msg: &str) -> Vec<U128> {
+        o.mt_on_transfer(
+            acct(sender),
+            vec![acct(sender)],
+            vec![COLLATERAL.to_string()],
+            vec![U128(amount)],
+            msg.to_string(),
+        )
+    }
+
     fn fresh_oracle() -> OracleContract {
         oracle_with_bond(1)
     }
@@ -1332,6 +1428,10 @@ mod tests {
     const PROPOSAL_TIME: u64 = 60 * SECOND;
 
     fn oracle_with(bond: u128, price_threshold: u32) -> OracleContract {
+        oracle_on(COLLATERAL, bond, price_threshold)
+    }
+
+    fn oracle_on(collateral_token_id: &str, bond: u128, price_threshold: u32) -> OracleContract {
         near_sdk::mock::with_mocked_blockchain(|b| {
             let _ = b.take_storage();
         });
@@ -1339,7 +1439,8 @@ mod tests {
         OracleContract::new(
             acct(OWNER),
             acct(MARKET),
-            acct(TOKEN),
+            acct(VERIFIER),
+            collateral_token_id.to_string(),
             U128(bond),
             U64(60_000),
             U64(120_000),
@@ -1413,6 +1514,8 @@ mod tests {
         commits: &[&str],
         votes: &[(&str, Outcome)],
     ) {
+        // Both bonds are in the case, as they would be had it been proposed and challenged through the hook.
+        o.bonds_held += 2 * o.bond;
         o.cases.insert(
             0,
             Case {
@@ -1515,14 +1618,15 @@ mod tests {
                 ..base_info()
             },
         );
-        act_as(TOKEN, SECOND);
-        let _ = o.ft_on_transfer(
-            acct("carol.near"),
-            U128(BOND),
-            format!("propose:0:{}:https://x", proposed.word()),
+        act_as(VERIFIER, SECOND);
+        deliver(
+            &mut o,
+            "carol.near",
+            BOND,
+            &format!("propose:0:{}:https://x", proposed.word()),
         );
-        act_as(TOKEN, CHALLENGED_AT);
-        let _ = o.ft_on_transfer(acct("dave.near"), U128(BOND), format!("challenge:0:{}", answer.word()));
+        act_as(VERIFIER, CHALLENGED_AT);
+        deliver(&mut o, "dave.near", BOND, &format!("challenge:0:{}", answer.word()));
         o
     }
 
@@ -1601,6 +1705,7 @@ mod tests {
             let paid_jurors: u128 = jurors.iter().map(|j| owed(&o, j)).sum();
             let (carol, dave, recipient) = (owed(&o, "carol.near"), owed(&o, "dave.near"), owed(&o, RECIPIENT));
             prop_assert_eq!(paid_jurors + carol + dave + recipient, 2 * bond, "the two bonds are paid out exactly");
+            prop_assert_eq!((o.total_owed().0, o.bonds_held), (2 * bond, 0), "settling moves the bonds into claimable and owes nothing new");
             prop_assert_eq!(owed(&o, OWNER), 0, "the owner is never paid");
 
             let case = o.case(0);
@@ -1830,7 +1935,7 @@ mod tests {
     }
 
     // With nobody having revealed, the jurors' half is held by the no-decision recipient, so it still leaves the two
-    // parties, and it does not land in the owner's claimable, which is governance's.
+    // parties, and it does not land in the owner's claimable, which is the DAO's.
     #[test]
     fn when_no_juror_revealed_the_no_decision_recipient_holds_the_jurors_half() {
         let mut o = oracle_with_bond(BOND);
@@ -1898,6 +2003,7 @@ mod tests {
         case.challenger_answer = None;
         case.panel = vec![];
         o.cases.insert(0, case);
+        o.bonds_held = BOND;
         act_as("anyone.near", 100);
         o.settle(0, Outcome::Yes, Ruling::Unchallenged);
         assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (BOND, 0));
@@ -1980,8 +2086,8 @@ mod tests {
                 ..o.case(0)
             },
         );
-        act_as(TOKEN, CHALLENGED_AT);
-        let _ = o.ft_on_transfer(acct("dave.near"), U128(BOND), "challenge:0".to_string());
+        act_as(VERIFIER, CHALLENGED_AT);
+        deliver(&mut o, "dave.near", BOND, "challenge:0");
     }
 
     #[test]
@@ -1996,10 +2102,10 @@ mod tests {
                 ..base_info()
             },
         );
-        act_as(TOKEN, SECOND);
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(BOND), "propose:0:yes:https://x".to_string());
-        act_at_height(TOKEN, CHALLENGED_AT, 10);
-        let _ = o.ft_on_transfer(acct("dave.near"), U128(BOND), "challenge:0:void".to_string());
+        act_as(VERIFIER, SECOND);
+        deliver(&mut o, "carol.near", BOND, "propose:0:yes:https://x");
+        act_at_height(VERIFIER, CHALLENGED_AT, 10);
+        deliver(&mut o, "dave.near", BOND, "challenge:0:void");
         let case = o.case(0);
         assert_eq!(
             (case.stage, case.challenger_answer, case.round, case.jury_size),
@@ -2441,6 +2547,11 @@ mod tests {
             refusal(|| drop(o.retry_unlock(U64(0)))),
             "attach at least 35 TGas: each jury's release gets an equal share of what is attached"
         );
+        act_with_gas("anyone.near", at, 32);
+        assert_eq!(
+            refusal(|| drop(o.withdraw_bond())),
+            "attach at least 33 TGas: a withdrawal sends the payout and then settles it"
+        );
     }
 
     // At the floor the gas check passes and the call goes on to whatever else it checks, here a market with no case.
@@ -2464,6 +2575,11 @@ mod tests {
         past(refusal(|| drop(o.resolve_draw(U64(99)))));
         act_with_gas("anyone.near", at, 35);
         past(refusal(|| drop(o.retry_unlock(U64(99)))));
+        let refused = {
+            act_with_gas("anyone.near", at, 33);
+            refusal(|| drop(o.withdraw_bond()))
+        };
+        assert_eq!(refused, "nothing to withdraw");
     }
 
     #[test]
@@ -2479,6 +2595,11 @@ mod tests {
             "the draw 250, its callback 15, and 10 for the call itself"
         );
         assert_eq!(GAS_RETRY_UNLOCK_FLOOR, Gas::from_tgas(35));
+        assert_eq!(
+            GAS_WITHDRAW_FLOOR,
+            Gas::from_tgas(33),
+            "the payout 15, its callback 10, and 8 for the call itself"
+        );
         assert!(
             GAS_DRAW_FLOOR < Gas::from_tgas(300),
             "a transaction carries at most 300 TGas"
@@ -2534,8 +2655,8 @@ mod tests {
                 ..base_info()
             },
         );
-        act_as(TOKEN, SECOND);
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(BOND), "propose:0:yes:https://x".to_string());
+        act_as(VERIFIER, SECOND);
+        deliver(&mut o, "carol.near", BOND, "propose:0:yes:https://x");
         act_as("anyone.near", MIN_GAP);
         o.resolve_by_deadline(U64(0));
         assert_eq!(
@@ -2598,8 +2719,8 @@ mod tests {
                 ..base_info()
             },
         );
-        act_as(TOKEN, SECOND);
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(BOND), "propose:0:yes:https://x".to_string());
+        act_as(VERIFIER, SECOND);
+        deliver(&mut o, "carol.near", BOND, "propose:0:yes:https://x");
         o.markets.insert(
             0,
             MarketInfo {
@@ -2678,9 +2799,9 @@ mod tests {
             // buffered moment is the last one that has to be accepted. Any between is accepted or refused, never unsafe.
             let latest_proposal = deadline - span - APPLY_BUFFER_NS;
             let proposed = close + (latest_proposal + APPLY_BUFFER_NS - close) * propose_at / 1000;
-            act_as(TOKEN, proposed);
+            act_as(VERIFIER, proposed);
             let accepted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = o.ft_on_transfer(acct("carol.near"), U128(BOND), "propose:0:yes:https://x".to_string());
+                deliver(&mut o, "carol.near", BOND, "propose:0:yes:https://x");
             }))
             .is_ok();
             prop_assert!(accepted || proposed > latest_proposal, "a proposal in time was refused");
@@ -2689,8 +2810,8 @@ mod tests {
             }
             if let Some(at) = challenge_at {
                 let challenged_at = proposed + (o.window_ns - 1) * at / 1000;
-                act_as(TOKEN, challenged_at);
-                let _ = o.ft_on_transfer(acct("dave.near"), U128(BOND), "challenge:0:no".to_string());
+                act_as(VERIFIER, challenged_at);
+                deliver(&mut o, "dave.near", BOND, "challenge:0:no");
                 let mut round_started = challenged_at;
                 for turn in 0..2 {
                     let case = o.case(0);
@@ -2814,16 +2935,12 @@ mod tests {
     }
 
     fn submit(o: &mut OracleContract, at: u64, price: u128, entries: &[String]) {
-        act_as(TOKEN, at);
-        let _ = o.ft_on_transfer(
-            acct("carol.near"),
-            U128(BOND),
-            format!("price:0:{price}:{}", entries.join(",")),
-        );
+        act_as(VERIFIER, at);
+        deliver(o, "carol.near", BOND, &format!("price:0:{price}:{}", entries.join(",")));
     }
 
     fn signed_by(keys: &[&SigningKey], market: u64, rule: &PriceRule, price: u128) -> Vec<String> {
-        act_as(TOKEN, 0);
+        act_as(VERIFIER, 0);
         keys.iter().map(|k| entry(k, &message(market, rule, price))).collect()
     }
 
@@ -2877,12 +2994,9 @@ mod tests {
     #[test]
     fn a_plain_proposal_names_no_signers() {
         let mut o = oracle_with_resolve_by(MARKET_DEADLINE);
-        act_as(TOKEN, 10 * SECOND);
-        let _ = o.ft_on_transfer(
-            acct("carol.near"),
-            U128(o.bond),
-            "propose:0:yes:https://example.com".to_string(),
-        );
+        act_as(VERIFIER, 10 * SECOND);
+        let bond = o.bond;
+        deliver(&mut o, "carol.near", bond, "propose:0:yes:https://example.com");
         assert_eq!(proposed_event()["signers"], near_sdk::serde_json::json!([]));
     }
 
@@ -2946,7 +3060,7 @@ mod tests {
     // Each of these signs something that is not exactly this market, moment, price or contract.
     fn assert_refused_when_signed_over(signed: impl Fn(&AccountId) -> String, price_submitted: u128) {
         let (mut o, k) = price_oracle(true);
-        act_as(TOKEN, 0);
+        act_as(VERIFIER, 0);
         let contract = env::current_account_id();
         let message = signed(&contract);
         let sigs = vec![entry(&k[0], &message), entry(&k[1], &message)];
@@ -2993,8 +3107,8 @@ mod tests {
     #[should_panic(expected = "a price market is answered with a signed price")]
     fn a_price_market_cannot_be_answered_with_a_plain_proposal() {
         let (mut o, _) = price_oracle(true);
-        act_as(TOKEN, OBS);
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(BOND), "propose:0:yes:https://x".to_string());
+        act_as(VERIFIER, OBS);
+        deliver(&mut o, "carol.near", BOND, "propose:0:yes:https://x");
     }
 
     #[test]
@@ -3004,12 +3118,8 @@ mod tests {
         act_as(MARKET, 0);
         o.register_market(U64(1), U64(OBS), U64(OBS + MIN_GAP), "hash".to_string(), None);
         let sigs = signed_by(&[&k[0], &k[1]], 1, &rule(true), 1_250);
-        act_as(TOKEN, OBS);
-        let _ = o.ft_on_transfer(
-            acct("carol.near"),
-            U128(BOND),
-            format!("price:1:1250:{}", sigs.join(",")),
-        );
+        act_as(VERIFIER, OBS);
+        deliver(&mut o, "carol.near", BOND, &format!("price:1:1250:{}", sigs.join(",")));
     }
 
     #[test]
@@ -3182,15 +3292,15 @@ mod tests {
     #[should_panic(expected = "too late to propose, the market will be voided at its deadline")]
     fn a_proposal_is_refused_with_exactly_zero_slack_for_apply_to_land() {
         let mut o = oracle_with_resolve_by(CASE_SPAN);
-        act_as(TOKEN, 0);
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(1), "propose:0:yes:https://x".to_string());
+        act_as(VERIFIER, 0);
+        deliver(&mut o, "carol.near", 1, "propose:0:yes:https://x");
     }
 
     #[test]
     fn a_proposal_is_accepted_with_exactly_apply_buffer_of_slack() {
         let mut o = oracle_with_resolve_by(CASE_SPAN + APPLY_BUFFER_NS);
-        act_as(TOKEN, 0);
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(1), "propose:0:yes:https://x".to_string());
+        act_as(VERIFIER, 0);
+        deliver(&mut o, "carol.near", 1, "propose:0:yes:https://x");
         assert_eq!(
             o.case(0).stage,
             Stage::Proposed,
@@ -3202,8 +3312,8 @@ mod tests {
     #[should_panic(expected = "too late to propose, the market will be voided at its deadline")]
     fn a_proposal_is_refused_one_nanosecond_short_of_the_buffer() {
         let mut o = oracle_with_resolve_by(CASE_SPAN + APPLY_BUFFER_NS - 1);
-        act_as(TOKEN, 0);
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(1), "propose:0:yes:https://x".to_string());
+        act_as(VERIFIER, 0);
+        deliver(&mut o, "carol.near", 1, "propose:0:yes:https://x");
     }
 
     // ---- code: staging, upgrade, migrate and seal ---------------------------------------------------------
@@ -3491,11 +3601,11 @@ mod tests {
         );
 
         // The old market still fits a whole case in its time, and every deadline of the case is on the old windows.
-        act_as(TOKEN, 1_000);
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(1), "propose:0:yes:https://x".to_string());
+        act_as(VERIFIER, 1_000);
+        deliver(&mut o, "carol.near", 1, "propose:0:yes:https://x");
         assert_eq!(o.case(0).window_ends_at.0, 1_000 + WINDOW);
-        act_as(TOKEN, 1_001);
-        let _ = o.ft_on_transfer(acct("dave.near"), U128(1), "challenge:0:no".to_string());
+        act_as(VERIFIER, 1_001);
+        deliver(&mut o, "dave.near", 1, "challenge:0:no");
         assert_eq!(o.case(0).draw_by.0, 1_001 + DRAW_WINDOW);
         seat(&mut o, 1_002, &names(3, "j"));
         let case = o.case(0);
@@ -3505,8 +3615,8 @@ mod tests {
         );
 
         // The new market runs on the new windows.
-        act_as(TOKEN, 1_000);
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(1), "propose:1:yes:https://x".to_string());
+        act_as(VERIFIER, 1_000);
+        deliver(&mut o, "carol.near", 1, "propose:1:yes:https://x");
         assert_eq!(o.case(1).window_ends_at.0, 1_000 + 10 * WINDOW);
     }
 
@@ -3541,26 +3651,26 @@ mod tests {
                 ..base_info()
             },
         );
-        act_as(TOKEN, SECOND);
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(1), "propose:0:yes:https://x".to_string());
+        act_as(VERIFIER, SECOND);
+        deliver(&mut o, "carol.near", 1, "propose:0:yes:https://x");
         act_unpaid(OWNER, 2 * SECOND);
         o.set_bond(U128(5));
         assert_eq!(o.case(0).bond.0, 1, "the open case keeps its bond");
 
-        act_as(TOKEN, 3 * SECOND);
+        act_as(VERIFIER, 3 * SECOND);
         assert!(refusal(|| {
-            let _ = o.ft_on_transfer(acct("dave.near"), U128(5), "challenge:0:no".to_string());
+            deliver(&mut o, "dave.near", 5, "challenge:0:no");
         })
         .contains("send exactly the bond"));
-        let _ = o.ft_on_transfer(acct("dave.near"), U128(1), "challenge:0:no".to_string());
+        deliver(&mut o, "dave.near", 1, "challenge:0:no");
         assert_eq!(o.case(0).stage, Stage::Disputed);
 
-        act_as(TOKEN, 4 * SECOND);
+        act_as(VERIFIER, 4 * SECOND);
         assert!(refusal(|| {
-            let _ = o.ft_on_transfer(acct("carol.near"), U128(1), "propose:1:yes:https://x".to_string());
+            deliver(&mut o, "carol.near", 1, "propose:1:yes:https://x");
         })
         .contains("send exactly the bond"));
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(5), "propose:1:yes:https://x".to_string());
+        deliver(&mut o, "carol.near", 5, "propose:1:yes:https://x");
         assert_eq!(o.case(1).bond.0, 5);
     }
 
@@ -3574,12 +3684,361 @@ mod tests {
                 ..base_info()
             },
         );
-        act_as(TOKEN, SECOND);
-        let _ = o.ft_on_transfer(acct("carol.near"), U128(1), "propose:0:yes:https://x".to_string());
+        act_as(VERIFIER, SECOND);
+        deliver(&mut o, "carol.near", 1, "propose:0:yes:https://x");
         act_unpaid(OWNER, 2 * SECOND);
         o.set_bond(U128(5));
         act_as("anyone.near", SECOND + WINDOW);
         o.finalize(U64(0));
         assert_eq!(owed(&o, "carol.near"), 1);
+    }
+
+    // ---- money through the verifier ---------------------------------------------------------------------------
+
+    fn logged(event: &str) -> Vec<near_sdk::serde_json::Value> {
+        near_sdk::test_utils::get_logs()
+            .iter()
+            .filter_map(|l| l.strip_prefix("EVENT_JSON:"))
+            .map(|j| near_sdk::serde_json::from_str::<near_sdk::serde_json::Value>(j).unwrap())
+            .filter(|e| e["event"] == event)
+            .map(|e| e["data"].clone())
+            .collect()
+    }
+
+    // The verifier call a payout sent: its arguments, the yocto attached and the gas reserved.
+    fn mt_transfer_sent() -> (near_sdk::serde_json::Value, u128, u64) {
+        let sent = receipts();
+        assert_eq!(sent[0].receiver_id, acct(VERIFIER));
+        match &sent[0].actions[0] {
+            near_sdk::mock::MockAction::FunctionCallWeight {
+                method_name,
+                args,
+                attached_deposit,
+                prepaid_gas,
+                ..
+            } => {
+                assert_eq!(method_name.as_slice(), b"mt_transfer");
+                (
+                    near_sdk::serde_json::from_slice(args).unwrap(),
+                    attached_deposit.as_yoctonear(),
+                    prepaid_gas.as_gas(),
+                )
+            }
+            other => panic!("not a function call: {other:?}"),
+        }
+    }
+
+    // Market 0 is open for answers. Carol puts her bond in through the hook at one second and nobody challenges, so it is
+    // hers to withdraw once anyone finalizes.
+    fn unchallenged_and_final() -> OracleContract {
+        let mut o = oracle_with_bond(BOND);
+        o.markets.insert(
+            0,
+            MarketInfo {
+                resolve_by: U64(MARKET_DEADLINE),
+                ..base_info()
+            },
+        );
+        act_as(VERIFIER, SECOND);
+        deliver(&mut o, "carol.near", BOND, "propose:0:yes:https://x");
+        act_as("anyone.near", SECOND + WINDOW);
+        o.finalize(U64(0));
+        o
+    }
+
+    #[test]
+    fn a_bond_from_the_verifier_is_kept_in_full_and_counted_as_owed() {
+        let mut o = oracle_with_bond(BOND);
+        o.markets.insert(
+            0,
+            MarketInfo {
+                resolve_by: U64(MARKET_DEADLINE),
+                ..base_info()
+            },
+        );
+        act_as(VERIFIER, SECOND);
+        assert_eq!(
+            deliver(&mut o, "carol.near", BOND, "propose:0:yes:https://x"),
+            vec![U128(0)]
+        );
+        assert_eq!(o.case(0).proposer, acct("carol.near"));
+        assert_eq!((o.total_owed().0, o.bonds_held, o.claimable_total), (BOND, BOND, 0));
+        act_as(VERIFIER, CHALLENGED_AT);
+        assert_eq!(deliver(&mut o, "dave.near", BOND, "challenge:0:no"), vec![U128(0)]);
+        assert_eq!(o.case(0).challenger, Some(acct("dave.near")));
+        assert_eq!(
+            (o.total_owed().0, o.bonds_held, o.claimable_total),
+            (2 * BOND, 2 * BOND, 0)
+        );
+    }
+
+    #[test]
+    fn a_bond_from_anyone_but_the_verifier_is_refused_and_counts_for_nothing() {
+        let mut o = oracle_with_resolve_by(MARKET_DEADLINE);
+        for who in ["carol.near", COUNCIL, MARKET, OWNER, OPERATOR, "stranger.near"] {
+            act_as(who, SECOND);
+            let message = refusal(|| {
+                deliver(&mut o, "carol.near", 1, "propose:0:yes:https://x");
+            });
+            assert_eq!(message, "only the verifier can deliver money", "{who}");
+        }
+        assert!(o.cases.get(&0).is_none());
+        assert_eq!(o.total_owed().0, 0);
+    }
+
+    #[test]
+    fn a_delivery_that_is_not_one_bond_of_the_collateral_from_the_senders_own_balance_is_refused() {
+        let mut o = oracle_with_bond(BOND);
+        o.markets.insert(
+            0,
+            MarketInfo {
+                resolve_by: U64(MARKET_DEADLINE),
+                ..base_info()
+            },
+        );
+        let (carol, dave) = (acct("carol.near"), acct("dave.near"));
+        let bond = U128(BOND);
+        let msg = "propose:0:yes:https://x";
+        // What is wrong, then the previous owners, token ids and amounts of the delivery, then the refusal.
+        type Delivery = (&'static str, Vec<AccountId>, Vec<String>, Vec<U128>, &'static str);
+        let cases: Vec<Delivery> = vec![
+            (
+                "another token",
+                vec![carol.clone()],
+                vec!["nep141:other.near".into()],
+                vec![bond],
+                "wrong token",
+            ),
+            (
+                "the bare contract id",
+                vec![carol.clone()],
+                vec!["usdc.near".into()],
+                vec![bond],
+                "wrong token",
+            ),
+            (
+                "two tokens in one delivery",
+                vec![carol.clone(), carol.clone()],
+                vec![COLLATERAL.into(), COLLATERAL.into()],
+                vec![bond, bond],
+                "exactly one token and amount",
+            ),
+            (
+                "no token at all",
+                vec![],
+                vec![],
+                vec![],
+                "exactly one token and amount",
+            ),
+            (
+                "one token with two amounts",
+                vec![carol.clone()],
+                vec![COLLATERAL.into()],
+                vec![bond, bond],
+                "exactly one token and amount",
+            ),
+            (
+                "money that was somebody else's",
+                vec![dave.clone()],
+                vec![COLLATERAL.into()],
+                vec![bond],
+                "the money must come from the sender's own balance",
+            ),
+            (
+                "no previous owner",
+                vec![],
+                vec![COLLATERAL.into()],
+                vec![bond],
+                "the money must come from the sender's own balance",
+            ),
+            (
+                "money passed through two owners",
+                vec![carol.clone(), dave.clone()],
+                vec![COLLATERAL.into()],
+                vec![bond],
+                "the money must come from the sender's own balance",
+            ),
+            (
+                "a zero amount",
+                vec![carol.clone()],
+                vec![COLLATERAL.into()],
+                vec![U128(0)],
+                "amount must be positive",
+            ),
+            (
+                "an amount that is not the bond",
+                vec![carol.clone()],
+                vec![COLLATERAL.into()],
+                vec![U128(BOND + 1)],
+                "send exactly the bond",
+            ),
+        ];
+        for (what, previous, tokens, amounts, why) in cases {
+            act_as(VERIFIER, SECOND);
+            let message = refusal(|| {
+                let _ = o.mt_on_transfer(carol.clone(), previous, tokens, amounts, msg.to_string());
+            });
+            assert_eq!(message, why, "{what}");
+        }
+        assert!(o.cases.get(&0).is_none(), "nothing was proposed");
+        assert_eq!(o.total_owed().0, 0, "nothing was counted");
+    }
+
+    #[test]
+    fn a_message_the_hook_does_not_know_is_refused_so_the_verifier_gives_the_money_back() {
+        let mut o = oracle_with_bond(BOND);
+        o.markets.insert(
+            0,
+            MarketInfo {
+                resolve_by: U64(MARKET_DEADLINE),
+                ..base_info()
+            },
+        );
+        for (msg, why) in [
+            ("hello", "bad market id"),
+            ("deposit", "bad market id"),
+            ("propose:x:yes:https://x", "bad market id"),
+            ("propose:0:maybe:https://x", "outcome must be yes, no or void"),
+            ("withdraw:0", "unknown action"),
+            ("challenge:0:no", "no case for that market"),
+        ] {
+            act_as(VERIFIER, SECOND);
+            let message = refusal(|| {
+                deliver(&mut o, "carol.near", BOND, msg);
+            });
+            assert!(message.contains(why), "{msg}: {message}");
+        }
+        assert!(o.cases.get(&0).is_none());
+        assert_eq!(o.total_owed().0, 0);
+    }
+
+    #[test]
+    fn an_unchallenged_case_releases_its_one_bond_into_claimable() {
+        let o = unchallenged_and_final();
+        assert_eq!((o.total_owed().0, o.bonds_held, o.claimable_total), (BOND, 0, BOND));
+        assert_eq!(owed(&o, "carol.near"), BOND);
+    }
+
+    #[test]
+    fn total_owed_follows_the_bonds_through_a_dispute_and_falls_only_as_payees_withdraw() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        assert_eq!(o.total_owed().0, 2 * BOND, "both bonds are held while the case is open");
+        let jurors = names(3, "j");
+        seat(&mut o, DRAW_BY, &jurors);
+        for j in &jurors[..2] {
+            commit(&mut o, j, DRAW_BY + SECOND, Outcome::No, "a-long-random-salt");
+        }
+        reveal_when_open(&mut o, &jurors[0], Outcome::No, "a-long-random-salt");
+        assert_eq!(o.total_owed().0, 2 * BOND, "a vote does not move money");
+        reveal_when_open(&mut o, &jurors[1], Outcome::No, "a-long-random-salt");
+        assert_eq!(o.case(0).stage, Stage::Final);
+        assert_eq!(
+            (o.total_owed().0, o.bonds_held, o.claimable_total),
+            (2 * BOND, 0, 2 * BOND)
+        );
+
+        let mut left = 2 * BOND;
+        for who in ["dave.near", "j0.near", "j1.near"] {
+            let due = owed(&o, who);
+            assert!(due > 0, "{who} is owed something");
+            act_as(who, 10 * DEADLINE);
+            let _ = o.withdraw_bond();
+            left -= due;
+            assert_eq!(o.total_owed().0, left, "{who} took {due}");
+        }
+        assert_eq!(left, 0, "two bonds, paid to three accounts, and nobody else is owed");
+        assert_eq!(o.total_owed().0, 0);
+    }
+
+    #[test]
+    fn a_withdrawal_is_one_mt_transfer_of_one_yocto_to_the_caller_and_to_nobody_else() {
+        let mut o = unchallenged_and_final();
+        act_as("stranger.near", 10 * DEADLINE);
+        assert_eq!(refusal(|| drop(o.withdraw_bond())), "nothing to withdraw");
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        let (args, deposit, gas) = mt_transfer_sent();
+        assert_eq!((deposit, gas), (1, GAS_MT_TRANSFER.as_gas()));
+        assert_eq!(args["receiver_id"], "carol.near");
+        assert_eq!(args["token_id"], COLLATERAL);
+        assert_eq!(args["amount"], BOND.to_string());
+        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, 0));
+    }
+
+    #[test]
+    fn a_withdrawal_without_the_one_yocto_is_refused() {
+        let mut o = unchallenged_and_final();
+        act_unpaid("carol.near", 10 * DEADLINE);
+        assert_eq!(
+            refusal(|| drop(o.withdraw_bond())),
+            "Requires attached deposit of exactly 1 yoctoNEAR"
+        );
+        assert_eq!(owed(&o, "carol.near"), BOND, "nothing was taken");
+    }
+
+    #[test]
+    fn a_payout_the_verifier_refused_gives_the_balance_back_and_a_paid_one_stays_paid() {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, 0));
+
+        act_as(OWNER, 10 * DEADLINE);
+        o.on_bond_withdrawn(acct("carol.near"), U128(BOND), Err(PromiseError::Failed));
+        assert_eq!(
+            (owed(&o, "carol.near"), o.total_owed().0, o.claimable_total),
+            (BOND, BOND, BOND),
+            "the balance and the books are back"
+        );
+        assert_eq!(
+            logged("bond_payout_failed"),
+            vec![near_sdk::serde_json::json!({ "account": "carol.near", "amount": BOND.to_string() })]
+        );
+
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        act_as(OWNER, 10 * DEADLINE);
+        o.on_bond_withdrawn(acct("carol.near"), U128(BOND), Ok(()));
+        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, 0));
+        assert_eq!(
+            logged("bond_paid"),
+            vec![near_sdk::serde_json::json!({ "account": "carol.near", "amount": BOND.to_string() })]
+        );
+        assert!(logged("bond_payout_failed").is_empty());
+    }
+
+    #[test]
+    fn two_accounts_with_a_balance_each_withdraw_only_their_own() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        act_as("anyone.near", DRAW_BY + 1);
+        o.finalize(U64(0));
+        act_as("anyone.near", DRAW_BY + 1 + PANEL + DRAW_WINDOW + PANEL);
+        o.finalize(U64(0));
+        let (carol, dave) = (owed(&o, "carol.near"), owed(&o, "dave.near"));
+        assert!(
+            carol > 0 && dave == 0,
+            "the challenger gets nothing back after no decision"
+        );
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        assert_eq!(mt_transfer_sent().0["receiver_id"], "carol.near");
+        assert_eq!(o.total_owed().0, 2 * BOND - carol);
+    }
+
+    #[test]
+    fn the_collateral_id_must_be_the_exact_nep141_form() {
+        let message = refusal(|| drop(oracle_on("usdc.near", BOND, 2)));
+        assert_eq!(message, "the collateral token id must look like nep141:<token>");
+        let message = refusal(|| drop(oracle_on("NEP141:usdc.near", BOND, 2)));
+        assert_eq!(message, "the collateral token id must look like nep141:<token>");
+    }
+
+    #[test]
+    fn config_names_the_verifier_and_the_exact_token_id_and_no_token_contract() {
+        let o = fresh_oracle();
+        let config = o.config();
+        assert_eq!(config["verifier"], VERIFIER);
+        assert_eq!(config["collateral_token_id"], COLLATERAL);
+        assert!(config.get("bond_token").is_none());
     }
 }

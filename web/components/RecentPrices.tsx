@@ -1,11 +1,11 @@
 import Link from "next/link";
 import type { MarketView } from "@/lib/market";
-import type { Pt } from "./PriceChart";
+import type { Pt } from "@/lib/history";
 export function RecentPrices({ markets, histories }: { markets: MarketView[]; histories: Record<string, Pt[]> }) {
   const updates = markets.flatMap(m => (histories[m.id] ?? []).slice(1).map((point, i) => ({ market:m, point, previous:histories[m.id][i].p })))
     .sort((a,b) => b.point.at - a.point.at).slice(0,4);
   return <section className="recent-prices" aria-label="Recent price updates">
-    <div className="recent-prices-head"><h2 className="section-title">Featured price moves</h2><p>Changes recorded in the featured markets.</p></div>
+    <div className="recent-prices-head"><h2 className="section-title">Featured price changes</h2></div>
     {updates.length ? <ul>{updates.map(({market,point,previous},i) => {
       const from = Math.round(previous), to = Math.round(point.p);
       const dir = to > from ? "up" : to < from ? "down" : "flat";

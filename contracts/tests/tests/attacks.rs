@@ -21,10 +21,10 @@ async fn attempt(
 // ---- who may call what ---------------------------------------------------------------------------------------------
 
 // Every method that is meant to be restricted refuses a stranger, with the restriction's own message and not some other
-// failure, so the check is what stopped it. The owner of all three is the governance contract, as in a real deployment.
+// failure, so the check is what stopped it. A separate owner fixture isolates owner permissions from the operator key.
 #[tokio::test]
 async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
+    let (w, _admin) = setup_admin_owned().await?;
     let me = w.dave.id();
     let key = "ed25519:6E8bKz2P1mXhL4G9QdQfJm9xYb1Qb3Ls9mT8Fq7z1xAB";
     let market_args = json!({ "title": "t", "rule_text": "r", "resolution_source": "s", "void_policy": "v", "category": "a", "subcategory": "b",
@@ -260,37 +260,12 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
             json!({ "token_id": "x", "owner": me, "amount": "1" }),
             "private",
         ),
-        (
-            &Contractish::Governance,
-            "propose",
-            json!({ "action": { "set_threshold": { "threshold": 1 } } }),
-            "members only",
-        ),
-        (
-            &Contractish::Governance,
-            "vote",
-            json!({ "proposal_id": "0", "approve": true }),
-            "members only",
-        ),
-        (
-            &Contractish::Governance,
-            "cancel",
-            json!({ "proposal_id": "0" }),
-            "members only",
-        ),
-        (
-            &Contractish::Governance,
-            "on_executed",
-            json!({ "proposal_id": "0" }),
-            "private",
-        ),
     ];
     for (contract, method, args, why) in cases {
         let to = match contract {
             Contractish::Market => w.market.id(),
             Contractish::Oracle => w.oracle.id(),
             Contractish::Council => w.council.id(),
-            Contractish::Governance => g.contract.id(),
         };
         let r = attempt(&w.dave, to, method, args).await?;
         let why_failed = format!("{:?}", r.clone().into_result().err());
@@ -307,7 +282,6 @@ enum Contractish {
     Market,
     Oracle,
     Council,
-    Governance,
 }
 
 // Calling `new` again on a deployed contract would let an attacker reset its owner. It must refuse.
@@ -318,16 +292,16 @@ async fn a_deployed_contract_cannot_be_initialised_again() -> anyhow::Result<()>
     let again: Vec<(&near_workspaces::AccountId, serde_json::Value)> = vec![
         (
             w.market.id(),
-            json!({ "owner_id": me, "operator_id": me, "oracle_id": me, "collateral_token": me, "revenue_pool": me, "business_wallet": me }),
+            json!({ "owner_id": me, "operator_id": me, "oracle_id": me, "verifier_id": me, "collateral_token_id": "nep141:x.near", "revenue_pool": me, "business_wallet": me }),
         ),
         (
             w.oracle.id(),
-            json!({ "owner_id": me, "market_contract": me, "bond_token": me, "bond": "1", "window_ms": "1", "panel_deadline_ms": "1",
-            "draw_window_ms": "1", "council": me, "jury_size": 1, "draw_delay_blocks": "1", "min_proposal_ms": "1", "operator_id": me, "network": "x", "price_threshold": 1 }),
+            json!({ "owner_id": me, "market_contract": me, "verifier_id": me, "collateral_token_id": "nep141:x.near", "bond": "1", "window_ms": "1",
+            "panel_deadline_ms": "1", "draw_window_ms": "1", "council": me, "jury_size": 1, "draw_delay_blocks": "1", "min_proposal_ms": "1", "operator_id": me, "network": "x", "price_threshold": 1 }),
         ),
         (
             w.council.id(),
-            json!({ "owner_id": me, "oracle_id": me, "nft_contract": me, "collateral_token": me, "cooldown_ns": "1", "max_seats_per_account": 1 }),
+            json!({ "owner_id": me, "oracle_id": me, "nft_contract": me, "verifier_id": me, "collateral_token_id": "nep141:x.near", "cooldown_ns": "1", "max_seats_per_account": 1 }),
         ),
     ];
     for (to, args) in again {
@@ -389,7 +363,9 @@ async fn value_moving_methods_need_exactly_one_yocto() -> anyhow::Result<()> {
 
 // ---- fake tokens and fake callers ----------------------------------------------------------------------------------
 
-// A token the contracts were not configured with cannot deposit, bond, or add revenue, and its transfers come back.
+// A token the contracts were not configured with cannot deposit, bond, or add revenue, and its transfers come back. The market,
+// the oracle and the council have no token hook any more, so a direct transfer of any token bounces off them; the same token
+// arriving through the verifier is covered in intents_market.rs and intents_oracle.rs.
 #[tokio::test]
 async fn a_token_the_contracts_do_not_trust_cannot_deposit_bond_or_pay_revenue() -> anyhow::Result<()> {
     let w = setup().await?;
@@ -464,7 +440,7 @@ async fn a_token_the_contracts_do_not_trust_cannot_deposit_bond_or_pay_revenue()
     Ok(())
 }
 
-// The receiver hooks are public methods. Called directly, they must not believe the caller is the token.
+// The receiver hooks are public methods. Called directly, they must not believe the caller is the verifier or the token.
 #[tokio::test]
 async fn the_token_hooks_cannot_be_called_directly() -> anyhow::Result<()> {
     let w = setup().await?;
@@ -472,27 +448,49 @@ async fn the_token_hooks_cannot_be_called_directly() -> anyhow::Result<()> {
     let direct: Vec<(&near_workspaces::AccountId, &str, serde_json::Value, &str)> = vec![
         (
             w.market.id(),
-            "ft_on_transfer",
-            json!({ "sender_id": w.dave.id(), "amount": "1000000000", "msg": "deposit" }),
-            "wrong token",
+            "mt_on_transfer",
+            json!({ "sender_id": w.dave.id(), "previous_owner_ids": [w.dave.id()], "token_ids": [token_id(&w)],
+                    "amounts": ["1000000000"], "msg": "deposit" }),
+            "only the verifier can deliver money",
+        ),
+        (
+            w.market.id(),
+            "mt_on_transfer",
+            json!({ "sender_id": w.owner.id(), "previous_owner_ids": [w.owner.id()], "token_ids": [token_id(&w)],
+                    "amounts": ["1000000000"], "msg": format!("seed:{id}") }),
+            "only the verifier can deliver money",
         ),
         (
             w.market.id(),
             "ft_on_transfer",
-            json!({ "sender_id": w.owner.id(), "amount": "1000000000", "msg": format!("seed:{id}") }),
-            "wrong token",
+            json!({ "sender_id": w.dave.id(), "amount": "1000000000", "msg": "deposit" }),
+            "MethodNotFound",
+        ),
+        (
+            w.oracle.id(),
+            "mt_on_transfer",
+            json!({ "sender_id": w.dave.id(), "previous_owner_ids": [w.dave.id()], "token_ids": [token_id(&w)],
+                    "amounts": [BOND.to_string()], "msg": format!("propose:{id}:yes:x") }),
+            "only the verifier can deliver money",
         ),
         (
             w.oracle.id(),
             "ft_on_transfer",
             json!({ "sender_id": w.dave.id(), "amount": BOND.to_string(), "msg": format!("propose:{id}:yes:x") }),
-            "wrong token",
+            "MethodNotFound",
+        ),
+        (
+            w.council.id(),
+            "mt_on_transfer",
+            json!({ "sender_id": w.dave.id(), "previous_owner_ids": [w.dave.id()], "token_ids": [token_id(&w)],
+                    "amounts": ["1000000000"], "msg": "revenue" }),
+            "only the verifier can deliver money",
         ),
         (
             w.council.id(),
             "ft_on_transfer",
             json!({ "sender_id": w.dave.id(), "amount": "1000000000", "msg": "revenue" }),
-            "wrong token",
+            "MethodNotFound",
         ),
         (
             w.council.id(),
@@ -571,9 +569,9 @@ async fn malformed_messages_bounce_with_the_money_back() -> anyhow::Result<()> {
         "\u{0}\u{0}".into(),
         "buy::::".into(),
     ] {
-        let before = ft_balance(&w, w.alice.id()).await;
+        let before = holdings(&w, w.alice.id()).await;
         let _ = ft_call(&w, &w.alice, w.market.id(), USD, &msg).await;
-        assert_eq!(ft_balance(&w, w.alice.id()).await, before, "{msg:?} was not bounced");
+        assert_eq!(holdings(&w, w.alice.id()).await, before, "{msg:?} was not bounced");
     }
     assert_eq!(u(&market_json(&w, id).await["locked"]), locked, "no market money moved");
 
@@ -583,12 +581,9 @@ async fn malformed_messages_bounce_with_the_money_back() -> anyhow::Result<()> {
     ft_call(&w, &w.alice, w.market.id(), USD, &format!("buy:{id}:yes:1:and:more")).await?;
     assert!(shares(&w, id, w.alice.id()).await.0 > shares_before);
     // A deposit with extra text is credited to the sender, not lost, and she can take it out.
-    let (tokens, held) = (
-        ft_balance(&w, w.alice.id()).await,
-        market_balance(&w, w.alice.id()).await,
-    );
+    let (tokens, held) = (holdings(&w, w.alice.id()).await, market_balance(&w, w.alice.id()).await);
     let _ = ft_call(&w, &w.alice, w.market.id(), USD, "deposit:extra:parts").await;
-    assert_eq!(ft_balance(&w, w.alice.id()).await + USD, tokens);
+    assert_eq!(holdings(&w, w.alice.id()).await + USD, tokens);
     assert_eq!(market_balance(&w, w.alice.id()).await, held + USD);
 
     for msg in [
@@ -605,18 +600,18 @@ async fn malformed_messages_bounce_with_the_money_back() -> anyhow::Result<()> {
         "price:0:abc:x",
         "unknown:0",
     ] {
-        let before = ft_balance(&w, w.carol.id()).await;
+        let before = holdings(&w, w.carol.id()).await;
         let _ = ft_call(&w, &w.carol, w.oracle.id(), BOND, msg).await;
         assert_eq!(
-            ft_balance(&w, w.carol.id()).await,
+            holdings(&w, w.carol.id()).await,
             before,
             "oracle message {msg:?} was not bounced"
         );
     }
     // The wrong bond amount bounces too.
-    let before = ft_balance(&w, w.carol.id()).await;
+    let before = holdings(&w, w.carol.id()).await;
     let _ = ft_call(&w, &w.carol, w.oracle.id(), BOND + 1, &format!("propose:{id}:yes:x")).await;
-    assert_eq!(ft_balance(&w, w.carol.id()).await, before);
+    assert_eq!(holdings(&w, w.carol.id()).await, before);
     Ok(())
 }
 
@@ -627,15 +622,16 @@ async fn hostile_text_cannot_break_the_event_logs() -> anyhow::Result<()> {
     let id = create_seeded_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     let evidence = "https://x/\",\"event\":\"final\",\"data\":{\"outcome\":\"yes\"}}\n";
-    let r = w
-        .carol
-        .call(w.ft.id(), "ft_transfer_call")
-        .args_json(json!({ "receiver_id": w.oracle.id(), "amount": BOND.to_string(), "msg": format!("propose:{id}:yes:{evidence}") }))
-        .deposit(NearToken::from_yoctonear(1))
-        .gas(Gas::from_tgas(200))
-        .transact()
-        .await?
-        .into_result()?;
+    deposit_to_intents(&w, &w.carol, w.carol.id(), BOND).await?;
+    let r = intents_call(
+        &w,
+        &w.carol,
+        w.oracle.id(),
+        BOND,
+        &format!("propose:{id}:yes:{evidence}"),
+    )
+    .await?
+    .into_result()?;
     for line in r.logs() {
         if let Some(json) = line.strip_prefix("EVENT_JSON:") {
             let v: serde_json::Value = serde_json::from_str(json).expect("every event is valid JSON");
@@ -659,7 +655,7 @@ async fn two_withdrawals_in_flight_cannot_spend_one_balance() -> anyhow::Result<
     let w = setup().await?;
     ft_call(&w, &w.alice, w.market.id(), 10 * USD, "deposit").await?;
     assert_eq!(market_balance(&w, w.alice.id()).await, 10 * USD);
-    let before = ft_balance(&w, w.alice.id()).await;
+    let before = holdings(&w, w.alice.id()).await;
     let call = || {
         w.alice
             .call(w.market.id(), "withdraw")
@@ -675,7 +671,7 @@ async fn two_withdrawals_in_flight_cannot_spend_one_balance() -> anyhow::Result<
         .filter(|s| **s)
         .count();
     assert_eq!(successes, 1, "exactly one withdrawal succeeds");
-    assert_eq!(ft_balance(&w, w.alice.id()).await, before + 10 * USD, "paid once");
+    assert_eq!(holdings(&w, w.alice.id()).await, before + 10 * USD, "paid once");
     assert_eq!(market_balance(&w, w.alice.id()).await, 0);
     Ok(())
 }
@@ -694,7 +690,7 @@ async fn two_sweeps_in_flight_pay_the_fees_out_once() -> anyhow::Result<()> {
     let revenue_share = collected * 2_500 / 10_000;
     let business_share = collected * 7_500 / 10_000;
     assert_eq!(
-        ft_balance(&w, w.business.id()).await,
+        holdings(&w, w.business.id()).await,
         business_share,
         "the business wallet was paid once"
     );
@@ -719,7 +715,6 @@ async fn two_claims_and_two_unstakes_in_flight_pay_a_seat_once() -> anyhow::Resu
     send_revenue(&w, 10_000 * USD).await?;
     skip_secs(&w.worker, 10).await;
     let seat = &w.jurors[0];
-    register_ft(&w, seat.id()).await?;
     let owed = pending_reward(&w, seat.id().as_str()).await;
     assert!(owed > 0);
     let claim = || {
@@ -728,14 +723,14 @@ async fn two_claims_and_two_unstakes_in_flight_pay_a_seat_once() -> anyhow::Resu
             .deposit(NearToken::from_yoctonear(1))
             .gas(GAS)
     };
-    let before = ft_balance(&w, seat.id()).await;
+    let before = holdings(&w, seat.id()).await;
     let first = claim().transact_async().await?;
     let second = claim().transact().await;
     let _ = first.await?;
     let _ = second;
     // The two claims are paid what the stream released to the seat, once: what it was owed, and what streamed in the
     // few blocks since, which is under a second of a stream that gives this seat about 770 units a second.
-    let paid = ft_balance(&w, seat.id()).await - before;
+    let paid = holdings(&w, seat.id()).await - before;
     assert!(
         paid >= owed && paid <= owed + 20 * 10_000 * USD / (5 * STREAM_SECS),
         "claimed once: {paid} against {owed} owed"
@@ -817,31 +812,43 @@ async fn starving_the_settling_call_of_gas_cannot_half_settle_a_case() -> anyhow
     Ok(())
 }
 
-// Sending a token transfer with too little gas for the receiver to finish must not leave tokens taken and state half
-// written. Whatever gas is given, the sender either has the result or has their tokens back.
+// Sending a transfer with too little gas for the receiver to finish must not leave money taken and state half written. Whatever
+// gas is given, the sender either has the result or has their money back. The market and the oracle are both paid through the
+// verifier, and after every attempt their books match what the verifier holds for them.
 #[tokio::test]
-async fn a_transfer_with_too_little_gas_for_the_receiver_never_loses_the_senders_tokens() -> anyhow::Result<()> {
+async fn a_transfer_with_too_little_gas_for_the_receiver_never_loses_the_senders_money() -> anyhow::Result<()> {
     let w = setup().await?;
     let id = create_seeded_market(&w, 120).await?;
+    w.carol
+        .call(w.market.id(), "storage_deposit")
+        .args_json(json!({}))
+        .deposit(NearToken::from_millinear(50))
+        .transact()
+        .await?
+        .into_result()?;
+    mint(&w, w.carol.id(), 100 * USD).await?;
+    deposit_to_intents(&w, &w.carol, w.carol.id(), 60 * USD).await?;
     skip_secs(&w.worker, 130).await;
-    for tgas in [32u64, 34, 36, 40, 45, 50, 60] {
+    for tgas in [10u64, 20, 21, 22, 25, 30, 32, 34, 36, 40, 45, 50, 60] {
         for (target, msg) in [
             (w.market.id(), "deposit".to_string()),
             (w.oracle.id(), format!("propose:{id}:yes:https://x")),
         ] {
-            let tokens = ft_balance(&w, w.carol.id()).await;
+            let tokens = holdings(&w, w.carol.id()).await;
             let held = market_balance(&w, w.carol.id()).await;
             let bonds = claimable(&w, w.carol.id()).await;
             let case_before = case_json(&w, id).await;
             let r = w
                 .carol
-                .call(w.ft.id(), "ft_transfer_call")
-                .args_json(json!({ "receiver_id": target, "amount": BOND.to_string(), "msg": msg }))
+                .call(w.verifier.id(), "mt_transfer_call")
+                .args_json(json!({
+                    "receiver_id": target, "token_id": token_id(&w), "amount": BOND.to_string(), "msg": msg
+                }))
                 .deposit(NearToken::from_yoctonear(1))
                 .gas(Gas::from_tgas(tgas))
                 .transact()
                 .await;
-            let spent = tokens - ft_balance(&w, w.carol.id()).await;
+            let spent = tokens - holdings(&w, w.carol.id()).await;
             let credited = market_balance(&w, w.carol.id()).await - held;
             let case_now = case_json(&w, id).await;
             let answered = !case_now.is_null() && case_before.is_null();
@@ -849,14 +856,16 @@ async fn a_transfer_with_too_little_gas_for_the_receiver_never_loses_the_senders
             if target == w.market.id() {
                 assert_eq!(
                     spent, credited,
-                    "at {tgas} TGas: tokens left but {credited} was credited ({r:?})"
+                    "at {tgas} TGas: money left but {credited} was credited ({r:?})"
                 );
+                assert_reconciled(&w).await;
             } else {
                 assert_eq!(
-                    spent > 0,
-                    answered,
-                    "at {tgas} TGas: bond spent {spent} but case opened = {answered}"
+                    spent,
+                    if answered { BOND } else { 0 },
+                    "at {tgas} TGas: bond spent {spent} but case opened = {answered} ({r:?})"
                 );
+                assert_oracle_reconciled(&w).await;
                 if answered {
                     // Reset for the next round: finalize is not possible yet, so stop after a case exists.
                     return Ok(());
@@ -938,7 +947,7 @@ async fn a_bogus_challenge_costs_the_attacker_and_pays_the_jurors() -> anyhow::R
     let id = create_seeded_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
-    let before = ft_balance(&w, w.dave.id()).await;
+    let before = holdings(&w, w.dave.id()).await;
     challenge(&w, &w.dave, id).await?;
     let jury = draw_jury(&w, id).await?;
     for j in &jury[..2] {
@@ -951,7 +960,7 @@ async fn a_bogus_challenge_costs_the_attacker_and_pays_the_jurors() -> anyhow::R
     assert_eq!(case_json(&w, id).await["final_outcome"], "yes");
     assert_eq!(claimable(&w, w.dave.id()).await, 0, "the attacker gets nothing back");
     assert_eq!(
-        ft_balance(&w, w.dave.id()).await,
+        holdings(&w, w.dave.id()).await,
         before - BOND,
         "and is out the whole bond"
     );
@@ -975,7 +984,7 @@ async fn a_bogus_challenge_costs_the_attacker_and_pays_the_jurors() -> anyhow::R
 // here closes in two days, so the halt is outside the last day, which the operator cannot halt in.
 #[tokio::test]
 async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_the_key() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
+    let (w, admin) = setup_admin_owned().await?;
     let thief = &w.owner; // the harness operator
     let id = create_seeded_market(&w, 2 * 86_400).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
@@ -996,10 +1005,10 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
         .transact()
         .await?
         .into_result()?;
-    let (tokens, held) = (ft_balance(&w, w.alice.id()).await, shares(&w, id, w.alice.id()).await);
+    let (tokens, held) = (holdings(&w, w.alice.id()).await, shares(&w, id, w.alice.id()).await);
     let _ = buy(&w, &w.alice, id, "yes", USD).await;
     assert_eq!(
-        (ft_balance(&w, w.alice.id()).await, shares(&w, id, w.alice.id()).await),
+        (holdings(&w, w.alice.id()).await, shares(&w, id, w.alice.id()).await),
         (tokens, held),
         "a paused contract bounces trades"
     );
@@ -1053,20 +1062,14 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
         "owner only",
     );
 
-    // The members vote the thief out: a new operator, after the timelock. The old key is then locked out.
+    // The configured owner replaces the operator. DAO approvals/delay are tested separately. The old key is then locked out.
     let replacement = &w.carol;
-    let change = gov_pass(
-        &g,
-        function_call(
-            w.market.id(),
-            "set_operator",
-            json!({ "operator_id": replacement.id() }),
-            20,
-        ),
-    )
-    .await?;
-    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
-    gov_execute(&g, &w.dave, change).await?;
+    admin
+        .call(w.market.id(), "set_operator")
+        .args_json(json!({ "operator_id": replacement.id() }))
+        .transact()
+        .await?
+        .into_result()?;
     refused(
         thief
             .call(w.market.id(), "resume")
@@ -1097,57 +1100,7 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
     Ok(())
 }
 
-// A minority of the governance members, however determined, cannot move anything.
-#[tokio::test]
-async fn a_minority_of_members_cannot_approve_or_execute_anything() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
-    let id = gov_propose(
-        &g,
-        &g.members[0],
-        function_call(
-            w.market.id(),
-            "set_fee_recipients",
-            json!({ "revenue_pool": w.dave.id(), "business_wallet": w.dave.id() }),
-            20,
-        ),
-    )
-    .await?;
-    for m in &g.members[..THRESHOLD as usize - 1] {
-        gov_vote(&g, m, id, true).await?;
-    }
-    refused(
-        g.members[0]
-            .call(g.contract.id(), "vote")
-            .args_json(json!({ "proposal_id": id.to_string(), "approve": true }))
-            .transact()
-            .await?
-            .into_result(),
-        "already voted",
-    );
-    assert_eq!(
-        gov_proposal(&g, id).await["stage"],
-        "open",
-        "one short of the threshold"
-    );
-    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
-    refused(gov_execute(&g, &w.dave, id).await, "not approved");
-    assert_eq!(config(&w.market).await["business_wallet"], json!(w.business.id()));
-
-    // Nor can they make the bar lower for themselves: the contract refuses a threshold that is not a majority of the
-    // members, so there is no vote that would lower it to a minority.
-    for minority in [1, 2] {
-        refused(
-            g.members[0]
-                .call(g.contract.id(), "propose")
-                .args_json(json!({ "action": { "set_threshold": { "threshold": minority } } }))
-                .transact()
-                .await?
-                .into_result(),
-            "the threshold must be a majority of the members",
-        );
-    }
-    Ok(())
-}
+// Legacy custom-controller voting tests are archived outside the active suite.
 
 // ---- the contract fixes of 2026-10-19 ------------------------------------------------------------------------------
 
@@ -1394,7 +1347,6 @@ async fn staking_one_block_before_a_sweep_earns_one_blocks_share_of_the_stream()
     let w = setup().await?;
     mint(&w, w.owner.id(), 10_000 * USD).await?;
     let sniper = w.worker.dev_create_account().await?;
-    register_ft(&w, sniper.id()).await?;
     let tokens: Vec<String> = (0..5).map(|i| format!("sniper{i}")).collect();
     for t in &tokens {
         mint_nft(&w, &sniper, t).await?;
@@ -1438,10 +1390,10 @@ async fn staking_one_block_before_a_sweep_earns_one_blocks_share_of_the_stream()
 }
 
 // A halt held to close takes the last day out of the average a Void pays, so in that day only the owner can halt: the
-// operator, whose key is the one a thief is likeliest to hold, is refused. The owner is governance here.
+// operator, whose key is the one a thief is likeliest to hold, is refused. The owner is separate from the operator here.
 #[tokio::test]
 async fn the_operator_cannot_halt_in_the_last_day_before_close() -> anyhow::Result<()> {
-    let (w, _g) = setup_governed().await?;
+    let (w, _admin) = setup_admin_owned().await?;
     let id = create_seeded_market(&w, 3_000).await?;
     refused(
         w.owner
@@ -1450,7 +1402,7 @@ async fn the_operator_cannot_halt_in_the_last_day_before_close() -> anyhow::Resu
             .transact()
             .await?
             .into_result(),
-        "a halt in the last day before close is a governance action",
+        "a halt in the last day before close is an owner action",
     );
     assert_eq!(market_json(&w, id).await["status"], "open");
     Ok(())

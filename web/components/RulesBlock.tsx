@@ -57,7 +57,7 @@ export function RulesBlock({ market }: { market: MarketView }) {
         <Row label="Cancelled if" icon={X}>{market.void_policy}</Row>
         <Row label="Locked" icon={ShieldTick}>
           <details className="rules-verify"><summary>View rule verification</summary><span className="rules-verify-body">
-            Rules fixed on-chain before trading. Fingerprint{" "}
+            These rules were fixed on-chain before trading opened. Rule fingerprint{" "}
             <span className="mono rules-hash" aria-label="Rule fingerprint" title={hash}>
               {hash.slice(0, 8)}…{hash.slice(-6)}
             </span>{" "}

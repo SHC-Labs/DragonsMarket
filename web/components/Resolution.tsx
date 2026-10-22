@@ -46,7 +46,7 @@ export function Resolution({ market }: { market: MarketView }) {
   return <section aria-labelledby="res-h" className="detail-section">
     <h2 id="res-h" className="section-title">Resolution</h2>
     {(market.status === "open" || !record.loading || c) && <Tracker market={market} record={c ?? null} />}
-    {market.status === "open" ? <p className="resolution-note">Trading closes on {formatDateTime(market.close_at)}. Result information will appear here.</p> : <>
+    {market.status === "open" ? <p className="resolution-note">Trading closes on {formatDateTime(market.close_at)}. Follow the proposed answer and final result here.</p> : <>
       {record.loading && !c && <p role="status" className="resolution-note">Loading the result record…</p>}
       {record.error && <p role="alert" className="resolution-note">The result record is unavailable. <button type="button" className="btn btn-ghost btn-sm" onClick={record.reload}>Retry</button></p>}
       {c && <div className="resolution-record" data-stage={c.stage}>
@@ -65,10 +65,10 @@ export function Resolution({ market }: { market: MarketView }) {
           <Sigil hash={seedHex(vote.juror)} className="vote-sigil" />
           <div className="min-w-0"><span className="mono vote-juror">{vote.juror}</span><p><span className="vote-outcome" data-outcome={vote.outcome}>{WORD[vote.outcome]}</span>{vote.reason ? <span className="vote-reason">: {vote.reason}</span> : null}</p></div>
         </li>)}</ul></>}
-        {c.stage === "disputed" && <p className="resolution-note">Jury details and dispute actions will appear here when they’re available.</p>}
+        {c.stage === "disputed" && <p className="resolution-note">Jury details and dispute actions are not available here yet.</p>}
       </div>}
       {!record.loading && !record.error && !c && <p className="resolution-note">No result has been published yet.</p>}
     </>}
-    <p className="resolution-footnote">Result proposals, challenges and voting aren’t available yet.</p>
+    <p className="resolution-footnote">You cannot submit proposals, challenge results or vote on this site yet.</p>
   </section>;
 }

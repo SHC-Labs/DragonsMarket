@@ -5,15 +5,14 @@
 // The JSON interface takes one argument per field, so a few methods are long on purpose.
 #![allow(clippy::too_many_arguments)]
 
-use near_contract_standards::fungible_token::core::ext_ft_core;
 use near_contract_standards::non_fungible_token::core::{ext_nft_core, NonFungibleTokenReceiver};
 use near_contract_standards::non_fungible_token::TokenId;
 use near_sdk::json_types::{Base58CryptoHash, U128, U64};
 use near_sdk::serde_json::json;
 use near_sdk::store::{LookupMap, LookupSet, Vector};
 use near_sdk::{
-    assert_one_yocto, env, near, require, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
-    PromiseError, PromiseOrValue, PublicKey,
+    assert_one_yocto, env, ext_contract, near, require, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault,
+    Promise, PromiseError, PromiseOrValue, PublicKey,
 };
 
 const MAX_SEATS: u32 = 1_000;
@@ -29,7 +28,9 @@ const STREAM_SECS: u64 = 30 * 24 * 60 * 60;
 const NS_PER_SEC: u64 = 1_000_000_000;
 const STREAM_NS: u64 = STREAM_SECS * NS_PER_SEC;
 const GAS_NFT_TRANSFER: Gas = Gas::from_tgas(15);
-const GAS_FT_TRANSFER: Gas = Gas::from_tgas(15);
+// The verifier burned 3.8 TGas for a payout from a contract in the sandbox (INTENTS-PROOF.md), so this is a wide margin.
+const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
+const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
 // Sends the NFT and schedules on_unstaked, so it covers both of those plus its own work (2.4 TGas measured).
 const GAS_UNSTAKE_PAID: Gas = Gas::from_tgas(35);
@@ -38,11 +39,26 @@ const GAS_UNSTAKE_PAID: Gas = Gas::from_tgas(35);
 // an unstake and 29 for a claim in the sandbox.
 const GAS_PAYOUT_OVERHEAD: Gas = Gas::from_tgas(8);
 const GAS_UNSTAKE_FLOOR: Gas =
-    Gas::from_gas(GAS_FT_TRANSFER.as_gas() + GAS_UNSTAKE_PAID.as_gas() + GAS_PAYOUT_OVERHEAD.as_gas());
+    Gas::from_gas(GAS_MT_TRANSFER.as_gas() + GAS_UNSTAKE_PAID.as_gas() + GAS_PAYOUT_OVERHEAD.as_gas());
 const GAS_CLAIM_FLOOR: Gas =
-    Gas::from_gas(GAS_FT_TRANSFER.as_gas() + GAS_CALLBACK.as_gas() + GAS_PAYOUT_OVERHEAD.as_gas());
+    Gas::from_gas(GAS_MT_TRANSFER.as_gas() + GAS_CALLBACK.as_gas() + GAS_PAYOUT_OVERHEAD.as_gas());
 // The layout of the state below. migrate reads exactly this one and refuses any other.
 const STATE_VERSION: u16 = 1;
+// Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
+const NEP141_PREFIX: &str = "nep141:";
+
+// The NEAR Intents verifier. Revenue arrives in this contract's account there, and claims and unstakes are paid out of it.
+#[ext_contract(ext_verifier)]
+pub trait Verifier {
+    fn mt_transfer(
+        &mut self,
+        receiver_id: AccountId,
+        token_id: String,
+        amount: U128,
+        approval: Option<(AccountId, u64)>,
+        memo: Option<String>,
+    );
+}
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
@@ -164,7 +180,9 @@ pub struct CouncilContract {
     pending_owner: Option<AccountId>,
     oracle: AccountId,
     nft_contract: AccountId,
-    collateral: AccountId,
+    // The Intents verifier that holds the revenue, and the exact id of the collateral in it, "nep141:<token>".
+    verifier: AccountId,
+    collateral_token_id: String,
     // How long a seat waits between asking to unstake and leaving. The council cannot see the oracle's settings, so
     // whoever sets this must keep it at least as long as the oracle's challenge window plus panel deadline.
     cooldown_ns: u64,
@@ -239,7 +257,8 @@ impl CouncilContract {
         owner_id: AccountId,
         oracle_id: AccountId,
         nft_contract: AccountId,
-        collateral_token: AccountId,
+        verifier_id: AccountId,
+        collateral_token_id: String,
         cooldown_ns: U64,
         max_seats_per_account: u32,
         allowlist_enabled: Option<bool>,
@@ -249,6 +268,10 @@ impl CouncilContract {
             max_seats_per_account > 0,
             "an account must be allowed at least one seat"
         );
+        require!(
+            collateral_token_id.starts_with(NEP141_PREFIX),
+            "the collateral token id must look like nep141:<token>"
+        );
         Self {
             state_version: STATE_VERSION,
             upgrade_proven: false,
@@ -257,7 +280,8 @@ impl CouncilContract {
             pending_owner: None,
             oracle: oracle_id,
             nft_contract,
-            collateral: collateral_token,
+            verifier: verifier_id,
+            collateral_token_id,
             cooldown_ns: cooldown_ns.0,
             max_seats_per_account,
             allowlist_enabled: allowlist_enabled.unwrap_or(true),
@@ -288,9 +312,10 @@ impl CouncilContract {
         staged.code_hash
     }
 
-    // Owner only, which is the governance contract, so code changes wait out its vote and timelock. Staking, unstaking
-    // and claiming never pause, so the timelock is the stakers' window to leave. The deploy and migrate are one batch: a
-    // migrate that panics puts the old code back. Attach at least 100 TGas.
+    // Owner only, which is the DAO. SputnikDAO executes a proposal in the call of the approval that reaches its threshold,
+    // so the DAO's voting period is the only delay a code change waits out (decided 2026-10-21). Staking, unstaking and
+    // claiming never pause. The deploy and migrate are one batch: a migrate that panics puts the old code back. Attach at
+    // least 100 TGas.
     pub fn upgrade(&mut self, code_hash: Base58CryptoHash) -> Promise {
         upgrade::require_upgrade_gas();
         self.only_owner();
@@ -504,15 +529,11 @@ impl CouncilContract {
         if amount == 0 {
             return self.return_nft(token_id, stake, earned);
         }
-        ext_ft_core::ext(self.collateral.clone())
-            .with_attached_deposit(NearToken::from_yoctonear(1))
-            .with_static_gas(GAS_FT_TRANSFER)
-            .ft_transfer(stake.owner.clone(), U128(amount), None)
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(GAS_UNSTAKE_PAID)
-                    .on_unstake_paid(token_id, stake, U128(earned)),
-            )
+        self.pay(&stake.owner, amount).then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(GAS_UNSTAKE_PAID)
+                .on_unstake_paid(token_id, stake, U128(earned)),
+        )
     }
 
     #[private]
@@ -577,15 +598,11 @@ impl CouncilContract {
             "revenue_claimed",
             json!({ "token_id": token_id, "owner": owner, "amount": amount.to_string() }),
         );
-        ext_ft_core::ext(self.collateral.clone())
-            .with_attached_deposit(NearToken::from_yoctonear(1))
-            .with_static_gas(GAS_FT_TRANSFER)
-            .ft_transfer(owner.clone(), U128(amount), None)
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(GAS_CALLBACK)
-                    .on_claimed(token_id, owner, U128(amount)),
-            )
+        self.pay(&owner, amount).then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(GAS_CALLBACK)
+                .on_claimed(token_id, owner, U128(amount)),
+        )
     }
 
     #[private]
@@ -610,18 +627,37 @@ impl CouncilContract {
         }
     }
 
-    // Called by the collateral token. msg "revenue" adds the amount to the stream that releases to the staked seats
-    // over the next 30 days. Anyone may send it. Panicking here makes the token refund the sender.
-    pub fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> PromiseOrValue<U128> {
-        require!(env::predecessor_account_id() == self.collateral, "wrong token");
+    // Called by the verifier after an mt_transfer_call, once the money is already in this contract's Intents account. msg
+    // "revenue" adds the amount to the stream that releases to the staked seats over the next 30 days. Anyone may send it.
+    // The answer is the amounts to hand back, so 0 keeps everything. Panicking makes the verifier refund the sender in full.
+    // A plain deposit never reaches here: it sits in the account as surplus and is never counted.
+    pub fn mt_on_transfer(
+        &mut self,
+        sender_id: AccountId,
+        previous_owner_ids: Vec<AccountId>,
+        token_ids: Vec<String>,
+        amounts: Vec<U128>,
+        msg: String,
+    ) -> Vec<U128> {
+        let _ = previous_owner_ids;
+        require!(
+            env::predecessor_account_id() == self.verifier,
+            "only the verifier can deliver money"
+        );
+        require!(
+            token_ids.len() == 1 && amounts.len() == 1,
+            "exactly one token and amount"
+        );
+        require!(token_ids[0] == self.collateral_token_id, "wrong token");
         require!(msg == "revenue", "unknown action");
+        let amount = amounts[0];
         self.total_received += amount.0;
         self.add_to_stream(amount.0);
         emit(
             "revenue",
             json!({ "from": sender_id, "amount": amount.0.to_string(), "seats": self.staked.len() }),
         );
-        PromiseOrValue::Value(U128(0))
+        vec![U128(0)]
     }
 
     // ---- views ----------------------------------------------------------------------------
@@ -685,7 +721,7 @@ impl CouncilContract {
         let (stream, _) = self.stream.advanced(env::block_timestamp(), self.staked.len() as u128);
         json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
                 "owner": self.owner, "pending_owner": self.pending_owner, "oracle": self.oracle, "nft_contract": self.nft_contract,
-                "collateral": self.collateral, "cooldown_ns": self.cooldown_ns.to_string(),
+                "verifier": self.verifier, "collateral_token_id": self.collateral_token_id, "cooldown_ns": self.cooldown_ns.to_string(),
                 "max_seats_per_account": self.max_seats_per_account, "allowlist_enabled": self.allowlist_enabled,
                 "allowed_range": self.current_range().map(|(first, last)| json!({ "first": first.to_string(), "last": last.to_string() })),
                 "total_received": self.total_received.to_string(), "stream_ns": STREAM_NS.to_string(), "stream_remaining": (stream.remaining / PRECISION).to_string(),
@@ -795,6 +831,15 @@ impl CouncilContract {
         self.insert_stake(token_id, stake);
     }
 
+    // Pays `amount` of the collateral to `to` inside the verifier. mt_transfer returns nothing, so an error in a callback means
+    // the verifier's receipt failed (paused, locked, out of gas) and nothing moved. `to` is always a seat owner on record.
+    fn pay(&self, to: &AccountId, amount: u128) -> Promise {
+        ext_verifier::ext(self.verifier.clone())
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(GAS_MT_TRANSFER)
+            .mt_transfer(to.clone(), self.collateral_token_id.clone(), U128(amount), None, None)
+    }
+
     fn return_nft(&self, token_id: TokenId, stake: Stake, earned: u128) -> Promise {
         ext_nft_core::ext(self.nft_contract.clone())
             .with_attached_deposit(NearToken::from_yoctonear(1))
@@ -835,7 +880,8 @@ mod tests {
     const OWNER: &str = "owner.near";
     const ORACLE: &str = "oracle.near";
     const NFT: &str = "nft.near";
-    const TOKEN: &str = "usd.near";
+    const VERIFIER: &str = "intents.near";
+    const COLLATERAL_ID: &str = "nep141:usd.near";
     const COOLDOWN_NS: u64 = 60_000_000_000;
     const SECOND: u64 = NS_PER_SEC;
     const DAY: u64 = 24 * 60 * 60 * SECOND;
@@ -902,16 +948,34 @@ mod tests {
             acct(OWNER),
             acct(ORACLE),
             acct(NFT),
-            acct(TOKEN),
+            acct(VERIFIER),
+            COLLATERAL_ID.to_string(),
             U64(COOLDOWN_NS),
             MAX_SEATS,
             allowlist_enabled,
         )
     }
 
+    // What the verifier calls after the market's mt_transfer_call.
+    fn deliver(
+        c: &mut CouncilContract,
+        sender: &str,
+        token_ids: Vec<&str>,
+        amounts: Vec<u128>,
+        msg: &str,
+    ) -> Vec<U128> {
+        c.mt_on_transfer(
+            acct(sender),
+            vec![acct(sender)],
+            token_ids.into_iter().map(String::from).collect(),
+            amounts.into_iter().map(U128).collect(),
+            msg.to_string(),
+        )
+    }
+
     fn revenue(c: &mut CouncilContract, amount: u128) {
-        act_as(TOKEN);
-        let _ = c.ft_on_transfer(acct("market.near"), U128(amount), "revenue".into());
+        act_as(VERIFIER);
+        let _ = deliver(c, "market.near", vec![COLLATERAL_ID], vec![amount], "revenue");
     }
 
     fn pending(c: &CouncilContract, token: &str) -> u128 {
@@ -1724,8 +1788,128 @@ mod tests {
     #[should_panic(expected = "unknown action")]
     fn a_plain_transfer_is_refused() {
         let mut c = council();
-        act_as(TOKEN);
-        let _ = c.ft_on_transfer(acct("a.near"), U128(5), "deposit".into());
+        act_as(VERIFIER);
+        let _ = deliver(&mut c, "a.near", vec![COLLATERAL_ID], vec![5], "deposit");
+    }
+
+    #[test]
+    fn revenue_from_the_verifier_is_counted_kept_in_full_and_answered_with_a_zero_refund() {
+        let mut c = council();
+        act_as(VERIFIER);
+        let out = deliver(&mut c, "market.near", vec![COLLATERAL_ID], vec![900], "revenue");
+        assert_eq!(out, vec![U128(0)]);
+        assert_eq!(c.total_received().0, 900);
+        assert_eq!(c.config()["total_received"], "900");
+    }
+
+    #[test]
+    #[should_panic(expected = "only the verifier can deliver money")]
+    fn revenue_from_anyone_but_the_verifier_is_refused() {
+        let mut c = council();
+        act_as("market.near");
+        let _ = deliver(&mut c, "market.near", vec![COLLATERAL_ID], vec![900], "revenue");
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong token")]
+    fn revenue_in_another_token_is_refused() {
+        let mut c = council();
+        act_as(VERIFIER);
+        let _ = deliver(&mut c, "market.near", vec!["nep141:other.near"], vec![900], "revenue");
+    }
+
+    #[test]
+    #[should_panic(expected = "exactly one token and amount")]
+    fn a_delivery_of_two_tokens_is_refused() {
+        let mut c = council();
+        act_as(VERIFIER);
+        let _ = deliver(
+            &mut c,
+            "market.near",
+            vec![COLLATERAL_ID, COLLATERAL_ID],
+            vec![1, 1],
+            "revenue",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "the collateral token id must look like nep141:<token>")]
+    fn a_collateral_id_without_the_nep141_prefix_is_refused_at_init() {
+        near_sdk::mock::with_mocked_blockchain(|b| {
+            let _ = b.take_storage();
+        });
+        act_as(OWNER);
+        CouncilContract::new(
+            acct(OWNER),
+            acct(ORACLE),
+            acct(NFT),
+            acct(VERIFIER),
+            "usd.near".to_string(),
+            U64(COOLDOWN_NS),
+            MAX_SEATS,
+            None,
+        );
+    }
+
+    #[test]
+    fn config_names_the_verifier_and_the_exact_token_id() {
+        let c = council();
+        let config = c.config();
+        assert_eq!(config["verifier"], VERIFIER);
+        assert_eq!(config["collateral_token_id"], COLLATERAL_ID);
+        assert!(config.get("collateral").is_none());
+    }
+
+    fn mt_transfer_of(r: &near_sdk::mock::Receipt) -> (near_sdk::serde_json::Value, u128, u64) {
+        assert_eq!(r.receiver_id, acct(VERIFIER));
+        match &r.actions[0] {
+            near_sdk::mock::MockAction::FunctionCallWeight {
+                method_name,
+                args,
+                attached_deposit,
+                prepaid_gas,
+                ..
+            } => {
+                assert_eq!(method_name.as_slice(), b"mt_transfer");
+                (
+                    near_sdk::serde_json::from_slice(args).unwrap(),
+                    attached_deposit.as_yoctonear(),
+                    prepaid_gas.as_gas(),
+                )
+            }
+            other => panic!("not a function call: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unstake_pays_by_mt_transfer_to_the_seat_owner_before_the_nft_leaves() {
+        let mut c = council();
+        stake(&mut c, "t1", "a.near");
+        revenue(&mut c, 900_000);
+        release_all();
+        let paid = leave(&mut c, "t1", "a.near");
+        let sent = near_sdk::test_utils::get_created_receipts();
+        let (args, deposit, _) = mt_transfer_of(&sent[0]);
+        assert_eq!(deposit, 1);
+        assert_eq!(args["receiver_id"], "a.near");
+        assert_eq!(args["token_id"], COLLATERAL_ID);
+        assert_eq!(args["amount"], paid.to_string());
+        assert_eq!(paid, 900_000);
+    }
+
+    #[test]
+    fn a_claim_is_one_mt_transfer_of_one_yocto_to_the_seat_owner() {
+        let mut c = council();
+        stake(&mut c, "t1", "a.near");
+        revenue(&mut c, 900_000);
+        release_all();
+        claim(&mut c, "t1", "a.near");
+        let sent = near_sdk::test_utils::get_created_receipts();
+        let (args, deposit, gas) = mt_transfer_of(&sent[0]);
+        assert_eq!((deposit, gas), (1, GAS_MT_TRANSFER.as_gas()));
+        assert_eq!(args["receiver_id"], "a.near");
+        assert_eq!(args["token_id"], COLLATERAL_ID);
+        assert_eq!(args["amount"], "900000");
     }
 
     proptest! {

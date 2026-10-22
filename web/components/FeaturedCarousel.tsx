@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useCallback, useState } from "react
 import { ArrowLeft, ArrowRight, Pause, Play } from "@/components/icons";
 import { FeaturedMarket } from "./Featured";
 import type { MarketView } from "@/lib/market";
-import type { Pt } from "./PriceChart";
+import type { Pt } from "@/lib/history";
 
 const ROTATE_MS = 8000;
 

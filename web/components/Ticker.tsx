@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { Pause, Play } from "./icons";
 import { DeltaChip, deltaOf } from "./Featured";
-import type { Pt } from "./PriceChart";
+import type { Pt } from "@/lib/history";
 import { pct } from "@/lib/probability";
 import type { MarketView } from "@/lib/market";
 

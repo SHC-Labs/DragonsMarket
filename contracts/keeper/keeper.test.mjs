@@ -1,15 +1,22 @@
-// Run with: node --test keeper/
+// Run with: node --test keeper/keeper.test.mjs keeper/treasury.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  advanceCursor, dueActions, formatNear, juryProblems, marginReport, nearToYocto, readCursor, readKeyFile, refuseKeyFlags,
-  resolveKeys, secondJurySize, storageMargin, writeCursor,
+  accessKeyReport, advanceCursor, daoReport, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options,
+  readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, verifierProblems,
+  writeCursor, refuseRetiredController,
 } from "./keeper.mjs";
+import { b58encode } from "./chain.mjs";
 
 const NOW = 1_000_000n;
+
+test("retired controller flags are rejected before any RPC call", () => {
+  assert.throws(() => refuseRetiredController({ governance: "old.example.near" }), /retired/);
+  assert.doesNotThrow(() => refuseRetiredController({ treasury: "example.sputnik-dao.near" }));
+});
 const base = {
   now: NOW, height: 100n, markets: [{ id: "0", outcome: null, resolve_by: "9000000" }], locked: {}, feesDue: 0n, minSweep: 1_000n,
 };
@@ -113,7 +120,133 @@ test("fees are swept once they reach the minimum, and never when there are none"
   const [sweep] = sweeps({ feesDue: 1_000n });
   assert.deepEqual([sweep.contract, sweep.args, sweep.gas], ["market", {}, 100n * 10n ** 12n]);
   assert.equal(sweeps({ feesDue: 0n, minSweep: 0n }).length, 0);
-  assert.ok(sweep.gas >= 95n * 10n ** 12n, "sweep_fees refuses less than 95 TGas");
+  assert.ok(sweep.gas >= 87n * 10n ** 12n, "sweep_fees refuses less than 87 TGas");
+});
+
+test("the books match the verifier, or the verifier holds more, or money is missing", () => {
+  const oracle = (owed, held) => reconciliation({ name: "oracle", owed, held });
+  assert.deepEqual(oracle("10000000", "10000000"), { line: "oracle owes 10000000 and holds 10000000 in the verifier", problem: null });
+  const surplus = oracle("10000000", "14000000");
+  assert.match(surplus.line, /^oracle owes 10000000 and holds 14000000 in the verifier, 4000000 more than it owes/);
+  assert.equal(surplus.problem, null, "a surplus is not an incident");
+  assert.equal(oracle("10000000", "9999999").problem, "the oracle owes 10000000 but the verifier holds only 9999999 for it: 1 is missing");
+  assert.equal(oracle("0", "0").problem, null);
+  const market = reconciliation({ name: "market", owed: 7n, held: 5n });
+  assert.equal(market.problem, "the market owes 7 but the verifier holds only 5 for it: 2 is missing");
+});
+
+test("the Council's figure is a floor: holding more is normal and holding less is missing money", () => {
+  const council = (owed, held) => reconciliation({ name: "council", owed, held, exact: false });
+  assert.equal(council(100n, 100n).line, "council owes at least 100 and holds 100 in the verifier");
+  assert.equal(council(100n, 100n).problem, null);
+  assert.match(council(100n, 103n).line, /^council owes at least 100 and holds 103 in the verifier, 3 more than it needs/);
+  assert.equal(council(100n, 103n).problem, null);
+  assert.equal(council(100n, 99n).problem, "the council owes at least 100 but the verifier holds only 99 for it: 1 is missing");
+});
+
+test("a shortfall is read again a few blocks later and reported only if it is still there", async () => {
+  const feed = (...reads) => {
+    const waits = [];
+    let n = 0;
+    return { read: async () => reads[Math.min(n++, reads.length - 1)], wait: async (blocks) => waits.push(blocks), waits, reads: () => n };
+  };
+  const ok = feed({ owed: 5n, held: 5n });
+  assert.deepEqual(await reconcile(ok.read, ok.wait), { owed: 5n, held: 5n });
+  assert.deepEqual([ok.reads(), ok.waits], [1, []], "nothing to doubt, nothing waited for");
+  const surplus = feed({ owed: 5n, held: 9n });
+  await reconcile(surplus.read, surplus.wait);
+  assert.deepEqual([surplus.reads(), surplus.waits], [1, []], "a surplus is not read again");
+  const settled = feed({ owed: 5n, held: 4n }, { owed: 5n, held: 5n });
+  assert.deepEqual(await reconcile(settled.read, settled.wait), { owed: 5n, held: 5n });
+  assert.deepEqual([settled.reads(), settled.waits], [2, [3]], "read again after 3 blocks, and it was a payout in flight");
+  const missing = feed({ owed: 5n, held: 4n });
+  assert.deepEqual(await reconcile(missing.read, missing.wait), { owed: 5n, held: 4n });
+  assert.deepEqual([missing.reads(), missing.waits], [3, [3, 3]], "three reads, 3 blocks apart");
+  const worse = feed({ owed: 5n, held: 4n }, { owed: 5n, held: 4n }, { owed: 5n, held: 1n });
+  assert.equal((await reconcile(worse.read, worse.wait)).held, 1n, "the last read is the one reported");
+});
+
+test("the verifier's view of a contract is a problem when it has a key, refuses its own calls, or has locked it", () => {
+  const view = { name: "market", id: "m.near", keys: [], predecessorAuth: true, locked: false };
+  assert.deepEqual(verifierProblems(view), []);
+  assert.match(verifierProblems({ ...view, keys: ["ed25519:abc"] })[0], /^market m\.near has 1 public key registered in the verifier: a key can move its funds/);
+  assert.match(verifierProblems({ ...view, keys: ["a", "b"] })[0], /has 2 public keys registered/);
+  assert.match(verifierProblems({ ...view, predecessorAuth: false })[0], /^market m\.near does not authenticate by predecessor/);
+  assert.match(verifierProblems({ ...view, locked: true })[0], /^market m\.near is locked in the verifier.*stop advertising deposits/);
+  assert.equal(verifierProblems({ ...view, keys: ["a"], predecessorAuth: false, locked: true }).length, 3);
+});
+
+test("access keys are counted, and are a problem only when the contracts are expected to be sealed", () => {
+  const accounts = [{ name: "market", id: "m.near", count: 1 }, { name: "oracle", id: "o.near", count: 0 }, { name: "council", id: "c.near", count: 2 }];
+  assert.deepEqual(accessKeyReport(accounts, false), { line: "access keys: market 1, oracle 0, council 2", problems: [] });
+  assert.deepEqual(accessKeyReport(accounts, true).problems, [
+    "market m.near still has 1 access key: the owner has not sealed it",
+    "council c.near still has 2 access keys: the owner has not sealed it",
+  ]);
+  assert.deepEqual(accessKeyReport(accounts.map((a) => ({ ...a, count: 0 })), true).problems, []);
+});
+
+test("flags that carry no value do not swallow the next option", () => {
+  assert.deepEqual(options(["--expect-sealed", "--rpc", "http://x", "--watch-dao", "--dry-run", "--market", "m.near"]), {
+    "expect-sealed": true, rpc: "http://x", "watch-dao": true, "dry-run": true, market: "m.near",
+  });
+  assert.deepEqual(options(["--min-margin", "7", "stray"]), { "min-margin": "7" });
+});
+
+test("a proposal is open while it is in progress or failed and inside its voting period, to the nanosecond", () => {
+  const period = "1000";
+  const at = (status, submitted) => isOpen({ status, submission_time: String(submitted) }, 5000n, period);
+  assert.equal(at("InProgress", 4000), true, "the last nanosecond");
+  assert.equal(at("InProgress", 3999), false, "one nanosecond past the period");
+  assert.equal(at("Failed", 4500), true, "a failed call can be retried until the period ends");
+  for (const status of ["Approved", "Rejected", "Removed", "Expired", "Moved"]) assert.equal(at(status, 4500), false, status);
+});
+
+const DAO = "dao.sputnik-dao.near";
+const CONTRACTS = { market: "market.near", oracle: "oracle.near", council: "council.near" };
+const call = (receiver, method, args, extra = {}) => ({
+  FunctionCall: { receiver_id: receiver, actions: [{ method_name: method, args: Buffer.from(JSON.stringify(args)).toString("base64"), deposit: "0", gas: "30000000000000", ...extra }] },
+});
+const pending = (id, kind, status = "InProgress") => ({ id, proposer: "alice.near", status, kind });
+
+test("the DAO report lists the open proposals that name the contracts and flags the ones the allow-list refuses", async () => {
+  const staged = b58encode(Buffer.alloc(32, 1));
+  const unstaged = b58encode(Buffer.alloc(32, 2));
+  const asked = [];
+  const view = async (account, method, args) => {
+    asked.push([account, method]);
+    if (method === "is_staged") return args.code_hash === staged;
+    throw new Error(`unexpected ${method}`);
+  };
+  const upgrade = (code_hash) => call(CONTRACTS.oracle, "upgrade", { code_hash }, { gas: "150000000000000" });
+  const proposals = [
+    pending(3, call(CONTRACTS.market, "set_fee_rate_bps", { fee_rate_bps: 150 })),
+    pending(4, call(CONTRACTS.oracle, "set_bond", { bond: "1" }), "Failed"),
+    pending(5, call(CONTRACTS.market, "set_min_sweep", { min_sweep: "1" })),
+    pending(6, call(CONTRACTS.council, "set_cooldown_ns", { cooldown_ns: "0" })),
+    pending(7, upgrade(unstaged)),
+    pending(8, upgrade(staged)),
+    pending(9, call("intents.near", "mt_transfer", {})),
+    pending(10, { Transfer: { token_id: "", receiver_id: "eve.near", amount: "1" } }),
+    pending(11, "Vote"),
+    pending(12, { ChangePolicy: { policy: {} } }),
+  ];
+  const report = await daoReport({ proposals, treasuryId: DAO, contracts: CONTRACTS, view });
+  assert.deepEqual(report.lines, [
+    'DAO proposal 3 (InProgress, by alice.near): market.set_fee_rate_bps {"fee_rate_bps":150}',
+    'DAO proposal 4 (Failed, by alice.near): oracle.set_bond {"bond":"1"}',
+    "DAO proposal 5 (InProgress, by alice.near) names market.near",
+    "DAO proposal 6 (InProgress, by alice.near) names council.near",
+    "DAO proposal 7 (InProgress, by alice.near) names oracle.near",
+    `DAO proposal 8 (InProgress, by alice.near): oracle.upgrade {"code_hash":"${staged}"}`,
+    "4 other open DAO proposals (FunctionCall, Transfer, Vote, ChangePolicy)",
+  ]);
+  assert.equal(report.problems.length, 3);
+  assert.equal(report.problems[0], "DAO proposal 5 names market.near and is not on the allow-list: market.set_min_sweep is not on the allow-list");
+  assert.match(report.problems[1], /^DAO proposal 6 names council\.near and is not on the allow-list: cooldown_ns must be/);
+  assert.match(report.problems[2], /^DAO proposal 7 names oracle\.near and is not on the allow-list: no code with the hash .* is staged on oracle\.near/);
+  assert.ok(asked.every(([account, method]) => account === CONTRACTS.oracle && method === "is_staged"), "it only reads");
+  assert.deepEqual((await daoReport({ proposals: [], treasuryId: DAO, contracts: CONTRACTS, view })).lines, ["no open DAO proposals"]);
 });
 
 test("the cursor advances over a finished prefix and stops at the first market that is not finished", () => {

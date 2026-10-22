@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { MarketOutcomeChart } from "./MarketOutcomeChart";
-import { type Pt } from "./PriceChart";
+import type { Pt } from "@/lib/history";
 import { SplitMeter, StateBadge } from "./ui";
 import { CountUp } from "./CountUp";
 import { MarketIcon } from "./MarketIcon";

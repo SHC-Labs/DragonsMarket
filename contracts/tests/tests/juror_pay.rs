@@ -1,7 +1,6 @@
 // What a decided dispute pays the jurors, and what a juror who never votes forfeits. Real contracts, sandbox chain.
 mod common;
 use common::*;
-use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::Account;
 use serde_json::json;
 
@@ -50,18 +49,13 @@ async fn the_majority_jurors_split_a_quarter_of_the_losing_bond_and_can_withdraw
     assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND - 1_250_000);
     assert_eq!(claimable(&w, w.carol.id()).await, 0);
 
-    // It is real money: the juror withdraws it.
-    register_ft(&w, voters[0].id()).await?;
-    let before = ft_balance(&w, voters[0].id()).await;
-    voters[0]
-        .call(w.oracle.id(), "withdraw_bond")
-        .deposit(NearToken::from_yoctonear(1))
-        .gas(Gas::from_tgas(100))
-        .transact()
-        .await?
-        .into_result()?;
-    assert_eq!(ft_balance(&w, voters[0].id()).await, before + 625_000);
+    // It is real money: the juror withdraws it into their Intents account.
+    let before = intents_balance(&w, voters[0].id()).await;
+    withdraw_bond(&w, &voters[0]).await?;
+    assert_eq!(intents_balance(&w, voters[0].id()).await, before + 625_000);
     assert_eq!(claimable(&w, voters[0].id()).await, 0);
+    assert_eq!(oracle_total_owed(&w).await, 2 * BOND - 625_000);
+    assert_oracle_reconciled(&w).await;
     Ok(())
 }
 
@@ -103,7 +97,7 @@ async fn a_juror_who_never_voted_forfeits_the_revenue_earned_while_serving() -> 
     register_ft(&w, silent.id()).await?;
     let paid = claimed_in(&claim(&w, &silent, tok(&silent)).await?);
     assert!(paid >= kept);
-    assert_eq!(ft_balance(&w, silent.id()).await, paid);
+    assert_eq!(holdings(&w, silent.id()).await, paid);
     Ok(())
 }
 

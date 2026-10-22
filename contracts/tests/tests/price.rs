@@ -104,10 +104,10 @@ async fn a_signed_price_resolves_the_market_after_the_challenge_window() -> anyh
     // 105.00, signed by two of the three publishers: at or above the strike, so Yes.
     let price = 10_500;
     let m = message(&w, NETWORK, id, obs, price);
-    let before = ft_balance(&w, w.carol.id()).await;
+    let before = holdings(&w, w.carol.id()).await;
     answer_price(&w, id, price, &[entry(&k[0], &m), entry(&k[2], &m)]).await?;
     assert_eq!(
-        ft_balance(&w, w.carol.id()).await,
+        holdings(&w, w.carol.id()).await,
         before - BOND,
         "the submitter's bond is held"
     );
@@ -148,7 +148,7 @@ async fn a_submission_the_oracle_refuses_gives_the_bond_back_and_opens_no_case()
     skip_secs(&w.worker, 130).await;
     let good = message(&w, NETWORK, id, obs, 10_500);
     let outsider = signing_key(99);
-    let before = ft_balance(&w, w.carol.id()).await;
+    let before = holdings(&w, w.carol.id()).await;
 
     let refused_submissions: Vec<(&str, u128, Vec<String>)> = vec![
         ("one signature when two must sign", 10_500, vec![entry(&k[0], &good)]),
@@ -195,11 +195,7 @@ async fn a_submission_the_oracle_refuses_gives_the_bond_back_and_opens_no_case()
     for (what, price, entries) in refused_submissions {
         let _ = answer_price(&w, id, price, &entries).await;
         assert!(case_json(&w, id).await.is_null(), "{what}: no case may open");
-        assert_eq!(
-            ft_balance(&w, w.carol.id()).await,
-            before,
-            "{what}: the bond comes back"
-        );
+        assert_eq!(holdings(&w, w.carol.id()).await, before, "{what}: the bond comes back");
     }
 
     // A plain proposal is not how a price market is answered.
@@ -212,7 +208,7 @@ async fn a_submission_the_oracle_refuses_gives_the_bond_back_and_opens_no_case()
     )
     .await;
     assert!(case_json(&w, id).await.is_null());
-    assert_eq!(ft_balance(&w, w.carol.id()).await, before);
+    assert_eq!(holdings(&w, w.carol.id()).await, before);
 
     // The right submission still works afterwards.
     answer_price(&w, id, 10_500, &[entry(&k[0], &good), entry(&k[1], &good)]).await?;
@@ -225,10 +221,10 @@ async fn a_price_cannot_be_submitted_before_its_observation_time() -> anyhow::Re
     let (w, k) = world_with_publishers().await?;
     let (id, obs) = price_market(&w).await?;
     let m = message(&w, NETWORK, id, obs, 10_500);
-    let before = ft_balance(&w, w.carol.id()).await;
+    let before = holdings(&w, w.carol.id()).await;
     let _ = answer_price(&w, id, 10_500, &[entry(&k[0], &m), entry(&k[1], &m)]).await;
     assert!(case_json(&w, id).await.is_null(), "the market has not even closed");
-    assert_eq!(ft_balance(&w, w.carol.id()).await, before);
+    assert_eq!(holdings(&w, w.carol.id()).await, before);
     Ok(())
 }
 
@@ -314,10 +310,10 @@ async fn the_operator_cuts_off_a_publisher_at_once_and_only_the_owner_adds_one()
     let (id, obs) = price_market(&w).await?;
     skip_secs(&w.worker, 130).await;
     let m = message(&w, NETWORK, id, obs, 10_500);
-    let before = ft_balance(&w, w.carol.id()).await;
+    let before = holdings(&w, w.carol.id()).await;
     let _ = answer_price(&w, id, 10_500, &[entry(&k[0], &m), entry(&k[2], &m)]).await;
     assert!(case_json(&w, id).await.is_null());
-    assert_eq!(ft_balance(&w, w.carol.id()).await, before);
+    assert_eq!(holdings(&w, w.carol.id()).await, before);
     answer_price(&w, id, 10_500, &[entry(&k[0], &m), entry(&k[1], &m)]).await?;
     assert_eq!(case_json(&w, id).await["stage"], "proposed");
     Ok(())

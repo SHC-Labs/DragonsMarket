@@ -8,12 +8,18 @@
 //   node keeper.mjs run   --rpc URL --market ID --oracle ID --council ID --account ID [--dry-run]
 //                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH]
 //                         [--state-file PATH] [--min-sweep UNITS]
-//   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID [--governance ID] [--min-margin NEAR]
+//   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID [--treasury ID] [--min-margin NEAR]
+//                         [--expect-sealed] [--watch-dao]
 //
 // `run` needs an account with a little NEAR for gas. The calls it makes move no money of the keeper's own, and none
 // of them attach a deposit, so a function call access key is enough. `check` reads only. It reports whether the
-// council can seat a jury and a second jury, and how much NEAR each contract account has left after paying for the
-// storage it uses, and exits 1 if anything is wrong.
+// council can seat a jury and a second jury; whether the market, the oracle and the council each hold in the verifier at
+// least what they owe, both read at one finalized block and read again a few blocks later before a shortfall is reported
+// (more than they owe is reported and never credited); whether the verifier has a key registered for any of the three, lets
+// them pay by their own calls, has locked them or has paused transfers; how many NEAR access keys each has (--expect-sealed
+// makes any key a problem, for use after seal); and how much NEAR each contract account has left after paying for the
+// storage it uses. --watch-dao lists the open proposals of the --treasury DAO that name these contracts and flags any that is
+// not on the treasury helper's allow-list. It never votes. `check` exits 1 if anything is wrong.
 //
 // The secret key is never taken from the command line, where it would sit in the process list and shell history.
 // Give it as the environment variable KEEPER_KEY, or as --key-file naming a file that only its owner can read
@@ -38,6 +44,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
+import { b58decode, b58encode, rpc, view, viewer } from "./chain.mjs";
+import { reviewKind } from "./treasury.mjs";
 
 const TGAS = 10n ** 12n;
 const PAGE = 50;
@@ -53,8 +61,19 @@ const DEFAULT_MIN_MARGIN_NEAR = "5";
 // In the collateral token's smallest unit. 10,000,000 is 10 tokens at 6 decimals. It only keeps the keeper from
 // paying for a sweep of dust.
 const DEFAULT_MIN_SWEEP = 10_000_000n;
-// sweep_fees refuses less than 95 TGas.
+// sweep_fees refuses less than 87 TGas.
 const SWEEP_GAS_TGAS = 100;
+const CONTRACTS = ["market", "oracle", "council"];
+// The verifier pauses transfers under this feature key, and a paused verifier refuses every mt_transfer and mt_transfer_call
+// (pause_and_lock_stop_payouts_but_not_receipts in intents_verifier.rs).
+const VERIFIER_PAUSE_KEY = "mt_transfer";
+// A shortfall is read again this many times, each time this many blocks later, before it is reported. The wait ends after the
+// timeout even if the chain has not moved.
+const SHORTFALL_RECHECKS = 2;
+const RECHECK_BLOCKS = 3;
+const BLOCK_POLL_MS = 1000;
+const RECHECK_TIMEOUT_MS = 30_000;
+const BRIEF_MAX = 200;
 
 // ---- what is due -------------------------------------------------------------------------------------------------
 
@@ -127,29 +146,6 @@ export function writeCursor(path, doneThrough) {
 
 // ---- reading the chain -------------------------------------------------------------------------------------------
 
-async function rpc(url, method, params) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: "keeper", method, params }),
-  });
-  const body = await res.json();
-  if (body.error) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
-  return body.result;
-}
-
-async function view(url, account, method, args = {}) {
-  const result = await rpc(url, "query", {
-    request_type: "call_function",
-    finality: "final",
-    account_id: account,
-    method_name: method,
-    args_base64: Buffer.from(JSON.stringify(args)).toString("base64"),
-  });
-  if (result.error) throw new Error(`${account}.${method}: ${result.error}`);
-  return JSON.parse(Buffer.from(result.result).toString());
-}
-
 async function snapshot(opts, firstMarket) {
   const block = await rpc(opts.rpc, "block", { finality: "final" });
   const markets = [];
@@ -216,28 +212,6 @@ function keyFor(keys, contract) {
 }
 
 // ---- sending a call ----------------------------------------------------------------------------------------------
-
-const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
-function b58decode(text) {
-  let n = 0n;
-  for (const ch of text) n = n * 58n + BigInt(B58.indexOf(ch));
-  const bytes = [];
-  for (; n > 0n; n >>= 8n) bytes.unshift(Number(n & 0xffn));
-  const zeros = text.length - text.replace(/^1+/, "").length;
-  return Buffer.from([...new Array(zeros).fill(0), ...bytes]);
-}
-
-function b58encode(bytes) {
-  let n = BigInt("0x" + Buffer.from(bytes).toString("hex"));
-  let out = "";
-  for (; n > 0n; n /= 58n) out = B58[Number(n % 58n)] + out;
-  for (const b of bytes) {
-    if (b !== 0) break;
-    out = "1" + out;
-  }
-  return out;
-}
 
 const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32LE(n); return b; };
 const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); return b; };
@@ -327,21 +301,191 @@ export function marginReport(accounts, minMargin) {
   return { lines, problems };
 }
 
-async function check(opts) {
-  const minMargin = nearToYocto(opts["min-margin"] ?? DEFAULT_MIN_MARGIN_NEAR);
-  const oracle = await view(opts.rpc, opts.oracle, "config");
+// What a contract owes against what the verifier holds for it, both read at one finalized block. The market and the oracle
+// keep a total, so `owed` is exact. The Council keeps none, so its `owed` is a floor (see councilBooks). Less in the verifier
+// than owed means money is missing. More is surplus nobody is credited for, such as a plain deposit or a payout on its way, and
+// is only reported.
+export function reconciliation({ name, owed, held, exact = true }) {
+  const surplus = BigInt(held) - BigInt(owed);
+  const owes = exact ? "owes" : "owes at least";
+  const extra = surplus > 0n ? `, ${surplus} more than it ${exact ? "owes" : "needs"} (surplus nobody is credited for, or a payout in flight)` : "";
+  return {
+    line: `${name} ${owes} ${owed} and holds ${held} in the verifier${extra}`,
+    problem: surplus < 0n ? `the ${name} ${owes} ${owed} but the verifier holds only ${held} for it: ${-surplus} is missing` : null,
+  };
+}
+
+// Reads the books, and while the verifier holds less than is owed reads them again a few blocks later, so that a shortfall
+// is reported only when it is still there. `read` returns { owed, held } from one block.
+export async function reconcile(read, waitForBlocks) {
+  let books = await read();
+  for (let attempt = 0; attempt < SHORTFALL_RECHECKS && BigInt(books.held) < BigInt(books.owed); attempt++) {
+    await waitForBlocks(RECHECK_BLOCKS);
+    books = await read();
+  }
+  return books;
+}
+
+// What the verifier says about one contract's account, as problems. A key registered there can move the funds without the
+// contract's rules. Without predecessor authentication the contract's own payout calls are refused. A locked account can
+// still be paid but cannot pay out.
+export function verifierProblems({ name, id, keys, predecessorAuth, locked }) {
+  const problems = [];
+  if (keys.length) problems.push(`${name} ${id} has ${keys.length} public key${keys.length === 1 ? "" : "s"} registered in the verifier: a key can move its funds without the contract's rules`);
+  if (!predecessorAuth) problems.push(`${name} ${id} does not authenticate by predecessor in the verifier: its own payout calls are refused`);
+  if (locked) problems.push(`${name} ${id} is locked in the verifier: it keeps receiving money it cannot pay out, so stop advertising deposits`);
+  return problems;
+}
+
+// accounts: [{ name, id, count }] of NEAR access keys. After seal there should be none, which is only a problem when asked for.
+export function accessKeyReport(accounts, expectSealed) {
+  const line = `access keys: ${accounts.map(({ name, count }) => `${name} ${count}`).join(", ")}`;
+  const problems = expectSealed
+    ? accounts.filter(({ count }) => count > 0).map(({ name, id, count }) => `${name} ${id} still has ${count} access key${count === 1 ? "" : "s"}: the owner has not sealed it`)
+    : [];
+  return { line, problems };
+}
+
+// Proposals that can still be voted on or retried: in progress or failed, and inside the voting period.
+export function isOpen(proposal, now, period) {
+  return ["InProgress", "Failed"].includes(proposal.status) && BigInt(proposal.submission_time) + BigInt(period) >= now;
+}
+
+const brief = (value) => {
+  const text = JSON.stringify(value);
+  return text.length > BRIEF_MAX ? `${text.slice(0, BRIEF_MAX)}...` : text;
+};
+
+// Lists the open DAO proposals that name one of the three contracts, and a problem for each the treasury helper would refuse
+// to approve. Other open proposals are counted by kind, so a policy or membership change does not go unseen. Nothing is voted.
+export async function daoReport({ proposals, treasuryId, contracts, view: read }) {
+  const lines = [];
+  const problems = [];
+  const others = [];
+  const ours = new Set(Object.values(contracts));
+  for (const proposal of proposals) {
+    const receiver = proposal.kind?.FunctionCall?.receiver_id;
+    if (!ours.has(receiver)) {
+      others.push(typeof proposal.kind === "string" ? proposal.kind : Object.keys(proposal.kind ?? {})[0]);
+      continue;
+    }
+    const who = `DAO proposal ${proposal.id} (${proposal.status}, by ${proposal.proposer})`;
+    try {
+      const reviewed = await reviewKind(proposal.kind, { treasuryId, contracts, view: read });
+      lines.push(`${who}: ${reviewed.target}.${reviewed.method} ${brief(reviewed.args)}`);
+    } catch (e) {
+      lines.push(`${who} names ${receiver}`);
+      problems.push(`DAO proposal ${proposal.id} names ${receiver} and is not on the allow-list: ${e.message}`);
+    }
+  }
+  if (others.length) lines.push(`${others.length} other open DAO proposals (${[...new Set(others)].join(", ")})`);
+  if (!lines.length) lines.push("no open DAO proposals");
+  return { lines, problems };
+}
+
+async function finalHeight(url) {
+  return (await rpc(url, "block", { finality: "final" })).header.height;
+}
+
+async function waitForBlocks(url, count) {
+  const target = (await finalHeight(url)) + count;
+  const deadline = Date.now() + RECHECK_TIMEOUT_MS;
+  while (Date.now() < deadline && (await finalHeight(url)) < target) {
+    await new Promise((resolve) => setTimeout(resolve, BLOCK_POLL_MS));
+  }
+}
+
+// The Council keeps no total of what it owes. It owes each staked seat what the seat has earned and not yet claimed
+// (pending_reward) and the stream what it has not yet released (stream_remaining in its config), so the sum is at most
+// what it owes: each figure is rounded down. A Council holding less than the sum has lost money. Holding more is
+// normal, because the rounding stays in the stream. Also returns the owners of the seats.
+async function councilBooks(opts, config, at) {
   const owners = new Set();
+  let owed = BigInt(config.stream_remaining);
   for (let from = 0; ; from += PAGE) {
-    const tokens = await view(opts.rpc, opts.council, "staked_tokens", { from_index: from, limit: PAGE });
-    for (const token_id of tokens) owners.add((await view(opts.rpc, opts.council, "stake_of", { token_id })).owner);
+    const tokens = await view(opts.rpc, opts.council, "staked_tokens", { from_index: from, limit: PAGE }, at);
+    for (const token_id of tokens) {
+      owners.add((await view(opts.rpc, opts.council, "stake_of", { token_id }, at)).owner);
+      owed += BigInt(await view(opts.rpc, opts.council, "pending_reward", { token_id }, at));
+    }
     if (tokens.length < PAGE) break;
   }
+  return { owed, owners };
+}
+
+// Open proposals of the DAO, newest page first, until a page whose newest proposal is past its voting period.
+async function openProposals(opts, read, now) {
+  const period = (await read(opts.treasury, "get_policy")).proposal_period;
+  const open = [];
+  for (let to = await read(opts.treasury, "get_last_proposal_id"); to > 0; to -= PAGE) {
+    const from = Math.max(0, to - PAGE);
+    const page = await read(opts.treasury, "get_proposals", { from_index: from, limit: to - from });
+    const newest = page.at(-1);
+    if (newest && BigInt(newest.submission_time) + BigInt(period) < now) break;
+    open.push(...page.filter((proposal) => isOpen(proposal, now, period)));
+  }
+  return open.sort((a, b) => a.id - b.id);
+}
+
+async function check(opts) {
+  const minMargin = nearToYocto(opts["min-margin"] ?? DEFAULT_MIN_MARGIN_NEAR);
+  if (opts["watch-dao"] && !opts.treasury) throw new Error("--watch-dao needs --treasury, the DAO whose proposals to list");
+  const block = await rpc(opts.rpc, "block", { finality: "final" });
+  const at = block.header.height;
+  const configs = {};
+  for (const name of CONTRACTS) configs[name] = await view(opts.rpc, opts[name], "config", {}, at);
+  const oracle = configs.oracle;
+
+  const books = {};
+  let owners;
+  for (const name of CONTRACTS) {
+    const read = async () => {
+      const height = await finalHeight(opts.rpc);
+      const council = name === "council" ? await councilBooks(opts, configs.council, height) : null;
+      owners ??= council?.owners;
+      const owed = council ? council.owed : BigInt(await view(opts.rpc, opts[name], "total_owed", {}, height));
+      const held = BigInt(await view(opts.rpc, configs[name].verifier, "mt_balance_of", { account_id: opts[name], token_id: configs[name].collateral_token_id }, height));
+      return { owed, held };
+    };
+    books[name] = reconciliation({ name, ...(await reconcile(read, () => waitForBlocks(opts.rpc, RECHECK_BLOCKS))), exact: name !== "council" });
+  }
+
   const problems = juryProblems({ jurySize: oracle.jury_size, holders: owners.size });
   if (oracle.publishers.length < oracle.price_threshold) problems.push(`${oracle.publishers.length} price publishers but ${oracle.price_threshold} must sign: no price market can open`);
   console.log(`jury size ${oracle.jury_size} then ${secondJurySize(oracle.jury_size)}, ${owners.size} different seat holders, ${oracle.publishers.length} publishers (${oracle.price_threshold} must sign)`);
+  for (const name of CONTRACTS) {
+    console.log(books[name].line);
+    if (books[name].problem) problems.push(books[name].problem);
+  }
 
-  const named = [["market", opts.market], ["oracle", opts.oracle], ["council", opts.council]];
-  if (opts.governance) named.push(["governance", opts.governance]);
+  const verifiers = new Set(CONTRACTS.map((name) => configs[name].verifier));
+  const trouble = [];
+  for (const name of CONTRACTS) {
+    const args = { account_id: opts[name] };
+    const read = (method) => view(opts.rpc, configs[name].verifier, method, args, at);
+    trouble.push(...verifierProblems({
+      name, id: opts[name], keys: await read("public_keys_of"), predecessorAuth: await read("is_auth_by_predecessor_id_enabled"), locked: await read("is_account_locked"),
+    }));
+  }
+  for (const verifier of verifiers) {
+    if (await view(opts.rpc, verifier, "pa_is_paused", { key: VERIFIER_PAUSE_KEY }, at)) {
+      trouble.push(`the verifier ${verifier} has ${VERIFIER_PAUSE_KEY} paused: every payout and every transfer call to the contracts fails`);
+    }
+  }
+  if (!trouble.length) console.log(`verifier ${[...verifiers].join(", ")}: no keys registered, predecessor authentication on, not locked and ${VERIFIER_PAUSE_KEY} running for the market, oracle and council`);
+  problems.push(...trouble);
+
+  const keyCounts = [];
+  for (const name of CONTRACTS) {
+    const { keys } = await rpc(opts.rpc, "query", { request_type: "view_access_key_list", block_id: at, account_id: opts[name] });
+    keyCounts.push({ name, id: opts[name], count: keys.length });
+  }
+  const keys = accessKeyReport(keyCounts, opts["expect-sealed"] === true);
+  console.log(keys.line);
+  problems.push(...keys.problems);
+
+  const named = CONTRACTS.map((name) => [name, opts[name]]);
+  if (opts.treasury) named.push(["treasury", opts.treasury]);
   const accounts = [];
   for (const [name, id] of named) {
     const account = await rpc(opts.rpc, "query", { request_type: "view_account", finality: "final", account_id: id });
@@ -351,6 +495,19 @@ async function check(opts) {
   for (const line of margins.lines) console.log(line);
   problems.push(...margins.problems);
 
+  if (opts["watch-dao"]) {
+    const read = viewer(opts.rpc, at);
+    const now = BigInt(block.header.timestamp_nanosec);
+    const dao = await daoReport({
+      proposals: await openProposals(opts, read, now),
+      treasuryId: opts.treasury,
+      contracts: Object.fromEntries(CONTRACTS.map((name) => [name, opts[name]])),
+      view: read,
+    });
+    for (const line of dao.lines) console.log(line);
+    problems.push(...dao.problems);
+  }
+
   for (const p of problems) console.log(`PROBLEM: ${p}`);
   if (!problems.length) console.log("ok");
   return problems.length ? 1 : 0;
@@ -358,13 +515,22 @@ async function check(opts) {
 
 // ---- command line ------------------------------------------------------------------------------------------------
 
-function options(argv) {
+const BOOLEAN_FLAGS = new Set(["dry-run", "expect-sealed", "watch-dao"]);
+
+export function options(argv) {
   const opts = {};
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--dry-run") opts.dryRun = true;
-    else if (argv[i].startsWith("--")) opts[argv[i].slice(2)] = argv[++i];
+    if (!argv[i].startsWith("--")) continue;
+    const name = argv[i].slice(2);
+    opts[name] = BOOLEAN_FLAGS.has(name) ? true : argv[++i];
   }
   return opts;
+}
+
+export function refuseRetiredController(opts) {
+  if (Object.hasOwn(opts, "governance")) {
+    throw new Error("--governance is retired; use --treasury with the verified Trezu/Sputnik account ID");
+  }
 }
 
 function label(action) {
@@ -374,21 +540,22 @@ function label(action) {
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const opts = options(rest);
+  refuseRetiredController(opts);
   if (command === "check") process.exit(await check(opts));
   if (command !== "run") {
     console.error("usage: keeper.mjs run|check --rpc URL --market ID --oracle ID --council ID [--account ID] [--dry-run] (see the top of the file)");
     process.exit(2);
   }
   refuseKeyFlags(opts);
-  const keys = opts.dryRun ? {} : resolveKeys(opts, process.env);
+  const keys = opts["dry-run"] ? {} : resolveKeys(opts, process.env);
   const finishedThrough = readCursor(opts["state-file"]);
   const snap = await snapshot(opts, finishedThrough + 1n);
   const actions = dueActions(snap);
   if (!actions.length) console.log("nothing due");
   for (const action of actions) {
-    console.log(opts.dryRun ? `due ${label(action)}` : `${label(action)}: ${await send(opts, keys, action)}`);
+    console.log(opts["dry-run"] ? `due ${label(action)}` : `${label(action)}: ${await send(opts, keys, action)}`);
   }
-  if (opts["state-file"] && !opts.dryRun) {
+  if (opts["state-file"] && !opts["dry-run"]) {
     const advanced = advanceCursor(snap, finishedThrough);
     if (advanced !== finishedThrough) writeCursor(opts["state-file"], advanced);
     if (advanced >= 0n) console.log(`markets finished through id ${advanced}`);

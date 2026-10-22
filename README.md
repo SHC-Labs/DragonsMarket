@@ -1,64 +1,224 @@
 # Dragons Market
 
-A binary-outcome prediction market on NEAR. Read `pitch.md` first (what it is, why it's different from Kalshi/Polymarket), then `spec.md` (the full design), then `stack.md` (the technology choices and their evidence). `contracts/AUDIT.md` is the running, dated log of what's actually been built and independently verified, section by section, and is the most current document in this repo.
+Dragons Market is a prediction market built on NEAR. Users buy Yes or No shares in an event,
+sell while trading is open, or redeem after the result is final. Each market has a published rule,
+result source and closing time. Staked Dragon NFTs make their owners eligible to serve on dispute
+juries and share in platform fees.
 
-## Token custody decision, 2026-10-19
+The product story and growth plan are in [PITCH.md](PITCH.md).
 
-NEAR Intents will hold the platform's fungible tokens. Users fund a balance inside Intents; trading commits collateral to controlled backing inside Intents; selling/redemption releases eligible funds there; withdrawals leave through supported routes. Dragons Market still enforces positions, disputes, fees, and payouts. The concrete escrow/authorization integration is pending, and Intents alone does not supply those rules.
+## How it works
 
-Read [intents-architecture.md](intents-architecture.md) for the accepted custody decision, implementation boundaries, and migration gates, and [hackathon-plan.md](hackathon-plan.md) for delivery milestones. Older separate-vault designs are superseded. The current NEP-141 contracts described below remain the implemented prototype, not an Intents integration.
+The market contract prices shares on a constant-product curve. An oracle accepts proposed results
+and challenges. A challenged result goes to a jury drawn from eligible Council seats; jurors commit
+their votes before revealing them. The Council contract handles NFT staking and reward accounting.
+The accepted administration target is a Trezu treasury backed by SputnikDAO. The custom
+`governance` contract is retired from the
+target architecture. Current administrative work is described in
+[the Trezu handoff](docs/contracts/governance.md).
 
-## Status, 2026-10-18
+NEAR Intents is the intended token-holding layer. Funding should arrive through a supported route,
+be committed as collateral for a position inside Intents, and become available again after a sale
+or settlement. Market and Council source now use Intents-held transfers. Oracle bond settlement, quarterly
+claims and the website's financial integration remain incomplete.
+The local sandbox uses the real Intents verifier with test collateral. Mainnet funding and
+withdrawals have not been established by these local tests.
 
-Four real contracts exist, are tested, and have been independently re-verified (not just built and trusted on the builder's word): `market` (the market itself, buy/sell on a pricing curve, fees), `oracle` (optimistic resolution: propose, challenge, random jury draw, commit-reveal votes), `council` (NFT staking, jury eligibility, revenue-share accumulator), `governance` (a 5-member propose/vote/timelock/execute contract that owns the other three, replacing a single owner key). Plus two test-only token contracts, `mock-ft` and `mock-nft`.
+The website includes markets, market details, a wallet watchlist, Council membership and disputes,
+partnerships, and a portfolio. It has a shared purple palette, light and dark themes, and layouts
+for phones and larger screens. The displayed NFT portraits are part of a larger collection.
 
-The implemented system is the combined curve-based market plus oracle, Council and governance, not the future modular order-book design in `spec.md`. The hackathon keeps curve pricing while migrating custody and settlement to Intents. A separate token-holding Vault is superseded; the proposed settlement adapter and later order book are not implemented. Use current code, contract manuals and the latest dated audit entries for implementation status, and `intents-architecture.md` for the accepted target.
+## Accepted architecture
 
-A full Next.js frontend exists under `web/` (markets, combined Council membership/disputes, watchlist, portfolio, partnerships, and a market-detail page), currently wired to a local NEAR sandbox for testing, not a live chain.
+Owner decision, 20 October 2026. This is the implementation target, not a report of deployment.
 
-Also built since: a signed-price path for price markets in oracle, juror pay and a forfeit for silent jurors, a Void that pays the closing price, governance cancel and execution window, capped fee settings, seeding at a chosen opening price, a keeper script (`contracts/keeper`) that sends the calls that only happen when someone calls them, sweeps fees, signs with scoped keys and checks storage margins, and an upgrade path for all four contracts: anyone stages a build, governance votes to deploy it by its hash and runs its `migrate`, and a `seal` deletes the deploy key once one upgrade has gone through.
+| Area | Decision |
+| --- | --- |
+| Administration | Use Trezu/SputnikDAO instead of deploying or maintaining our custom `governance` contract |
+| Token holding | Keep trading funds, committed backing, bonds and reward funds in NEAR Intents |
+| Earned platform revenue | Allocate 75% to the Trezu treasury and 25% to Council-controlled NFT-holder rewards |
+| Holder payouts | Eligible holders claim through the Council on a quarterly schedule; no manual payout-wallet route |
+| Disputes | Keep Council juries and oracle rules separate from treasury member voting |
 
-Not done: the Intents-held custody/settlement migration and final frontend financial integration, the publisher service that signs prices, an outside security audit (named as still-open throughout AUDIT.md), mainnet deployment, the legal/licensing route (spec.md section 18), and the live order-book mode.
+The Council must track entitlements while its reward backing remains in Intents. The current
+30-day reward stream does not implement a quarterly claim window.
 
-## Build and test the contracts
+Owner decision, 21 October 2026: sensitive administrative changes use Trezu/Sputnik member
+approvals, and the DAO voting period is the only delay. SputnikDAO executes a proposal at the
+approval that reaches its threshold, so the period gives public visibility and a deadline, not an
+exit window after approval. Withdraw and redeem never pause, upgrades use publicly staged code, and
+deployment keys are removed only after a proven upgrade. The owner handover still needs review
+before deployment.
+
+See [the accepted architecture](docs/intents-architecture.md) for the migration requirements and
+[the product specification](docs/spec.md#7-architecture-and-administration) for review scope.
+
+The [product goal](docs/spec.md#1-product-goal) and
+[requirements map](docs/spec.md#requirements-to-implementation-map) connect these
+decisions to contract capabilities and acceptance checks. Missing methods are implementation
+work; the existing prototype does not set the limit of the product.
+
+## Repository
+
+```text
+contracts/   Rust contracts, sandbox tests and keeper scripts
+web/         Next.js website, components, assets and browser tests
+docs/        Architecture, plans, contract manuals and reviews
+design/      Branding and design assets
+marketing/   Launch campaign, images, copy and metrics
+README.md    Project overview and development setup
+PITCH.md     Product idea, differentiation and growth plan
+```
+
+Git configuration and GitHub Actions remain in the usual hidden files and folders.
+
+Start with [docs/spec.md](docs/spec.md) for decisions and current gaps.
+[docs/intents-architecture.md](docs/intents-architecture.md) defines custody/control boundaries;
+[docs/hackathon-plan.md](docs/hackathon-plan.md) defines submission evidence.
+[NEAR-RESEARCH.md](NEAR-RESEARCH.md) is a reusable ecosystem reference, not a product roadmap.
+
+Contract manuals and the historical audit record are in `docs/contracts/`. The launch campaign is in
+[marketing/launch-campaign-10-days/CAMPAIGN.md](marketing/launch-campaign-10-days/CAMPAIGN.md).
+
+## Dependencies
+
+| Part              | Dependencies                                                            |
+| ----------------- | ----------------------------------------------------------------------- |
+| Contracts         | Rust 1.99.0, `near-sdk` and `near-contract-standards` 5.29.1            |
+| Contract builds   | `cargo-near` 0.22.0, WebAssembly target; Docker for reproducible builds |
+| Sandbox tests     | `near-workspaces` 0.23.0, Tokio, a local Intents verifier build         |
+| Website           | Node.js 20.9 or newer, npm, Next.js 16.4 and React 19.3                 |
+| UI                | TypeScript, Tailwind CSS 4, Visx charts and Iconsax icons               |
+| Wallet connection | `@hot-labs/near-connect`                                                |
+| Website checks    | Vitest, Playwright, axe and ESLint                                      |
+
+Exact package versions are recorded in `contracts/Cargo.lock` and `web/package-lock.json`.
+The Rust toolchain and WebAssembly target are pinned in `contracts/rust-toolchain.toml`.
+
+The active contract workspace contains `market`, `oracle`, `council` and the shared `upgrade`
+crate. Custom governance is removed from the workspace, builds, CI and active sandbox fixtures.
+Trezu/SputnikDAO administration helpers prepare wallet proposals in `contracts/keeper/treasury.mjs`;
+they do not sign or submit transactions. The treasury has not been created, live ownership is
+unconfigured, and the helper is an allow-list of the owner methods of the three contracts that has not
+been run against a real DAO.
+
+`mock-ft`, `mock-nft` and `mock-mt-receiver` are test fixtures. The scripts in
+`contracts/keeper/` advance contract actions that need a transaction, such as finalization and fee
+sweeps; they require their own configuration and keys.
+
+## Run locally
+
+Run the following commands from the repository root. You will need the pinned Rust toolchain,
+`cargo-near`, Node.js 22.23.4 or newer in the 22.x line, and npm. The sandbox suite also needs the Intents verifier described below.
+
+Build the contracts and start the local chain in one terminal:
 
 ```bash
 cd contracts
-./build.sh                        # builds all six wasm files with the pinned toolchain (rust-toolchain.toml)
-./build.sh --reproducible         # the four deployed contracts in the pinned docker image; needs docker and a clean commit; writes target/near/HASHES.txt
-cargo test -p market            # 128 unit tests
-cargo test -p oracle            # 103 unit tests
-cargo test -p council           # 79 unit tests
-cargo test -p governance        # 60 unit tests
-cargo test -p upgrade           # 11 unit tests of the shared upgrade and gas floor helpers
-cargo test -p tests             # sandbox integration tests (near-workspaces), 129 tests plus 1 ignored long run
-node --test keeper/keeper.test.mjs # the keeper's decision, key and cursor logic, 17 tests
+./build.sh
+DEV_CHAIN_SECS=604800 cargo test -p tests --test dev_chain -- --ignored --nocapture
+```
+
+Wait for `DEV_CHAIN_READY`. The harness writes its RPC endpoint and deployed account IDs to
+`contracts/dev-chain.json`, which is local runtime state regenerated by the harness.
+
+In another terminal, start from the repository root:
+
+```bash
+cd web
+# Select web/.node-version with your version manager, or the project-local runtime:
+source scripts/use-node.sh
+npm ci
+DEV_SERVER_SECS=0 PORT=3400 bash scripts/dev-local.sh
+```
+
+Open [localhost:3400](http://localhost:3400). The script reads the chain descriptor and configures
+the website for that sandbox. Start the chain before the website, and restart the website if the
+chain is replaced. `DEV_SERVER_SECS=0` keeps the server running until you stop it.
+
+For another deployment, set `NEXT_PUBLIC_NETWORK`, `NEXT_PUBLIC_RPC_URL`, `NEXT_PUBLIC_MARKET_ID`,
+`NEXT_PUBLIC_ORACLE_ID` and `NEXT_PUBLIC_TOKEN_ID` before starting or building the website.
+The public environment settings select the contracts; they do not contain signing keys.
+
+### Intents verifier
+
+The integration tests load `contracts/target/intents/defuse.wasm`. It is built from
+[near/intents](https://github.com/near/intents) at commit
+`16d04f6ec4401263f8914638710260da50bb46b0` and is not committed here.
+
+With Docker and `cargo-near` 0.22.0 installed, build it from a clean upstream checkout.
+Start these commands from the repository root:
+
+```bash
+PROJECT_ROOT="$(pwd)"
+INTENTS_BUILD="$(mktemp -d)"
+git clone https://github.com/near/intents "$INTENTS_BUILD/intents"
+git -C "$INTENTS_BUILD/intents" checkout 16d04f6ec4401263f8914638710260da50bb46b0
+mkdir -p "$PROJECT_ROOT/contracts/target/intents"
+(
+  cd "$INTENTS_BUILD/intents/contracts/defuse"
+  cargo near build reproducible-wasm --out-dir "$PROJECT_ROOT/contracts/target/intents"
+)
+```
+
+The expected SHA256 is
+`a1afab98916d9f213746544dcf8e4e6bdb22c0be6bc5dfbd8ea8814c9922b547`.
+Verifier tests exercise deposits, transfers, receiver callbacks and refunds in the sandbox.
+They do not exercise a real cross-chain bridge or production collateral.
+
+## Checks and builds
+
+From `contracts/`:
+
+```bash
+cargo test -p market -p oracle -p council -p upgrade
+cargo test -p tests
+node --test keeper/keeper.test.mjs keeper/treasury.test.mjs
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`.github/workflows/ci.yml` runs the same on every push and pull request to `main`: formatting, clippy with warnings as errors (wasm target and all targets), the unit suites, `./build.sh` with the sandbox suite, and the keeper tests, and it uploads the sha256 of each wasm. It has not run on GitHub yet; each command in it was run locally.
+Counts after the keeper and treasury helper rewrite (2026-10-21): unit tests market 148, oracle 115, council 87,
+upgrade 11; sandbox tests 153 in 20 files (10 verifier proof tests, 7 market and Council money-path tests, 9
+oracle money-path tests, 8 source guards, 7 keeper tests; the `dev_chain` harness is ignored); keeper node
+tests 49 (26 keeper, 23 treasury helper). A missing
+`contracts/target/intents/defuse.wasm` fails the sandbox tests with the build recipe instead of skipping
+them, so CI builds it first.
 
-## Documents for the contracts
+These commands cover the application contracts. Owner/upgrade tests use an explicitly labelled
+local account fixture, not simulated DAO approvals. Real Sputnik proposal execution, expiry and
+owner handover still need dedicated integration evidence. No retired controller is deployed.
 
-`contracts/DEPLOY.md` is the mainnet deployment checklist, with the starting parameters and the publisher key rules. `contracts/market.md`, `oracle.md`, `council.md` and `governance.md` are the manual of each contract, each ending in a "Things to know" table. `contracts/AUDIT.md` is the dated log of what was built and checked, with the table that maps each finding of the 2026-10-19 outside review to its fix at the end. `spec.md` section 21 is the plan those fixes followed.
+Run `./build.sh` before the sandbox tests. For reproducible builds of the three application contracts,
+use `./build.sh --reproducible`; that path requires Docker and a clean committed working tree.
+GitHub Actions runs the contract checks in `.github/workflows/ci.yml`.
 
-## Run the website
+From `web/`:
 
 ```bash
-cd web
-npm run dev                       # local dev server against whatever chain NEXT_PUBLIC_* points to
-npm run build:dev                 # static export against a running local dev chain (see contracts/tests/tests/dev_chain.rs)
-npm run serve                     # serve the static export
-npm run e2e                       # Playwright end-to-end tests
+npm run lint
+npm test
+npm run tokens
+npm run build:dev
+npm run e2e
 ```
 
-## Reading order for a first look
+`build:dev` exports the website against the running sandbox. Playwright serves that export on
+port 3390. `npm run serve` serves it separately. The palette source is `web/design/palette.json`;
+`npm run tokens` generates the stylesheet and checks its configured contrast pairs.
 
-1. `pitch.md`: the one-page pitch and what the small first test proves.
-2. `spec.md`: the full design. Anything marked PROPOSED can change; anything marked OPEN needs a decision.
-3. `stack.md`: the technology choices (oracle, server, indexer) and the evidence behind each.
-4. `nft-council-research.md`: how the Council NFT ties into the contracts, with a dated build-order log.
-5. `contracts/AUDIT.md`: what's actually built, tested, and independently re-verified, in build order. The most current document here.
-6. `intents-architecture.md`: accepted token-custody direction and the gap from today's contracts. Dated audit entries describe implementation, not completion of this target.
-7. `hackathon-plan.md`: scope, track evidence, owners, milestones, acceptance checks, and submission requirements.
+The project is under development. Production settlement, the complete funding and withdrawal
+flow, an external security audit and launch requirements remain open work.
+
+## Repository alignment, 21 October 2026
+
+The active spec and implementation handoffs now share one direction. Old stack/NFT research
+drafts, custom-controller source snapshots, unused NFT sets, template icons and abandoned UI
+components have been removed. Dated security/legal reviews and policy copies remain evidence.
+
+Current release gaps are quarterly Council claims, the real treasury and its owner handover,
+external funding/identity/exit integration, and backend recovery.
+Financial UI actions remain disabled until those interfaces are reviewed.
+
+Contract code, tests, build scripts and CI were inspected without modification during this pass.
+Claude owns that work; Codex owns website cleanup and the reviewed frontend integration.

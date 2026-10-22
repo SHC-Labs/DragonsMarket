@@ -301,7 +301,7 @@ async fn dev_chain() -> anyhow::Result<()> {
 
     let out = json!({
         "rpc": format!("http://{}", w.worker.rpc_addr().trim_start_matches("http://")),
-        "market": w.market.id(), "oracle": w.oracle.id(), "council": w.council.id(), "token": w.ft.id(), "nft": w.nft.id(),
+        "market": w.market.id(), "oracle": w.oracle.id(), "council": w.council.id(), "token": w.ft.id(), "verifier": w.verifier.id(), "nft": w.nft.id(),
         "count": SPECS.len(),
         "markets": { "open": m_open, "proposed": m_proposed, "disputed": m_disputed, "verdict": m_verdict, "nobody": m_nobody, "final_yes": m_final_yes },
         "accounts": { "owner": w.owner.id(), "alice": w.alice.id(), "bob": w.bob.id(), "carol": w.carol.id(), "dave": w.dave.id(),

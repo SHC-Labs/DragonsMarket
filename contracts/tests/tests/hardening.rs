@@ -12,36 +12,25 @@ use serde_json::json;
 async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
     let stranger = worker.dev_create_account().await?;
-    let members = [
-        worker.dev_create_account().await?,
-        worker.dev_create_account().await?,
-        worker.dev_create_account().await?,
-    ];
     let other = stranger.id().clone();
     let day = (24 * 3600 * 1_000_000_000u64).to_string();
-    let three_days = (72 * 3600 * 1_000_000_000u64).to_string();
     let contracts = [
         (
             "market",
-            json!({ "owner_id": other, "operator_id": other, "oracle_id": other, "collateral_token": other,
-                    "revenue_pool": other, "business_wallet": other }),
+            json!({ "owner_id": other, "operator_id": other, "oracle_id": other, "verifier_id": other,
+                    "collateral_token_id": "nep141:token.test.near", "revenue_pool": other, "business_wallet": other }),
         ),
         (
             "oracle",
-            json!({ "owner_id": other, "market_contract": other, "bond_token": other, "bond": "1", "window_ms": "1000",
-                    "panel_deadline_ms": "1000", "draw_window_ms": "1000", "council": other, "jury_size": 3,
+            json!({ "owner_id": other, "market_contract": other, "verifier_id": other, "collateral_token_id": "nep141:token.test.near",
+                    "bond": "1", "window_ms": "1000", "panel_deadline_ms": "1000", "draw_window_ms": "1000", "council": other, "jury_size": 3,
                     "draw_delay_blocks": "1", "min_proposal_ms": "1000", "operator_id": other, "network": NETWORK,
                     "price_threshold": 1, "no_decision_recipient": other }),
         ),
         (
             "council",
-            json!({ "owner_id": other, "oracle_id": other, "nft_contract": other, "collateral_token": other,
-                    "cooldown_ns": day, "max_seats_per_account": 1 }),
-        ),
-        (
-            "governance",
-            json!({ "members": members.iter().map(|m| m.id()).collect::<Vec<_>>(), "threshold": 2,
-                    "voting_period_ns": day, "timelock_ns": three_days, "execution_window_ns": day }),
+            json!({ "owner_id": other, "oracle_id": other, "nft_contract": other, "verifier_id": other,
+                    "collateral_token_id": "nep141:token.test.near", "cooldown_ns": day, "max_seats_per_account": 1 }),
         ),
     ];
     for (name, args) in contracts {
@@ -222,13 +211,10 @@ async fn a_user_registers_alone_or_is_registered_by_someone_else_and_leaves_with
     assert!(!again, "an account that is not registered gets false, not a panic");
 
     // Unregistered, she cannot deposit until she registers again: the token comes back.
-    let tokens = ft_balance(&w, w.carol.id()).await;
+    let tokens = holdings(&w, w.carol.id()).await;
     ft_call(&w, &w.carol, w.market.id(), 5 * USD, "deposit").await?;
     assert_eq!(
-        (
-            ft_balance(&w, w.carol.id()).await,
-            market_balance(&w, w.carol.id()).await
-        ),
+        (holdings(&w, w.carol.id()).await, market_balance(&w, w.carol.id()).await),
         (tokens, 0)
     );
     Ok(())
@@ -259,7 +245,7 @@ async fn council_with_default_allowlist(w: &World) -> anyhow::Result<near_worksp
     council
         .call("new")
         .args_json(json!({
-            "owner_id": w.owner.id(), "oracle_id": w.oracle.id(), "nft_contract": w.nft.id(), "collateral_token": w.ft.id(),
+            "owner_id": w.owner.id(), "oracle_id": w.oracle.id(), "nft_contract": w.nft.id(), "verifier_id": w.verifier.id(), "collateral_token_id": token_id(w),
             "cooldown_ns": (COOLDOWN_SECS * 1_000_000_000).to_string(), "max_seats_per_account": MAX_SEATS_PER_ACCOUNT
         }))
         .transact()
@@ -403,37 +389,37 @@ async fn the_allowlist_belongs_to_the_collection_it_was_made_for() -> anyhow::Re
     Ok(())
 }
 
-// What a full batch costs, and the owner being governance: the list is changed by a vote like any other setting.
+// The configured owner can manage a full batch; other callers remain restricted.
 #[tokio::test]
-async fn governance_switches_the_list_on_and_allows_a_full_batch_of_tokens() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
+async fn the_configured_owner_switches_the_list_on_and_allows_a_full_batch_of_tokens() -> anyhow::Result<()> {
+    let (w, admin) = setup_admin_owned().await?;
     mint_nft(&w, &w.alice, "late").await?;
     assert!(
         try_stake(&w.nft, w.council.id(), &w.alice, "late").await?,
         "the test world starts with the list off"
     );
 
-    let on = gov_pass(
-        &g,
-        function_call(w.council.id(), "set_allowlist_enabled", json!({ "enabled": true }), 20),
-    )
-    .await?;
-    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
-    gov_execute(&g, &w.carol, on).await?;
+    admin
+        .call(w.council.id(), "set_allowlist_enabled")
+        .args_json(json!({ "enabled": true }))
+        .transact()
+        .await?
+        .into_result()?;
     mint_nft(&w, &w.alice, "later").await?;
     assert!(!try_stake(&w.nft, w.council.id(), &w.alice, "later").await?);
 
-    // The vote carries the arguments, and governance caps them at 4,096 bytes, so a full batch needs short ids.
+    // Exercise a full batch of short IDs through the application owner interface.
     let batch: Vec<String> = (0..100).map(|i| format!("token-{i:03}")).collect();
     mint_nft(&w, &w.alice, &batch[99]).await?;
-    let allow = gov_pass(
-        &g,
-        function_call(w.council.id(), "allow_tokens", json!({ "token_ids": batch }), 60),
-    )
-    .await?;
-    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
-    let logs = gov_execute(&g, &w.carol, allow).await?;
-    assert_eq!(event_names(&logs), vec!["call_sent", "tokens_allowed", "executed"]);
+    let result = admin
+        .call(w.council.id(), "allow_tokens")
+        .args_json(json!({ "token_ids": batch }))
+        .gas(Gas::from_tgas(60))
+        .transact()
+        .await?
+        .into_result()?;
+    let logs: Vec<String> = result.logs().iter().map(|l| l.to_string()).collect();
+    assert_eq!(event_names(&logs), vec!["tokens_allowed"]);
     assert!(try_stake(&w.nft, w.council.id(), &w.alice, &batch[99]).await?);
     assert!(
         !try_stake(&w.nft, w.council.id(), &w.alice, "later").await?,
@@ -508,19 +494,40 @@ async fn market_with_fees(w: &World) -> anyhow::Result<()> {
     Ok(())
 }
 
-// The token moved the tokens and then its own resolve step failed. The market saw a failure, the Council has the money.
+// The verifier refuses the market's payouts (its account is locked there), so neither share moves. The Council's share has
+// no usable report and waits as unresolved, the business share goes back to its own due, and nothing is paid twice.
 #[tokio::test]
-async fn a_revenue_transfer_that_arrived_but_reported_a_failure_is_not_paid_a_second_time() -> anyhow::Result<()> {
+async fn a_revenue_transfer_the_verifier_refused_is_parked_and_not_paid_a_second_time() -> anyhow::Result<()> {
     let w = setup().await?;
     market_with_fees(&w).await?;
-    w.owner
-        .call(w.ft.id(), "set_fail_resolve")
-        .args_json(json!({ "fail": true }))
-        .transact()
-        .await?
-        .into_result()?;
-    let council_before = ft_balance(&w, w.council.id()).await;
+    lock_account(&w, w.market.id()).await?;
+    let council_before = intents_balance(&w, w.council.id()).await;
 
+    let logs = sweep(&w, &w.carol)
+        .await?
+        .logs()
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>();
+    let events = event_names(&logs);
+    assert!(events.contains(&"fee_transfer_unresolved".to_string()), "{logs:?}");
+    assert!(events.contains(&"fee_transfer_failed".to_string()), "{logs:?}");
+    assert_eq!(
+        intents_balance(&w, w.council.id()).await,
+        council_before,
+        "nothing reached the Council"
+    );
+    assert_eq!(total_received(&w).await, 0);
+    assert_eq!(
+        fees(&w).await,
+        (1, 0, BUSINESS_SHARE),
+        "the business share is due again, the Council share is not"
+    );
+    assert_eq!(revenue_unresolved(&w).await, REVENUE_SHARE);
+    assert_eq!(config(&w.market).await["revenue_unresolved"], REVENUE_SHARE.to_string());
+    assert_reconciled(&w).await;
+
+    // Sweeping again retries the business share and sends the Council nothing, so the Council is not paid the same money twice.
     let logs = sweep(&w, &w.carol)
         .await?
         .logs()
@@ -528,65 +535,88 @@ async fn a_revenue_transfer_that_arrived_but_reported_a_failure_is_not_paid_a_se
         .map(|l| l.to_string())
         .collect::<Vec<_>>();
     assert!(
-        event_names(&logs).contains(&"fee_transfer_unresolved".to_string()),
+        !event_names(&logs).contains(&"fee_transfer_unresolved".to_string()),
         "{logs:?}"
     );
-    assert_eq!(
-        ft_balance(&w, w.council.id()).await - council_before,
-        REVENUE_SHARE,
-        "the tokens did arrive"
-    );
-    assert_eq!(
-        total_received(&w).await,
-        REVENUE_SHARE,
-        "the Council counted them, which is how the owner can tell"
-    );
-    assert_eq!(fees(&w).await, (1, 0, 0), "nothing is due again");
     assert_eq!(revenue_unresolved(&w).await, REVENUE_SHARE);
-    let config = config(&w.market).await;
-    assert_eq!(config["revenue_unresolved"], REVENUE_SHARE.to_string());
-
-    // Sweeping again sends nothing, so the Council is not paid the same money twice.
-    let logs = sweep(&w, &w.carol)
-        .await?
-        .logs()
-        .iter()
-        .map(|l| l.to_string())
-        .collect::<Vec<_>>();
-    assert!(event_names(&logs).is_empty(), "{logs:?}");
-    assert_eq!(ft_balance(&w, w.council.id()).await - council_before, REVENUE_SHARE);
+    assert_eq!(fees(&w).await, (1, 0, BUSINESS_SHARE));
 
     // Only the owner settles it, and only up to what is unresolved.
     refused(
         w.carol
             .call(w.market.id(), "reconcile_revenue")
-            .args_json(json!({ "amount": "1", "arrived": true }))
+            .args_json(json!({ "amount": "1", "arrived": false }))
             .transact()
             .await?
             .into_result(),
         "owner only",
     );
     refused(
-        reconcile(&w, REVENUE_SHARE + 1, true).await,
+        reconcile(&w, REVENUE_SHARE + 1, false).await,
         "that is more than is unresolved",
     );
-    let logs = reconcile(&w, REVENUE_SHARE, true).await?;
-    assert_eq!(events_named(&logs, "revenue_reconciled")[0]["arrived"], true);
-    assert_eq!((revenue_unresolved(&w).await, fees(&w).await), (0, (1, 0, 0)));
+
+    // The owner sees the Council's total unchanged, so it never arrived: the amount is due again and the next sweep sends it.
+    unlock_account(&w, w.market.id()).await?;
+    let logs = reconcile(&w, REVENUE_SHARE, false).await?;
+    assert_eq!(events_named(&logs, "revenue_reconciled")[0]["arrived"], false);
+    assert_eq!(
+        (revenue_unresolved(&w).await, fees(&w).await),
+        (0, (1, REVENUE_SHARE, BUSINESS_SHARE))
+    );
     sweep(&w, &w.carol).await?;
     assert_eq!(
-        ft_balance(&w, w.council.id()).await - council_before,
+        intents_balance(&w, w.council.id()).await - council_before,
+        REVENUE_SHARE
+    );
+    assert_eq!((total_received(&w).await, fees(&w).await), (REVENUE_SHARE, (1, 0, 0)));
+    assert_eq!(intents_balance(&w, w.business.id()).await, BUSINESS_SHARE);
+    assert_reconciled(&w).await;
+    Ok(())
+}
+
+// Telling the market a transfer arrived when it did not drops it from the books while the verifier still holds it. The
+// reconciliation view shows that as a surplus, which nothing credits to anyone.
+#[tokio::test]
+async fn settling_an_unresolved_amount_as_arrived_when_it_did_not_shows_up_as_surplus() -> anyhow::Result<()> {
+    let w = setup().await?;
+    market_with_fees(&w).await?;
+    lock_account(&w, w.market.id()).await?;
+    sweep(&w, &w.carol).await?;
+    unlock_account(&w, w.market.id()).await?;
+    assert_eq!(total_received(&w).await, 0, "the Council never got it");
+
+    let logs = reconcile(&w, REVENUE_SHARE, true).await?;
+    assert_eq!(events_named(&logs, "revenue_reconciled")[0]["arrived"], true);
+    sweep(&w, &w.carol).await?;
+    assert_eq!(revenue_unresolved(&w).await, 0);
+    assert_eq!(total_received(&w).await, 0, "still nothing at the Council");
+    let owed: String = w.market.view("total_owed").await?.json()?;
+    assert_eq!(
+        intents_balance(&w, w.market.id()).await - owed.parse::<u128>()?,
         REVENUE_SHARE,
-        "still paid once"
+        "the verifier holds what the books no longer owe"
     );
     Ok(())
 }
 
-// Nothing moved: the receiver is unknown to the token. The owner sees the Council's total unchanged and sends it back to due.
+// A receiver that refuses the revenue (a contract that panics in mt_on_transfer, or an account with no contract) makes the
+// verifier refund it, and the report says nothing was kept. The amount is due again and is not parked as unresolved.
 #[tokio::test]
-async fn a_revenue_transfer_that_never_arrived_is_sent_again_after_the_owner_says_so() -> anyhow::Result<()> {
+async fn a_council_that_refuses_the_revenue_gets_it_back_as_due_and_is_not_paid_twice() -> anyhow::Result<()> {
     let w = setup().await?;
     market_with_fees(&w).await?;
+    let wrong_token = w.worker.dev_deploy(&wasm("council")).await?;
+    wrong_token
+        .call("new")
+        .args_json(json!({
+            "owner_id": w.owner.id(), "oracle_id": w.oracle.id(), "nft_contract": w.nft.id(),
+            "verifier_id": w.verifier.id(), "collateral_token_id": "nep141:some-other-token.test.near",
+            "cooldown_ns": (COOLDOWN_SECS * 1_000_000_000).to_string(), "max_seats_per_account": MAX_SEATS_PER_ACCOUNT
+        }))
+        .transact()
+        .await?
+        .into_result()?;
     let stranger = w.worker.dev_create_account().await?;
     let set_pool = |pool: near_workspaces::AccountId| {
         w.owner
@@ -594,107 +624,43 @@ async fn a_revenue_transfer_that_never_arrived_is_sent_again_after_the_owner_say
             .args_json(json!({ "revenue_pool": pool, "business_wallet": w.business.id() }))
             .transact()
     };
-    set_pool(stranger.id().clone()).await?.into_result()?;
-    let logs = sweep(&w, &w.carol)
-        .await?
-        .logs()
-        .iter()
-        .map(|l| l.to_string())
-        .collect::<Vec<_>>();
-    assert!(
-        event_names(&logs).contains(&"fee_transfer_unresolved".to_string()),
-        "{logs:?}"
-    );
-    assert_eq!(ft_balance(&w, stranger.id()).await, 0);
+    for refuser in [wrong_token.id().clone(), stranger.id().clone()] {
+        set_pool(refuser.clone()).await?.into_result()?;
+        let logs = sweep(&w, &w.carol)
+            .await?
+            .logs()
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>();
+        let events = event_names(&logs);
+        assert!(events.contains(&"fee_transfer_failed".to_string()), "{logs:?}");
+        assert!(!events.contains(&"fee_transfer_unresolved".to_string()), "{logs:?}");
+        assert_eq!(intents_balance(&w, &refuser).await, 0, "{refuser} kept nothing");
+        assert_eq!(revenue_unresolved(&w).await, 0);
+        assert_eq!(
+            fees(&w).await,
+            (1, REVENUE_SHARE, 0),
+            "the Council's share is due again"
+        );
+        assert_reconciled(&w).await;
+    }
+    assert_eq!(total_received(&w).await, 0);
     assert_eq!(
-        (revenue_unresolved(&w).await, fees(&w).await.1, total_received(&w).await),
-        (REVENUE_SHARE, 0, 0)
+        intents_balance(&w, w.business.id()).await,
+        BUSINESS_SHARE,
+        "the business wallet was paid once"
     );
 
     set_pool(w.council.id().clone()).await?.into_result()?;
-    let council_before = ft_balance(&w, w.council.id()).await;
-    reconcile(&w, REVENUE_SHARE, false).await?;
-    assert_eq!((revenue_unresolved(&w).await, fees(&w).await.1), (0, REVENUE_SHARE));
     sweep(&w, &w.carol).await?;
-    assert_eq!(ft_balance(&w, w.council.id()).await - council_before, REVENUE_SHARE);
+    assert_eq!(intents_balance(&w, w.council.id()).await, REVENUE_SHARE);
     assert_eq!((total_received(&w).await, fees(&w).await), (REVENUE_SHARE, (1, 0, 0)));
-    assert_eq!(ft_balance(&w, w.business.id()).await, BUSINESS_SHARE);
+    assert_eq!(intents_balance(&w, w.business.id()).await, BUSINESS_SHARE);
+    assert_reconciled(&w).await;
     Ok(())
 }
 
-// ---- the gas a governance call carries ------------------------------------------------------------------------
-
-#[tokio::test]
-async fn a_governance_call_carries_between_5_and_250_tgas_and_the_view_says_what_to_attach() -> anyhow::Result<()> {
-    let (w, g) = setup_governed().await?;
-    for bad in [0, 4, 251, 300] {
-        let action = function_call(w.market.id(), "set_paused", json!({ "paused": true }), bad);
-        let r = g.members[0]
-            .call(g.contract.id(), "propose")
-            .args_json(json!({ "action": action }))
-            .transact()
-            .await?;
-        refused(r.into_result(), "the call's gas must be between 5 and 250 TGas");
-    }
-    for ok in [5, 250] {
-        gov_propose(
-            &g,
-            &g.members[0],
-            function_call(w.market.id(), "set_paused", json!({ "paused": true }), ok),
-        )
-        .await?;
-    }
-
-    let id = gov_pass(
-        &g,
-        function_call(w.market.id(), "set_paused", json!({ "paused": true }), 20),
-    )
-    .await?;
-    assert_eq!(
-        gov_proposal(&g, id).await["execute_gas"],
-        Gas::from_tgas(34).as_gas().to_string(),
-        "20 TGas plus 14"
-    );
-    let listed: serde_json::Value = g
-        .contract
-        .view("list_proposals")
-        .args_json(json!({ "from_index": "0", "limit": "10" }))
-        .await?
-        .json()?;
-    assert_eq!(listed[2]["execute_gas"], Gas::from_tgas(34).as_gas().to_string());
-    assert_eq!(listed[2]["stage"], "approved", "the stored fields are still shown");
-
-    skip_secs(&w.worker, TIMELOCK_SECS + 1).await;
-    let execute_with = |tgas: u64| {
-        w.carol
-            .call(g.contract.id(), "execute")
-            .args_json(json!({ "proposal_id": id.to_string() }))
-            .gas(Gas::from_tgas(tgas))
-            .transact()
-    };
-    refused(
-        execute_with(33).await?.into_result(),
-        "attach at least 34 TGas to execute this call",
-    );
-    assert_eq!(
-        gov_proposal(&g, id).await["stage"],
-        "approved",
-        "a refused execute leaves it approved"
-    );
-    let logs: Vec<String> = execute_with(34)
-        .await?
-        .into_result()?
-        .logs()
-        .iter()
-        .map(|l| l.to_string())
-        .collect();
-    assert_eq!(
-        event_names(&logs),
-        vec!["call_sent", "paused", "executed"],
-        "the amount the view shows is enough"
-    );
-    Ok(())
-}
+// Legacy controller gas tests are archived; DAO execution gas requires real integration evidence.
 
 // ---- the publishers behind a signed price ---------------------------------------------------------------------
 
@@ -748,15 +714,16 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
 
     let message = format!("price:v1:{}:{NETWORK}:{id}:{close_at}:10500:2", w.oracle.id());
     let entries = [signed_entry(&keys[2], &message), signed_entry(&keys[0], &message)];
-    let r = w
-        .carol
-        .call(w.ft.id(), "ft_transfer_call")
-        .args_json(json!({ "receiver_id": w.oracle.id(), "amount": BOND.to_string(), "msg": format!("price:{id}:10500:{}", entries.join(",")) }))
-        .deposit(NearToken::from_yoctonear(1))
-        .gas(Gas::from_tgas(200))
-        .transact()
-        .await?
-        .into_result()?;
+    deposit_to_intents(&w, &w.carol, w.carol.id(), BOND).await?;
+    let r = intents_call(
+        &w,
+        &w.carol,
+        w.oracle.id(),
+        BOND,
+        &format!("price:{id}:10500:{}", entries.join(",")),
+    )
+    .await?
+    .into_result()?;
     let logs: Vec<String> = r.logs().iter().map(|l| l.to_string()).collect();
     let proposed = &events_named(&logs, "proposed")[0];
     assert_eq!(

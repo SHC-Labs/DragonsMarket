@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { LinePath, AreaClosed } from "@visx/shape";
 import { scaleLinear } from "@visx/scale";
 import { curveMonotoneX } from "@visx/curve";
-import type { Pt } from "./PriceChart";
+import type { Pt } from "@/lib/history";
 
 const DAY = 86_400_000;
 

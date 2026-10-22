@@ -21,7 +21,7 @@ function reset(event: PointerEvent<HTMLElement>) {
 }
 export function CollectionGallery() {
   return <section className="collection-gallery" aria-label="NFT collection">
-    <div className="collection-gallery-heading"><h2>The Dragons</h2><p>Selected artwork from the collection.</p></div>
+    <div className="collection-gallery-heading"><h2>The Dragons</h2><p>Four Dragons from the larger collection.</p></div>
     <div className="collection-art-row">{DESCRIPTIONS.map((description,i)=><figure key={description} className="collection-tilt-card enter" style={{ "--i": i } as React.CSSProperties} onPointerMove={tilt} onPointerLeave={reset} onPointerCancel={reset}>
       <div className="collection-tilt-image"><Image src={`/collection/council-${String(i+1).padStart(2,"0")}.jpg`} alt={description} width={1600} height={1600} unoptimized /><span className="collection-glare" aria-hidden="true" /></div>
     </figure>)}</div>

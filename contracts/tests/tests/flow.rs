@@ -41,7 +41,7 @@ async fn trading_keeps_the_invariant_and_never_pays_more_than_paid_in() -> anyho
     );
     assert!(invariant(&w, id).await);
     assert_eq!(
-        ft_balance(&w, w.alice.id()).await,
+        holdings(&w, w.alice.id()).await,
         190 * USD,
         "the ten dollars left her wallet"
     );
@@ -97,7 +97,13 @@ async fn trading_keeps_the_invariant_and_never_pays_more_than_paid_in() -> anyho
         .await?
         .into_result()?;
     assert_eq!(market_balance(&w, w.alice.id()).await, 0);
-    assert_eq!(ft_balance(&w, w.alice.id()).await, 190 * USD + got);
+    assert_eq!(holdings(&w, w.alice.id()).await, 190 * USD + got);
+    assert_eq!(
+        intents_balance(&w, w.alice.id()).await,
+        got,
+        "the payout is in her Intents account, not her tokens"
+    );
+    assert_reconciled(&w).await;
     Ok(())
 }
 
@@ -107,17 +113,17 @@ async fn bad_requests_are_refused_and_money_comes_back() -> anyhow::Result<()> {
     let id = create_seeded_market(&w, 600).await?;
 
     // Carol never paid the storage deposit, so her buy is refused and the transfer is returned.
-    let before = ft_balance(&w, w.carol.id()).await;
+    let before = holdings(&w, w.carol.id()).await;
     let _ = buy(&w, &w.carol, id, "yes", 5 * USD).await;
     assert_eq!(
-        ft_balance(&w, w.carol.id()).await,
+        holdings(&w, w.carol.id()).await,
         before,
         "refused transfer must be refunded"
     );
     assert_eq!(shares(&w, id, w.carol.id()).await, (0, 0));
 
     // A buy for fewer shares than the minimum is refused too.
-    let before = ft_balance(&w, w.alice.id()).await;
+    let before = holdings(&w, w.alice.id()).await;
     let _ = ft_call(
         &w,
         &w.alice,
@@ -126,7 +132,7 @@ async fn bad_requests_are_refused_and_money_comes_back() -> anyhow::Result<()> {
         &format!("buy:{id}:yes:999999999999"),
     )
     .await;
-    assert_eq!(ft_balance(&w, w.alice.id()).await, before);
+    assert_eq!(holdings(&w, w.alice.id()).await, before);
 
     // Only the oracle can set an outcome.
     let r = w
@@ -138,9 +144,9 @@ async fn bad_requests_are_refused_and_money_comes_back() -> anyhow::Result<()> {
     assert!(r.is_failure());
 
     // Nobody can propose before the market closes.
-    let before = ft_balance(&w, w.carol.id()).await;
+    let before = holdings(&w, w.carol.id()).await;
     let _ = propose(&w, &w.carol, id, "yes").await;
-    assert_eq!(ft_balance(&w, w.carol.id()).await, before, "early bond is refunded");
+    assert_eq!(holdings(&w, w.carol.id()).await, before, "early bond is refunded");
     assert!(case_json(&w, id).await.is_null());
 
     // A market without a void policy cannot be created.
@@ -186,7 +192,7 @@ async fn unchallenged_answer_becomes_final_and_pays_out_with_no_deadline() -> an
 
     propose(&w, &w.carol, id, "yes").await?;
     assert_eq!(case_json(&w, id).await["stage"], "proposed");
-    assert_eq!(ft_balance(&w, w.carol.id()).await, 50 * USD - BOND);
+    assert_eq!(holdings(&w, w.carol.id()).await, 50 * USD - BOND);
 
     // Too early to finalise.
     let r = w
@@ -245,14 +251,15 @@ async fn unchallenged_answer_becomes_final_and_pays_out_with_no_deadline() -> an
 
     // Carol's bond comes back.
     assert_eq!(claimable(&w, w.carol.id()).await, BOND);
-    w.carol
-        .call(w.oracle.id(), "withdraw_bond")
-        .deposit(NearToken::from_yoctonear(1))
-        .gas(Gas::from_tgas(100))
-        .transact()
-        .await?
-        .into_result()?;
-    assert_eq!(ft_balance(&w, w.carol.id()).await, 50 * USD);
+    assert_oracle_reconciled(&w).await;
+    withdraw_bond(&w, &w.carol).await?;
+    assert_eq!(holdings(&w, w.carol.id()).await, 50 * USD);
+    assert_eq!(
+        intents_balance(&w, w.carol.id()).await,
+        BOND,
+        "the bond is back in her Intents account"
+    );
+    assert_oracle_reconciled(&w).await;
     Ok(())
 }
 
@@ -441,9 +448,9 @@ async fn a_market_seeded_at_a_chosen_price_opens_there_and_settles_cleanly() -> 
     let id: u64 = id.parse()?;
 
     // Outside 1% to 99% the seed is refused and the money comes back.
-    let before = ft_balance(&w, w.owner.id()).await;
+    let before = holdings(&w, w.owner.id()).await;
     ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{id}:5000")).await?;
-    assert_eq!(ft_balance(&w, w.owner.id()).await, before);
+    assert_eq!(holdings(&w, w.owner.id()).await, before);
     assert_eq!(u(&market_json(&w, id).await["locked"]), 0);
 
     ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{id}:250000")).await?;

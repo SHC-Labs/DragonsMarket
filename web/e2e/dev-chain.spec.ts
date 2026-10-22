@@ -19,7 +19,7 @@ test("search has a recoverable empty result", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("market-card").first()).toBeVisible();
   await page.getByRole("searchbox", {name:"Search markets"}).fill("no-matching-market-xyz");
-  await expect(page.getByText("No markets match that.", {exact:false})).toBeVisible();
+  await expect(page.getByText("No markets match your search.", {exact:false})).toBeVisible();
   await page.getByRole("button", {name:"Clear search"}).click();
   await expect(page.getByTestId("market-card").first()).toBeVisible();
 });

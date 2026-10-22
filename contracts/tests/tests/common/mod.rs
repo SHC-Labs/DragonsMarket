@@ -5,6 +5,7 @@ use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 pub const USD: u128 = 1_000_000; // mock token has 6 decimals
 pub const BOND: u128 = 5 * USD;
@@ -26,6 +27,8 @@ pub const CREATE_FEE: u128 = USD;
 
 pub struct World {
     pub worker: Worker<Sandbox>,
+    // The real NEAR Intents verifier. The market, the oracle and the council keep their money in their own accounts in it.
+    pub verifier: Contract,
     pub ft: Contract,
     pub market: Contract,
     pub oracle: Contract,
@@ -45,6 +48,30 @@ pub struct World {
 pub fn wasm(name: &str) -> Vec<u8> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../target/near/{0}/{0}.wasm", name));
     std::fs::read(&p).unwrap_or_else(|e| panic!("run contracts/build.sh first ({p:?}): {e}"))
+}
+
+// The verifier is built outside the repository from the pinned source (contracts/INTENTS-PROOF.md). A missing file fails the
+// test with the recipe: a silent skip would hide every test that needs it. CI must build it before it runs the sandbox tests.
+pub const VERIFIER_RECIPE: &str =
+    "the NEAR Intents verifier wasm is missing. These tests need the real contract, so CI must build it \
+before running them. Build it with:\n\
+  SCRATCH=$(mktemp -d)\n\
+  git clone https://github.com/near/intents $SCRATCH/intents-src\n\
+  git -C $SCRATCH/intents-src checkout 16d04f6ec4401263f8914638710260da50bb46b0\n\
+  cd $SCRATCH/intents-src/contracts/defuse\n\
+  cargo near build reproducible-wasm --out-dir $SCRATCH/intents-repro   (needs docker and cargo-near 0.22.0)\n\
+  mkdir -p contracts/target/intents && cp $SCRATCH/intents-repro/defuse.wasm contracts/target/intents/defuse.wasm\n\
+The sha256 must be a1afab98916d9f213746544dcf8e4e6bdb22c0be6bc5dfbd8ea8814c9922b547 (the code hash of intents.near). \
+Details are in contracts/INTENTS-PROOF.md.";
+
+pub fn verifier_wasm() -> Vec<u8> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/intents/defuse.wasm");
+    std::fs::read(&p).unwrap_or_else(|e| panic!("{VERIFIER_RECIPE}\n(looked at {p:?}: {e})"))
+}
+
+// The id of the collateral inside the verifier.
+pub fn token_id(w: &World) -> String {
+    format!("nep141:{}", w.ft.id())
 }
 
 pub async fn now(worker: &Worker<Sandbox>) -> u64 {
@@ -73,6 +100,7 @@ async fn build(
     draw_delay_blocks: u64,
     owner_id: Option<AccountId>,
 ) -> anyhow::Result<World> {
+    let verifier = worker.dev_deploy(&verifier_wasm()).await?;
     let ft = worker.dev_deploy(&wasm("mock_ft")).await?;
     let market = worker.dev_deploy(&wasm("market")).await?;
     let oracle = worker.dev_deploy(&wasm("oracle")).await?;
@@ -90,16 +118,30 @@ async fn build(
     }
     let owner_id = owner_id.unwrap_or_else(|| owner.id().clone());
 
+    verifier
+        .call("new")
+        .args_json(json!({ "config": {
+            "wnear_id": "wrap.near",
+            "fees": { "fee": 0, "fee_collector": owner.id() },
+            "roles": {
+                "super_admins": [owner.id()],
+                "grantees": { "DAO": [owner.id()], "UnrestrictedAccountLocker": [owner.id()], "UnrestrictedAccountUnlocker": [owner.id()] }
+            }
+        }}))
+        .transact()
+        .await?
+        .into_result()?;
     ft.call("new")
         .args_json(json!({ "owner_id": owner.id() }))
         .transact()
         .await?
         .into_result()?;
+    let collateral_token_id = format!("nep141:{}", ft.id());
     market
         .call("new")
         .args_json(json!({
-            "owner_id": owner_id, "operator_id": owner.id(), "oracle_id": oracle.id(), "collateral_token": ft.id(),
-            "revenue_pool": council.id(), "business_wallet": business.id()
+            "owner_id": owner_id, "operator_id": owner.id(), "oracle_id": oracle.id(), "verifier_id": verifier.id(),
+            "collateral_token_id": collateral_token_id, "revenue_pool": council.id(), "business_wallet": business.id()
         }))
         .transact()
         .await?
@@ -112,8 +154,8 @@ async fn build(
     council
         .call("new")
         .args_json(json!({
-            "owner_id": owner_id, "oracle_id": oracle.id(), "nft_contract": nft.id(), "collateral_token": ft.id(),
-            "cooldown_ns": (COOLDOWN_SECS * 1_000_000_000).to_string(), "max_seats_per_account": MAX_SEATS_PER_ACCOUNT,
+            "owner_id": owner_id, "oracle_id": oracle.id(), "nft_contract": nft.id(), "verifier_id": verifier.id(),
+            "collateral_token_id": collateral_token_id, "cooldown_ns": (COOLDOWN_SECS * 1_000_000_000).to_string(), "max_seats_per_account": MAX_SEATS_PER_ACCOUNT,
             "allowlist_enabled": false
         }))
         .transact()
@@ -122,8 +164,8 @@ async fn build(
     oracle
         .call("new")
         .args_json(json!({
-            "owner_id": owner_id, "market_contract": market.id(), "bond_token": ft.id(),
-            "bond": BOND.to_string(), "window_ms": window_ms.to_string(), "panel_deadline_ms": panel_ms.to_string(),
+            "owner_id": owner_id, "market_contract": market.id(), "verifier_id": verifier.id(),
+            "collateral_token_id": collateral_token_id, "bond": BOND.to_string(), "window_ms": window_ms.to_string(), "panel_deadline_ms": panel_ms.to_string(),
             "draw_window_ms": DRAW_WINDOW_MS.to_string(), "council": council.id(), "jury_size": JURY, "draw_delay_blocks": draw_delay_blocks.to_string(),
             "min_proposal_ms": MIN_PROPOSAL_MS.to_string(), "operator_id": owner.id(), "network": NETWORK,
             "price_threshold": PRICE_THRESHOLD, "no_decision_recipient": business.id()
@@ -132,8 +174,9 @@ async fn build(
         .await?
         .into_result()?;
 
-    // The token needs to know these accounts before they can receive transfers.
-    for c in [market.id(), oracle.id(), council.id(), business.id()] {
+    // The token needs to know these accounts before they can receive transfers. The market, the oracle and the council are not
+    // among them: the verifier holds their money, and none is ever sent the token itself.
+    for c in [verifier.id(), business.id()] {
         owner
             .call(ft.id(), "storage_deposit")
             .args_json(json!({ "account_id": c, "registration_only": true }))
@@ -166,6 +209,7 @@ async fn build(
     }
     let w = World {
         worker,
+        verifier,
         ft,
         market,
         oracle,
@@ -281,15 +325,119 @@ pub async fn is_seat(w: &World, who: &AccountId) -> bool {
         .unwrap()
 }
 
+// Sends `amount` of the token to a contract with a message. The market, the oracle and the council take it through the
+// verifier: the token goes into the sender's own Intents account first, then an mt_transfer_call moves it to the contract, so a
+// refusal puts it back in the sender's Intents account.
 pub async fn ft_call(w: &World, from: &Account, to: &AccountId, amount: u128, msg: &str) -> anyhow::Result<()> {
+    deposit_to_intents(w, from, from.id(), amount).await?;
+    intents_call(w, from, to, amount, msg).await?.into_result()?;
+    Ok(())
+}
+
+// Moves tokens from `from`'s NEP-141 balance into `to`'s Intents account.
+pub async fn deposit_to_intents(w: &World, from: &Account, to: &AccountId, amount: u128) -> anyhow::Result<()> {
     from.call(w.ft.id(), "ft_transfer_call")
-        .args_json(json!({ "receiver_id": to, "amount": amount.to_string(), "msg": msg }))
+        .args_json(json!({ "receiver_id": w.verifier.id(), "amount": amount.to_string(), "msg": to }))
         .deposit(NearToken::from_yoctonear(1))
         .gas(Gas::from_tgas(200))
         .transact()
         .await?
         .into_result()?;
     Ok(())
+}
+
+// The user's mt_transfer_call of collateral from their Intents account to a contract. The result is not unwrapped, so a test
+// can look at refusals.
+pub async fn intents_call(
+    w: &World,
+    from: &Account,
+    to: &AccountId,
+    amount: u128,
+    msg: &str,
+) -> anyhow::Result<near_workspaces::result::ExecutionFinalResult> {
+    Ok(from
+        .call(w.verifier.id(), "mt_transfer_call")
+        .args_json(json!({
+            "receiver_id": to, "token_id": token_id(w), "amount": amount.to_string(), "msg": msg
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?)
+}
+
+// What the verifier holds for an account.
+pub async fn intents_balance(w: &World, who: &AccountId) -> u128 {
+    let s: String = w
+        .verifier
+        .view("mt_balance_of")
+        .args_json(json!({ "account_id": who, "token_id": token_id(w) }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    s.parse().unwrap()
+}
+
+// The verifier's emergency powers, held by w.owner in these tests. A paused feature stops every transfer, and a locked account
+// cannot send anything while it can still receive.
+async fn verifier_admin(w: &World, method: &str, args: serde_json::Value) -> anyhow::Result<()> {
+    let yocto = if method.starts_with("force_") { 1 } else { 0 };
+    w.owner
+        .call(w.verifier.id(), method)
+        .args_json(args)
+        .deposit(NearToken::from_yoctonear(yocto))
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(())
+}
+
+pub async fn lock_account(w: &World, who: &AccountId) -> anyhow::Result<()> {
+    verifier_admin(w, "force_lock_account", json!({ "account_id": who })).await
+}
+
+pub async fn unlock_account(w: &World, who: &AccountId) -> anyhow::Result<()> {
+    verifier_admin(w, "force_unlock_account", json!({ "account_id": who })).await
+}
+
+pub async fn pause_transfers(w: &World) -> anyhow::Result<()> {
+    verifier_admin(w, "pa_pause_feature", json!({ "key": "mt_transfer" })).await
+}
+
+pub async fn unpause_transfers(w: &World) -> anyhow::Result<()> {
+    verifier_admin(w, "pa_unpause_feature", json!({ "key": "mt_transfer" })).await
+}
+
+// All the collateral an account has outside the market, the oracle and the council: its tokens plus its Intents balance. Every
+// payout from the three lands in the Intents balance, and what a test starts with is tokens, so a test that follows one
+// person's money across both reads this.
+pub async fn holdings(w: &World, who: &AccountId) -> u128 {
+    ft_balance(w, who).await + intents_balance(w, who).await
+}
+
+// The market's books must match what the verifier holds for it. Only valid while nothing is in flight.
+pub async fn assert_reconciled(w: &World) {
+    let owed: String = w.market.view("total_owed").await.unwrap().json().unwrap();
+    assert_eq!(
+        u128::from_str(&owed).unwrap(),
+        intents_balance(w, w.market.id()).await,
+        "the market's total_owed differs from its balance in the verifier"
+    );
+}
+
+// The oracle's books must match what the verifier holds for it. Only valid while no payout is in flight.
+pub async fn assert_oracle_reconciled(w: &World) {
+    assert_eq!(
+        oracle_total_owed(w).await,
+        intents_balance(w, w.oracle.id()).await,
+        "the oracle's total_owed differs from its balance in the verifier"
+    );
+}
+
+pub async fn oracle_total_owed(w: &World) -> u128 {
+    let owed: String = w.oracle.view("total_owed").await.unwrap().json().unwrap();
+    u128::from_str(&owed).unwrap()
 }
 
 pub async fn ft_balance(w: &World, who: &AccountId) -> u128 {
@@ -428,6 +576,18 @@ pub async fn challenge(w: &World, who: &Account, id: u64) -> anyhow::Result<()> 
 
 pub async fn challenge_with(w: &World, who: &Account, id: u64, answer: &str) -> anyhow::Result<()> {
     ft_call(w, who, w.oracle.id(), BOND, &format!("challenge:{id}:{answer}")).await
+}
+
+// Returns the logs of the whole call, the verifier's payout and the callback included.
+pub async fn withdraw_bond(w: &World, who: &Account) -> anyhow::Result<Vec<String>> {
+    let r = who
+        .call(w.oracle.id(), "withdraw_bond")
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(r.logs().iter().map(|l| l.to_string()).collect())
 }
 
 pub async fn claimable(w: &World, who: &AccountId) -> u128 {
@@ -735,82 +895,13 @@ pub async fn register_ft(w: &World, who: &AccountId) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub const VOTING_SECS: u64 = 600;
-// The timelock the governance tests run with. The contract refuses anything under MIN_TIMELOCK_SECS, and fast-forwarding
-// 72 hours of sandbox blocks takes longer than the whole suite, so deploy_governance writes this into the stored state.
-pub const TIMELOCK_SECS: u64 = 120;
-pub const MIN_TIMELOCK_SECS: u64 = 72 * 3_600;
-pub const EXECUTION_WINDOW_SECS: u64 = 600;
-pub const THRESHOLD: u32 = 3;
-
-pub struct Governance {
-    pub contract: Contract,
-    pub members: Vec<Account>,
-}
-
-// Writes a timelock of `secs` into the stored state of a deployed governance contract. Only a sandbox can do this, so
-// the deployed wasm keeps its 72 hour floor and has no way in for a short one. The state is the version number, two
-// flags, the members (a count, then each account as a length and its bytes), the threshold, the voting period and then
-// the timelock.
-async fn set_stored_timelock(worker: &Worker<Sandbox>, governance: &Contract, secs: u64) -> anyhow::Result<()> {
-    const KEY: &[u8] = b"STATE";
-    const BEFORE_MEMBERS: usize = 2 + 1 + 1;
-    let state = worker.view_state(governance.id()).await?;
-    let mut bytes = state
-        .get(KEY)
-        .expect("the contract's state is stored under STATE")
-        .clone();
-    let members = u32::from_le_bytes(bytes[BEFORE_MEMBERS..BEFORE_MEMBERS + 4].try_into()?) as usize;
-    let mut at = BEFORE_MEMBERS + 4;
-    for _ in 0..members {
-        at += 4 + u32::from_le_bytes(bytes[at..at + 4].try_into()?) as usize;
-    }
-    let timelock_at = at + 4 + 8;
-    bytes[timelock_at..timelock_at + 8].copy_from_slice(&(secs * 1_000_000_000).to_le_bytes());
-    worker.patch_state(governance.id(), KEY, &bytes).await?;
-    Ok(())
-}
-
-// Five members, three yes votes to approve.
-pub async fn deploy_governance(worker: &Worker<Sandbox>) -> anyhow::Result<Governance> {
-    let contract = worker.dev_deploy(&wasm("governance")).await?;
-    let mut members = vec![];
-    for _ in 0..5 {
-        members.push(worker.dev_create_account().await?);
-    }
-    contract
-        .call("new")
-        .args_json(json!({
-            "members": members.iter().map(|m| m.id()).collect::<Vec<_>>(), "threshold": THRESHOLD,
-            "voting_period_ns": (VOTING_SECS * 1_000_000_000).to_string(),
-            "timelock_ns": (MIN_TIMELOCK_SECS * 1_000_000_000).to_string(),
-            "execution_window_ns": (EXECUTION_WINDOW_SECS * 1_000_000_000).to_string()
-        }))
-        .transact()
-        .await?
-        .into_result()?;
-    set_stored_timelock(worker, &contract, TIMELOCK_SECS).await?;
-    assert_eq!(
-        config(&contract).await["timelock_ns"],
-        (TIMELOCK_SECS * 1_000_000_000).to_string(),
-        "the stored timelock was rewritten where the contract reads it"
-    );
-    Ok(Governance { contract, members })
-}
-
-// Governance is deployed first and owns the market, the oracle and the council from the start.
-pub async fn setup_governed() -> anyhow::Result<(World, Governance)> {
+// Application owner fixture only. This does not simulate Trezu voting or its execution delay.
+// Real Sputnik proposal/callback integration must be tested against the selected deployment separately.
+pub async fn setup_admin_owned() -> anyhow::Result<(World, Account)> {
     let worker = near_workspaces::sandbox().await?;
-    let g = deploy_governance(&worker).await?;
-    let w = build(
-        worker,
-        WINDOW_MS,
-        PANEL_MS,
-        DRAW_DELAY_BLOCKS,
-        Some(g.contract.id().clone()),
-    )
-    .await?;
-    Ok((w, g))
+    let admin = worker.dev_create_account().await?;
+    let w = build(worker, WINDOW_MS, PANEL_MS, DRAW_DELAY_BLOCKS, Some(admin.id().clone())).await?;
+    Ok((w, admin))
 }
 
 pub fn function_call(receiver: &AccountId, method: &str, args: serde_json::Value, tgas: u64) -> serde_json::Value {
@@ -820,58 +911,6 @@ pub fn function_call(receiver: &AccountId, method: &str, args: serde_json::Value
         "args": base64::engine::general_purpose::STANDARD.encode(args.to_string()),
         "deposit": "0", "gas": Gas::from_tgas(tgas).as_gas().to_string()
     } })
-}
-
-pub async fn gov_propose(g: &Governance, by: &Account, action: serde_json::Value) -> anyhow::Result<u64> {
-    let id: String = by
-        .call(g.contract.id(), "propose")
-        .args_json(json!({ "action": action }))
-        .transact()
-        .await?
-        .into_result()?
-        .json()?;
-    Ok(id.parse()?)
-}
-
-pub async fn gov_vote(g: &Governance, by: &Account, id: u64, approve: bool) -> anyhow::Result<()> {
-    by.call(g.contract.id(), "vote")
-        .args_json(json!({ "proposal_id": id.to_string(), "approve": approve }))
-        .transact()
-        .await?
-        .into_result()?;
-    Ok(())
-}
-
-// Returns the logs of the whole call, the target call and the callback included.
-pub async fn gov_execute(g: &Governance, by: &Account, id: u64) -> anyhow::Result<Vec<String>> {
-    let r = by
-        .call(g.contract.id(), "execute")
-        .args_json(json!({ "proposal_id": id.to_string() }))
-        .gas(Gas::from_tgas(300))
-        .transact()
-        .await?
-        .into_result()?;
-    Ok(r.logs().iter().map(|l| l.to_string()).collect())
-}
-
-// Proposed by the first member and approved by the first THRESHOLD members. The timelock starts now.
-pub async fn gov_pass(g: &Governance, action: serde_json::Value) -> anyhow::Result<u64> {
-    let id = gov_propose(g, &g.members[0], action).await?;
-    for m in &g.members[..THRESHOLD as usize] {
-        gov_vote(g, m, id, true).await?;
-    }
-    assert_eq!(gov_proposal(g, id).await["stage"], "approved");
-    Ok(id)
-}
-
-pub async fn gov_proposal(g: &Governance, id: u64) -> serde_json::Value {
-    g.contract
-        .view("get_proposal")
-        .args_json(json!({ "proposal_id": id.to_string() }))
-        .await
-        .unwrap()
-        .json()
-        .unwrap()
 }
 
 pub async fn config(c: &Contract) -> serde_json::Value {

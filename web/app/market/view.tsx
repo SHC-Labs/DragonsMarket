@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { PageHeader } from "@/components/PageHeader";
 import { Notice, SplitMeter, StateBadge } from "@/components/ui";
-import type { Pt } from "@/components/PriceChart";
+import type { Pt } from "@/lib/history";
 import { MarketOutcomeChart } from "@/components/MarketOutcomeChart";
 import { CountUp } from "@/components/CountUp";
 import { RulesBlock } from "@/components/RulesBlock";
