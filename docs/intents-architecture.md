@@ -138,7 +138,7 @@ Source inspection on 21 October 2026; no contract build or test was run for this
 | Market | Verifier-backed transfers, internal positions and 25/75 fee sweep | Complete user identity/funding/exit journey and verified recipient configuration |
 | Council | Intents revenue receipt and payments, NFT staking and streamed rewards | Quarter accounting and claim gate |
 | Oracle | NEP-141 bond and payment paths | Intents bond/juror settlement |
-| Treasury | Proposal/vote preparation helpers; custom governance removed | Real DAO and policy, allow-list helper, ownership handover and integration tests |
+| Treasury | Allow-list proposal and vote helpers, not yet run against a real DAO; custom governance removed | Real DAO and policy, ownership handover and integration tests |
 | Frontend | Read-oriented adapters, disabled financial writes | Final DTOs, quote/sign/receipt/recovery integration |
 
 See [market](contracts/market.md), [Council](contracts/council.md), [oracle](contracts/oracle.md)

@@ -407,10 +407,10 @@ impl MarketContract {
         staged.code_hash
     }
 
-    // Owner only, which is the DAO. SputnikDAO runs a proposal as soon as it passes, so nothing here enforces a delay
-    // between approval and deploy. That delay is a separate requirement (R-07) that is not built yet. Until it is,
-    // withdraw and redeem never pause, so the exit is open whatever the code does next. The deploy and migrate are one
-    // batch: a migrate that panics puts the old code back. Attach at least 100 TGas.
+    // Owner only, which is the DAO. SputnikDAO executes a proposal in the call of the approval that reaches its threshold,
+    // so the DAO's voting period is the only delay a code change waits out (decided 2026-10-21). Withdraw and redeem never
+    // pause, so the exit is open whatever the code does next. The deploy and migrate are one batch: a migrate that panics
+    // puts the old code back. Attach at least 100 TGas.
     pub fn upgrade(&mut self, code_hash: Base58CryptoHash) -> Promise {
         upgrade::require_upgrade_gas();
         self.only_owner();

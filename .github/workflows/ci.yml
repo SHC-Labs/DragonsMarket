@@ -107,8 +107,10 @@ jobs:
           cp "$RUNNER_TEMP/intents-repro/defuse.wasm" target/intents/defuse.wasm
           echo "a1afab98916d9f213746544dcf8e4e6bdb22c0be6bc5dfbd8ea8814c9922b547  target/intents/defuse.wasm" | sha256sum --check
       - name: Sandbox tests
-        # near-workspaces downloads the nearcore sandbox binary itself the first time it runs.
-        run: cargo test -p tests
+        # near-workspaces downloads the nearcore sandbox binary itself the first time it runs. Sandbox chain time follows
+        # the wall clock, so on a 2 core runner many parallel sandboxes slow each transaction until a short dispute
+        # window closes mid-test. Two threads keep the tests inside their windows.
+        run: cargo test -p tests -- --test-threads=2
       - name: Record the sha256 of each wasm
         run: sha256sum target/near/*/*.wasm | tee wasm-sha256.txt
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0

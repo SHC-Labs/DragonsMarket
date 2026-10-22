@@ -1,5 +1,6 @@
-// Application upgrade paths on a real sandbox with a separate owner fixture. This does not
-// establish Trezu/Sputnik approval or execution-delay behaviour. Those need dedicated integration tests.
+// Application upgrade paths on a real sandbox with a separate owner fixture. This does not establish Trezu/Sputnik
+// approval or execution, which needs a real DAO. The DAO's voting period is the only delay (decided 2026-10-21), because
+// SputnikDAO executes a proposal in the call of the approval that reaches its threshold, so no delay is tested here.
 mod common;
 use common::*;
 use near_workspaces::types::{Gas, NearToken};

@@ -99,7 +99,8 @@ The active contract workspace contains `market`, `oracle`, `council` and the sha
 crate. Custom governance is removed from the workspace, builds, CI and active sandbox fixtures.
 Trezu/SputnikDAO administration helpers prepare wallet proposals in `contracts/keeper/treasury.mjs`;
 they do not sign or submit transactions. The treasury has not been created, live ownership is
-unconfigured, and the helper still uses a deny-list that an allow-list will replace.
+unconfigured, and the helper is an allow-list of the owner methods of the three contracts that has not
+been run against a real DAO.
 
 `mock-ft`, `mock-nft` and `mock-mt-receiver` are test fixtures. The scripts in
 `contracts/keeper/` advance contract actions that need a transaction, such as finalization and fee
@@ -177,9 +178,10 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Counts at the end of phase I3 (2026-10-21): unit tests market 148, oracle 115, council 87, upgrade 11;
-sandbox tests 151 in 20 files (10 verifier proof tests, 7 market and Council money-path tests, 9 oracle
-money-path tests, 8 source guards; the `dev_chain` harness is ignored); keeper 24. A missing
+Counts after the keeper and treasury helper rewrite (2026-10-21): unit tests market 148, oracle 115, council 87,
+upgrade 11; sandbox tests 153 in 20 files (10 verifier proof tests, 7 market and Council money-path tests, 9
+oracle money-path tests, 8 source guards, 7 keeper tests; the `dev_chain` harness is ignored); keeper node
+tests 49 (26 keeper, 23 treasury helper). A missing
 `contracts/target/intents/defuse.wasm` fails the sandbox tests with the build recipe instead of skipping
 them, so CI builds it first.
 

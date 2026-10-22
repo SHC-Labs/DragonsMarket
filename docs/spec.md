@@ -286,7 +286,7 @@ Source inspection on 21 October 2026, without running or modifying contract code
 | Market | Uses verifier-held balances and Intents transfer callbacks | End-to-end funding/identity/exit validation and production configuration |
 | Council | Receives and pays through its Intents account | Quarterly entitlement and claim enforcement |
 | Oracle | Outcome/jury logic exists; bonds and juror pay arrive through the verifier and are paid from the oracle's own Intents account (phase I3, 21 October 2026) | Real USDC and mainnet run, website bond message, a push payout for a DAO recipient |
-| Administration | Custom governance removed from workspace; proposal helper exists | Create and verify treasury, replace the helper's deny-list with an allow-list and transfer ownership |
+| Administration | Custom governance removed from workspace; the proposal and vote helper is an allow-list (21 October 2026), not yet run against a real DAO | Create and verify treasury, run the helper against it and transfer ownership |
 | Website | Pages and wallet connection exist; financial writes remain disabled | Reviewed DTOs, quotes, signing, receipts and recovery |
 | Backend | Required operation and reconciliation responsibilities are defined | Choose and implement the actual service and persistence design |
 

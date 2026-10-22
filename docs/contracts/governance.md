@@ -13,7 +13,7 @@ Trezu/SputnikDAO replaces the retired custom governance contract.
 ## Contents
 
 1. [Required behaviour](#1-required-behaviour)
-2. [Existing helper](#2-existing-helper)
+2. [The helper and the keeper](#2-the-helper-and-the-keeper)
 3. [Work to complete](#3-work-to-complete)
 
 ---
@@ -37,30 +37,41 @@ are not the target administration ABI. Past findings remain in [AUDIT.md](AUDIT.
 
 ---
 
-## 2. Existing helper
+## 2. The helper and the keeper
+
+Status: BUILT on 21 October 2026. Nothing has run against a real SputnikDAO.
 
 [treasury.mjs](../../contracts/keeper/treasury.mjs) prepares wallet requests using Sputnik's
-`add_proposal` and `act_proposal`. It requires an explicit treasury account and proposal bond,
-preserves the proposal kind for voting, and does not sign or submit a transaction.
+`add_proposal` and `act_proposal`. It does not sign or submit a transaction. It replaces the earlier
+deny-list of five method names with an allow-list of every owner method of the market, oracle and
+Council in the current source, including `upgrade`, `seal`, `propose_owner`, `accept_owner` and
+`set_fee_recipients`. Each entry fixes the arguments and their limits, the deposit and the gas. Any
+other method is refused, and a test scans the three contracts so that a new owner method cannot be
+missing. The treasury account and the three contract ids are required inputs, and the proposal bond
+is read from the DAO's `get_policy`.
 
-Today the helper uses a deny-list: it refuses to prepare or approve `upgrade`, `seal`,
-`propose_owner`, `accept_owner` and `set_fee_recipients`, and lets every other method through.
-That refusal was written for a delay route that will not be built. PROPOSED: replace it with the
-allow-list in [the owner model](specs/owner-and-keeper.md#5-the-allow-list-that-replaces-the-deny-list),
-which can prepare those owner methods and keeps the guard on proposal kinds that change the DAO
-policy or membership. Local owner fixtures test application permissions and upgrades; they do not prove real DAO
+The vote helper builds `act_proposal` from the proposal the DAO stores, checks a `FunctionCall`
+against the same allow-list (a configured receiver, one action, the entry's deposit and gas, valid
+arguments, code staged for an `upgrade`), and refuses to approve any of the other Sputnik proposal
+kinds that change membership, policy, DAO code, treasury funds, bounties or staking unless the caller
+names the kind. `stage_code` carries the wasm as raw input and is not a proposal: `prepareStageCode`
+builds that request and `codeHash` gives the value `upgrade` takes. The rules and the tests are in
+[the owner model](specs/owner-and-keeper.md#5-the-allow-list-that-replaces-the-deny-list).
+Local owner fixtures test application permissions and upgrades; they do not prove real DAO
 membership, voting or execution behaviour.
 
-The keeper's `--treasury` option observes account funding. It does not configure the DAO or move
-ownership. The retired `--governance` option is rejected.
+The keeper's `--treasury` option observes account funding. With `--watch-dao` it also lists the DAO's
+open proposals that name the three contracts and flags any the allow-list refuses. It never votes,
+and it does not configure the DAO or move ownership. The retired `--governance` option is rejected.
 
 ---
 
 ## 3. Work to complete
 
 - [ ] Create the Trezu treasury and verify its actual account, code, policy and member roles.
-- [ ] Specify supported administrative actions, arguments, deposits, gas and receipt handling.
-- [ ] Replace the helper's deny-list with the allow-list and test that keys and direct calls cannot bypass DAO ownership.
+- [x] Specify supported administrative actions, arguments, deposits and gas (the allow-list, with tests). Receipt handling is not specified: the helper does not submit anything.
+- [x] Replace the helper's deny-list with the allow-list.
+- [ ] Test that keys and direct calls cannot bypass DAO ownership. The keeper reports keys left on the contracts (`--expect-sealed`) and keys registered in the verifier; a test with a real DAO is missing.
 - [ ] Prove owner handover for market, oracle and Council, including recovery from failed steps.
 - [ ] Configure the verified 75% recipient through that reviewed path.
 - [ ] Check authority over treasury Intents balances and separation from user/reward backing.

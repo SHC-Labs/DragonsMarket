@@ -312,9 +312,10 @@ impl CouncilContract {
         staged.code_hash
     }
 
-    // Owner only, which is the DAO. SputnikDAO has no delay between approval and execution, so the delay a code change
-    // should wait out is a separate requirement (R-07) that is not built yet. Staking, unstaking and claiming never pause.
-    // The deploy and migrate are one batch: a migrate that panics puts the old code back. Attach at least 100 TGas.
+    // Owner only, which is the DAO. SputnikDAO executes a proposal in the call of the approval that reaches its threshold,
+    // so the DAO's voting period is the only delay a code change waits out (decided 2026-10-21). Staking, unstaking and
+    // claiming never pause. The deploy and migrate are one batch: a migrate that panics puts the old code back. Attach at
+    // least 100 TGas.
     pub fn upgrade(&mut self, code_hash: Base58CryptoHash) -> Promise {
         upgrade::require_upgrade_gas();
         self.only_owner();
