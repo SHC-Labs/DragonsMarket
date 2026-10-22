@@ -16,6 +16,14 @@ export function Header() {
   const pathname = usePathname();
   const desktopNav = useRef<HTMLElement>(null);
   const mobileNav = useRef<HTMLElement>(null);
+  const bar = useRef<HTMLElement>(null);
+  // Solid once content scrolls beneath the header; glass only over the page's own top.
+  useEffect(() => {
+    const onScroll = () => bar.current?.toggleAttribute("data-scrolled", window.scrollY > 8);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
   useIndicator(desktopNav, pathname);
   useIndicator(mobileNav, pathname);
   useEffect(() => {
@@ -28,7 +36,7 @@ export function Header() {
     <Link key={href} href={href} aria-current={pathname === href || (href === "/" && pathname === "/market") ? "page" : undefined} className="site-nav-link">{label}</Link>
   ));
   return (
-    <header className="site-header" style={{ viewTransitionName: "site-header" }}>
+    <header ref={bar} className="site-header" style={{ viewTransitionName: "site-header" }}>
       <div className="site-header-row">
         <div className="site-header-start">
           <Brand />

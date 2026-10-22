@@ -24,6 +24,25 @@ interface Props {
 
 export function Controls(p: Props) {
   const input = useRef<HTMLInputElement>(null);
+  const bar = useRef<HTMLDivElement>(null);
+
+  // Marks the toolbar while it is stuck under the header, so it can turn solid only when content slides beneath it.
+  useEffect(() => {
+    const el = bar.current;
+    if (!el) return;
+    let frame = 0;
+    const check = () => {
+      frame = 0;
+      const top = parseFloat(getComputedStyle(el).top);
+      const stuck = getComputedStyle(el).position === "sticky" && !Number.isNaN(top) && el.getBoundingClientRect().top <= top + 1 && window.scrollY > 0;
+      el.toggleAttribute("data-stuck", stuck);
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(check); };
+    check();
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    return () => { cancelAnimationFrame(frame); window.removeEventListener("scroll", schedule); window.removeEventListener("resize", schedule); };
+  }, []);
   const statusGroup = useRef<HTMLDivElement>(null);
   useIndicator(statusGroup, `${p.status}:${p.statusCounts[p.status]}`);
 
@@ -46,7 +65,7 @@ export function Controls(p: Props) {
   const subCounts = p.counts.bySub[p.cat] ?? {};
 
   return (
-    <div className="market-controls">
+    <div ref={bar} className="market-controls">
       <div className="market-controls-row">
         <div className="field market-search">
           <label htmlFor="search" className="sr-only">Search markets</label>
