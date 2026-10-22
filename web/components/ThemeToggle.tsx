@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useSyncExternalStore } from "react";
-import palette from "@/design/palette.json";
+import { color } from "@/lib/tokens";
 import { Moon, Sun } from "@/components/icons";
 const subscribe = (notify: () => void) => {
   window.addEventListener("theme-change", notify);
@@ -11,9 +11,8 @@ export function ThemeToggle() {
   useEffect(() => {
     // One palette on every page; only the theme changes the browser chrome colour.
     document.documentElement.dataset.palette = "venue";
-    const colors = palette.themes;
     const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
-    if (meta) meta.content = theme === "light" ? colors.light.bg : colors.dark.bg;
+    if (meta) meta.content = color("bg", theme === "light" ? "light" : "dark");
   }, [theme]);
   const toggle = () => {
     const next = theme === "dark" ? "light" : "dark";

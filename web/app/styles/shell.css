@@ -49,7 +49,8 @@
 .brand-mark { display: block; flex-shrink: 0; width: 2rem; height: 2.4rem; background: var(--crest); mask: url("/brand/dragon-crest.png") center / contain no-repeat; -webkit-mask: url("/brand/dragon-crest.png") center / contain no-repeat; }
 .site-brand-header .brand-mark { width: 2.2rem; height: 2.65rem; filter: drop-shadow(0 0 12px var(--glow-council)); transition: transform var(--dur-4) var(--ease-emph); }
 .site-brand-header:hover .brand-mark { transform: rotate(-6deg) scale(1.06); }
-.brand-wordmark { font-family: var(--font-brand-stack); font-size: 1.125rem; font-weight: 600; letter-spacing: -0.045em; line-height: 1.2; }
+/* The wordmark is Sora 600 outlined to SVG (public/brand/wordmark.svg); font-size sets its scale. */
+.brand-wordmark { display: block; flex-shrink: 0; font-size: 1.125rem; height: 1.26em; aspect-ratio: 7586 / 1260; background: currentColor; mask: url("/brand/wordmark.svg") left center / contain no-repeat; -webkit-mask: url("/brand/wordmark.svg") left center / contain no-repeat; }
 .site-brand-footer .brand-mark { width: 2.6rem; height: 3.1rem; }
 .site-brand-footer .brand-wordmark { font-size: 1.6rem; }
 

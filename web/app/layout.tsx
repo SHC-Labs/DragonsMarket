@@ -1,17 +1,15 @@
 import type { Metadata, Viewport } from "next";
-import { Funnel_Display, IBM_Plex_Sans, JetBrains_Mono, Sora } from "next/font/google";
+import { Funnel_Display, IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 import "./globals.css";
-import "./palette.css";
 import { WalletProvider } from "@/components/WalletProvider";
-import palette from "@/design/palette.json";
+import { color } from "@/lib/tokens";
 import { Header } from "@/components/Header";
 import { SmoothScroll } from "@/components/SmoothScroll";
 import { Footer } from "@/components/Footer";
 
 const plex = IBM_Plex_Sans({ variable: "--font-plex", subsets: ["latin"], weight: ["300", "400", "500", "600"] });
-const sora = Sora({ variable: "--font-brand", subsets: ["latin"], weight: "600", display: "swap" });
 const funnel = Funnel_Display({ variable: "--font-funnel", subsets: ["latin"], weight: ["400", "500", "600", "700"], display: "swap" });
-const jetbrains = JetBrains_Mono({ variable: "--font-jetbrains", subsets: ["latin"], weight: ["400", "500"] });
+const plexMono = IBM_Plex_Mono({ variable: "--font-plex-mono", subsets: ["latin"], weight: ["400", "500"] });
 
 export const metadata: Metadata = {
   title: "Dragons Market | Prediction Markets",
@@ -27,8 +25,8 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" suppressHydrationWarning className={`${plex.variable} ${jetbrains.variable} ${sora.variable} ${funnel.variable}`}>
-      <head><script dangerouslySetInnerHTML={{ __html: `(function(){var t='dark';try{t=localStorage.getItem('council-theme')||'dark'}catch(e){}document.documentElement.dataset.theme=t==='light'?'light':'dark';document.documentElement.dataset.palette='venue';var m=document.createElement('meta');m.name='theme-color';m.content=t==='light'?'${palette.themes.light.bg}':'${palette.themes.dark.bg}';document.head.appendChild(m)})()` }} /></head>
+    <html lang="en" suppressHydrationWarning className={`${plex.variable} ${plexMono.variable} ${funnel.variable}`}>
+      <head><script dangerouslySetInnerHTML={{ __html: `(function(){var t='dark';try{t=localStorage.getItem('council-theme')||'dark'}catch(e){}document.documentElement.dataset.theme=t==='light'?'light':'dark';document.documentElement.dataset.palette='venue';var m=document.createElement('meta');m.name='theme-color';m.content=t==='light'?'${color("bg", "light")}':'${color("bg", "dark")}';document.head.appendChild(m)})()` }} /></head>
       <body>
         <a href="#main-content" className="skip-link">Skip to content</a>
         <WalletProvider>
