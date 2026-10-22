@@ -3,7 +3,7 @@
 // which the case ends with no decision: drawing a jury, finalizing, writing a final answer to the market, releasing a
 // jury's seats, and answering a market nobody answered once its resolve_by has passed. Every one of those calls is open
 // to anyone, so this script watches the chain and sends each one when it is due. It also sweeps the market's fees to the
-// Council and the business wallet once enough have built up.
+// Council and the treasury once enough have built up.
 //
 //   node keeper.mjs run   --rpc URL --market ID --oracle ID --council ID --account ID [--dry-run]
 //                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH]
@@ -166,7 +166,7 @@ async function snapshot(opts, firstMarket) {
       : false;
   }
   const fees = await view(opts.rpc, opts.market, "get_fees");
-  const feesDue = BigInt(fees.collected) + BigInt(fees.revenue_due) + BigInt(fees.business_due);
+  const feesDue = BigInt(fees.collected) + BigInt(fees.revenue_due) + BigInt(fees.treasury_due);
   const minSweep = opts["min-sweep"] === undefined ? DEFAULT_MIN_SWEEP : BigInt(opts["min-sweep"]);
   return {
     now: BigInt(block.header.timestamp_nanosec), height: BigInt(block.header.height), markets, cases, locked, feesDue, minSweep,
@@ -302,7 +302,7 @@ export function marginReport(accounts, minMargin) {
 }
 
 // What a contract owes against what the verifier holds for it, both read at one finalized block. The market and the oracle
-// keep a total, so `owed` is exact. The Council keeps none, so its `owed` is a floor (see councilBooks). Less in the verifier
+// keep a total, so `owed` is exact. The Council's `owed` is a floor (see councilFloor). Less in the verifier
 // than owed means money is missing. More is surplus nobody is credited for, such as a plain deposit or a payout on its way, and
 // is only reported.
 export function reconciliation({ name, owed, held, exact = true }) {
@@ -395,22 +395,23 @@ async function waitForBlocks(url, count) {
   }
 }
 
-// The Council keeps no total of what it owes. It owes each staked seat what the seat has earned and not yet claimed
-// (pending_reward) and the stream what it has not yet released (stream_remaining in its config), so the sum is at most
-// what it owes: each figure is rounded down. A Council holding less than the sum has lost money. Holding more is
-// normal, because the rounding stays in the stream. Also returns the owners of the seats.
-async function councilBooks(opts, config, at) {
+// What the Council must hold at least: everything it took in as revenue, less what it paid out, less the claims in flight
+// (their transfers move the money before the Council books them as paid). Rounding left in finalized quarters and a plain
+// deposit make it hold more, so the figure is a floor and the Council is allowed to hold more. A Council holding less has lost
+// money.
+export function councilFloor(totals) {
+  return BigInt(totals.total_received) - BigInt(totals.total_paid) - BigInt(totals.pending_claims);
+}
+
+// The floor at one block, and the owners of the seats.
+async function councilBooks(opts, at) {
   const owners = new Set();
-  let owed = BigInt(config.stream_remaining);
   for (let from = 0; ; from += PAGE) {
     const tokens = await view(opts.rpc, opts.council, "staked_tokens", { from_index: from, limit: PAGE }, at);
-    for (const token_id of tokens) {
-      owners.add((await view(opts.rpc, opts.council, "stake_of", { token_id }, at)).owner);
-      owed += BigInt(await view(opts.rpc, opts.council, "pending_reward", { token_id }, at));
-    }
+    for (const token_id of tokens) owners.add((await view(opts.rpc, opts.council, "stake_of", { token_id }, at)).owner);
     if (tokens.length < PAGE) break;
   }
-  return { owed, owners };
+  return { owed: councilFloor(await view(opts.rpc, opts.council, "reward_totals", {}, at)), owners };
 }
 
 // Open proposals of the DAO, newest page first, until a page whose newest proposal is past its voting period.
@@ -441,7 +442,7 @@ async function check(opts) {
   for (const name of CONTRACTS) {
     const read = async () => {
       const height = await finalHeight(opts.rpc);
-      const council = name === "council" ? await councilBooks(opts, configs.council, height) : null;
+      const council = name === "council" ? await councilBooks(opts, height) : null;
       owners ??= council?.owners;
       const owed = council ? council.owed : BigInt(await view(opts.rpc, opts[name], "total_owed", {}, height));
       const held = BigInt(await view(opts.rpc, configs[name].verifier, "mt_balance_of", { account_id: opts[name], token_id: configs[name].collateral_token_id }, height));

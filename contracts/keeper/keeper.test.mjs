@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  accessKeyReport, advanceCursor, daoReport, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options,
+  accessKeyReport, advanceCursor, councilFloor, daoReport, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options,
   readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, verifierProblems,
   writeCursor, refuseRetiredController,
 } from "./keeper.mjs";
@@ -144,6 +144,15 @@ test("the Council's figure is a floor: holding more is normal and holding less i
   assert.equal(council(100n, 99n).problem, "the council owes at least 100 but the verifier holds only 99 for it: 1 is missing");
 });
 
+test("the Council's floor is what it took in less what it paid and less the claims on their way", () => {
+  const totals = (total_received, total_paid, pending_claims) => ({ total_received, total_paid, pending_claims });
+  assert.equal(councilFloor(totals("1600000", "0", "0")), 1600000n);
+  assert.equal(councilFloor(totals("1600000", "871005", "0")), 728995n);
+  assert.equal(councilFloor(totals("1600000", "871005", "444970")), 284025n, "a claim in flight has already left the verifier");
+  assert.equal(councilFloor(totals("0", "0", "0")), 0n);
+  assert.equal(councilFloor(totals("340282366920938463463374607431768211455", "1", "0")), 340282366920938463463374607431768211454n);
+});
+
 test("a shortfall is read again a few blocks later and reported only if it is still there", async () => {
   const feed = (...reads) => {
     const waits = [];
@@ -222,7 +231,7 @@ test("the DAO report lists the open proposals that name the contracts and flags 
   const proposals = [
     pending(3, call(CONTRACTS.market, "set_fee_rate_bps", { fee_rate_bps: 150 })),
     pending(4, call(CONTRACTS.oracle, "set_bond", { bond: "1" }), "Failed"),
-    pending(5, call(CONTRACTS.market, "set_min_sweep", { min_sweep: "1" })),
+    pending(5, call(CONTRACTS.market, "settle_leg", { sweep_id: "1" })),
     pending(6, call(CONTRACTS.council, "set_cooldown_ns", { cooldown_ns: "0" })),
     pending(7, upgrade(unstaged)),
     pending(8, upgrade(staged)),
@@ -242,7 +251,7 @@ test("the DAO report lists the open proposals that name the contracts and flags 
     "4 other open DAO proposals (FunctionCall, Transfer, Vote, ChangePolicy)",
   ]);
   assert.equal(report.problems.length, 3);
-  assert.equal(report.problems[0], "DAO proposal 5 names market.near and is not on the allow-list: market.set_min_sweep is not on the allow-list");
+  assert.equal(report.problems[0], "DAO proposal 5 names market.near and is not on the allow-list: market.settle_leg is not on the allow-list");
   assert.match(report.problems[1], /^DAO proposal 6 names council\.near and is not on the allow-list: cooldown_ns must be/);
   assert.match(report.problems[2], /^DAO proposal 7 names oracle\.near and is not on the allow-list: no code with the hash .* is staged on oracle\.near/);
   assert.ok(asked.every(([account, method]) => account === CONTRACTS.oracle && method === "is_staged"), "it only reads");

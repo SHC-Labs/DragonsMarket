@@ -1,31 +1,12 @@
-// Trading fees, the 25/75 sweep, and revenue shared among staked Council seats. Real contracts, sandbox chain.
+// Trading fees and the 25/75 sweep to the Council and the treasury. Real contracts, sandbox chain.
 mod common;
 use common::*;
 use near_workspaces::types::{Gas, NearToken};
-use near_workspaces::Account;
 use serde_json::json;
-
-fn tok(a: &Account) -> &str {
-    a.id().as_str()
-}
 
 // The fee formula from spec section 4, with p = collateral / shares the trade's average price.
 fn fee_shape(collateral: u128, shares: u128) -> u128 {
     (200 * collateral * (shares - collateral)).div_ceil(10_000 * shares)
-}
-
-// What the seats of this council are owed right now and the revenue still streaming. Together they are what has
-// arrived and not been claimed, give or take a unit of rounding for each seat.
-async fn unclaimed(w: &World, tokens: &[&str]) -> u128 {
-    let mut owed = stream_remaining(w).await;
-    for t in tokens {
-        owed += pending_reward(w, t).await;
-    }
-    owed
-}
-
-fn about(have: u128, want: u128, dust: u128) -> bool {
-    have <= want && want - have <= dust
 }
 
 #[tokio::test]
@@ -92,13 +73,13 @@ async fn trades_pay_the_quoted_fee_and_redeem_and_withdraw_pay_none() -> anyhow:
 }
 
 #[tokio::test]
-async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_business_once() -> anyhow::Result<()> {
+async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once() -> anyhow::Result<()> {
     let w = setup().await?;
     let id = create_seeded_market(&w, 600).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     let collected = CREATE_FEE + 95_193;
     assert_eq!(collected % 4, 1, "neither share is a whole number of units");
-    let (council_before, business_before) = (holdings(&w, w.council.id()).await, holdings(&w, w.business.id()).await);
+    let (council_before, treasury_before) = (holdings(&w, w.council.id()).await, holdings(&w, w.treasury.id()).await);
 
     // Anyone can sweep. Both shares round down and the one unit left over stays collected.
     let logs = sweep(&w, &w.carol)
@@ -107,16 +88,56 @@ async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_business_once() -
         .iter()
         .map(|l| l.to_string())
         .collect::<Vec<_>>();
-    assert!(event_names(&logs).contains(&"fees_swept".to_string()));
+    let events = event_names(&logs);
+    assert_eq!(events.first().map(String::as_str), Some("fees_swept"), "{logs:?}");
+    assert_eq!(events.iter().filter(|e| *e == "fee_leg_settled").count(), 2, "{logs:?}");
+    assert!(
+        events.contains(&"revenue".to_string()),
+        "the Council's receipt logged: {logs:?}"
+    );
+    let swept = &events_named(&logs, "fees_swept")[0];
+    assert_eq!(
+        (
+            swept["id"].as_str(),
+            swept["council"].as_str(),
+            swept["treasury"].as_str(),
+            swept["total"].as_str()
+        ),
+        (Some("1"), Some("273798"), Some("821394"), Some("1095193"))
+    );
     assert_eq!(holdings(&w, w.council.id()).await - council_before, 273_798);
-    assert_eq!(holdings(&w, w.business.id()).await - business_before, 821_394);
+    assert_eq!(holdings(&w, w.treasury.id()).await - treasury_before, 821_394);
     assert_eq!(fees(&w).await, (1, 0, 0));
-    // The Council's part is streaming to the five staked seats over 30 days, so it is all either owed or still to come.
-    let seats: Vec<&str> = w.jurors.iter().map(tok).collect();
-    let held = unclaimed(&w, &seats).await;
-    assert!(about(held, 273_798, 6), "273,798 arrived and {held} is accounted for");
+    let record: serde_json::Value = w
+        .market
+        .view("get_sweep")
+        .args_json(json!({ "sweep_id": "1" }))
+        .await?
+        .json()?;
+    assert_eq!(
+        (
+            record["council"]["status"].as_str(),
+            record["treasury"]["status"].as_str()
+        ),
+        (Some("settled"), Some("settled"))
+    );
+    assert_eq!(record["council"]["to"], json!(w.council.id()));
+    assert_eq!(record["treasury"]["to"], json!(w.treasury.id()));
 
-    // Nothing new: a second sweep sends nothing and changes nothing.
+    // The Council took it as revenue of the quarter it arrived in, under the sweep's id.
+    let received: serde_json::Value = w
+        .council
+        .view("received_of")
+        .args_json(json!({ "sweep_id": "1" }))
+        .await?
+        .json()?;
+    assert_eq!(u(&received["amount"]), 273_798);
+    assert_eq!(received["quarter"], current_quarter(&w).await["quarter"]);
+    assert_eq!(u(&current_quarter(&w).await["revenue_in"]), 273_798);
+    assert_eq!(council_total_received(&w).await, 273_798);
+    assert_reconciled(&w).await;
+
+    // Nothing new: a second sweep sends nothing, takes no id and changes nothing.
     let logs = sweep(&w, &w.carol)
         .await?
         .logs()
@@ -125,40 +146,29 @@ async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_business_once() -
         .collect::<Vec<_>>();
     assert!(event_names(&logs).is_empty(), "{logs:?}");
     assert_eq!(holdings(&w, w.council.id()).await - council_before, 273_798);
-    assert_eq!(holdings(&w, w.business.id()).await - business_before, 821_394);
+    assert_eq!(holdings(&w, w.treasury.id()).await - treasury_before, 821_394);
     assert_eq!(fees(&w).await, (1, 0, 0));
-
-    // A seat holder claims what has streamed to it so far. That is a small part of the fees, which take 30 days to come.
-    let j = &w.jurors[0];
-    mint(&w, w.owner.id(), 1_000 * USD).await?;
-    send_revenue(&w, 1_000 * USD).await?;
-    skip_secs(&w.worker, 10).await;
-    let owed = pending_reward(&w, tok(j)).await;
-    assert!(owed > 0, "ten seconds of a 1,000 USD stream is something");
-    let paid = claimed_in(&claim(&w, j, tok(j)).await?);
-    assert!(
-        paid >= owed && paid <= 1_000 * USD / 1_000,
-        "claimed {paid}, was owed {owed}"
-    );
-    assert_eq!(holdings(&w, j.id()).await, paid);
-    assert!(
-        pending_reward(&w, tok(j)).await < paid / 5,
-        "the claim took what had streamed"
-    );
+    assert!(w
+        .market
+        .view("get_sweep")
+        .args_json(json!({ "sweep_id": "2" }))
+        .await?
+        .json::<serde_json::Value>()?
+        .is_null());
     Ok(())
 }
 
-// Receiving in the verifier needs no registration anywhere, so a new business wallet is paid on the next sweep with no setup.
+// Receiving in the verifier needs no registration anywhere, so a new treasury is paid on the next sweep with no setup.
 // A payout that fails is covered where the verifier refuses it (hardening.rs).
 #[tokio::test]
-async fn a_business_wallet_that_never_registered_anywhere_is_paid_its_share() -> anyhow::Result<()> {
+async fn a_treasury_that_never_registered_anywhere_is_paid_its_share() -> anyhow::Result<()> {
     let w = setup().await?;
     let id = create_seeded_market(&w, 600).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
-    let new_wallet = w.worker.dev_create_account().await?;
+    let new_treasury = w.worker.dev_create_account().await?;
     w.owner
         .call(w.market.id(), "set_fee_recipients")
-        .args_json(json!({ "revenue_pool": w.council.id(), "business_wallet": new_wallet.id() }))
+        .args_json(json!({ "revenue_pool": w.council.id(), "treasury": new_treasury.id() }))
         .transact()
         .await?
         .into_result()?;
@@ -170,9 +180,9 @@ async fn a_business_wallet_that_never_registered_anywhere_is_paid_its_share() ->
         .map(|l| l.to_string())
         .collect::<Vec<_>>();
     assert!(!event_names(&logs).contains(&"fee_transfer_failed".to_string()));
-    assert_eq!(intents_balance(&w, new_wallet.id()).await, 821_394);
+    assert_eq!(intents_balance(&w, new_treasury.id()).await, 821_394);
     assert_eq!(
-        ft_balance(&w, new_wallet.id()).await,
+        ft_balance(&w, new_treasury.id()).await,
         0,
         "paid in the verifier, not in tokens"
     );
@@ -182,144 +192,143 @@ async fn a_business_wallet_that_never_registered_anywhere_is_paid_its_share() ->
     Ok(())
 }
 
-// Revenue is released to the staked seats over 30 days. Each one's share of what has streamed so far is what it is owed,
-// and what has not streamed yet belongs to whoever is staked when it does.
+// Fail closed: a market that nobody has told where fees go refuses to sweep, and a Council that nobody has told which market to
+// trust takes no revenue and pays no claim.
 #[tokio::test]
-async fn revenue_streams_to_the_seats_staked_and_leaves_with_the_staker() -> anyhow::Result<()> {
-    let w = setup().await?;
-    let j = &w.jurors;
-    mint(&w, w.owner.id(), 10_000 * USD).await?;
-    leave(&w, &[&j[1], &j[2], &j[3], &j[4]]).await?;
-    let revenue = 1_000 * USD;
-
-    // One seat takes the whole stream. Nothing has streamed at the moment it arrives.
-    send_revenue(&w, revenue).await?;
-    skip_secs(&w.worker, 10).await;
-    let owed = pending_reward(&w, tok(&j[0])).await;
-    assert!(owed > 0 && owed < revenue / 1_000, "ten seconds of thirty days: {owed}");
-    assert!(
-        about(unclaimed(&w, &[tok(&j[0])]).await, revenue, 2),
-        "what is owed and what is to come is what arrived"
-    );
-    let paid = claimed_in(&claim(&w, &j[0], tok(&j[0])).await?);
-    assert!(paid >= owed && paid < revenue / 1_000);
-    assert_eq!(holdings(&w, j[0].id()).await, paid);
-
-    // Two more seats stake. A seat staked late has earned nothing of what streamed before.
-    stake(&w, &j[1], tok(&j[1])).await?;
-    stake(&w, &j[2], tok(&j[2])).await?;
-    assert!(
-        pending_reward(&w, tok(&j[1])).await < paid / 5,
-        "a seat staked just now has earned almost nothing"
-    );
-    skip_secs(&w.worker, 30).await;
-    let (a, b) = (
-        pending_reward(&w, tok(&j[1])).await,
-        pending_reward(&w, tok(&j[2])).await,
-    );
-    assert!(
-        a > 0 && b > 0 && a.abs_diff(b) <= a / 10 + 1,
-        "seats staked through the same time earn the same: {a} and {b}"
-    );
-
-    // Unstaking pays the staker first, then returns the token.
-    request_unstake(&w, &j[0], tok(&j[0])).await?;
-    skip_secs(&w.worker, COOLDOWN_SECS + 1).await;
-    let before = holdings(&w, j[0].id()).await;
-    let logs = unstake(&w, &j[0], tok(&j[0])).await?;
+async fn nothing_is_swept_or_claimed_until_the_owner_has_configured_the_recipients() -> anyhow::Result<()> {
+    let w = setup_unconfigured().await?;
+    let cfg = config(&w.market).await;
+    assert_eq!((&cfg["revenue_pool"], &cfg["treasury"]), (&json!(null), &json!(null)));
     assert_eq!(
-        event_names(&logs),
-        vec!["mt_transfer", "revenue_claimed", "nft_transfer", "unstaked"]
+        (
+            &config(&w.council).await["market"],
+            &config(&w.council).await["nft_contract"]
+        ),
+        (&json!(null), &json!(w.nft.id()))
     );
-    let out = claimed_in(&logs);
-    assert!(out > 0);
-    assert_eq!(holdings(&w, j[0].id()).await, before + out);
-    assert_eq!(nft_owner(&w, tok(&j[0])).await, j[0].id().as_str());
+    let id = create_seeded_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    let collected = fees(&w).await.0;
+    refused(
+        sweep(&w, &w.carol).await,
+        "the fee recipients are not set, the owner must call set_fee_recipients before a sweep",
+    );
+    assert_eq!(fees(&w).await, (collected, 0, 0), "a refused sweep changed nothing");
+    assert_reconciled(&w).await;
 
-    // The token is sold to Alice, who stakes it. It brings her nothing earned before.
-    j[0].call(w.nft.id(), "nft_transfer")
-        .args_json(json!({ "receiver_id": w.alice.id(), "token_id": tok(&j[0]) }))
-        .deposit(NearToken::from_yoctonear(1))
+    // The recipients are set but the Council has no market: it refuses the revenue and the verifier gives it back.
+    w.owner
+        .call(w.market.id(), "set_fee_recipients")
+        .args_json(json!({ "revenue_pool": w.council.id(), "treasury": w.treasury.id() }))
         .transact()
         .await?
         .into_result()?;
-    stake(&w, &w.alice, tok(&j[0])).await?;
-    assert!(pending_reward(&w, tok(&j[0])).await < pending_reward(&w, tok(&j[1])).await / 5);
-    Ok(())
-}
-
-// Time with no seats stretches the stream instead of losing what arrived.
-#[tokio::test]
-async fn revenue_that_arrives_with_no_seats_streams_once_a_seat_exists() -> anyhow::Result<()> {
-    let w = setup().await?;
-    let j = &w.jurors;
-    leave(&w, &[&j[0], &j[1], &j[2], &j[3], &j[4]]).await?;
-    send_revenue(&w, USD).await?;
-    assert_eq!(
-        stream_remaining(&w).await,
-        USD,
-        "with no seat to take it, none of it has been released"
-    );
-    assert_eq!(holdings(&w, w.council.id()).await, USD, "the Council kept it");
-
-    stake(&w, &j[0], tok(&j[0])).await?;
-    send_revenue(&w, 2 * USD).await?;
-    skip_secs(&w.worker, 10).await;
-    let held = unclaimed(&w, &[tok(&j[0])]).await;
-    assert!(about(held, 3 * USD, 2), "all three dollars are accounted for: {held}");
-    assert!(pending_reward(&w, tok(&j[0])).await > 0, "the seat is earning");
-    Ok(())
-}
-
-#[tokio::test]
-async fn only_the_staker_claims_and_a_failed_payout_stays_claimable() -> anyhow::Result<()> {
-    let w = setup().await?;
-    let j = &w.jurors;
-    mint(&w, w.owner.id(), 10_000 * USD).await?;
-    send_revenue(&w, 1_000 * USD).await?;
-    skip_secs(&w.worker, 10).await;
-    assert!(pending_reward(&w, tok(&j[0])).await > 0);
-    refused(claim(&w, &w.alice, tok(&j[0])).await, "not your seat");
-    refused(claim(&w, &w.alice, "nothing").await, "not staked");
-
-    // The verifier refuses the Council's payouts while its account is locked, so the claim fails and is restored.
-    lock_account(&w, w.council.id()).await?;
-    let logs = claim(&w, &j[0], tok(&j[0])).await?;
-    assert_eq!(event_names(&logs), vec!["revenue_claimed", "claim_failed"]);
-    let attempted = claimed_in(&logs);
+    w.owner
+        .call(w.market.id(), "set_min_sweep")
+        .args_json(json!({ "min_sweep": "1" }))
+        .transact()
+        .await?
+        .into_result()?;
+    let logs = sweep(&w, &w.carol)
+        .await?
+        .logs()
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>();
     assert!(
-        pending_reward(&w, tok(&j[0])).await >= attempted,
-        "the failed claim is still owed"
+        event_names(&logs).contains(&"fee_transfer_failed".to_string()),
+        "{logs:?}"
     );
-    unlock_account(&w, w.council.id()).await?;
-    let paid = claimed_in(&claim(&w, &j[0], tok(&j[0])).await?);
-    assert!(paid >= attempted);
-    assert_eq!(holdings(&w, j[0].id()).await, paid);
-
-    // The same for an unstake: the payout fails, so the seat stays staked with what it earned.
-    let erin = w.worker.dev_create_account().await?;
-    mint_nft(&w, &erin, "erins").await?;
-    stake(&w, &erin, "erins").await?;
-    request_unstake(&w, &erin, "erins").await?;
-    refused(
-        claim(&w, &erin, "erins").await,
-        "an unstake is requested, and unstaking pays what the seat earned",
-    );
-    skip_secs(&w.worker, COOLDOWN_SECS + 1).await;
-    lock_account(&w, w.council.id()).await?;
-    let before = stake_of(&w, "erins").await;
-    assert_eq!(event_names(&unstake(&w, &erin, "erins").await?), vec!["unstake_failed"]);
-    assert_eq!(stake_of(&w, "erins").await, before);
-    let owed = pending_reward(&w, "erins").await;
-    assert!(owed > 0);
-    assert_eq!(nft_owner(&w, "erins").await, w.council.id().as_str());
-    unlock_account(&w, w.council.id()).await?;
-    let logs = unstake(&w, &erin, "erins").await?;
+    assert_eq!(council_total_received(&w).await, 0);
     assert_eq!(
-        event_names(&logs),
-        vec!["mt_transfer", "revenue_claimed", "nft_transfer", "unstaked"]
+        intents_balance(&w, w.treasury.id()).await,
+        821_394,
+        "the treasury leg did not wait for the Council's"
     );
-    assert!(claimed_in(&logs) >= owed);
-    assert_eq!(holdings(&w, erin.id()).await, claimed_in(&logs));
+    assert_eq!(fees(&w).await, (1, 273_798, 0), "the Council's share is due again");
+    refused(
+        claim_quarter(&w, &w.jurors[0], 0, w.jurors[0].id().as_str()).await,
+        "the Council is not configured, the owner must call set_market",
+    );
+    assert_reconciled(&w).await;
+    Ok(())
+}
+
+// One leg failing must not touch the other, spend backing, or be paid twice when it is retried.
+#[tokio::test]
+async fn a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_once() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let id = create_seeded_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    w.owner
+        .call(w.market.id(), "set_min_sweep")
+        .args_json(json!({ "min_sweep": "1" }))
+        .transact()
+        .await?
+        .into_result()?;
+    // The Council trusts another account as its market, so it refuses the sweep.
+    set_council_market(&w, w.dave.id()).await?;
+    let (council_before, treasury_before) = (holdings(&w, w.council.id()).await, holdings(&w, w.treasury.id()).await);
+    sweep(&w, &w.carol).await?;
+    assert_eq!(
+        holdings(&w, w.treasury.id()).await - treasury_before,
+        821_394,
+        "the treasury leg was paid"
+    );
+    assert_eq!(
+        holdings(&w, w.council.id()).await,
+        council_before,
+        "the Council's leg was given back"
+    );
+    assert_eq!(fees(&w).await, (1, 273_798, 0));
+    let first: serde_json::Value = w
+        .market
+        .view("get_sweep")
+        .args_json(json!({ "sweep_id": "1" }))
+        .await?
+        .json()?;
+    assert_eq!(
+        (
+            first["council"]["status"].as_str(),
+            first["treasury"]["status"].as_str()
+        ),
+        (Some("refused"), Some("settled"))
+    );
+    assert_reconciled(&w).await;
+
+    // The owner points the Council at the market again. The retry is a sweep of its own under a new id and carries the
+    // refused amount once. The treasury has nothing more to be paid.
+    set_council_market(&w, w.market.id()).await?;
+    sweep(&w, &w.carol).await?;
+    assert_eq!(holdings(&w, w.council.id()).await - council_before, 273_798);
+    assert_eq!(
+        holdings(&w, w.treasury.id()).await - treasury_before,
+        821_394,
+        "the treasury was paid once"
+    );
+    assert_eq!(fees(&w).await, (1, 0, 0));
+    let second: serde_json::Value = w
+        .market
+        .view("get_sweep")
+        .args_json(json!({ "sweep_id": "2" }))
+        .await?
+        .json()?;
+    assert_eq!(
+        (
+            second["council"]["amount"].as_str(),
+            second["carried_council"].as_str(),
+            second["treasury"]["status"].as_str()
+        ),
+        (Some("273798"), Some("273798"), Some("settled"))
+    );
+    let received: serde_json::Value = w
+        .council
+        .view("received_of")
+        .args_json(json!({ "sweep_id": "1" }))
+        .await?
+        .json()?;
+    assert!(received.is_null(), "the Council never took sweep 1");
+    assert_eq!(council_total_received(&w).await, 273_798);
+    assert_reconciled(&w).await;
     Ok(())
 }

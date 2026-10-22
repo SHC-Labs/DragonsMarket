@@ -235,7 +235,7 @@ async fn unchallenged_answer_becomes_final_and_pays_out_with_no_deadline() -> an
     assert_eq!(r.json::<String>()?, "0", "bob held No and lost");
     assert!(invariant(&w, id).await);
 
-    // The pool's leftover goes to the business wallet, not the owner. Everything owed to users stays reserved.
+    // The pool's leftover goes to the treasury, not the owner. Everything owed to users stays reserved.
     let leftover = u(&market_json(&w, id).await["locked"]);
     assert!(leftover > 0);
     w.owner
@@ -246,7 +246,12 @@ async fn unchallenged_answer_becomes_final_and_pays_out_with_no_deadline() -> an
         .into_result()?;
     assert!(invariant(&w, id).await);
     assert_eq!(market_json(&w, id).await["locked"], "0");
-    assert_eq!(market_balance(&w, w.business.id()).await, leftover);
+    assert_eq!(fees(&w).await.2, leftover, "the next sweep pays it on the treasury leg");
+    assert_eq!(
+        market_balance(&w, w.treasury.id()).await,
+        0,
+        "it is not a balance the treasury must withdraw"
+    );
     assert_eq!(market_balance(&w, w.owner.id()).await, 0);
 
     // Carol's bond comes back.

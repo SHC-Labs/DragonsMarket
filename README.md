@@ -19,8 +19,10 @@ target architecture. Current administrative work is described in
 
 NEAR Intents is the intended token-holding layer. Funding should arrive through a supported route,
 be committed as collateral for a position inside Intents, and become available again after a sale
-or settlement. Market and Council source now use Intents-held transfers. Oracle bond settlement, quarterly
-claims and the website's financial integration remain incomplete.
+or settlement. Market and Council source now use Intents-held transfers, the market splits fees between
+the treasury and the Council with a recorded sweep per leg, and the Council pays quarterly claims once
+(2026-10-21). The website's financial integration, the real treasury and a run against the real USDC
+remain incomplete.
 The local sandbox uses the real Intents verifier with test collateral. Mainnet funding and
 withdrawals have not been established by these local tests.
 
@@ -40,8 +42,9 @@ Owner decision, 20 October 2026. This is the implementation target, not a report
 | Holder payouts | Eligible holders claim through the Council on a quarterly schedule; no manual payout-wallet route |
 | Disputes | Keep Council juries and oracle rules separate from treasury member voting |
 
-The Council must track entitlements while its reward backing remains in Intents. The current
-30-day reward stream does not implement a quarterly claim window.
+The Council tracks entitlements by UTC calendar quarter while its reward backing remains in Intents.
+A seat earns for the time it was staked in the quarter, and claims each quarter once after the
+quarter is final (7 days after it ends to start). The 30-day stream is gone.
 
 Owner decision, 21 October 2026: sensitive administrative changes use Trezu/Sputnik member
 approvals, and the DAO voting period is the only delay. SputnikDAO executes a proposal at the
@@ -178,10 +181,10 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Counts after the keeper and treasury helper rewrite (2026-10-21): unit tests market 148, oracle 115, council 87,
-upgrade 11; sandbox tests 153 in 20 files (10 verifier proof tests, 7 market and Council money-path tests, 9
-oracle money-path tests, 8 source guards, 7 keeper tests; the `dev_chain` harness is ignored); keeper node
-tests 49 (26 keeper, 23 treasury helper). A missing
+Counts after the fee split and quarterly claims (2026-10-21): unit tests market 172, oracle 115, council 106,
+upgrade 11; sandbox tests 160 in 22 files (10 verifier proof tests, 7 market and Council money-path tests, 9
+oracle money-path tests, 10 source guards, 7 keeper tests, 5 quarterly claim tests; the `dev_chain` harness is
+ignored); keeper node tests 52 (27 keeper, 25 treasury helper). A missing
 `contracts/target/intents/defuse.wasm` fails the sandbox tests with the build recipe instead of skipping
 them, so CI builds it first.
 
@@ -216,7 +219,8 @@ The active spec and implementation handoffs now share one direction. Old stack/N
 drafts, custom-controller source snapshots, unused NFT sets, template icons and abandoned UI
 components have been removed. Dated security/legal reviews and policy copies remain evidence.
 
-Current release gaps are quarterly Council claims, the real treasury and its owner handover,
+Current release gaps are the real treasury and its owner handover and a run of the fee split and the
+claims against the real USDC and a real DAO,
 external funding/identity/exit integration, and backend recovery.
 Financial UI actions remain disabled until those interfaces are reviewed.
 

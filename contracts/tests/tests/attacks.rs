@@ -7,7 +7,6 @@ use near_workspaces::Account;
 use serde_json::json;
 
 const GAS: Gas = Gas::from_tgas(100);
-const STREAM_SECS: u128 = 30 * 24 * 60 * 60;
 
 async fn attempt(
     attacker: &Account,
@@ -29,7 +28,8 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
     let key = "ed25519:6E8bKz2P1mXhL4G9QdQfJm9xYb1Qb3Ls9mT8Fq7z1xAB";
     let market_args = json!({ "title": "t", "rule_text": "r", "resolution_source": "s", "void_policy": "v", "category": "a", "subcategory": "b",
         "close_at": "1", "resolve_by": "2" });
-    let stake = json!({ "owner": me, "staked_at": "0", "unlock_requested_at": null, "serving": null });
+    let stake =
+        json!({ "owner": me, "staked_at": "0", "unlock_requested_at": null, "serving": null, "booked_to": "0" });
 
     let cases: Vec<(&Contractish, &str, serde_json::Value, &str)> = vec![
         (
@@ -89,7 +89,31 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
         (
             &Contractish::Market,
             "set_fee_recipients",
-            json!({ "revenue_pool": me, "business_wallet": me }),
+            json!({ "revenue_pool": me, "treasury": me }),
+            "owner only",
+        ),
+        (
+            &Contractish::Market,
+            "set_revenue_share_bps",
+            json!({ "revenue_share_bps": 2500 }),
+            "owner only",
+        ),
+        (
+            &Contractish::Market,
+            "set_min_sweep",
+            json!({ "min_sweep": "1" }),
+            "owner only",
+        ),
+        (
+            &Contractish::Market,
+            "set_next_sweep_id",
+            json!({ "next_sweep_id": "100" }),
+            "owner only",
+        ),
+        (
+            &Contractish::Market,
+            "reconcile_leg",
+            json!({ "sweep_id": "1", "leg": "council", "arrived": true }),
             "owner only",
         ),
         (
@@ -125,13 +149,19 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
         (
             &Contractish::Market,
             "on_revenue_sent",
-            json!({ "amount": "1" }),
+            json!({ "sweep_id": "1" }),
             "private",
         ),
         (
             &Contractish::Market,
-            "on_business_sent",
-            json!({ "amount": "1" }),
+            "on_treasury_sent",
+            json!({ "sweep_id": "1" }),
+            "private",
+        ),
+        (
+            &Contractish::Market,
+            "on_council_checked",
+            json!({ "sweep_id": "1" }),
             "private",
         ),
         (
@@ -226,6 +256,18 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
         ),
         (
             &Contractish::Council,
+            "set_market",
+            json!({ "market": me }),
+            "owner only",
+        ),
+        (
+            &Contractish::Council,
+            "set_close_grace_ns",
+            json!({ "close_grace_ns": "86400000000000" }),
+            "owner only",
+        ),
+        (
+            &Contractish::Council,
             "set_max_seats_per_account",
             json!({ "max_seats_per_account": 1 }),
             "owner only",
@@ -244,20 +286,14 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
         ),
         (
             &Contractish::Council,
-            "on_unstake_paid",
-            json!({ "token_id": "x", "stake": stake, "earned": "0" }),
-            "private",
-        ),
-        (
-            &Contractish::Council,
             "on_unstaked",
-            json!({ "token_id": "x", "stake": stake, "earned": "0" }),
+            json!({ "token_id": "x", "stake": stake }),
             "private",
         ),
         (
             &Contractish::Council,
-            "on_claimed",
-            json!({ "token_id": "x", "owner": me, "amount": "1" }),
+            "on_claim_paid",
+            json!({ "quarter": 1, "token_id": "x", "owner": me, "amount": "1" }),
             "private",
         ),
     ];
@@ -292,7 +328,7 @@ async fn a_deployed_contract_cannot_be_initialised_again() -> anyhow::Result<()>
     let again: Vec<(&near_workspaces::AccountId, serde_json::Value)> = vec![
         (
             w.market.id(),
-            json!({ "owner_id": me, "operator_id": me, "oracle_id": me, "verifier_id": me, "collateral_token_id": "nep141:x.near", "revenue_pool": me, "business_wallet": me }),
+            json!({ "owner_id": me, "operator_id": me, "oracle_id": me, "verifier_id": me, "collateral_token_id": "nep141:x.near" }),
         ),
         (
             w.oracle.id(),
@@ -301,7 +337,7 @@ async fn a_deployed_contract_cannot_be_initialised_again() -> anyhow::Result<()>
         ),
         (
             w.council.id(),
-            json!({ "owner_id": me, "oracle_id": me, "nft_contract": me, "verifier_id": me, "collateral_token_id": "nep141:x.near", "cooldown_ns": "1", "max_seats_per_account": 1 }),
+            json!({ "owner_id": me, "oracle_id": me, "verifier_id": me, "collateral_token_id": "nep141:x.near", "cooldown_ns": "1", "max_seats_per_account": 1 }),
         ),
     ];
     for (to, args) in again {
@@ -348,7 +384,11 @@ async fn value_moving_methods_need_exactly_one_yocto() -> anyhow::Result<()> {
             "reveal_vote",
             json!({ "market_id": "0", "outcome": "yes", "salt": "s", "reason": "r" }),
         ),
-        (w.council.id(), "claim", json!({ "token_id": "x" })),
+        (
+            w.council.id(),
+            "claim_quarter",
+            json!({ "quarter": 0, "token_id": "x" }),
+        ),
         (w.council.id(), "unstake", json!({ "token_id": "x" })),
     ] {
         let r = none(to, method, args).await?;
@@ -418,7 +458,7 @@ async fn a_token_the_contracts_do_not_trust_cannot_deposit_bond_or_pay_revenue()
         (w.market.id(), format!("seed:{id}")),
         (w.oracle.id(), format!("propose:{id}:yes:https://x")),
         (w.oracle.id(), format!("challenge:{id}:no")),
-        (w.council.id(), "revenue".to_string()),
+        (w.council.id(), "revenue:1".to_string()),
     ] {
         w.dave
             .call(evil.id(), "ft_transfer_call")
@@ -433,7 +473,7 @@ async fn a_token_the_contracts_do_not_trust_cannot_deposit_bond_or_pay_revenue()
     assert_eq!(market_balance(&w, w.dave.id()).await, 0);
     assert!(case_json(&w, id).await.is_null());
     assert_eq!(
-        stream_remaining(&w).await,
+        council_total_received(&w).await,
         0,
         "no revenue arrived from a token the council does not trust"
     );
@@ -483,13 +523,13 @@ async fn the_token_hooks_cannot_be_called_directly() -> anyhow::Result<()> {
             w.council.id(),
             "mt_on_transfer",
             json!({ "sender_id": w.dave.id(), "previous_owner_ids": [w.dave.id()], "token_ids": [token_id(&w)],
-                    "amounts": ["1000000000"], "msg": "revenue" }),
+                    "amounts": ["1000000000"], "msg": "revenue:1" }),
             "only the verifier can deliver money",
         ),
         (
             w.council.id(),
             "ft_on_transfer",
-            json!({ "sender_id": w.dave.id(), "amount": "1000000000", "msg": "revenue" }),
+            json!({ "sender_id": w.dave.id(), "amount": "1000000000", "msg": "revenue:1" }),
             "MethodNotFound",
         ),
         (
@@ -688,20 +728,16 @@ async fn two_sweeps_in_flight_pay_the_fees_out_once() -> anyhow::Result<()> {
     let _ = first.await?;
     let _ = second;
     let revenue_share = collected * 2_500 / 10_000;
-    let business_share = collected * 7_500 / 10_000;
+    let treasury_share = collected * 7_500 / 10_000;
     assert_eq!(
-        holdings(&w, w.business.id()).await,
-        business_share,
-        "the business wallet was paid once"
+        holdings(&w, w.treasury.id()).await,
+        treasury_share,
+        "the treasury was paid once"
     );
-    let seats: Vec<&str> = w.jurors.iter().map(|j| j.id().as_str()).collect();
-    let mut held = stream_remaining(&w).await;
-    for t in &seats {
-        held += pending_reward(&w, t).await;
-    }
-    assert!(
-        held <= revenue_share && revenue_share - held <= 6,
-        "the council received its share once: {held} of {revenue_share}"
+    assert_eq!(
+        council_total_received(&w).await,
+        revenue_share,
+        "the council received its share once"
     );
     let (left, _, _) = fees(&w).await;
     assert!(left <= 1, "nothing is left to sweep again: {left}");
@@ -713,13 +749,14 @@ async fn two_claims_and_two_unstakes_in_flight_pay_a_seat_once() -> anyhow::Resu
     let w = setup().await?;
     mint(&w, w.owner.id(), 10_000 * USD).await?;
     send_revenue(&w, 10_000 * USD).await?;
-    skip_secs(&w.worker, 10).await;
     let seat = &w.jurors[0];
-    let owed = pending_reward(&w, seat.id().as_str()).await;
+    let quarter = age_current_quarter(&w).await?;
+    finalize_quarter(&w, quarter).await?;
+    let owed = u(&entitlement(&w, quarter, seat.id().as_str(), seat.id()).await["amount"]);
     assert!(owed > 0);
     let claim = || {
-        seat.call(w.council.id(), "claim")
-            .args_json(json!({ "token_id": seat.id().as_str() }))
+        seat.call(w.council.id(), "claim_quarter")
+            .args_json(json!({ "quarter": quarter, "token_id": seat.id().as_str() }))
             .deposit(NearToken::from_yoctonear(1))
             .gas(GAS)
     };
@@ -728,13 +765,8 @@ async fn two_claims_and_two_unstakes_in_flight_pay_a_seat_once() -> anyhow::Resu
     let second = claim().transact().await;
     let _ = first.await?;
     let _ = second;
-    // The two claims are paid what the stream released to the seat, once: what it was owed, and what streamed in the
-    // few blocks since, which is under a second of a stream that gives this seat about 770 units a second.
-    let paid = holdings(&w, seat.id()).await - before;
-    assert!(
-        paid >= owed && paid <= owed + 20 * 10_000 * USD / (5 * STREAM_SECS),
-        "claimed once: {paid} against {owed} owed"
-    );
+    assert_eq!(holdings(&w, seat.id()).await - before, owed, "claimed once");
+    assert_eq!(u(&reward_totals(&w).await["total_paid"]), owed);
 
     request_unstake(&w, seat, seat.id().as_str()).await?;
     skip_secs(&w.worker, COOLDOWN_SECS + 1).await;
@@ -1037,7 +1069,7 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
     refused(
         thief
             .call(w.market.id(), "set_fee_recipients")
-            .args_json(json!({ "revenue_pool": thief.id(), "business_wallet": thief.id() }))
+            .args_json(json!({ "revenue_pool": thief.id(), "treasury": thief.id() }))
             .transact()
             .await?
             .into_result(),
@@ -1237,7 +1269,7 @@ async fn two_colluding_accounts_cannot_stall_a_case_for_free() -> anyhow::Result
     let (carol, dave, recipient) = (
         claimable(&w, w.carol.id()).await,
         claimable(&w, w.dave.id()).await,
-        claimable(&w, w.business.id()).await,
+        claimable(&w, w.treasury.id()).await,
     );
     assert_eq!(claimable(&w, w.owner.id()).await, 0, "the owner is not paid");
     assert_eq!(
@@ -1340,12 +1372,14 @@ async fn at_the_deadline_an_unfinalized_proposal_is_applied_and_not_voided_over(
     Ok(())
 }
 
-// A seat that stakes a block before a large arrival used to take its share of everything gathered so far. Revenue now
-// streams over 30 days, so five seats staked just before 10,000 USD arrives have earned a few seconds' share of it.
+// A seat that stakes a block before a large arrival used to take its share of everything gathered so far. A seat now earns
+// for the time it was staked inside the quarter, so five seats staked just before 10,000 USD arrives have earned less than
+// the five that were there all along, though they hold half the seats.
 #[tokio::test]
-async fn staking_one_block_before_a_sweep_earns_one_blocks_share_of_the_stream() -> anyhow::Result<()> {
+async fn staking_one_block_before_a_sweep_earns_only_the_time_staked() -> anyhow::Result<()> {
     let w = setup().await?;
     mint(&w, w.owner.id(), 10_000 * USD).await?;
+    skip_secs(&w.worker, 30).await;
     let sniper = w.worker.dev_create_account().await?;
     let tokens: Vec<String> = (0..5).map(|i| format!("sniper{i}")).collect();
     for t in &tokens {
@@ -1354,37 +1388,24 @@ async fn staking_one_block_before_a_sweep_earns_one_blocks_share_of_the_stream()
     }
     send_revenue(&w, 10_000 * USD).await?;
     skip_secs(&w.worker, 5).await;
+    let quarter = age_current_quarter(&w).await?;
+    finalize_quarter(&w, quarter).await?;
 
     let mut sniped = 0;
     for t in &tokens {
-        sniped += pending_reward(&w, t).await;
+        sniped += u(&entitlement(&w, quarter, t, sniper.id()).await["amount"]);
     }
     let mut honest = 0;
     for j in &w.jurors {
-        honest += pending_reward(&w, j.id().as_str()).await;
+        honest += u(&entitlement(&w, quarter, j.id().as_str(), j.id()).await["amount"]);
     }
-    // Half the seats were the sniper's. They would have taken 5,000 USD. A few seconds of 30 days is a thousandth.
     assert!(
-        sniped > 0 && sniped < 10_000 * USD / 1_000,
-        "the sniper has earned {sniped}"
+        sniped > 0 && sniped < honest / 2,
+        "five seats staked a moment before the arrival earned {sniped} against {honest} for the five that were there"
     );
     assert!(
-        sniped.abs_diff(honest) <= honest / 5 + 5,
-        "equal seats staked at the same time earned the same: {sniped} and {honest}"
-    );
-
-    // Leaving takes the cooldown, and the seats earn while they wait, as any seat does. The payout is small.
-    for t in &tokens {
-        request_unstake(&w, &sniper, t).await?;
-    }
-    skip_secs(&w.worker, COOLDOWN_SECS + 1).await;
-    let mut taken = 0;
-    for t in &tokens {
-        taken += claimed_in(&unstake(&w, &sniper, t).await?);
-    }
-    assert!(
-        taken < 10_000 * USD / 100,
-        "five seats staked for about a minute took {taken} of 10,000 USD"
+        sniped + honest <= 10_000 * USD && 10_000 * USD - (sniped + honest) < 10,
+        "the shares and the dust are the whole pool"
     );
     Ok(())
 }

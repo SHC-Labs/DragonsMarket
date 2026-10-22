@@ -17,6 +17,9 @@ const TGAS = 10n ** 12n;
 // No transaction carries more, and act_proposal needs all it can get when the vote that reaches the threshold runs the call.
 const MAX_TX_TGAS = 300n;
 const U32_MAX = 2 ** 32 - 1;
+const NS_PER_DAY = 86_400n * 10n ** 9n;
+// The Council's grace period, 1 to 30 days (MIN_CLOSE_GRACE_NS and MAX_CLOSE_GRACE_NS in its source).
+export const CLOSE_GRACE_DAYS = { min: 1n, max: 30n };
 const U64_MAX = 2n ** 64n - 1n;
 const U128_MAX = 2n ** 128n - 1n;
 const NS_PER_MS = 1_000_000n;
@@ -42,6 +45,9 @@ export const TARGETS = ["market", "oracle", "council"];
 export const CONTRACT_LIMITS = {
   market: {
     MAX_FEE_RATE_BPS: 500,
+    MIN_REVENUE_SHARE_BPS: 1_000,
+    MAX_REVENUE_SHARE_BPS: 5_000,
+    MAX_MIN_SWEEP: 100_000_000n,
     MAX_CREATE_FEE: 10_000_000n,
     MAX_TITLE: 200,
     MAX_RULE: 2000,
@@ -92,6 +98,7 @@ const slug = (v) =>
     : reject(`a slug of at most ${SLUG_MAX} lowercase letters, digits and hyphens`);
 const oddUpTo = (max) => (v) =>
   Number.isInteger(v) && v >= 1 && v <= max && v % 2 === 1 ? v : reject(`an odd number from 1 to ${max}`);
+const oneOf = (...values) => (v) => (values.includes(v) ? v : reject(`one of ${values.join(", ")}`));
 const optional = (check) => Object.assign((v, ids) => (v === null ? null : check(v, ids)), { optional: true });
 
 function base58Bytes(encoded, length) {
@@ -176,10 +183,13 @@ export const ALLOWED = {
   market: {
     ...upgradePath,
     set_operator: setOperator,
-    set_fee_recipients: call({ revenue_pool: exactly("council"), business_wallet: exactly("treasury") }),
+    set_fee_recipients: call({ revenue_pool: exactly("council"), treasury: exactly("treasury") }),
+    set_revenue_share_bps: call({ revenue_share_bps: integer(LIMIT_MARKET.MAX_REVENUE_SHARE_BPS, LIMIT_MARKET.MIN_REVENUE_SHARE_BPS) }),
+    set_min_sweep: call({ min_sweep: u128(1n, LIMIT_MARKET.MAX_MIN_SWEEP) }),
+    set_next_sweep_id: call({ next_sweep_id: u64(1n) }, { needs: "sweep_id_forward" }),
     set_fee_rate_bps: call({ fee_rate_bps: integer(LIMIT_MARKET.MAX_FEE_RATE_BPS) }),
     set_create_fee: call({ create_fee: u128(0n, LIMIT_MARKET.MAX_CREATE_FEE) }),
-    reconcile_revenue: call({ amount: u128(1n), arrived: flag }),
+    reconcile_leg: call({ sweep_id: u64(1n), leg: oneOf("council", "treasury"), arrived: flag }),
     set_paused: call({ paused: flag }),
     halt: call({ market_id: u64(), reason: text(REASON_MAX) }),
     resume: call({ market_id: u64() }),
@@ -227,6 +237,8 @@ export const ALLOWED = {
   council: {
     ...upgradePath,
     set_cooldown_ns: call({ cooldown_ns: u64(1n) }),
+    set_close_grace_ns: call({ close_grace_ns: u64(CLOSE_GRACE_DAYS.min * NS_PER_DAY, CLOSE_GRACE_DAYS.max * NS_PER_DAY) }),
+    set_market: call({ market: exactly("market") }),
     set_max_seats_per_account: call({ max_seats_per_account: integer(U32_MAX, 1) }),
     set_nft_contract: call({ nft_contract: account }),
     allow_tokens: call({ token_ids: list(text(ID_TEXT_MAX), LIMIT_COUNCIL.MAX_ALLOW_BATCH) }),
@@ -241,6 +253,10 @@ const NEEDS = {
     if ((await view(receiver, "is_staged", { code_hash: args.code_hash })) !== true) {
       reject(`no code with the hash ${args.code_hash} is staged on ${receiver}; stage it first`);
     }
+  },
+  sweep_id_forward: async ({ view, receiver, args }) => {
+    const next = BigInt((await view(receiver, "config", {})).next_sweep_id);
+    if (BigInt(args.next_sweep_id) < next) reject(`the next sweep id can only move up from ${next}, and a sweep id is never reused`);
   },
   upgrade_proven: async ({ view, receiver }) => {
     if ((await view(receiver, "config", {})).upgrade_proven !== true) {

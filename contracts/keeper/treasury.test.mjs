@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  ALLOWED, CONTRACT_LIMITS, GUARDED_KINDS, TARGETS, codeHash, prepareAdministrationProposal, prepareStageCode,
+  ALLOWED, CLOSE_GRACE_DAYS, CONTRACT_LIMITS, GUARDED_KINDS, TARGETS, codeHash, prepareAdministrationProposal, prepareStageCode,
   prepareTreasuryVote, reviewKind,
 } from "./treasury.mjs";
 import { b58encode } from "./chain.mjs";
@@ -18,6 +18,7 @@ const HASH = b58encode(Buffer.alloc(32, 9));
 const ED_KEY = `ed25519:${b58encode(Buffer.alloc(32, 7))}`;
 const SECP_KEY = `secp256k1:${b58encode(Buffer.alloc(64, 5))}`;
 const CONTRACTS_DIR = path.resolve(import.meta.dirname, "..");
+const NEXT_SWEEP_ID = "5";
 
 // A DAO and three contracts that answer only the views the helper is meant to ask.
 function chain({ bond = BOND, proposals = [], staged = true, proven = true } = {}) {
@@ -29,7 +30,7 @@ function chain({ bond = BOND, proposals = [], staged = true, proven = true } = {
       return byId.get(args.id);
     }
     if (Object.values(CONTRACTS).includes(account) && method === "is_staged") return staged;
-    if (Object.values(CONTRACTS).includes(account) && method === "config") return { upgrade_proven: proven };
+    if (Object.values(CONTRACTS).includes(account) && method === "config") return { upgrade_proven: proven, next_sweep_id: NEXT_SWEEP_ID };
     throw new Error(`unexpected view ${account}.${method}`);
   };
 }
@@ -56,10 +57,13 @@ const SAMPLES = {
     propose_owner: { new_owner: DAO },
     accept_owner: {},
     set_operator: { operator_id: "keeper.example.near" },
-    set_fee_recipients: { revenue_pool: CONTRACTS.council, business_wallet: DAO },
+    set_fee_recipients: { revenue_pool: CONTRACTS.council, treasury: DAO },
+    set_revenue_share_bps: { revenue_share_bps: 2500 },
+    set_min_sweep: { min_sweep: "1000000" },
+    set_next_sweep_id: { next_sweep_id: "50" },
     set_fee_rate_bps: { fee_rate_bps: 150 },
     set_create_fee: { create_fee: "1000000" },
-    reconcile_revenue: { amount: "5", arrived: true },
+    reconcile_leg: { sweep_id: "3", leg: "council", arrived: true },
     set_paused: { paused: true },
     halt: { market_id: "3", reason: "the source is down" },
     resume: { market_id: "3" },
@@ -96,6 +100,8 @@ const SAMPLES = {
     propose_owner: { new_owner: DAO },
     accept_owner: {},
     set_cooldown_ns: { cooldown_ns: "172800000000000" },
+    set_close_grace_ns: { close_grace_ns: "604800000000000" },
+    set_market: { market: CONTRACTS.market },
     set_max_seats_per_account: { max_seats_per_account: 2 },
     set_nft_contract: { nft_contract: "dragons.example.near" },
     allow_tokens: { token_ids: ["1", "2"] },
@@ -166,13 +172,23 @@ test("a value past what the contract allows is refused, and the value at the lim
     ["market", "set_create_fee", { create_fee: "10000000" }, { create_fee: "10000001" }],
     ["market", "set_create_fee", { create_fee: "0" }, { create_fee: 1000000 }],
     ["market", "set_create_fee", { create_fee: "5" }, { create_fee: "05" }],
-    ["market", "reconcile_revenue", { amount: "1", arrived: false }, { amount: "0", arrived: false }],
-    ["market", "reconcile_revenue", { amount: "1", arrived: false }, { amount: "1", arrived: "no" }],
+    ["market", "reconcile_leg", { sweep_id: "1", leg: "council", arrived: false }, { sweep_id: "0", leg: "council", arrived: false }],
+    ["market", "reconcile_leg", { sweep_id: "1", leg: "treasury", arrived: false }, { sweep_id: "1", leg: "business", arrived: false }],
+    ["market", "reconcile_leg", { sweep_id: "1", leg: "council", arrived: false }, { sweep_id: "1", leg: "council", arrived: "no" }],
+    ["market", "set_revenue_share_bps", { revenue_share_bps: limit.market.MIN_REVENUE_SHARE_BPS }, { revenue_share_bps: limit.market.MIN_REVENUE_SHARE_BPS - 1 }],
+    ["market", "set_revenue_share_bps", { revenue_share_bps: limit.market.MAX_REVENUE_SHARE_BPS }, { revenue_share_bps: limit.market.MAX_REVENUE_SHARE_BPS + 1 }],
+    ["market", "set_revenue_share_bps", { revenue_share_bps: 2500 }, { revenue_share_bps: "2500" }],
+    ["market", "set_min_sweep", { min_sweep: "1" }, { min_sweep: "0" }],
+    ["market", "set_min_sweep", { min_sweep: String(limit.market.MAX_MIN_SWEEP) }, { min_sweep: String(limit.market.MAX_MIN_SWEEP + 1n) }],
+    ["market", "set_next_sweep_id", { next_sweep_id: "5" }, { next_sweep_id: "0" }],
+    ["council", "set_close_grace_ns", { close_grace_ns: "86400000000000" }, { close_grace_ns: "86399999999999" }],
+    ["council", "set_close_grace_ns", { close_grace_ns: "2592000000000000" }, { close_grace_ns: "2592000000000001" }],
+    ["council", "set_market", { market: CONTRACTS.market }, { market: CONTRACTS.oracle }],
     ["market", "withdraw", { amount: "340282366920938463463374607431768211455" }, { amount: "340282366920938463463374607431768211456" }],
     ["market", "halt", { market_id: "0", reason: "x" }, { market_id: "0", reason: "   " }],
     ["market", "halt", { market_id: "0", reason: "x" }, { market_id: "-1", reason: "x" }],
-    ["market", "set_fee_recipients", SAMPLES.market.set_fee_recipients, { revenue_pool: CONTRACTS.oracle, business_wallet: DAO }],
-    ["market", "set_fee_recipients", SAMPLES.market.set_fee_recipients, { revenue_pool: CONTRACTS.council, business_wallet: "typo.near" }],
+    ["market", "set_fee_recipients", SAMPLES.market.set_fee_recipients, { revenue_pool: CONTRACTS.oracle, treasury: DAO }],
+    ["market", "set_fee_recipients", SAMPLES.market.set_fee_recipients, { revenue_pool: CONTRACTS.council, treasury: "typo.near" }],
     ["market", "set_operator", { operator_id: "a.near" }, { operator_id: "Upper.near" }],
     ["market", "set_operator", { operator_id: "a.near" }, { operator_id: "a" }],
     ["market", "propose_owner", { new_owner: "a.near" }, { new_owner: "a..near" }],
@@ -207,6 +223,25 @@ test("a value past what the contract allows is refused, and the value at the lim
   }
 });
 
+test("the next sweep id can only move up from where the market is", async () => {
+  await propose("market", "set_next_sweep_id", { next_sweep_id: NEXT_SWEEP_ID });
+  await propose("market", "set_next_sweep_id", { next_sweep_id: String(BigInt(NEXT_SWEEP_ID) + 1n) });
+  await assert.rejects(propose("market", "set_next_sweep_id", { next_sweep_id: "4" }), /can only move up from 5/);
+  const kind = functionCall(CONTRACTS.market, "set_next_sweep_id", { next_sweep_id: "4" });
+  await assert.rejects(vote(stored(1, kind)), /can only move up from 5/);
+});
+
+test("the grace period bounds are the ones in the Council's source", () => {
+  const rust = source("council");
+  const days = (name) => {
+    const match = new RegExp(`const ${name}: u64 = (?:(\\d+) \\* )?NS_PER_DAY;`).exec(rust);
+    assert.ok(match, `council has no constant ${name} in days`);
+    return BigInt(match[1] ?? 1);
+  };
+  assert.equal(days("MIN_CLOSE_GRACE_NS"), CLOSE_GRACE_DAYS.min);
+  assert.equal(days("MAX_CLOSE_GRACE_NS"), CLOSE_GRACE_DAYS.max);
+});
+
 test("a new market is checked the way the contract checks it", async () => {
   const sample = SAMPLES.market.create_market;
   const make = (change) => propose("market", "create_market", { ...sample, ...change });
@@ -237,7 +272,7 @@ test("a new market is checked the way the contract checks it", async () => {
 test("a method that is not on the list is refused for every contract, whatever its name", async () => {
   const names = [
     "stage_code", "migrate", "new", "set_outcome", "ft_transfer", "mt_transfer", "mt_transfer_call", "storage_deposit", "sweep_fees",
-    "set_min_sweep", "set_market", "settle_leg", "payout_bond", "set_close_grace_ns", "constructor", "__proto__", "toString", "hasOwnProperty", "",
+    "reconcile_revenue", "settle_leg", "payout_bond", "constructor", "__proto__", "toString", "hasOwnProperty", "",
   ];
   for (const target of TARGETS) {
     for (const methodName of names) {
@@ -433,7 +468,7 @@ test("a function call is approved only when its receiver is a configured contrac
     ["gas that is not a number", functionCall(CONTRACTS.market, "set_paused", { paused: true }, { gas: "lots" }), /not a whole number/],
     ["an extra argument", functionCall(CONTRACTS.market, "set_paused", { paused: true, also: 1 }), /unknown argument also/],
     ["an argument over the cap", functionCall(CONTRACTS.market, "set_fee_rate_bps", { fee_rate_bps: 501 }), /fee_rate_bps must be/],
-    ["a wrong recipient", functionCall(CONTRACTS.market, "set_fee_recipients", { revenue_pool: CONTRACTS.council, business_wallet: "typo.near" }), /business_wallet must be/],
+    ["a wrong recipient", functionCall(CONTRACTS.market, "set_fee_recipients", { revenue_pool: CONTRACTS.council, treasury: "typo.near" }), /treasury must be/],
     ["arguments that are not base64", functionCall(CONTRACTS.market, "set_paused", null, { raw: "eyJwYXVzZWQiOnRydWV9 " }), /canonical base64/],
     ["arguments that are not JSON", functionCall(CONTRACTS.market, "set_paused", null, { raw: Buffer.from("paused").toString("base64") }), /not JSON/],
     ["arguments with spacing", functionCall(CONTRACTS.market, "set_paused", null, { raw: Buffer.from('{"paused": true}').toString("base64") }), /canonical JSON/],

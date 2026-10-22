@@ -5,7 +5,7 @@
 | Field | Value |
 | --- | --- |
 | Date | 2026-10-21 |
-| Status | Draft. Items marked EXISTING are checked in source. Items marked NEW are PROPOSED and are not an ABI until the contract phase that adds them lands |
+| Status | Draft. Items marked EXISTING are checked in source. Items marked NEW are PROPOSED and are not an ABI until the contract phase that adds them lands. On 2026-10-21 the Council views and calls of section 7 and the market's `get_sweep`, `list_sweeps`, `settle_leg`, `treasury` and `treasury_due` of section 4 were BUILT as written, with `SweepView.council.to` and `SweepView.treasury.to` added; `config` of both contracts lists the new settings (null recipients until set) |
 | Scope | `web/lib/market.ts`, `config.ts`, `settlement.ts`, `errors.ts`, `hooks.ts`, `rpc.ts` and the components that call or display contract data |
 | Source | Contract working tree on top of commit `6cad02e`, read 2026-10-21. Website files as of the same day |
 | Index | [README.md](README.md) |
