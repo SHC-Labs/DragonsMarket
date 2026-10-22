@@ -3,10 +3,11 @@
 // which the case ends with no decision: drawing a jury, finalizing, writing a final answer to the market, releasing a
 // jury's seats, and answering a market nobody answered once its resolve_by has passed. Every one of those calls is open
 // to anyone, so this script watches the chain and sends each one when it is due. It also sweeps the market's fees to the
-// Council and the treasury once enough have built up.
+// Council and the treasury once enough have built up. It also moves the Council's seat-time ledger forward, finalizes its
+// quarters in order once their grace period has passed, and settles a fee leg whose result the market lost.
 //
 //   node keeper.mjs run   --rpc URL --market ID --oracle ID --council ID --account ID [--dry-run]
-//                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH]
+//                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH] [--council-key-file PATH]
 //                         [--state-file PATH] [--min-sweep UNITS]
 //   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID [--treasury ID] [--min-margin NEAR]
 //                         [--expect-sealed] [--watch-dao]
@@ -24,7 +25,8 @@
 // The secret key is never taken from the command line, where it would sit in the process list and shell history.
 // Give it as the environment variable KEEPER_KEY, or as --key-file naming a file that only its owner can read
 // (chmod 600). --key is refused. The calls to one contract can use their own key: --oracle-key-file or KEEPER_ORACLE_KEY
-// for the oracle, --market-key-file or KEEPER_MARKET_KEY for the market. A scoped key replaces the default for that
+// for the oracle, --market-key-file or KEEPER_MARKET_KEY for the market, --council-key-file or KEEPER_COUNCIL_KEY for the
+// Council. A scoped key replaces the default for that
 // contract only. Create scoped keys on the keeper account with near-cli-rs, limited to one receiver, the methods the
 // keeper calls there and a small allowance (the gas the keeper attaches is charged against it, so watch what is left
 // with view_access_key and top up by adding a fresh key):
@@ -34,7 +36,10 @@
 //     --method-names 'finalize,resolve_draw,retry_apply,retry_unlock,resolve_by_deadline' \
 //     autogenerate-new-keypair print-to-terminal network-config mainnet sign-with-keychain send
 //   near account add-key KEEPER.near grant-function-call-access --allowance '0.5 NEAR' \
-//     --receiver-account-id MARKET.near --method-names 'sweep_fees' \
+//     --receiver-account-id MARKET.near --method-names 'sweep_fees,settle_leg' \
+//     autogenerate-new-keypair print-to-terminal network-config mainnet sign-with-keychain send
+//   near account add-key KEEPER.near grant-function-call-access --allowance '0.5 NEAR' \
+//     --receiver-account-id COUNCIL.near --method-names 'advance_quarters,finalize_quarter' \
 //     autogenerate-new-keypair print-to-terminal network-config mainnet sign-with-keychain send
 //
 // Each run reads every market and case unless --state-file is given. The file holds the highest market id N such that
@@ -63,6 +68,19 @@ const DEFAULT_MIN_MARGIN_NEAR = "5";
 const DEFAULT_MIN_SWEEP = 10_000_000n;
 // sweep_fees refuses less than 87 TGas.
 const SWEEP_GAS_TGAS = 100;
+// sweep_fees refuses a second sweep within this long of the last one.
+const MIN_SWEEP_INTERVAL_NS = 3_600n * 10n ** 9n;
+// settle_leg refuses a sweep younger than this. It needs 30 TGas; the measured cost is 6 in all.
+const SETTLE_WAIT_NS = 10n * 60n * 10n ** 9n;
+const SETTLE_GAS_TGAS = 50;
+// How many of the newest sweeps are looked at for a leg that needs settling.
+const RECENT_SWEEPS = 20;
+// One book write and no transfer: 2 TGas in all, measured, with 30 attached. advance_quarters writes up to eight books.
+const FINALIZE_GAS_TGAS = 50;
+const ADVANCE_GAS_TGAS = 50;
+// The most quarters one advance_quarters call moves across (MAX_QUARTER_STEPS in the council).
+const MAX_QUARTER_STEPS = 8;
+const JURY_OPEN_REFUSAL = "a jury drawn in this quarter is still open";
 const CONTRACTS = ["market", "oracle", "council"];
 // The verifier pauses transfers under this feature key, and a paused verifier refuses every mt_transfer and mt_transfer_call
 // (pause_and_lock_stop_payouts_but_not_receipts in intents_verifier.rs).
@@ -77,8 +95,22 @@ const BRIEF_MAX = 200;
 
 // ---- what is due -------------------------------------------------------------------------------------------------
 
+// The council's quarter id for a time in ns: year * 4 + (quarter - 1), UTC. A time on a boundary belongs to the quarter that
+// starts there.
+export function quarterOf(ns) {
+  const d = new Date(Number(ns / 1_000_000n));
+  return d.getUTCFullYear() * 4 + Math.floor(d.getUTCMonth() / 3);
+}
+
+// Where the quarter ends, exclusive, in ns.
+export function quarterEnd(quarter) {
+  const next = quarter + 1;
+  return BigInt(Date.UTC(Math.floor(next / 4), (next % 4) * 3, 1)) * 1_000_000n;
+}
+
 // snapshot: { now, height, markets: [{ id, outcome, resolve_by }], cases: { [id]: case | null }, locked: { [id]: bool },
-// feesDue, minSweep }. feesDue is what a sweep would send now, in token units.
+// feesDue, minSweep, council: { lastTick, nextToFinalize, closeGraceNs }, sweeps: [{ id, at, council: { status } }] oldest
+// first, lastSweepAt }. feesDue is what a sweep would send now, in token units. lastSweepAt is null before the first sweep.
 // A disputed case that has no jury yet can be drawn until draw_by and is over after it. One that has a jury is over once
 // its panel_deadline has passed. Finalizing a round that is over calls for the second jury or settles the case.
 // Times are BigInt nanoseconds, height, feesDue and minSweep are BigInt. Returns the calls to send now, in the order to
@@ -104,8 +136,37 @@ export function dueActions(snapshot) {
       call("oracle", "resolve_by_deadline", id, 100);
     }
   }
-  if (snapshot.feesDue > 0n && snapshot.feesDue >= snapshot.minSweep) {
+  actions.push(...councilActions(snapshot));
+  for (const sweep of snapshot.sweeps ?? []) {
+    if (sweep.council.status === "unresolved" && snapshot.now >= BigInt(sweep.at) + SETTLE_WAIT_NS) {
+      actions.push({ contract: "market", method: "settle_leg", args: { sweep_id: String(sweep.id) }, gas: BigInt(SETTLE_GAS_TGAS) * TGAS });
+    }
+  }
+  const sweepOpen = snapshot.lastSweepAt == null || snapshot.now >= BigInt(snapshot.lastSweepAt) + MIN_SWEEP_INTERVAL_NS;
+  if (sweepOpen && snapshot.feesDue > 0n && snapshot.feesDue >= snapshot.minSweep) {
     actions.push({ contract: "market", method: "sweep_fees", args: {}, gas: BigInt(SWEEP_GAS_TGAS) * TGAS });
+  }
+  return actions;
+}
+
+// The views do not say how many ticks are owed, so advance_quarters is sent once a run when the quarter of now differs from
+// the quarter of last_tick. Within one quarter there is nothing a stake, an unstake or a finalize would have to catch up on.
+// finalize_quarter is sent for next_to_finalize only, once its end plus the grace has passed, and only when one advance
+// (eight quarters) can bring last_tick up to that end, because finalizing refuses until the ledger has reached it. The
+// contract still refuses while a jury drawn inside that quarter is open and no view shows one, so that refusal is read when
+// the call is sent (see JURY_OPEN_REFUSAL).
+function councilActions(snapshot) {
+  const c = snapshot.council;
+  if (!c) return [];
+  const actions = [];
+  const lastTick = BigInt(c.lastTick);
+  const behind = quarterOf(snapshot.now) !== quarterOf(lastTick);
+  if (behind) actions.push({ contract: "council", method: "advance_quarters", args: {}, gas: BigInt(ADVANCE_GAS_TGAS) * TGAS });
+  const quarter = Number(c.nextToFinalize);
+  const end = quarterEnd(quarter);
+  const reachable = lastTick >= end || quarter - quarterOf(lastTick) + 1 <= MAX_QUARTER_STEPS;
+  if (snapshot.now >= end + BigInt(c.closeGraceNs) && reachable) {
+    actions.push({ contract: "council", method: "finalize_quarter", args: { quarter }, gas: BigInt(FINALIZE_GAS_TGAS) * TGAS });
   }
   return actions;
 }
@@ -165,11 +226,19 @@ async function snapshot(opts, firstMarket) {
         (await view(opts.rpc, opts.council, "jury_of", { case_key: secondKey })).length > 0
       : false;
   }
+  const council = await view(opts.rpc, opts.council, "config");
+  const marketConfig = await view(opts.rpc, opts.market, "config");
+  const nextSweep = BigInt(marketConfig.next_sweep_id);
+  const firstRecent = nextSweep > BigInt(RECENT_SWEEPS) ? nextSweep - BigInt(RECENT_SWEEPS) : 0n;
+  const sweeps = await view(opts.rpc, opts.market, "list_sweeps", { from_index: String(firstRecent), limit: String(RECENT_SWEEPS) });
+  const lastSweepAt = sweeps.length ? BigInt(sweeps.at(-1).at) : null;
   const fees = await view(opts.rpc, opts.market, "get_fees");
   const feesDue = BigInt(fees.collected) + BigInt(fees.revenue_due) + BigInt(fees.treasury_due);
   const minSweep = opts["min-sweep"] === undefined ? DEFAULT_MIN_SWEEP : BigInt(opts["min-sweep"]);
   return {
     now: BigInt(block.header.timestamp_nanosec), height: BigInt(block.header.height), markets, cases, locked, feesDue, minSweep,
+    council: { lastTick: BigInt(council.last_tick), nextToFinalize: council.next_to_finalize, closeGraceNs: BigInt(council.close_grace_ns) },
+    sweeps, lastSweepAt,
   };
 }
 
@@ -179,10 +248,11 @@ const KEY_SOURCES = {
   default: { file: "key-file", env: "KEEPER_KEY" },
   oracle: { file: "oracle-key-file", env: "KEEPER_ORACLE_KEY" },
   market: { file: "market-key-file", env: "KEEPER_MARKET_KEY" },
+  council: { file: "council-key-file", env: "KEEPER_COUNCIL_KEY" },
 };
 
 export function refuseKeyFlags(opts) {
-  for (const flag of ["key", "oracle-key", "market-key"]) {
+  for (const flag of ["key", "oracle-key", "market-key", "council-key"]) {
     if (flag in opts) throw new Error(`--${flag} is refused: a key on the command line shows in the process list. Use KEEPER_KEY or --key-file`);
   }
 }
@@ -196,7 +266,7 @@ export function readKeyFile(path) {
 }
 
 // The secret key for each contract the keeper calls. A key given for one contract replaces the default for it.
-// Returns { default, oracle, market }, each a string or undefined.
+// Returns { default, oracle, market, council }, each a string or undefined.
 export function resolveKeys(opts, env) {
   const keys = {};
   for (const [name, source] of Object.entries(KEY_SOURCES)) {
@@ -540,7 +610,12 @@ export function refuseRetiredController(opts) {
 }
 
 function label(action) {
-  return `${action.contract}.${action.method}(${action.args.market_id ?? ""})`;
+  return `${action.contract}.${action.method}(${action.args.market_id ?? action.args.quarter ?? action.args.sweep_id ?? ""})`;
+}
+
+// A finalize the contract refused only because a jury drawn in the quarter is still open is not a fault: the next run asks again.
+export function describeOutcome(action, outcome) {
+  return action.method === "finalize_quarter" && outcome.includes(JURY_OPEN_REFUSAL) ? "waiting, a jury drawn in this quarter is still open" : outcome;
 }
 
 async function main() {
@@ -559,7 +634,7 @@ async function main() {
   const actions = dueActions(snap);
   if (!actions.length) console.log("nothing due");
   for (const action of actions) {
-    console.log(opts["dry-run"] ? `due ${label(action)}` : `${label(action)}: ${await send(opts, keys, action)}`);
+    console.log(opts["dry-run"] ? `due ${label(action)}` : `${label(action)}: ${describeOutcome(action, await send(opts, keys, action))}`);
   }
   if (opts["state-file"] && !opts["dry-run"]) {
     const advanced = advanceCursor(snap, finishedThrough);

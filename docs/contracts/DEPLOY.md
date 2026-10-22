@@ -67,7 +67,8 @@ proposal once the DAO owns the contract, and the helper in `contracts/keeper` pr
 
 Send a small sweep after step 5 and read both Intents balances, the sweep record (`get_sweep`) and
 the Council's `received_of`. The keeper sweeps when fees reach its own threshold (10 units to start),
-which is above the contract's minimum.
+which is above the contract's minimum, and never within an hour of the last sweep. The keeper also calls the market's `settle_leg`
+and the Council's `advance_quarters` and `finalize_quarter`; its function call keys need those methods (see the header of `keeper.mjs`).
 
 Existing market and Council Intents code is part of this work. Its presence does not establish
 that the complete production journey has passed. The [verifier proof](INTENTS-PROOF.md) and

@@ -5,8 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  accessKeyReport, advanceCursor, councilFloor, daoReport, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options,
-  readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, verifierProblems,
+  accessKeyReport, advanceCursor, councilFloor, daoReport, describeOutcome, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options,
+  quarterEnd, quarterOf, readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, verifierProblems,
   writeCursor, refuseRetiredController,
 } from "./keeper.mjs";
 import { b58encode } from "./chain.mjs";
@@ -300,12 +300,12 @@ test("a key comes from the environment or from a private file, a scoped key repl
     fs.chmodSync(p, mode);
     return p;
   };
-  assert.deepEqual(resolveKeys({}, { KEEPER_KEY: "env-key" }), { default: "env-key", oracle: undefined, market: undefined });
+  assert.deepEqual(resolveKeys({}, { KEEPER_KEY: "env-key" }), { default: "env-key", oracle: undefined, market: undefined, council: undefined });
   const keys = resolveKeys(
     { "key-file": file("d", 0o600, "file-key"), "oracle-key-file": file("o", 0o400, "oracle-key") },
     { KEEPER_KEY: "env-key", KEEPER_MARKET_KEY: "market-env" },
   );
-  assert.deepEqual(keys, { default: "file-key", oracle: "oracle-key", market: "market-env" });
+  assert.deepEqual(keys, { default: "file-key", oracle: "oracle-key", market: "market-env", council: undefined });
   assert.throws(() => readKeyFile(file("group", 0o640, "x")), /can be read by group or others \(mode 640\)/);
   assert.throws(() => readKeyFile(file("world", 0o644, "x")), /chmod 600/);
   assert.throws(() => resolveKeys({ "market-key-file": file("loose", 0o604, "x") }, {}), /group or others/);
@@ -335,4 +335,81 @@ test("a council of leaving holders is short of the drawable holders a jury needs
   const stakes = Array.from({ length: 12 }, (_, i) => ({ owner: `h${i}.near`, unlock_requested_at: i < 3 ? "1" : null, serving: null }));
   assert.equal(juryProblems({ jurySize: 3, holders: drawableHolders(stakes).size }).length, 1, "9 drawable of the 12 needed");
   assert.equal(juryProblems({ jurySize: 3, holders: drawableHolders(stakes.map((s) => ({ ...s, unlock_requested_at: null }))).size }).length, 0);
+});
+
+const ns = (iso) => BigInt(Date.parse(iso)) * 1_000_000n;
+const DAY = 86_400n * 10n ** 9n;
+const HOUR = 3_600n * 10n ** 9n;
+const MINUTE = 60n * 10n ** 9n;
+const Q4_2026 = 2026 * 4 + 3;
+const idle = { ...base, now: 0n, cases: { 0: null }, markets: [] };
+const council = (extra = {}) => ({ lastTick: ns("2026-11-01T00:00:00Z"), nextToFinalize: Q4_2026, closeGraceNs: 7n * DAY, ...extra });
+const withCouncil = (now, extra) => ({ ...idle, now: ns(now), council: council(extra) });
+const councilCalls = (s) => dueActions(s).filter((a) => a.contract === "council").map((a) => a.method);
+
+test("quarters are numbered year * 4 + quarter and end where the next one starts", () => {
+  assert.equal(quarterOf(ns("2026-12-31T23:59:59Z")), Q4_2026);
+  assert.equal(quarterOf(ns("2027-01-01T00:00:00Z")), Q4_2026 + 1);
+  assert.equal(quarterEnd(Q4_2026), ns("2027-01-01T00:00:00Z"));
+  assert.equal(quarterEnd(Q4_2026 + 1), ns("2027-04-01T00:00:00Z"));
+});
+
+test("advance_quarters is sent once the quarter of now is not the quarter of the last tick, and not before", () => {
+  assert.deepEqual(councilCalls(withCouncil("2026-12-31T23:59:59Z")), []);
+  assert.deepEqual(councilCalls(withCouncil("2027-01-01T00:00:00Z")), ["advance_quarters"]);
+  const [advance] = dueActions(withCouncil("2027-01-01T00:00:00Z"));
+  assert.deepEqual([advance.contract, advance.args, advance.gas], ["council", {}, 50n * 10n ** 12n]);
+});
+
+test("finalize_quarter is sent for the next quarter only after its end plus the grace, and only that quarter", () => {
+  const end = quarterEnd(Q4_2026);
+  const caught = { lastTick: end };
+  assert.deepEqual(councilCalls({ ...withCouncil("2027-01-01T00:00:00Z", caught), now: end + 7n * DAY - 1n }), []);
+  const only = dueActions({ ...withCouncil("2027-01-01T00:00:00Z", caught), now: end + 7n * DAY });
+  const finalize = only.find((a) => a.method === "finalize_quarter");
+  assert.deepEqual([finalize.contract, finalize.args, finalize.gas], ["council", { quarter: Q4_2026 }, 50n * 10n ** 12n]);
+  const behind = dueActions({ ...withCouncil("2027-01-01T00:00:00Z", { lastTick: end - DAY }), now: end + 7n * DAY });
+  assert.deepEqual(behind.map((a) => a.method), ["advance_quarters", "finalize_quarter"], "the ledger moves first");
+  const later = dueActions({ ...withCouncil("2027-05-01T00:00:00Z", { nextToFinalize: Q4_2026 + 1, lastTick: quarterEnd(Q4_2026 + 1) }) });
+  assert.deepEqual(later.map((a) => a.args.quarter), [Q4_2026 + 1], "in order: the next one, not the newest");
+});
+
+test("finalize_quarter waits while one advance cannot bring the ledger up to the quarter's end", () => {
+  const stale = council({ lastTick: ns("2024-02-01T00:00:00Z") });
+  assert.deepEqual(councilCalls({ ...idle, now: ns("2027-03-01T00:00:00Z"), council: stale }), ["advance_quarters"]);
+  assert.deepEqual(councilCalls({ ...idle, now: ns("2027-03-01T00:00:00Z"), council: council({ lastTick: ns("2025-04-01T00:00:00Z") }) }), ["advance_quarters", "finalize_quarter"]);
+});
+
+test("a finalize refused for an open jury is reported as waiting, any other failure is shown as it is", () => {
+  const finalize = { method: "finalize_quarter" };
+  assert.match(describeOutcome(finalize, 'FAILED {"ActionError":"Smart contract panicked: a jury drawn in this quarter is still open"}'), /^waiting/);
+  assert.equal(describeOutcome(finalize, "FAILED other"), "FAILED other");
+  assert.equal(describeOutcome({ method: "sweep_fees" }, "ok"), "ok");
+});
+
+const sweepAt = (id, at, status) => ({ id: String(id), at: String(at), council: { status }, treasury: { status: "settled" } });
+const settling = (sweeps, now) => dueActions({ ...idle, now, sweeps }).filter((a) => a.method === "settle_leg");
+
+test("settle_leg is sent for an unresolved leg ten minutes after its sweep, never for a younger, settled or refused one", () => {
+  const at = ns("2027-01-01T00:00:00Z");
+  const sweeps = [sweepAt(4, at, "unresolved"), sweepAt(5, at, "settled"), sweepAt(6, at, "refused"), sweepAt(7, at, "pending")];
+  assert.deepEqual(settling(sweeps, at + 10n * MINUTE - 1n), []);
+  const [settle, ...rest] = settling(sweeps, at + 10n * MINUTE);
+  assert.equal(rest.length, 0);
+  assert.deepEqual([settle.contract, settle.args, settle.gas], ["market", { sweep_id: "4" }, 50n * 10n ** 12n]);
+  assert.ok(settle.gas >= 30n * 10n ** 12n, "settle_leg refuses less than 30 TGas");
+});
+
+test("every recent sweep with an unresolved leg gets its own settle_leg", () => {
+  const at = ns("2027-01-01T00:00:00Z");
+  const sweeps = [sweepAt(1, at, "unresolved"), sweepAt(2, at, "settled"), sweepAt(3, at, "unresolved")];
+  assert.deepEqual(settling(sweeps, at + HOUR).map((a) => a.args.sweep_id), ["1", "3"]);
+});
+
+test("no sweep is sent within an hour of the last one, and one is sent from the hour on", () => {
+  const last = ns("2027-01-01T00:00:00Z");
+  const sweeps = (now, lastSweepAt) => dueActions({ ...idle, now, feesDue: 1_000n, lastSweepAt }).filter((a) => a.method === "sweep_fees");
+  assert.equal(sweeps(last + HOUR - 1n, last).length, 0);
+  assert.equal(sweeps(last + HOUR, last).length, 1);
+  assert.equal(sweeps(last + 1n, null).length, 1, "no sweep yet");
 });
