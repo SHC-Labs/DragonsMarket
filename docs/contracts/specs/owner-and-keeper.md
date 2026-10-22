@@ -10,7 +10,7 @@
 | Source | Working tree on top of commit `6cad02e`, SputnikDAO source at revision `5434a59dec23ee0c49df8c8c4350c208a7e75b0b` (version 2.3.1), read 2026-10-21 |
 | Index | [README.md](README.md) |
 
-**Build status, 2026-10-21.** The new owner methods are in the allow-list of `contracts/keeper/treasury.mjs` with their argument checks: market `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id` (it must not be below the market's `next_sweep_id`) and `reconcile_leg`; Council `set_close_grace_ns` and `set_market`. `reconcile_revenue` is removed (see market.md). `set_fee_recipients` now takes `revenue_pool` and `treasury`. The Council reconciliation of section 9.2 uses `reward_totals`: the floor is total received less total paid less the claims in flight. `settle_leg` and `payout_bond` are still not prepared (anyone calls them). The keeper sends `advance_quarters`, `finalize_quarter` and `settle_leg` (section 9.1), and holds back `sweep_fees` for an hour after the last sweep. Tests: `treasury.test.mjs` (`the next sweep id can only move up from where the market is`, `the grace period bounds are the ones in the Council's source`, the sample table, the limits) and `keeper.test.mjs` (`the Council's floor is what it took in less what it paid and less the claims on their way`).
+**Build status, 2026-10-21.** The new owner methods are in the allow-list of `contracts/keeper/treasury.mjs` with their argument checks: market `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id` (it must not be below the market's `next_sweep_id`), `reconcile_leg` and `reconcile_withdrawal`; oracle `set_reconcile_wait_ns` and `reconcile_bond_payout`; Council `set_close_grace_ns` and `set_market`. `reconcile_revenue` is removed (see market.md). `set_fee_recipients` now takes `revenue_pool` and `treasury`. The Council reconciliation of section 9.2 uses `reward_totals`: the floor is total received less total paid less the claims in flight. `settle_leg` and `payout_bond` are still not prepared (anyone calls them). The keeper sends `advance_quarters`, `finalize_quarter` and `settle_leg` (section 9.1), and holds back `sweep_fees` for an hour after the last sweep. Tests: `treasury.test.mjs` (`the next sweep id can only move up from where the market is`, `the grace period bounds are the ones in the Council's source`, the sample table, the limits) and `keeper.test.mjs` (`the Council's floor is what it took in less what it paid and less the claims on their way`).
 
 ---
 
@@ -116,6 +116,7 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `set_fee_recipients` | Owner | `revenue_pool: AccountId`, `business_wallet: AccountId` (NEW name `treasury`) | 0 | 30 TGas | 2 | Redirects fees. `revenue_pool` must equal the Council. The treasury must be the verified Trezu account |
 | `reconcile_revenue` | Owner | `amount: U128`, `arrived: bool` | 0 | 30 TGas | 2 | Needs evidence from the Council's `total_received` |
 | NEW `reconcile_leg` | Owner | `sweep_id: U64`, `arrived: bool` | 0 | 30 TGas | 2 | Treasury leg fallback |
+| NEW `reconcile_withdrawal` | Owner | `id: U64`, `paid: bool` | 0 | 30 TGas | 2 | Decides a withdrawal whose callback never arrived, after the market's reconcile wait. The owner checks the verifier's events first |
 | `upgrade` | Owner | `code_hash: Base58CryptoHash` | 0 | at least 100 TGas, 250 maximum | 3 | The hash must be staged. A panicking `migrate` reverts |
 | `seal` | Owner | `public_key: PublicKey` | 0 | 30 TGas | 3 | Refused until `upgrade_proven`. Deletes an access key |
 | `propose_owner` | Owner | `new_owner: AccountId` | 0 | 30 TGas | 3 | |
@@ -137,6 +138,8 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `set_no_decision_recipient` | Owner | `recipient: AccountId` | 0 | 30 TGas | 2 | Receives the jurors' half when nobody revealed. Should be the treasury |
 | `add_publisher` | Owner | `key: PublicKey` | 0 | 30 TGas | 2 | Grants power over prices |
 | `set_price_threshold` | Owner | `threshold: u32` | 0 | 30 TGas | 2 | |
+| NEW `set_reconcile_wait_ns` | Owner | `reconcile_wait_ns: U64` | 0 | 30 TGas | 2 | 10 minutes to 7 days, 1 hour to start. Live |
+| NEW `reconcile_bond_payout` | Owner | `id: U64`, `paid: bool` | 0 | 30 TGas | 2 | Decides a payout whose callback never arrived, after the reconcile wait. The owner checks the verifier's events first |
 | `upgrade`, `seal`, `propose_owner`, `accept_owner` | as the market | | 0 | as the market | 3 | |
 
 ### 3.3 council
@@ -250,6 +253,7 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | market | `set_sells_paused` | `sells_paused`: boolean | 0 | 5 to 30 |
 | market | `set_void_rules` | `price_window_ns`, `grace_ns`: decimal strings in range | 0 | 5 to 30 |
 | market | `set_sweep_timing` | three integers in range, settle wait not above reconcile wait | 0 | 5 to 30 |
+| market | `reconcile_withdrawal` | `id`: decimal string from 1, `paid`: boolean | 0 | 5 to 30 |
 | market | `set_open_price_bounds` | `min`, `max`: decimal strings in range, min not above max | 0 | 5 to 30 |
 | market | `set_max_positions` | integer 5 to 100 | 0 | 5 to 30 |
 | market | `set_fee_limits` | five values in range, share floor not above ceiling | 0 | 5 to 30 |
@@ -268,6 +272,8 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | oracle | `set_no_decision_recipient` | `recipient` must be the treasury | 0 | 5 to 30 |
 | oracle | `add_publisher`, `remove_publisher` | `key`: an ed25519 key | 0 | 5 to 30 |
 | oracle | `set_price_threshold` | integer 1 to 10 | 0 | 5 to 30 |
+| oracle | `set_reconcile_wait_ns` | decimal string 600e9 to 604800e9 | 0 | 5 to 30 |
+| oracle | `reconcile_bond_payout` | `id`: decimal string from 1, `paid`: boolean | 0 | 5 to 30 |
 | oracle | `withdraw_bond` | none. The DAO's own claimable balance, not an owner method | 1 | 50 to 150, 100 attached |
 | council | `set_cooldown_ns` | U64 above 0 | 0 | 5 to 30 |
 | council | `set_max_seats_per_account` | integer 1 to 4,294,967,295 | 0 | 5 to 30 |
@@ -428,8 +434,8 @@ Checked in source and by run on 2026-10-21: `contracts/keeper/keeper.mjs`, with 
 
 | Check | How | Level | Status |
 | --- | --- | --- | --- |
-| Market reconciliation | `market.total_owed()` against `verifier.mt_balance_of(M, T)`, both read at one `block_id`. `in_flight()` does not exist in the market | Surplus is reported. A shortfall seen on three reads, 3 blocks apart, is a problem | BUILT. Sandbox: `the_deploy_check_reconciles_all_three_contracts_and_reads_what_the_verifier_says_about_each`, `the_deploy_check_reports_money_missing_from_the_verifier_only_after_reading_again` |
-| Oracle reconciliation | `oracle.total_owed()` against `mt_balance_of(O, T)` | Same | BUILT. Sandbox: `the_deploy_check_reconciles_the_oracle_with_what_the_verifier_holds_for_it` |
+| Market reconciliation | `market.total_owed()` against `verifier.mt_balance_of(M, T)`, both read at one `block_id`, less `in_flight().withdrawals` | Surplus is reported. The verifier must hold at least owed less what is in flight. A shortfall below that seen on three reads, 3 blocks apart, is a problem | BUILT. Sandbox: `the_deploy_check_reconciles_all_three_contracts_and_reads_what_the_verifier_says_about_each`, `the_deploy_check_reports_money_missing_from_the_verifier_only_after_reading_again` |
+| Oracle reconciliation | `oracle.total_owed()` against `mt_balance_of(O, T)`, less `bond_totals().pending_payouts` | Same | BUILT. Sandbox: `the_deploy_check_reconciles_the_oracle_with_what_the_verifier_holds_for_it` |
 | Council reconciliation | The Council has no `reward_totals` or total owed yet. The keeper adds `config.stream_remaining` and the `pending_reward` of every staked token at one block, a floor that is at most what the Council owes, and compares it with `mt_balance_of(C, T)` | Shortfall is a problem. More than the floor is normal (rounding stays in the stream) | BUILT as a floor. The exact check with `reward_totals` waits for the quarterly change, which removes `pending_reward` |
 | Market to Council consistency | Sum of settled Council legs in `market.list_sweeps` equals `council.total_received` | Page on a difference | NOT BUILT. `list_sweeps` does not exist |
 | No key registered | `verifier.public_keys_of(a)` is an empty list for M, O and C | Problem | BUILT. Sandbox test above, with a key added under the Council's account |
@@ -463,11 +469,11 @@ Cadence (PROPOSED): `run` every minute, `check` every five minutes, the quarter 
 
 ### 9.3 Reconciliation procedure
 
-BUILT as follows (2026-10-21). The contracts have no `in_flight` or `pending_payouts` view, so the keeper does not wait on them. It does not need to: each contract takes a balance down in its books before it sends the money (the market in `withdraw` and `sweep_fees`, the oracle in `withdraw_bond`, the Council in `claim` and `unstake`), so a payout in flight shows as a surplus, never as a shortfall, and a deposit shows as a surplus until its hook has run. Checked in source for all three.
+BUILT as follows. A payout leaves the verifier before the contract's callback books it, and the contract keeps it in `total_owed` until then, so while it is in flight the verifier holds that much less than is owed. The keeper reads the amount in flight in the same block: the market's `in_flight().withdrawals` and the oracle's `bond_totals().pending_payouts`. The Council has no such view: its floor (`reward_totals`) already takes off the claims in flight. A deposit shows as a surplus until its hook has run.
 
 1. Read the finalized height. Read each contract's owed figure and the verifier's `mt_balance_of` for it at that `block_id`. The three contracts are read one after another, each at the final height current when its turn comes.
 2. `held > owed`: surplus nobody is credited for, for example a plain deposit. Show the amount and do not call it a problem. It is never credited automatically.
-3. `held < owed`: read both again at the then final height, after the final height has moved 3 blocks (it gives up waiting after 30 seconds), up to two more times. Report a problem only if the last read still shows the shortfall, with the amount from that read.
+3. `held < owed` less the amount in flight: read both again at the then final height, after the final height has moved 3 blocks (it gives up waiting after 30 seconds), up to two more times. Report a problem only if the last read still shows the shortfall, with the amount from that read.
 4. NOT BUILT: stopping the advertisement of deposits, paging a person, and not running `sweep_fees` until a person has looked. `check` exits 1 and prints the problem, and that is all it does.
 
 ---

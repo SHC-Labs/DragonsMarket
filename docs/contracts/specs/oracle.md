@@ -128,7 +128,7 @@ All EXISTING (`oracle/src/lib.rs:212-253`).
 | `bond_token: AccountId` | Removed. Replaced by `verifier: AccountId` and `collateral_token_id: String`, the exact `nep141:<contract>` string, validated like the market |
 | `bonds_held: u128` | NEW. Sum of the bonds of every case that is not final: one bond after a proposal, two after a challenge |
 | `claimable_total: u128` | NEW. Sum of `claimable` |
-| `pending_payouts_total: u128` | NEW. Amounts zeroed in `claimable` whose transfer has not reported yet |
+| `pending_payouts_total: u128` | BUILT. Amounts zeroed in `claimable` whose transfer has not reported yet. A `payouts` map keyed by a payout id (`last_payout_id`, from 1) holds `{account, amount, at}` for each |
 | `state_version` | Bump to 2. Nothing is deployed, so no migration is needed |
 
 ---
@@ -252,8 +252,8 @@ An error from `mt_transfer` means the verifier receipt failed and nothing moved.
 | Item | Specification |
 | --- | --- |
 | `bonds_held` | Increment by the bond in `propose` and again in `challenge`. Decrement in `settle` by the case's bonds (one when unchallenged, two otherwise) as they move into `claimable` |
-| `bond_totals()` BUILT | `{bonds_held: U128, claimable: U128, total: U128}`. `pending_payouts` joins it when bond payouts in flight are tracked |
-| `total_owed()` NEW | `bonds_held + claimable_total + pending_payouts_total`. The keeper compares it with `mt_balance_of(O, token)` |
+| `bond_totals()` BUILT | `{bonds_held: U128, claimable: U128, pending_payouts: U128, total: U128}` |
+| `total_owed()` BUILT | `bonds_held + claimable_total + pending_payouts_total`. The keeper compares it with `mt_balance_of(O, token)` |
 
 ### 8.4 Case list for the website and keeper
 
@@ -282,7 +282,7 @@ The website's Council page loads every market and then every case one by one (`w
 | Bond required to propose or challenge | `config.bond`, `Case.bond` | EXISTING |
 | Windows of one market | `get_market_info` | EXISTING |
 | Claimable bond of an account | `claimable_of` | EXISTING |
-| Pending payout | `bond_totals().pending_payouts`, events `bond_paid`, `bond_payout_failed` | NEW |
+| Pending payout | `bond_totals().pending_payouts`, events `bond_payout_requested`, `bond_paid`, `bond_payout_failed` | BUILT |
 | Reconciliation | `total_owed`, `bond_totals` | NEW |
 | Publishers and threshold, network | `config` | EXISTING |
 
@@ -309,8 +309,9 @@ Envelope: `EVENT_JSON:{"standard":"oracle","version":"1.0.0","event":"<name>","d
 | `owner_proposed`, `owner_changed`, `code_staged`, `upgrade_sent`, `migrated`, `seal_sent` | as the market | EXISTING |
 | `jury_size_set` | `jury_size` | NEW |
 | `bond_received` | `account`, `amount`, `action` (`propose`, `price`, `challenge`), `market_id` | NEW |
-| `bond_paid` | `account`, `amount` | NEW |
-| `bond_payout_failed` | `account`, `amount` | NEW |
+| `bond_payout_requested` | `account`, `amount`, `id` | BUILT |
+| `bond_paid` | `account`, `amount`, `id` | BUILT |
+| `bond_payout_failed` | `account`, `amount`, `id` | BUILT |
 
 The `final` event carries who is paid but not the amounts that went into `claimable`. An indexer rebuilds them from the rules in section 3, or the event gains `credits: [{account, amount}]` (PROPOSED, small).
 

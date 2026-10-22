@@ -135,6 +135,17 @@ test("the books match the verifier, or the verifier holds more, or money is miss
   assert.equal(market.problem, "the market owes 7 but the verifier holds only 5 for it: 2 is missing");
 });
 
+test("a payout in flight lowers what the verifier must hold, and only that much", () => {
+  const books = (held, inFlight) => reconciliation({ name: "market", owed: 100n, held, inFlight });
+  const exact = books(60n, 40n);
+  assert.deepEqual(exact, { line: "market owes 100, 40 of it in flight and holds 60 in the verifier", problem: null });
+  assert.equal(books(100n, 40n).problem, null, "the transfer had not left yet");
+  assert.match(books(130n, 40n).line, /, 30 more than it owes/);
+  assert.equal(books(59n, 40n).problem, "the market owes 100, 40 of it in flight but the verifier holds only 59 for it: 1 is missing");
+  assert.equal(books(60n, 0n).problem, "the market owes 100 but the verifier holds only 60 for it: 40 is missing", "nothing in flight behaves as before");
+  assert.equal(reconciliation({ name: "oracle", owed: 100n, held: 100n }).line, "oracle owes 100 and holds 100 in the verifier");
+});
+
 test("the Council's figure is a floor: holding more is normal and holding less is missing money", () => {
   const council = (owed, held) => reconciliation({ name: "council", owed, held, exact: false });
   assert.equal(council(100n, 100n).line, "council owes at least 100 and holds 100 in the verifier");
@@ -168,6 +179,12 @@ test("a shortfall is read again a few blocks later and reported only if it is st
   const settled = feed({ owed: 5n, held: 4n }, { owed: 5n, held: 5n });
   assert.deepEqual(await reconcile(settled.read, settled.wait), { owed: 5n, held: 5n });
   assert.deepEqual([settled.reads(), settled.waits], [2, [3]], "read again after 3 blocks, and it was a payout in flight");
+  const flying = feed({ owed: 5n, held: 3n, inFlight: 2n });
+  assert.deepEqual(await reconcile(flying.read, flying.wait), { owed: 5n, held: 3n, inFlight: 2n });
+  assert.deepEqual([flying.reads(), flying.waits], [1, []], "holding owed less what is in flight is not doubted");
+  const short = feed({ owed: 5n, held: 2n, inFlight: 2n });
+  await reconcile(short.read, short.wait);
+  assert.deepEqual([short.reads(), short.waits], [3, [3, 3]], "below owed less what is in flight is read again");
   const missing = feed({ owed: 5n, held: 4n });
   assert.deepEqual(await reconcile(missing.read, missing.wait), { owed: 5n, held: 4n });
   assert.deepEqual([missing.reads(), missing.waits], [3, [3, 3]], "three reads, 3 blocks apart");

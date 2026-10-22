@@ -25,7 +25,9 @@
 | `locked_total` (7.5) | `total_owed` is a constant-size sum | unit `assert_conserved` in the random trading proptest |
 | `get_sweep`, `list_sweeps` (7.2) | views | sandbox `a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once` |
 
-Not built (still PROPOSED): 7.1 pending withdrawals, 7.4 positions and `get_account`, `owed_breakdown` and `in_flight` from 7.5, the 7.7 gas floors for `retry_apply`, `withdraw` and `retry_register`.
+| Pending withdrawals (7.1), `get_account`, `owed_breakdown`, `in_flight` (7.5) | `withdraw` records each withdrawal under an id, `on_withdraw(id)` confirms or restores it, `total_owed` includes `pending_withdrawals_total` | unit `a_withdrawal_writes_its_record_and_emits_the_event_with_an_id`, `withdrawals_with_any_mix_of_callbacks_never_create_or_lose_money`, `the_views_report_each_state_and_change_nothing` |
+
+Not built (still PROPOSED): the transfer memo `wd:<id>` from 7.1, the 7.7 gas floors for `retry_apply`, `withdraw` and `retry_register`.
 
 Changes against the text above:
 
@@ -172,9 +174,11 @@ All EXISTING (`lib.rs:260-306`) except where marked.
 | `treasury` | `AccountId` | Rename of `business_wallet` |
 | `treasury_due` | `u128` | Rename of `business_due` |
 | `locked_total` | `u128` | Sum of every `Market.locked`, kept incrementally so `total_owed` is O(1) |
-| `pending_withdrawals` | `LookupMap<AccountId, u128>` | Debited but not yet confirmed by the verifier |
-| `pending_withdrawals_total` | `u128` | Sum of the map |
-| `next_withdrawal_id` | `u64` | Counter used in the transfer memo `wd:<id>` |
+| `withdrawals` | `LookupMap<u64, Withdrawal>` | `{account, amount, at}` for each withdrawal debited and not yet reported by the verifier |
+| `pending_by_account` | `LookupMap<AccountId, u128>` | Each account's share of the pending total, absent when zero |
+| `pending_withdrawals_total`, `pending_withdrawal_count` | `u128`, `u32` | Sum and number of the records |
+| `legs_in_flight_total`, `legs_in_flight_count` | `u128`, `u32` | Sum and number of fee legs that are pending or unresolved |
+| `next_withdrawal_id` | `u64` | Starts at 1, only goes up |
 | `positions` | `LookupMap<AccountId, Vec<u64>>` | Market ids in which the account holds shares, at most 20 entries |
 | `min_sweep` | `u128` | Least total a sweep may act on. Default 1,000,000 (1 USDC). Owner setter, at most 100,000,000 |
 | `next_sweep_id` | `u64` | Counter, first id 1 |
@@ -261,7 +265,7 @@ Gas floors are the attached gas the contract itself refuses to run below. Where 
 | `sell` (`:796`) | A registered account | `market_id: U64`, `side: String`, `collateral_out: U128`, `max_shares_in: U128` | none | exactly 1 | 100 TGas used by the website | Takes `collateral_out` from the pool, keeps the fee and credits the rest to the seller's balance. Refuses `price moved, would need more shares than your maximum` | `sell` |
 | `redeem` (`:839`) | Anyone with shares | `market_id: U64` | `U128` payout | none | none | After resolution turns all of the caller's shares in that market into balance. No deadline. Never pauses | `redeemed` |
 | `withdraw` (`:872`) | Anyone with a balance | `amount: U128` | `Promise` | exactly 1 | 25 TGas reserved plus own work, 100 used by tests | Debits first, then `mt_transfer` to the caller's own Intents account. Never pauses. Refuses zero and `not enough balance` | `withdraw`, then `withdraw_failed` if the verifier refused |
-| `on_withdraw` (`:893`) | The account itself | `account: AccountId`, `amount: U128` | none | none | 10 TGas | An error means the verifier receipt failed and nothing moved. Credits the balance back | `withdraw_failed` |
+| `on_withdraw` (`:893`) | The account itself | `id: U64` | none | none | 10 TGas | Reads the amount and account from the withdrawal's record. An error means the verifier receipt failed and nothing moved, so it credits the balance back. No record means nothing to do | `withdraw_confirmed` or `withdraw_failed` |
 
 ### 6.4 Fees
 
@@ -283,7 +287,7 @@ The sweep floor in the code is 87 TGas (42 for the Council transfer call, 15 and
 | --- | --- | --- | --- |
 | `config` (`:1034`) | none | JSON object | `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `operator`, `oracle`, `verifier`, `collateral_token_id`, `paused`, `markets` (string), `storage_deposit` (string yocto), `max_positions`, `fee_rate_bps` (number), `create_fee` (string), `revenue_pool`, `business_wallet`, `revenue_unresolved` (string) |
 | `get_fees` (`:1044`) | none | JSON object | `collected`, `revenue_due`, `business_due`, `revenue_unresolved`, all strings |
-| `total_owed` (`:1056`) | none | `U128` | `balances_total + sum(locked) + fees + revenue_due + business_due + revenue_unresolved`. Walks every market |
+| `total_owed` (`:1056`) | none | `U128` | `balances_total + locked_total + fees + revenue_due + treasury_due + revenue_unresolved + pending_withdrawals_total` |
 | `is_registered` (`:1049`) | `account_id` | `bool` | NEP-145 registered |
 | `get_balance` (`:1064`) | `account_id` | `U128` | Deposited, untraded balance |
 | `get_shares` (`:1068`) | `market_id: U64`, `account_id` | `(U128, U128)` | Yes and No shares |
@@ -313,13 +317,13 @@ The sweep floor in the code is 87 TGas (42 for the Council transfer call, 15 and
 
 ### 7.1 Pending withdrawals (R-02, R-08)
 
-PROPOSED. Today `withdraw` debits the balance and its callback restores it on error. Between the two there is no record, so the user cannot tell a debit in flight from a loss, and `total_owed` drops before the verifier balance does.
+BUILT, except the transfer memo. `withdraw` debits the balance and its callback restores it on error. Between the two the withdrawal is on record, so the user can tell a debit in flight from a loss, and `total_owed` does not drop before the verifier balance does.
 
 | Item | Specification |
 | --- | --- |
-| `withdraw(amount: U128)` CHANGED | Before sending, adds `amount` to `pending_withdrawals[caller]` and `pending_withdrawals_total`, takes `id = next_withdrawal_id`, and sends `mt_transfer` with `memo: Some("wd:<id>")`. The memo appears in the verifier's transfer event, so an indexer can match the confirmation to the request. Emits `withdraw {account, amount, id}` |
-| `on_withdraw(account, amount, id)` CHANGED | Subtracts from the pending map first. On error restores the balance and emits `withdraw_failed {account, amount, id}`. On success emits `withdraw_confirmed {account, amount, id}` |
-| `get_account(account_id) returns AccountView` NEW | `{registered: bool, available: U128, pending_withdrawals: U128, positions: u32}` |
+| `withdraw(amount: U128)` CHANGED | Before sending, stores `{account, amount, at}` under `id = next_withdrawal_id` and adds `amount` to `pending_withdrawals_total` and to the account's pending amount. Emits `withdraw {account, amount, id}`. The memo `wd:<id>` on the transfer is NOT built: the transfer carries no memo |
+| `on_withdraw(id: U64)` CHANGED | Takes the amount and account from the stored record, so a repeat or an unknown id changes nothing. Removes the record and subtracts the totals. On error restores the balance and emits `withdraw_failed {account, amount, id}`. On success emits `withdraw_confirmed {account, amount, id}` |
+| `get_account(account_id) returns AccountView` BUILT | `{registered: bool, available: U128, pending_withdrawals: U128, positions: u32}` |
 
 `total_owed` includes `pending_withdrawals_total`. This keeps `total_owed` equal to the verifier balance until the verifier receipt lands, and the keeper compares only when `in_flight()` reports zero (section 7.5).
 
@@ -388,13 +392,13 @@ PROPOSED. The website calls `get_shares` for every market to find a user's posit
 
 ### 7.5 Reconciliation views (R-08)
 
-PROPOSED. The keeper must compare `total_owed` with the verifier balance read at the same finalized block. Two problems today: `total_owed` walks every market (`lib.rs:1056-1062`) and nothing says whether a transfer is in flight.
+BUILT. The keeper must compare `total_owed` with the verifier balance read at the same finalized block. Two problems today: `total_owed` walks every market (`lib.rs:1056-1062`) and nothing says whether a transfer is in flight.
 
 | Item | Specification |
 | --- | --- |
 | `locked_total` | Updated wherever `Market.locked` changes: seed, buy, sell, redeem, `claim_residual`. `total_owed` becomes a constant-size sum |
-| `owed_breakdown()` NEW | `{balances, locked, fees, revenue_due, treasury_due, unresolved, pending_withdrawals, total}`, all `U128` |
-| `in_flight()` NEW | `{withdrawals: U128, withdrawal_count: u32, legs: U128, leg_count: u32}`. A leg counts while its status is `pending` |
+| `owed_breakdown()` BUILT | `{balances, locked, fees, revenue_due, treasury_due, unresolved, pending_withdrawals, total}`, all `U128` |
+| `in_flight()` BUILT | `{withdrawals: U128, withdrawal_count: u32, legs: U128, leg_count: u32}`. A leg counts while its status is `pending` or `unresolved`. Leg totals are running counters changed where a sweep creates a leg and where a leg ends |
 
 The comparison rule: when `in_flight()` is zero on two reads one block apart, `mt_balance_of(market, collateral)` must equal `total_owed()`. More in the verifier is surplus that nobody is credited for. Less is an incident.
 

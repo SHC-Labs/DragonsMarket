@@ -142,10 +142,10 @@ interface OwedView { balances: U128; locked: U128; fees: U128; revenue_due: U128
 | `total_owed` | `{}` | `U128` | EXISTING |
 | `config` | `{}` | See below | EXISTING |
 | `check_invariant` | `{market_id: U64}` | `boolean` | EXISTING |
-| `get_account` | `{account_id}` | `AccountView` | NEW |
+| `get_account` | `{account_id}` | `AccountView`. `positions` is the length of `get_positions`. An unknown account is `registered: false` with zeros | BUILT |
 | `get_positions` | `{account_id}` | `PositionView[]`, one per market where the account holds shares, by market id. `redeemable` is what `redeem` would credit now, `"0"` until the market resolves | BUILT |
 | `get_sweep`, `list_sweeps` | `{sweep_id: U64}`, `{from_index: U64, limit: U64}` | `SweepView \| null`, `SweepView[]` | NEW |
-| `in_flight`, `owed_breakdown` | `{}` | `InFlightView`, `OwedView` | NEW |
+| `in_flight`, `owed_breakdown` | `{}` | `InFlightView`, `OwedView`. `total` equals `total_owed`, which includes `pending_withdrawals`. `legs` counts fee legs that are `pending` or `unresolved` | BUILT |
 
 `config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `create_fee: U128`, `revenue_pool`, `business_wallet` (NEW name `treasury`), `revenue_unresolved: U128`, `void_price_window_ns: U64`, `void_grace_ns: U64`, `settle_wait_minutes: number`, `reconcile_wait_minutes: number`, `min_sweep_interval_minutes: number`, `min_open_price: U128`, `max_open_price: U128`, `max_fee_rate_bps: number`, `max_create_fee: U128`, `min_revenue_share_bps: number`, `max_revenue_share_bps: number`, `max_min_sweep: U128`. `max_positions` is the stored cap.
 
@@ -222,10 +222,10 @@ BUILT (`list_cases`, `bond_totals`):
 interface CaseSummary { market_id: U64; stage: Stage; proposed: Outcome; challenger_answer: Outcome | null;
                         round: number; final_outcome: Outcome | null; applied: boolean; votes: number;
                         window_ends_at: U64; draw_by: U64; panel_deadline: U64 }
-interface BondTotals { bonds_held: U128; claimable: U128; total: U128 }   // total equals total_owed
+interface BondTotals { bonds_held: U128; claimable: U128; pending_payouts: U128; total: U128 }   // total equals total_owed
 ```
 
-`BondTotals` has no `pending_payouts` yet: money in flight on a bond withdrawal is not tracked, and the field is added beside these when it is.
+`pending_payouts` is the sum of bond payouts sent to the verifier whose callback has not run. `total` is `bonds_held + claimable + pending_payouts`.
 
 ### 6.2 Views
 
@@ -241,7 +241,7 @@ interface BondTotals { bonds_held: U128; claimable: U128; total: U128 }   // tot
 
 `list_cases` looks at `limit` consecutive market ids from `from_market_id`, clamped to 50, and returns a row for each id that has a case. An id without a case is skipped, so a page can hold fewer than `limit` rows and the caller advances by `limit`. `votes` is the count of revealed votes.
 
-`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `market`, `bond_token` (NEW: `verifier`, `collateral_token_id`), `bond: U128`, `window_ns`, `panel_deadline_ns`, `draw_window_ns`, `min_proposal_ns`, `min_resolve_gap_ns`, `apply_buffer_ns` (all `U64`), `council`, `jury_size: number`, `draw_delay_blocks: U64`, `operator`, `network: string`, `publishers: string[]`, `price_threshold: number`, `no_decision_recipient`, `juror_share_bps: number`, `no_decision_share_bps: number`, `max_publishers: number`.
+`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `market`, `bond_token` (NEW: `verifier`, `collateral_token_id`), `bond: U128`, `window_ns`, `panel_deadline_ns`, `draw_window_ns`, `min_proposal_ns`, `min_resolve_gap_ns`, `apply_buffer_ns` (all `U64`), `council`, `jury_size: number`, `draw_delay_blocks: U64`, `operator`, `network: string`, `publishers: string[]`, `price_threshold: number`, `no_decision_recipient`, `juror_share_bps: number`, `no_decision_share_bps: number`, `max_publishers: number`, `reconcile_wait_ns: U64`.
 
 ### 6.3 Calls and messages
 
@@ -369,12 +369,13 @@ The site does not parse events today. When it does, the envelope is `EVENT_JSON:
 | market | `deposit` | `account`, `amount` | Funds credited to the market balance |
 | market | `buy`, `sell` | `market_id`, `account`, `side`, `shares`, `collateral`, `fee` | Trade done |
 | market | `redeemed` | `market_id`, `account`, `amount` | Winnings credited to the market balance |
-| market | `withdraw` | `account`, `amount` (NEW `id`) | Requested. It is emitted before the transfer, so it is not a payout |
-| market | `withdraw_confirmed` NEW | `account`, `amount`, `id` | The verifier moved the money |
-| market | `withdraw_failed` | `account`, `amount` (NEW `id`) | The verifier refused, the balance came back |
+| market | `withdraw` | `account`, `amount`, `id` (`U64`, string) | Requested. It is emitted before the transfer, so it is not a payout |
+| market | `withdraw_confirmed` | `account`, `amount`, `id` | The verifier moved the money |
+| market | `withdraw_failed` | `account`, `amount`, `id` | The verifier refused, the balance came back |
 | market | `outcome_set` | `market_id`, `outcome` | Market resolved |
 | oracle | `proposed`, `challenged`, `jury_drawn`, `draw_failed`, `vote_committed`, `vote_revealed`, `escalated`, `final`, `outcome_applied` | see oracle.md | Case progress |
-| oracle | `bond_received`, `bond_paid`, `bond_payout_failed` NEW | `account`, `amount` | Bond custody |
+| oracle | `bond_payout_requested`, `bond_paid`, `bond_payout_failed` | `account`, `amount`, `id` (`U64`, string) | Bond payout progress. The request is emitted before the transfer, so it is not a payout |
+| oracle | `bond_received` NEW | `account`, `amount` | Bond custody |
 | council | `staked`, `unstake_requested`, `unstaked`, `unstake_failed` | `token_id`, `owner` | Seat progress |
 | council | `quarter_finalized` NEW | `quarter`, `pool`, `weight_ns`, `rolled_to` | A quarter became claimable |
 | council | `claim_requested`, `claim_paid`, `claim_failed` NEW | `quarter`, `token_id`, `owner`, `amount` | Claim progress |

@@ -49,6 +49,7 @@ const GAS_WITHDRAW_FLOOR: Gas =
     Gas::from_gas(GAS_MT_TRANSFER.as_gas() + GAS_CALLBACK.as_gas() + GAS_WITHDRAW_OVERHEAD.as_gas());
 const SETTLE_REASON: &str = "a call that settles a case sends the answer to the market and releases the juries";
 const NS_PER_MS: u64 = 1_000_000;
+const NS_PER_SEC: u64 = 1_000_000_000;
 // The layout of the state below. migrate reads exactly this one and refuses any other.
 const STATE_VERSION: u16 = 1;
 // Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
@@ -60,6 +61,12 @@ const NEP141_PREFIX: &str = "nep141:";
 const DEFAULT_APPLY_BUFFER_NS: u64 = 30_000_000_000;
 const MIN_APPLY_BUFFER_NS: u64 = 5_000_000_000;
 const MAX_APPLY_BUFFER_NS: u64 = 300_000_000_000;
+// How long a payout can sit pending before the owner may decide it by hand, which leaves its callback time to arrive. The
+// owner can move it between the bounds: under 10 minutes the callback may still be on its way, and over 7 days a bond stuck
+// in flight waits too long for its money.
+const DEFAULT_RECONCILE_WAIT_NS: u64 = 3_600_000_000_000;
+const MIN_RECONCILE_WAIT_NS: u64 = 600_000_000_000;
+const MAX_RECONCILE_WAIT_NS: u64 = 604_800_000_000_000;
 // The council keeps one jury per key. A case's first jury is kept under the market id and its second under this bit
 // set on the id, so the two can never be taken for each other.
 const SECOND_ROUND_KEY: u64 = 1 << 63;
@@ -97,6 +104,7 @@ enum Key {
     Markets,
     Cases,
     Claimable,
+    Payouts,
 }
 
 #[near(serializers=[borsh, json])]
@@ -250,7 +258,17 @@ pub struct CaseSummary {
 pub struct BondTotals {
     bonds_held: U128,
     claimable: U128,
+    pending_payouts: U128,
     total: U128,
+}
+
+// A payout sent to the verifier whose callback has not run yet. It stays until the callback settles it.
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Debug)]
+pub struct Payout {
+    account: AccountId,
+    amount: U128,
+    at: U64,
 }
 
 // The NEAR Intents verifier. Bonds arrive in this contract's account there, and payouts are sent out of it.
@@ -333,6 +351,14 @@ pub struct OracleContract {
     // after a challenge. Kept so total_owed can add them up without walking a map.
     claimable_total: u128,
     bonds_held: u128,
+    // Payouts sent to the verifier and not yet confirmed or refused, by id. The amount left claimable_total when the payout
+    // was sent and sits in pending_payouts_total until its callback settles it, so total_owed still counts it.
+    payouts: LookupMap<u64, Payout>,
+    pending_payouts_total: u128,
+    // How long a payout must be pending before reconcile_bond_payout can decide it.
+    reconcile_wait_ns: u64,
+    // The id the next payout gets. Starts at 1 and only goes up.
+    last_payout_id: u64,
 }
 
 fn emit(event: &str, data: near_sdk::serde_json::Value) {
@@ -518,6 +544,10 @@ impl OracleContract {
             claimable: LookupMap::new(Key::Claimable),
             claimable_total: 0,
             bonds_held: 0,
+            payouts: LookupMap::new(Key::Payouts),
+            pending_payouts_total: 0,
+            reconcile_wait_ns: DEFAULT_RECONCILE_WAIT_NS,
+            last_payout_id: 0,
         }
     }
 
@@ -640,6 +670,20 @@ impl OracleContract {
         );
         emit("apply_buffer_set", json!({ "apply_buffer_ms": apply_buffer_ms }));
         self.apply_buffer_ns = apply_buffer_ms.0 * NS_PER_MS;
+    }
+
+    // How long a payout must be pending before the owner can decide it by hand. It applies to every payout from now on.
+    pub fn set_reconcile_wait_ns(&mut self, reconcile_wait_ns: U64) {
+        self.only_owner();
+        require!(
+            (MIN_RECONCILE_WAIT_NS..=MAX_RECONCILE_WAIT_NS).contains(&reconcile_wait_ns.0),
+            "the reconcile wait must be between 10 minutes and 7 days"
+        );
+        emit(
+            "reconcile_wait_set",
+            json!({ "reconcile_wait_ns": reconcile_wait_ns.0.to_string() }),
+        );
+        self.reconcile_wait_ns = reconcile_wait_ns.0;
     }
 
     // Live. It never removes a publisher, and it cannot go below the number that must sign a price.
@@ -1084,7 +1128,8 @@ impl OracleContract {
     }
 
     // Pays the caller's whole claimable balance into the caller's own Intents account, out of this contract's. The balance
-    // is zeroed first and given back in the callback if the verifier refuses.
+    // is zeroed first and recorded as a pending payout, which the callback settles: confirmed, or given back if the verifier
+    // refuses. A callback that never reports leaves the amount pending, still owed and never credited back.
     #[payable]
     pub fn withdraw_bond(&mut self) -> Promise {
         upgrade::require_gas(GAS_WITHDRAW_FLOOR, "a withdrawal sends the payout and then settles it");
@@ -1094,6 +1139,21 @@ impl OracleContract {
         require!(amount > 0, "nothing to withdraw");
         self.claimable.remove(&who);
         self.claimable_total -= amount;
+        self.last_payout_id += 1;
+        let id = self.last_payout_id;
+        self.payouts.insert(
+            id,
+            Payout {
+                account: who.clone(),
+                amount: U128(amount),
+                at: U64(env::block_timestamp()),
+            },
+        );
+        self.pending_payouts_total += amount;
+        emit(
+            "bond_payout_requested",
+            json!({ "account": who, "amount": amount.to_string(), "id": id.to_string() }),
+        );
         // mt_transfer returns nothing, so an error here means the verifier's receipt failed (paused, locked, out of gas) and
         // nothing moved.
         ext_verifier::ext(self.verifier.clone())
@@ -1103,29 +1163,61 @@ impl OracleContract {
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_CALLBACK)
-                    .on_bond_withdrawn(who, U128(amount)),
+                    .on_bond_withdrawn(U64(id)),
             )
     }
 
+    // Settles one pending payout. The account and amount come from the stored record, never from the call. An id with no
+    // record, already settled or never issued, changes nothing.
     #[private]
-    pub fn on_bond_withdrawn(
-        &mut self,
-        account: AccountId,
-        amount: U128,
-        #[callback_result] result: Result<(), PromiseError>,
-    ) {
-        if result.is_err() {
-            self.add_claimable(&account, amount.0);
-            emit(
-                "bond_payout_failed",
-                json!({ "account": account, "amount": amount.0.to_string() }),
-            );
-        } else {
-            emit(
-                "bond_paid",
-                json!({ "account": account, "amount": amount.0.to_string() }),
-            );
+    pub fn on_bond_withdrawn(&mut self, id: U64, #[callback_result] result: Result<(), PromiseError>) {
+        let Some(payout) = self.payouts.get(&id.0).cloned() else {
+            return;
+        };
+        let data = self.close_payout(id.0, payout, result.is_err());
+        emit(
+            if result.is_err() {
+                "bond_payout_failed"
+            } else {
+                "bond_paid"
+            },
+            data,
+        );
+    }
+
+    // Owner only, for a payout whose callback never came, so it stays in the pending total and still counts as owed. It
+    // needs the reconcile wait after the payout, which leaves the callback time to land, and the owner checks the verifier's
+    // events first: `paid` true means the transfer happened and the record is dropped, false means it did not and the amount
+    // is claimable again. A callback that comes later finds no record and changes nothing.
+    pub fn reconcile_bond_payout(&mut self, id: U64, paid: bool) {
+        self.only_owner();
+        let payout = self
+            .payouts
+            .get(&id.0)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("no payout is pending with that id"));
+        require!(
+            env::block_timestamp() >= payout.at.0.saturating_add(self.reconcile_wait_ns),
+            &format!(
+                "wait {} minutes after the payout before reconciling",
+                self.reconcile_wait_ns / (60 * NS_PER_SEC)
+            )
+        );
+        let mut data = self.close_payout(id.0, payout, !paid);
+        data["paid"] = json!(paid);
+        emit("bond_payout_reconciled", data);
+    }
+
+    // Takes a payout out of the pending total and makes the amount claimable again when it failed. Both the payout callback
+    // and reconcile_bond_payout end a payout here, so the two cannot disagree about the books. Returns the event data.
+    fn close_payout(&mut self, id: u64, payout: Payout, failed: bool) -> near_sdk::serde_json::Value {
+        self.payouts.remove(&id);
+        let amount = payout.amount.0;
+        self.pending_payouts_total -= amount;
+        if failed {
+            self.add_claimable(&payout.account, amount);
         }
+        json!({ "account": payout.account, "amount": amount.to_string(), "id": id.to_string() })
     }
 
     // ---- views ----------------------------------------------------------------------------
@@ -1143,10 +1235,12 @@ impl OracleContract {
     }
 
     // Everything this contract owes, in collateral units: the bonds in cases that are not final and everything waiting to be
-    // withdrawn. The keeper compares it with the verifier's mt_balance_of for this account at the same finalized block. More
-    // there than here is surplus nobody is credited for, or a payout that is in flight. Less is an incident.
+    // withdrawn, plus payouts sent to the verifier and not yet confirmed. The keeper compares it with the verifier's
+    // mt_balance_of for this account at the same finalized block. More there than here is surplus nobody is credited for.
+    // Less is an incident, unless the shortfall is within pending_payouts_total: a payout that already left the verifier
+    // is owed here until its callback runs.
     pub fn total_owed(&self) -> U128 {
-        U128(self.bonds_held + self.claimable_total)
+        U128(self.bonds_held + self.claimable_total + self.pending_payouts_total)
     }
 
     // Looks at `limit` consecutive market ids from `from_market_id` (at most MAX_LIST_CASES) and returns a summary for each
@@ -1177,6 +1271,7 @@ impl OracleContract {
         BondTotals {
             bonds_held: U128(self.bonds_held),
             claimable: U128(self.claimable_total),
+            pending_payouts: U128(self.pending_payouts_total),
             total: self.total_owed(),
         }
     }
@@ -1199,7 +1294,8 @@ impl OracleContract {
                 "apply_buffer_ns": self.apply_buffer_ns.to_string(), "juror_share_bps": self.juror_share_bps,
                 "no_decision_share_bps": self.no_decision_share_bps, "max_publishers": self.max_publishers, "operator": self.operator,
                 "network": self.network, "publishers": self.publishers, "price_threshold": self.price_threshold,
-                "no_decision_recipient": self.no_decision_recipient })
+                "no_decision_recipient": self.no_decision_recipient,
+                "reconcile_wait_ns": self.reconcile_wait_ns.to_string() })
     }
 }
 
@@ -3877,6 +3973,12 @@ mod tests {
             .collect()
     }
 
+    // Runs the payout callback for `id` as the contract itself, as the verifier's answer would.
+    fn settle(o: &mut OracleContract, id: u64, paid: bool) {
+        act_as(OWNER, 10 * DEADLINE);
+        o.on_bond_withdrawn(U64(id), if paid { Ok(()) } else { Err(PromiseError::Failed) });
+    }
+
     // The verifier call a payout sent: its arguments, the yocto attached and the gas reserved.
     fn mt_transfer_sent() -> (near_sdk::serde_json::Value, u128, u64) {
         let sent = receipts();
@@ -4110,11 +4212,17 @@ mod tests {
         );
 
         let mut left = 2 * BOND;
-        for who in ["dave.near", "j0.near", "j1.near"] {
+        for (n, who) in ["dave.near", "j0.near", "j1.near"].into_iter().enumerate() {
             let due = owed(&o, who);
             assert!(due > 0, "{who} is owed something");
             act_as(who, 10 * DEADLINE);
             let _ = o.withdraw_bond();
+            assert_eq!(
+                o.total_owed().0,
+                left,
+                "{who}'s {due} is still owed while it is in flight"
+            );
+            settle(&mut o, n as u64 + 1, true);
             left -= due;
             assert_eq!(o.total_owed().0, left, "{who} took {due}");
         }
@@ -4134,7 +4242,9 @@ mod tests {
         assert_eq!(args["receiver_id"], "carol.near");
         assert_eq!(args["token_id"], COLLATERAL);
         assert_eq!(args["amount"], BOND.to_string());
-        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, 0));
+        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, BOND));
+        settle(&mut o, 1, true);
+        assert_eq!(o.total_owed().0, 0);
     }
 
     #[test]
@@ -4153,30 +4263,329 @@ mod tests {
         let mut o = unchallenged_and_final();
         act_as("carol.near", 10 * DEADLINE);
         let _ = o.withdraw_bond();
-        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, 0));
+        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, BOND));
 
-        act_as(OWNER, 10 * DEADLINE);
-        o.on_bond_withdrawn(acct("carol.near"), U128(BOND), Err(PromiseError::Failed));
+        settle(&mut o, 1, false);
         assert_eq!(
-            (owed(&o, "carol.near"), o.total_owed().0, o.claimable_total),
-            (BOND, BOND, BOND),
+            (
+                owed(&o, "carol.near"),
+                o.total_owed().0,
+                o.claimable_total,
+                o.pending_payouts_total
+            ),
+            (BOND, BOND, BOND, 0),
             "the balance and the books are back"
         );
         assert_eq!(
             logged("bond_payout_failed"),
-            vec![near_sdk::serde_json::json!({ "account": "carol.near", "amount": BOND.to_string() })]
+            vec![near_sdk::serde_json::json!({ "account": "carol.near", "amount": BOND.to_string(), "id": "1" })]
         );
 
         act_as("carol.near", 10 * DEADLINE);
         let _ = o.withdraw_bond();
-        act_as(OWNER, 10 * DEADLINE);
-        o.on_bond_withdrawn(acct("carol.near"), U128(BOND), Ok(()));
+        settle(&mut o, 2, true);
         assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, 0));
         assert_eq!(
             logged("bond_paid"),
-            vec![near_sdk::serde_json::json!({ "account": "carol.near", "amount": BOND.to_string() })]
+            vec![near_sdk::serde_json::json!({ "account": "carol.near", "amount": BOND.to_string(), "id": "2" })]
         );
         assert!(logged("bond_payout_failed").is_empty());
+    }
+
+    fn payout_json(account: &str, id: u64) -> near_sdk::serde_json::Value {
+        near_sdk::serde_json::json!({ "account": account, "amount": BOND.to_string(), "id": id.to_string() })
+    }
+
+    // ---- reconcile_bond_payout: the owner decides when the callback never came ----------------------------------
+
+    const PAID_OUT_AT: u64 = 10 * DEADLINE;
+    const PAYOUT_DECIDABLE_AT: u64 = PAID_OUT_AT + DEFAULT_RECONCILE_WAIT_NS;
+
+    // Carol's whole bond is in flight as payout 1.
+    fn a_stuck_payout() -> OracleContract {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", PAID_OUT_AT);
+        let _ = o.withdraw_bond();
+        o
+    }
+
+    fn reconcile_at(o: &mut OracleContract, now: u64, paid: bool) {
+        act_unpaid(OWNER, now);
+        o.reconcile_bond_payout(U64(1), paid);
+    }
+
+    #[test]
+    fn only_the_owner_reconciles_a_payout() {
+        let mut o = a_stuck_payout();
+        for who in ["stranger.near", OPERATOR, "carol.near"] {
+            act_unpaid(who, PAYOUT_DECIDABLE_AT);
+            assert!(
+                refusal(|| o.reconcile_bond_payout(U64(1), false)).contains("owner only"),
+                "{who}"
+            );
+        }
+        assert_eq!((o.pending_payouts_total, o.total_owed().0), (BOND, BOND));
+    }
+
+    #[test]
+    fn an_unknown_payout_id_is_refused() {
+        let mut o = a_stuck_payout();
+        act_unpaid(OWNER, PAYOUT_DECIDABLE_AT);
+        for id in [0, 2, u64::MAX] {
+            assert!(refusal(|| o.reconcile_bond_payout(U64(id), true)).contains("no payout is pending with that id"));
+        }
+    }
+
+    #[test]
+    fn a_payout_is_decided_exactly_at_the_wait_and_not_before() {
+        let mut o = a_stuck_payout();
+        act_unpaid(OWNER, PAYOUT_DECIDABLE_AT - 1);
+        assert!(refusal(|| o.reconcile_bond_payout(U64(1), true))
+            .contains("wait 60 minutes after the payout before reconciling"));
+        assert_eq!(o.pending_payouts_total, BOND);
+        reconcile_at(&mut o, PAYOUT_DECIDABLE_AT, true);
+        assert_eq!(o.pending_payouts_total, 0);
+    }
+
+    #[test]
+    fn a_payout_that_was_paid_is_dropped_and_no_longer_owed() {
+        let mut o = a_stuck_payout();
+        reconcile_at(&mut o, PAYOUT_DECIDABLE_AT, true);
+        assert!(o.payouts.get(&1).is_none());
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (0, 0, 0)
+        );
+        assert_eq!(owed(&o, "carol.near"), 0);
+        let mut event = payout_json("carol.near", 1);
+        event["paid"] = near_sdk::serde_json::json!(true);
+        assert_eq!(logged("bond_payout_reconciled"), vec![event]);
+        assert!(logged("bond_paid").is_empty() && logged("bond_payout_failed").is_empty());
+    }
+
+    #[test]
+    fn a_payout_that_never_happened_is_claimable_again() {
+        let mut o = a_stuck_payout();
+        reconcile_at(&mut o, PAYOUT_DECIDABLE_AT, false);
+        assert!(o.payouts.get(&1).is_none());
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (0, BOND, BOND)
+        );
+        assert_eq!(owed(&o, "carol.near"), BOND);
+        let mut event = payout_json("carol.near", 1);
+        event["paid"] = near_sdk::serde_json::json!(false);
+        assert_eq!(logged("bond_payout_reconciled"), vec![event]);
+        act_as("carol.near", PAYOUT_DECIDABLE_AT + 1);
+        let _ = o.withdraw_bond();
+        assert_eq!((o.pending_payouts_total, o.last_payout_id), (BOND, 2));
+    }
+
+    #[test]
+    fn a_payout_cannot_be_reconciled_twice() {
+        let mut o = a_stuck_payout();
+        reconcile_at(&mut o, PAYOUT_DECIDABLE_AT, false);
+        for paid in [false, true] {
+            act_unpaid(OWNER, PAYOUT_DECIDABLE_AT);
+            assert!(refusal(|| o.reconcile_bond_payout(U64(1), paid)).contains("no payout is pending with that id"));
+        }
+        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (BOND, BOND));
+    }
+
+    #[test]
+    fn a_late_callback_after_a_reconcile_changes_nothing() {
+        for (paid, claimable) in [(true, 0), (false, BOND)] {
+            let mut o = a_stuck_payout();
+            reconcile_at(&mut o, PAYOUT_DECIDABLE_AT, paid);
+            for callback_paid in [true, false] {
+                settle(&mut o, 1, callback_paid);
+                assert_eq!(
+                    (
+                        owed(&o, "carol.near"),
+                        o.claimable_total,
+                        o.pending_payouts_total,
+                        o.total_owed().0
+                    ),
+                    (claimable, claimable, 0, claimable)
+                );
+                assert!(logged("bond_paid").is_empty() && logged("bond_payout_failed").is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_withdrawal_records_the_payout_and_announces_it_before_the_callback() {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        let record = o.payouts.get(&1).cloned().unwrap();
+        assert_eq!(
+            (record.account, record.amount.0, record.at.0),
+            (acct("carol.near"), BOND, 10 * DEADLINE)
+        );
+        assert_eq!(
+            (o.last_payout_id, o.pending_payouts_total, o.claimable_total),
+            (1, BOND, 0)
+        );
+        assert_eq!(logged("bond_payout_requested"), vec![payout_json("carol.near", 1)]);
+        assert!(logged("bond_paid").is_empty() && logged("bond_payout_failed").is_empty());
+    }
+
+    #[test]
+    fn a_confirmed_payout_is_removed_and_reported_paid() {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        settle(&mut o, 1, true);
+        assert!(o.payouts.get(&1).is_none());
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (0, 0, 0)
+        );
+        assert_eq!(logged("bond_paid"), vec![payout_json("carol.near", 1)]);
+    }
+
+    #[test]
+    fn a_callback_that_runs_twice_or_names_an_unknown_id_changes_nothing() {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        settle(&mut o, 1, false);
+        let before = (
+            owed(&o, "carol.near"),
+            o.claimable_total,
+            o.pending_payouts_total,
+            o.total_owed().0,
+        );
+        for (id, paid) in [(1, false), (1, true), (2, true), (0, false), (u64::MAX, false)] {
+            settle(&mut o, id, paid);
+            assert_eq!(
+                (
+                    owed(&o, "carol.near"),
+                    o.claimable_total,
+                    o.pending_payouts_total,
+                    o.total_owed().0
+                ),
+                before
+            );
+        }
+        assert!(logged("bond_paid").is_empty());
+        assert!(logged("bond_payout_failed").is_empty());
+    }
+
+    #[test]
+    fn two_payouts_in_flight_settle_independently() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        act_as("anyone.near", DRAW_BY + 1);
+        o.finalize(U64(0));
+        act_as("anyone.near", DRAW_BY + 1 + PANEL + DRAW_WINDOW + PANEL);
+        o.finalize(U64(0));
+        for who in ["carol.near", "dave.near"] {
+            act_as(who, 10 * DEADLINE);
+            let _ = o.withdraw_bond();
+        }
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (2 * BOND, 0, 2 * BOND)
+        );
+        settle(&mut o, 2, false);
+        assert_eq!(logged("bond_payout_failed"), vec![payout_json("dave.near", 2)]);
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (BOND, BOND, 2 * BOND)
+        );
+        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (0, BOND));
+        assert!(o.payouts.get(&1).is_some() && o.payouts.get(&2).is_none());
+        settle(&mut o, 1, true);
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (0, BOND, BOND)
+        );
+        assert_eq!(logged("bond_paid"), vec![payout_json("carol.near", 1)]);
+    }
+
+    #[test]
+    fn a_payout_whose_callback_never_reports_stays_pending_and_owed() {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        act_as("carol.near", 100 * DEADLINE);
+        assert_eq!(refusal(|| drop(o.withdraw_bond())), "nothing to withdraw");
+        assert_eq!(
+            (owed(&o, "carol.near"), o.pending_payouts_total, o.total_owed().0),
+            (0, BOND, BOND)
+        );
+        assert!(o.payouts.get(&1).is_some());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        // Whatever the verifier answers, or does not, a withdrawal never changes what is owed while it is in flight, and
+        // after each callback every unit is in exactly one place: paid out, claimable, or still pending.
+        #[test]
+        fn withdrawals_with_any_callback_outcome_create_and_lose_nothing(
+            balances in prop::collection::vec(1u128..1_000_000, 5),
+            steps in prop::collection::vec((0usize..5, 0u8..3), 1..40),
+        ) {
+            let mut o = fresh_oracle();
+            for (i, b) in balances.iter().enumerate() {
+                o.add_claimable(&acct(&format!("u{i}.near")), *b);
+            }
+            let start: u128 = balances.iter().sum();
+            let (mut paid, mut stuck) = (0u128, 0u128);
+            for (who, answer) in steps {
+                let name = format!("u{who}.near");
+                let due = owed(&o, &name);
+                if due == 0 {
+                    continue;
+                }
+                let before = o.total_owed().0;
+                act_as(&name, 10 * DEADLINE);
+                let _ = o.withdraw_bond();
+                prop_assert_eq!(o.total_owed().0, before, "in flight, the money is still owed");
+                prop_assert_eq!(o.pending_payouts_total, stuck + due);
+                let id = o.last_payout_id;
+                match answer {
+                    0 => {
+                        settle(&mut o, id, true);
+                        paid += due;
+                    }
+                    1 => settle(&mut o, id, false),
+                    _ => stuck += due,
+                }
+                let claimable: u128 = (0..5).map(|i| owed(&o, &format!("u{i}.near"))).sum();
+                prop_assert_eq!(claimable, o.claimable_total);
+                prop_assert_eq!(o.pending_payouts_total, stuck);
+                prop_assert_eq!(o.total_owed().0 + paid, start, "nothing was created or lost");
+                prop_assert_eq!(o.bond_totals().total, o.total_owed());
+            }
+        }
+    }
+
+    #[test]
+    fn bond_totals_shows_the_payout_in_flight_and_settles_back_into_the_books() {
+        let mut o = unchallenged_and_final();
+        let totals = |o: &OracleContract| near_sdk::serde_json::to_value(o.bond_totals()).unwrap();
+        let json = |held: u128, claimable: u128, pending: u128| {
+            near_sdk::serde_json::json!({
+                "bonds_held": held.to_string(),
+                "claimable": claimable.to_string(),
+                "pending_payouts": pending.to_string(),
+                "total": (held + claimable + pending).to_string()
+            })
+        };
+        assert_eq!(totals(&o), json(0, BOND, 0));
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        assert_eq!(totals(&o), json(0, 0, BOND));
+        assert_eq!(o.bond_totals().total, o.total_owed());
+        settle(&mut o, 1, false);
+        assert_eq!(totals(&o), json(0, BOND, 0));
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        settle(&mut o, 2, true);
+        assert_eq!(totals(&o), json(0, 0, 0));
     }
 
     #[test]
@@ -4195,6 +4604,12 @@ mod tests {
         act_as("carol.near", 10 * DEADLINE);
         let _ = o.withdraw_bond();
         assert_eq!(mt_transfer_sent().0["receiver_id"], "carol.near");
+        assert_eq!(
+            o.total_owed().0,
+            2 * BOND,
+            "carol's payout is still owed until it is confirmed"
+        );
+        settle(&mut o, 1, true);
         assert_eq!(o.total_owed().0, 2 * BOND - carol);
     }
 
@@ -4372,35 +4787,47 @@ mod tests {
                 ..base_info()
             },
         );
-        let check = |o: &OracleContract, held: u128, claimable: u128| {
+        let check = |o: &OracleContract, held: u128, claimable: u128, pending: u128| {
             let totals = near_sdk::serde_json::to_value(o.bond_totals()).unwrap();
             assert_eq!(
                 totals,
                 near_sdk::serde_json::json!({
                     "bonds_held": held.to_string(),
                     "claimable": claimable.to_string(),
-                    "total": (held + claimable).to_string()
+                    "pending_payouts": pending.to_string(),
+                    "total": (held + claimable + pending).to_string()
                 })
             );
             assert_eq!(o.bond_totals().total, o.total_owed());
         };
-        check(&o, 0, 0);
+        check(&o, 0, 0, 0);
         act_as(VERIFIER, SECOND);
         deliver(&mut o, "carol.near", BOND, "propose:0:yes:https://x");
-        check(&o, BOND, 0);
+        check(&o, BOND, 0, 0);
         act_as(VERIFIER, CHALLENGED_AT);
         deliver(&mut o, "dave.near", BOND, "challenge:0:no");
-        check(&o, 2 * BOND, 0);
+        check(&o, 2 * BOND, 0, 0);
         act_as("anyone.near", DRAW_BY + 1);
         o.finalize(U64(0));
         seat(&mut o, DRAW_BY + 1 + SECOND, &names(7, "k"));
         act_as("anyone.near", o.case(0).panel_deadline.0 + 1);
         o.finalize(U64(0));
         assert_eq!(o.case(0).stage, Stage::Final);
-        check(&o, 0, 2 * BOND);
+        check(&o, 0, 2 * BOND, 0);
+        let paid = owed(&o, RECIPIENT);
+        assert!(paid > 0);
         act_as(RECIPIENT, 10 * DEADLINE);
         let _ = o.withdraw_bond();
-        check(&o, 0, 2 * BOND - BOND / 2);
+        check(&o, 0, 2 * BOND - paid, paid);
+        settle(&mut o, 1, true);
+        check(&o, 0, 2 * BOND - paid, 0);
+        let carol = owed(&o, "carol.near");
+        assert!(carol > 0);
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        check(&o, 0, 2 * BOND - paid - carol, carol);
+        settle(&mut o, 2, false);
+        check(&o, 0, 2 * BOND - paid, 0);
     }
 
     #[test]
@@ -4425,6 +4852,28 @@ mod tests {
             o.total_owed(),
         );
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn the_views_leave_a_payout_in_flight_untouched() {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        let state = |o: &OracleContract| {
+            (
+                near_sdk::serde_json::to_value(o.bond_totals()).unwrap(),
+                o.total_owed(),
+                o.claimable_of(acct("carol.near")),
+                o.pending_payouts_total,
+                o.last_payout_id,
+                o.payouts.get(&1).cloned().map(|p| p.amount),
+            )
+        };
+        let before = state(&o);
+        for _ in 0..2 {
+            let _ = o.list_cases(U64(0), 50);
+        }
+        assert_eq!(before, state(&o));
     }
 
     // ---- the policy settings the DAO can tune -------------------------------------------------------------------
@@ -4454,6 +4903,50 @@ mod tests {
             );
             assert!(refusal(|| o.set_max_publishers(10)).contains("owner only"), "{who}");
         }
+    }
+
+    #[test]
+    fn the_reconcile_wait_starts_at_an_hour_and_the_owner_moves_it_within_its_bounds() {
+        let mut o = fresh_oracle();
+        assert_eq!(o.config()["reconcile_wait_ns"], DEFAULT_RECONCILE_WAIT_NS.to_string());
+        act_unpaid(OWNER, 5);
+        o.set_reconcile_wait_ns(U64(MIN_RECONCILE_WAIT_NS));
+        assert_eq!(
+            logged("reconcile_wait_set"),
+            vec![near_sdk::serde_json::json!({ "reconcile_wait_ns": MIN_RECONCILE_WAIT_NS.to_string() })]
+        );
+        assert_eq!(o.config()["reconcile_wait_ns"], "600000000000");
+        o.set_reconcile_wait_ns(U64(MAX_RECONCILE_WAIT_NS));
+        assert_eq!(o.config()["reconcile_wait_ns"], "604800000000000");
+        for bad in [0, MIN_RECONCILE_WAIT_NS - 1, MAX_RECONCILE_WAIT_NS + 1] {
+            let message = refusal(|| o.set_reconcile_wait_ns(U64(bad)));
+            assert!(message.contains("between 10 minutes and 7 days"), "{bad}: {message}");
+        }
+    }
+
+    #[test]
+    fn only_the_owner_sets_the_reconcile_wait() {
+        let mut o = fresh_oracle();
+        for who in ["stranger.near", OPERATOR] {
+            act_unpaid(who, 5);
+            assert!(
+                refusal(|| o.set_reconcile_wait_ns(U64(DEFAULT_RECONCILE_WAIT_NS))).contains("owner only"),
+                "{who}"
+            );
+        }
+        assert_eq!(o.config()["reconcile_wait_ns"], DEFAULT_RECONCILE_WAIT_NS.to_string());
+    }
+
+    #[test]
+    fn a_longer_reconcile_wait_refuses_a_reconcile_the_old_wait_would_allow() {
+        let mut o = a_stuck_payout();
+        act_unpaid(OWNER, PAID_OUT_AT);
+        o.set_reconcile_wait_ns(U64(2 * DEFAULT_RECONCILE_WAIT_NS));
+        act_unpaid(OWNER, PAYOUT_DECIDABLE_AT);
+        assert!(refusal(|| o.reconcile_bond_payout(U64(1), true))
+            .contains("wait 120 minutes after the payout before reconciling"));
+        reconcile_at(&mut o, PAID_OUT_AT + 2 * DEFAULT_RECONCILE_WAIT_NS, true);
+        assert_eq!(o.pending_payouts_total, 0);
     }
 
     #[test]

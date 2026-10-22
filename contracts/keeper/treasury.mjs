@@ -21,7 +21,7 @@ const NS_PER_DAY = 86_400n * 10n ** 9n;
 // The ranges the market accepts for the void rules, in nanoseconds: the window is 1 hour to 7 days, the grace 1 to 60 days.
 const VOID_WINDOW_NS = { min: NS_PER_DAY / 24n, max: 7n * NS_PER_DAY };
 const VOID_GRACE_NS = { min: NS_PER_DAY, max: 60n * NS_PER_DAY };
-// The range the Council accepts for the claim reconcile wait: 10 minutes to 7 days.
+// The range the Council and the oracle accept for their reconcile wait: 10 minutes to 7 days.
 const RECONCILE_WAIT_NS = { min: 600n * 10n ** 9n, max: 7n * NS_PER_DAY };
 // The Council's grace period, 1 to 30 days (MIN_CLOSE_GRACE_NS and MAX_CLOSE_GRACE_NS in its source).
 export const CLOSE_GRACE_DAYS = { min: 1n, max: 30n };
@@ -213,6 +213,7 @@ export const ALLOWED = {
     set_fee_rate_bps: call({ fee_rate_bps: integer(LIMIT_MARKET.HARD_MAX_FEE_RATE_BPS) }),
     set_create_fee: call({ create_fee: u128(0n, LIMIT_MARKET.HARD_MAX_CREATE_FEE) }),
     reconcile_leg: call({ sweep_id: u64(1n), leg: oneOf("council", "treasury"), arrived: flag }),
+    reconcile_withdrawal: call({ id: u64(1n), paid: flag }),
     set_paused: call({ paused: flag }),
     set_sells_paused: call({ sells_paused: flag }),
     set_void_rules: call({
@@ -291,6 +292,8 @@ export const ALLOWED = {
     add_publisher: call({ key: ed25519 }),
     remove_publisher: call({ key: ed25519 }),
     set_price_threshold: call({ threshold: integer(LIMIT_ORACLE.MAX_MAX_PUBLISHERS, 1) }),
+    set_reconcile_wait_ns: call({ reconcile_wait_ns: u64(RECONCILE_WAIT_NS.min, RECONCILE_WAIT_NS.max) }),
+    reconcile_bond_payout: call({ id: u64(1n), paid: flag }),
     withdraw_bond: calling({}, ownDeposit),
   },
   council: {

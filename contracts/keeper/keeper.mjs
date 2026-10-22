@@ -372,24 +372,30 @@ export function marginReport(accounts, minMargin) {
 }
 
 // What a contract owes against what the verifier holds for it, both read at one finalized block. The market and the oracle
-// keep a total, so `owed` is exact. The Council's `owed` is a floor (see councilFloor). Less in the verifier
-// than owed means money is missing. More is surplus nobody is credited for, such as a plain deposit or a payout on its way, and
-// is only reported.
-export function reconciliation({ name, owed, held, exact = true }) {
+// keep a total, so `owed` is exact. The Council's `owed` is a floor (see councilFloor). A payout leaves the verifier before
+// the contract's callback books it, so up to `inFlight` of what is owed is already gone: the verifier must hold at least
+// owed less inFlight. Less than that means money is missing. More than owed is surplus nobody is credited for, such as a
+// plain deposit, and is only reported.
+export function reconciliation({ name, owed, held, inFlight = 0n, exact = true }) {
+  const floor = BigInt(owed) - BigInt(inFlight);
   const surplus = BigInt(held) - BigInt(owed);
   const owes = exact ? "owes" : "owes at least";
-  const extra = surplus > 0n ? `, ${surplus} more than it ${exact ? "owes" : "needs"} (surplus nobody is credited for, or a payout in flight)` : "";
+  const flying = BigInt(inFlight) > 0n ? `, ${inFlight} of it in flight` : "";
+  const extra = surplus > 0n ? `, ${surplus} more than it ${exact ? "owes" : "needs"} (surplus nobody is credited for)` : "";
   return {
-    line: `${name} ${owes} ${owed} and holds ${held} in the verifier${extra}`,
-    problem: surplus < 0n ? `the ${name} ${owes} ${owed} but the verifier holds only ${held} for it: ${-surplus} is missing` : null,
+    line: `${name} ${owes} ${owed}${flying} and holds ${held} in the verifier${extra}`,
+    problem: BigInt(held) < floor
+      ? `the ${name} ${owes} ${owed}${flying} but the verifier holds only ${held} for it: ${floor - BigInt(held)} is missing`
+      : null,
   };
 }
 
-// Reads the books, and while the verifier holds less than is owed reads them again a few blocks later, so that a shortfall
-// is reported only when it is still there. `read` returns { owed, held } from one block.
+// Reads the books, and while the verifier holds less than is owed less what is in flight reads them again a few blocks
+// later, so that a shortfall is reported only when it is still there. `read` returns { owed, held, inFlight } from one block.
 export async function reconcile(read, waitForBlocks) {
+  const short = (books) => BigInt(books.held) < BigInt(books.owed) - BigInt(books.inFlight ?? 0n);
   let books = await read();
-  for (let attempt = 0; attempt < SHORTFALL_RECHECKS && BigInt(books.held) < BigInt(books.owed); attempt++) {
+  for (let attempt = 0; attempt < SHORTFALL_RECHECKS && short(books); attempt++) {
     await waitForBlocks(RECHECK_BLOCKS);
     books = await read();
   }
@@ -478,6 +484,14 @@ export function drawableHolders(stakes) {
   return new Set(stakes.filter((stake) => stake.unlock_requested_at == null && stake.serving == null).map((stake) => stake.owner));
 }
 
+// What the market and the oracle have sent out and not yet booked. The Council has none: its claims in flight are already
+// taken off its floor.
+async function inFlightAmount(opts, name, at) {
+  if (name === "market") return BigInt((await view(opts.rpc, opts.market, "in_flight", {}, at)).withdrawals);
+  if (name === "oracle") return BigInt((await view(opts.rpc, opts.oracle, "bond_totals", {}, at)).pending_payouts);
+  return 0n;
+}
+
 // The floor at one block, and the owners of the drawable seats.
 async function councilBooks(opts, at) {
   const stakes = [];
@@ -520,8 +534,9 @@ async function check(opts) {
       const council = name === "council" ? await councilBooks(opts, height) : null;
       owners ??= council?.owners;
       const owed = council ? council.owed : BigInt(await view(opts.rpc, opts[name], "total_owed", {}, height));
+      const inFlight = await inFlightAmount(opts, name, height);
       const held = BigInt(await view(opts.rpc, configs[name].verifier, "mt_balance_of", { account_id: opts[name], token_id: configs[name].collateral_token_id }, height));
-      return { owed, held };
+      return { owed, held, inFlight };
     };
     books[name] = reconciliation({ name, ...(await reconcile(read, () => waitForBlocks(opts.rpc, RECHECK_BLOCKS))), exact: name !== "council" });
   }

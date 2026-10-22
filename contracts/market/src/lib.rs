@@ -80,6 +80,7 @@ const DEFAULT_MIN_SWEEP: u128 = 1_000_000;
 const MAX_MIN_SWEEP: u128 = 100_000_000;
 const HARD_MAX_MIN_SWEEP: u128 = 1_000_000_000;
 const FIRST_SWEEP_ID: u64 = 1;
+const FIRST_WITHDRAWAL_ID: u64 = 1;
 // How long after a sweep its result can be asked for (settle_leg) or overridden by the owner (reconcile_leg). The first lets
 // the Council's receipt finish whatever it is doing, the second leaves a callback an hour to arrive before a person decides.
 const NS_PER_MINUTE: u64 = 60 * 1_000_000_000;
@@ -130,6 +131,8 @@ enum Key {
     Accounts,
     Shares,
     Sweeps,
+    Withdrawals,
+    PendingByAccount,
 }
 
 #[near(serializers=[borsh, json])]
@@ -225,6 +228,45 @@ pub struct Market {
     history: Vec<(u64, u32)>,
     // What a Void pays is averaged from this, not from the log: see Twap.
     twap: Option<Twap>,
+}
+
+// A withdrawal whose transfer has been sent and whose callback has not reported. It stays owed until the verifier confirms it.
+#[near(serializers=[borsh, json])]
+#[derive(Clone)]
+pub struct Withdrawal {
+    account: AccountId,
+    amount: U128,
+    at: U64,
+}
+
+#[near(serializers=[json])]
+pub struct AccountView {
+    registered: bool,
+    available: U128,
+    pending_withdrawals: U128,
+    positions: u32,
+}
+
+// Money that has been sent and not yet reported: withdrawals, and fee legs that are pending or unresolved.
+#[near(serializers=[json])]
+pub struct InFlightView {
+    withdrawals: U128,
+    withdrawal_count: u32,
+    legs: U128,
+    leg_count: u32,
+}
+
+// The buckets total_owed adds, and their sum.
+#[near(serializers=[json])]
+pub struct OwedView {
+    balances: U128,
+    locked: U128,
+    fees: U128,
+    revenue_due: U128,
+    treasury_due: U128,
+    unresolved: U128,
+    pending_withdrawals: U128,
+    total: U128,
 }
 
 #[near(serializers=[json])]
@@ -481,6 +523,17 @@ pub struct MarketContract {
     // When the last sweep ran, in ns. None until the first one.
     last_sweep_at: Option<u64>,
     sweeps: LookupMap<u64, Sweep>,
+    // The sum and number of fee legs that are pending or unresolved, kept so in_flight does not walk the sweeps.
+    legs_in_flight_total: u128,
+    legs_in_flight_count: u32,
+    // Withdrawals sent and not yet reported, by id. Ids start at 1 and only go up. The total is part of total_owed: the money
+    // is still owed until the verifier confirms it, and a callback that never reports leaves it here, in view.
+    next_withdrawal_id: u64,
+    withdrawals: LookupMap<u64, Withdrawal>,
+    pending_withdrawals_total: u128,
+    pending_withdrawal_count: u32,
+    // account -> the part of the total that is theirs, so get_account does not walk the withdrawals. Absent when zero.
+    pending_by_account: LookupMap<AccountId, u128>,
 }
 
 // A Yes price of one half, in millionths. What a market with no price points before close falls back to.
@@ -596,6 +649,13 @@ impl MarketContract {
             next_sweep_id: FIRST_SWEEP_ID,
             last_sweep_at: None,
             sweeps: LookupMap::new(Key::Sweeps),
+            legs_in_flight_total: 0,
+            legs_in_flight_count: 0,
+            next_withdrawal_id: FIRST_WITHDRAWAL_ID,
+            withdrawals: LookupMap::new(Key::Withdrawals),
+            pending_withdrawals_total: 0,
+            pending_withdrawal_count: 0,
+            pending_by_account: LookupMap::new(Key::PendingByAccount),
         }
     }
 
@@ -1294,9 +1354,26 @@ impl MarketContract {
         assert_one_yocto();
         let who = env::predecessor_account_id();
         require!(amount.0 > 0, "amount must be positive");
-        // Take the balance first; give it back in the callback if the transfer fails.
+        // Take the balance first and record the withdrawal as owed; the callback confirms it or gives the balance back.
         self.debit(&who, amount.0);
-        emit("withdraw", json!({ "account": who, "amount": amount.0.to_string() }));
+        let id = self.next_withdrawal_id;
+        self.next_withdrawal_id += 1;
+        self.withdrawals.insert(
+            id,
+            Withdrawal {
+                account: who.clone(),
+                amount,
+                at: U64(env::block_timestamp()),
+            },
+        );
+        self.pending_withdrawals_total += amount.0;
+        self.pending_withdrawal_count += 1;
+        let mine = self.pending_by_account.get(&who).copied().unwrap_or(0);
+        self.pending_by_account.insert(who.clone(), mine + amount.0);
+        emit(
+            "withdraw",
+            json!({ "account": who, "amount": amount.0.to_string(), "id": id.to_string() }),
+        );
         // The payout goes to the caller's own Intents account, inside the verifier. mt_transfer returns nothing, so an
         // error here means the verifier's receipt failed (paused, locked, out of gas) and nothing moved.
         ext_verifier::ext(self.verifier.clone())
@@ -1306,24 +1383,71 @@ impl MarketContract {
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_CALLBACK)
-                    .on_withdraw(who, amount),
+                    .on_withdraw(U64(id)),
             )
     }
 
+    // The amount and the account come from the stored record, never from the callback. An id with no record was already settled,
+    // so a repeat changes nothing. A callback that never runs leaves the withdrawal in the pending total, still owed.
     #[private]
-    pub fn on_withdraw(
-        &mut self,
-        account: AccountId,
-        amount: U128,
-        #[callback_result] result: Result<(), PromiseError>,
-    ) {
-        if result.is_err() {
-            self.credit(&account, amount.0);
-            emit(
-                "withdraw_failed",
-                json!({ "account": account, "amount": amount.0.to_string() }),
-            );
+    pub fn on_withdraw(&mut self, id: U64, #[callback_result] result: Result<(), PromiseError>) {
+        let Some(w) = self.withdrawals.get(&id.0).cloned() else {
+            return;
+        };
+        let data = self.close_withdrawal(id.0, w, result.is_err());
+        emit(
+            if result.is_err() {
+                "withdraw_failed"
+            } else {
+                "withdraw_confirmed"
+            },
+            data,
+        );
+    }
+
+    // Owner only, for a withdrawal whose callback never came, so it stays in the pending totals and still counts as owed. It
+    // needs the same wait as reconcile_leg, which leaves the callback time to land, and the owner checks the verifier's
+    // events first: `paid` true means the transfer happened and the record is dropped, false means it did not and the
+    // balance is credited back. A callback that comes later finds no record and changes nothing.
+    pub fn reconcile_withdrawal(&mut self, id: U64, paid: bool) {
+        self.only_owner();
+        let w = self
+            .withdrawals
+            .get(&id.0)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("no withdrawal is pending with that id"));
+        require!(
+            env::block_timestamp()
+                >= w.at
+                    .0
+                    .saturating_add(self.reconcile_wait_minutes as u64 * NS_PER_MINUTE),
+            format!(
+                "wait {} minutes after the withdrawal before reconciling",
+                self.reconcile_wait_minutes
+            )
+        );
+        let mut data = self.close_withdrawal(id.0, w, !paid);
+        data["paid"] = json!(paid);
+        emit("withdrawal_reconciled", data);
+    }
+
+    // Takes a withdrawal out of the pending totals and gives the balance back when it failed. Both the payout callback and
+    // reconcile_withdrawal end a withdrawal here, so the two cannot disagree about the books. Returns the event data.
+    fn close_withdrawal(&mut self, id: u64, w: Withdrawal, failed: bool) -> near_sdk::serde_json::Value {
+        self.withdrawals.remove(&id);
+        let amount = w.amount.0;
+        self.pending_withdrawals_total -= amount;
+        self.pending_withdrawal_count -= 1;
+        let mine = self.pending_by_account.get(&w.account).copied().unwrap_or(0) - amount;
+        if mine == 0 {
+            self.pending_by_account.remove(&w.account);
+        } else {
+            self.pending_by_account.insert(w.account.clone(), mine);
         }
+        if failed {
+            self.credit(&w.account, amount);
+        }
+        json!({ "account": w.account, "amount": amount.to_string(), "id": id.to_string() })
     }
 
     // ---- fees -----------------------------------------------------------------------------
@@ -1386,6 +1510,12 @@ impl MarketContract {
         self.fees -= to_council + to_treasury;
         self.revenue_due = 0;
         self.treasury_due = 0;
+        for leg in [&sweep.council, &sweep.treasury] {
+            if leg.status == LegStatus::Pending {
+                self.legs_in_flight_total += leg.amount.0;
+                self.legs_in_flight_count += 1;
+            }
+        }
         self.sweeps.insert(id, sweep.clone());
         emit(
             "fees_swept",
@@ -1591,17 +1721,53 @@ impl MarketContract {
 
     // Everything this contract owes, in collateral units: user balances, what is locked in every market, and every fee
     // bucket. The keeper compares it with the verifier's mt_balance_of for this account at the same finalized block. More
-    // there than here is surplus nobody is credited for. Less is an incident. A leg that is pending is out of the books
-    // because its money is already on its way, so an unfinished transfer shows as surplus here and never as a shortfall.
+    // there than here is surplus nobody is credited for. Less is an incident. A withdrawal in flight is still counted, because
+    // the verifier has not confirmed it, so the verifier's balance covers total_owed at every moment. A fee leg that is pending
+    // is out of the books because its money is already on its way, so an unfinished transfer shows as surplus here and never
+    // as a shortfall.
     pub fn total_owed(&self) -> U128 {
-        U128(
-            self.balances_total
-                + self.locked_total
-                + self.fees
-                + self.revenue_due
-                + self.treasury_due
-                + self.revenue_unresolved,
-        )
+        self.owed_breakdown().total
+    }
+
+    // The buckets total_owed adds, so a reader can see what the number is made of.
+    pub fn owed_breakdown(&self) -> OwedView {
+        OwedView {
+            balances: U128(self.balances_total),
+            locked: U128(self.locked_total),
+            fees: U128(self.fees),
+            revenue_due: U128(self.revenue_due),
+            treasury_due: U128(self.treasury_due),
+            unresolved: U128(self.revenue_unresolved),
+            pending_withdrawals: U128(self.pending_withdrawals_total),
+            total: U128(
+                self.balances_total
+                    + self.locked_total
+                    + self.fees
+                    + self.revenue_due
+                    + self.treasury_due
+                    + self.revenue_unresolved
+                    + self.pending_withdrawals_total,
+            ),
+        }
+    }
+
+    pub fn get_account(&self, account_id: AccountId) -> AccountView {
+        AccountView {
+            registered: self.accounts.contains_key(&account_id),
+            available: self.get_balance(account_id.clone()),
+            pending_withdrawals: U128(self.pending_by_account.get(&account_id).copied().unwrap_or(0)),
+            positions: self.get_positions(account_id).len() as u32,
+        }
+    }
+
+    // Money sent and not yet reported: withdrawals waiting on their callback, and fee legs that are pending or unresolved.
+    pub fn in_flight(&self) -> InFlightView {
+        InFlightView {
+            withdrawals: U128(self.pending_withdrawals_total),
+            withdrawal_count: self.pending_withdrawal_count,
+            legs: U128(self.legs_in_flight_total),
+            leg_count: self.legs_in_flight_count,
+        }
     }
 
     pub fn get_balance(&self, account_id: AccountId) -> U128 {
@@ -1794,6 +1960,11 @@ impl StorageManagement for MarketContract {
             self.balances.get(&who).copied().unwrap_or(0) == 0,
             "withdraw your balance first"
         );
+        // A failed withdrawal credits the balance back, which would be stranded if the account had already left.
+        require!(
+            self.pending_by_account.get(&who).copied().unwrap_or(0) == 0,
+            "a withdrawal is still pending"
+        );
         self.accounts.remove(&who);
         self.balances.remove(&who);
         emit("unregistered", json!({ "account": who }));
@@ -1983,6 +2154,8 @@ impl MarketContract {
             LegStatus::Refused
         };
         let (to, amount) = (leg.to.clone(), leg.amount.0);
+        self.legs_in_flight_total -= amount;
+        self.legs_in_flight_count -= 1;
         match kind {
             LegKind::Council => self.revenue_due += back,
             LegKind::Treasury => self.treasury_due += back,
@@ -2354,7 +2527,13 @@ mod tests {
         let balances: u128 = USERS.iter().chain([&OWNER]).map(|u| c.get_balance(acct(u)).0).sum();
         assert_eq!(c.locked_total, locked, "locked_total drifted from the markets");
         assert_eq!(
-            locked + balances + c.fees + c.revenue_due + c.treasury_due + c.revenue_unresolved,
+            locked
+                + balances
+                + c.fees
+                + c.revenue_due
+                + c.treasury_due
+                + c.revenue_unresolved
+                + c.pending_withdrawals_total,
             total_in,
             "money was created or lost"
         );
@@ -4143,9 +4322,10 @@ mod tests {
         let _ = c.withdraw(U128(2_000_000));
         assert_eq!(
             c.total_owed().0,
-            total_in + 5_000_000 + 41,
-            "a withdrawal stops being owed once it is taken from the balance"
+            total_in + 7_000_000 + 41,
+            "a withdrawal in flight is still owed until the verifier confirms it"
         );
+        assert_eq!(c.owed_breakdown().total.0, c.total_owed().0);
     }
 
     #[test]
@@ -4155,9 +4335,9 @@ mod tests {
         let _ = receive(&mut c, acct(USERS[0]), U128(7_000_000), "deposit".to_string());
         act_as(USERS[0], 4);
         let _ = c.withdraw(U128(7_000_000));
-        assert_eq!(c.total_owed().0, total_in);
+        assert_eq!(c.total_owed().0, total_in + 7_000_000);
         act_as("market.near", 5);
-        c.on_withdraw(acct(USERS[0]), U128(7_000_000), Err(PromiseError::Failed));
+        c.on_withdraw(U64(1), Err(PromiseError::Failed));
         assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
         assert_eq!(c.total_owed().0, total_in + 7_000_000);
         assert_eq!(last_event()["event"], "withdraw_failed");
@@ -4171,9 +4351,417 @@ mod tests {
         act_as(USERS[0], 4);
         let _ = c.withdraw(U128(7_000_000));
         act_as("market.near", 5);
-        c.on_withdraw(acct(USERS[0]), U128(7_000_000), Ok(()));
+        c.on_withdraw(U64(1), Ok(()));
         assert_eq!(c.get_balance(acct(USERS[0])).0, 0);
         assert_eq!(c.total_owed().0, total_in);
+    }
+
+    // ---- withdrawals in flight ----------------------------------------------------------------------------------
+
+    fn deposit(c: &mut MarketContract, who: &str, amount: u128) {
+        act_as(VERIFIER, 3);
+        let _ = receive(c, acct(who), U128(amount), "deposit".to_string());
+    }
+
+    fn json_of<T: near_sdk::serde::Serialize>(v: &T) -> near_sdk::serde_json::Value {
+        near_sdk::serde_json::to_value(v).unwrap()
+    }
+
+    #[test]
+    fn a_withdrawal_writes_its_record_and_emits_the_event_with_an_id() {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        let e = last_event();
+        assert_eq!(e["event"], "withdraw");
+        assert_eq!(
+            e["data"],
+            near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1" })
+        );
+        let w = c.withdrawals.get(&1).unwrap();
+        assert_eq!((w.account.as_str(), w.amount.0, w.at.0), (USERS[0], 3_000_000, 4));
+        assert_eq!(
+            (c.pending_withdrawals_total, c.pending_withdrawal_count),
+            (3_000_000, 1)
+        );
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 4_000_000);
+        assert_eq!(c.total_owed().0, total_in + 7_000_000);
+        act_as(USERS[0], 5);
+        let _ = c.withdraw(U128(1));
+        assert_eq!(last_event()["data"]["id"], "2");
+    }
+
+    #[test]
+    fn a_confirmed_withdrawal_leaves_no_record_and_emits_withdraw_confirmed() {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Ok(()));
+        let e = last_event();
+        assert_eq!(e["event"], "withdraw_confirmed");
+        assert_eq!(
+            e["data"],
+            near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1" })
+        );
+        assert!(c.withdrawals.get(&1).is_none());
+        assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 4_000_000);
+        assert_eq!(c.total_owed().0, total_in + 4_000_000);
+    }
+
+    #[test]
+    fn a_failed_withdrawal_credits_back_and_emits_withdraw_failed_with_the_id() {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Err(PromiseError::Failed));
+        let e = last_event();
+        assert_eq!(e["event"], "withdraw_failed");
+        assert_eq!(
+            e["data"],
+            near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1" })
+        );
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
+        assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+        assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 0);
+        assert_eq!(c.total_owed().0, total_in + 7_000_000);
+    }
+
+    #[test]
+    fn a_repeated_or_unknown_callback_changes_nothing() {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Err(PromiseError::Failed));
+        for (id, result) in [
+            (1, Err(PromiseError::Failed)),
+            (1, Ok(())),
+            (99, Err(PromiseError::Failed)),
+        ] {
+            act_as("market.near", 6);
+            c.on_withdraw(U64(id), result);
+            assert!(near_sdk::test_utils::get_logs().is_empty());
+            assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
+            assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+            assert_eq!(c.total_owed().0, total_in + 7_000_000);
+        }
+    }
+
+    #[test]
+    fn two_withdrawals_in_flight_keep_their_own_ids_and_amounts() {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        deposit(&mut c, USERS[1], 5_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        act_as(USERS[1], 4);
+        let _ = c.withdraw(U128(2_000_000));
+        assert_eq!(last_event()["data"]["id"], "2");
+        assert_eq!(
+            (c.pending_withdrawals_total, c.pending_withdrawal_count),
+            (5_000_000, 2)
+        );
+        assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 3_000_000);
+        assert_eq!(c.get_account(acct(USERS[1])).pending_withdrawals.0, 2_000_000);
+        assert_eq!(c.total_owed().0, total_in + 12_000_000);
+        act_as("market.near", 5);
+        c.on_withdraw(U64(2), Err(PromiseError::Failed));
+        assert_eq!(c.get_balance(acct(USERS[1])).0, 5_000_000);
+        assert_eq!(
+            (c.pending_withdrawals_total, c.pending_withdrawal_count),
+            (3_000_000, 1)
+        );
+        assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 3_000_000);
+        assert_eq!(c.withdrawals.get(&1).unwrap().amount.0, 3_000_000);
+        c.on_withdraw(U64(1), Ok(()));
+        assert_eq!(c.pending_withdrawals_total, 0);
+        assert_eq!(c.total_owed().0, total_in + 9_000_000);
+    }
+
+    #[test]
+    fn a_callback_pays_the_stored_amount_and_account() {
+        let (mut c, _) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Err(PromiseError::Failed));
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
+        assert_eq!(c.get_balance(acct(USERS[1])).0, 0);
+    }
+
+    // ---- reconcile_withdrawal: the owner decides when the callback never came ---------------------------------
+
+    const WITHDRAWN_AT: u64 = 4;
+    const WITHDRAWAL_DECIDABLE_AT: u64 = WITHDRAWN_AT + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE;
+
+    // One user holds 7 000 000 and has 3 000 000 of it in flight as withdrawal 1.
+    fn a_stuck_withdrawal() -> (MarketContract, u128) {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], WITHDRAWN_AT);
+        let _ = c.withdraw(U128(3_000_000));
+        (c, total_in + 7_000_000)
+    }
+
+    #[test]
+    fn only_the_owner_reconciles_a_withdrawal() {
+        let (mut c, total) = a_stuck_withdrawal();
+        act_as(OWNER, 7);
+        c.set_operator(acct("ops.near"));
+        for who in ["ops.near", USERS[0], USERS[1]] {
+            act_as(who, WITHDRAWAL_DECIDABLE_AT);
+            let caught =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.reconcile_withdrawal(U64(1), false)));
+            assert!(caught.is_err(), "{who} must be refused");
+        }
+        assert_eq!(
+            (c.pending_withdrawals_total, c.pending_withdrawal_count),
+            (3_000_000, 1)
+        );
+        assert_conserved(&c, total);
+    }
+
+    #[test]
+    fn an_unknown_withdrawal_id_is_refused() {
+        let (mut c, _) = a_stuck_withdrawal();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        assert!(refusal(|| c.reconcile_withdrawal(U64(9), true)).contains("no withdrawal is pending with that id"));
+    }
+
+    #[test]
+    fn a_withdrawal_is_decided_exactly_at_the_wait_and_not_before() {
+        let (mut c, _) = a_stuck_withdrawal();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT - 1);
+        assert_eq!(
+            refusal(|| c.reconcile_withdrawal(U64(1), true)),
+            "wait 60 minutes after the withdrawal before reconciling"
+        );
+        assert_eq!(c.pending_withdrawals_total, 3_000_000);
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        c.reconcile_withdrawal(U64(1), true);
+        assert_eq!(c.pending_withdrawals_total, 0);
+    }
+
+    #[test]
+    fn a_withdrawal_that_was_paid_is_dropped_and_no_longer_owed() {
+        let (mut c, total) = a_stuck_withdrawal();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        c.reconcile_withdrawal(U64(1), true);
+        let e = last_event();
+        assert_eq!(e["event"], "withdrawal_reconciled");
+        assert_eq!(
+            e["data"],
+            near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1", "paid": true })
+        );
+        assert!(c.withdrawals.get(&1).is_none());
+        assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+        assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 0);
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 4_000_000);
+        assert_eq!(c.total_owed().0, total - 3_000_000);
+        assert_conserved(&c, total - 3_000_000);
+    }
+
+    #[test]
+    fn a_withdrawal_that_never_happened_is_credited_back() {
+        let (mut c, total) = a_stuck_withdrawal();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        c.reconcile_withdrawal(U64(1), false);
+        let e = last_event();
+        assert_eq!(e["event"], "withdrawal_reconciled");
+        assert_eq!(
+            e["data"],
+            near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1", "paid": false })
+        );
+        assert!(c.withdrawals.get(&1).is_none());
+        assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+        assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 0);
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
+        assert_eq!(c.total_owed().0, total);
+        assert_conserved(&c, total);
+    }
+
+    #[test]
+    fn a_withdrawal_cannot_be_reconciled_twice() {
+        let (mut c, _) = a_stuck_withdrawal();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        c.reconcile_withdrawal(U64(1), false);
+        for paid in [false, true] {
+            assert!(refusal(|| c.reconcile_withdrawal(U64(1), paid)).contains("no withdrawal is pending with that id"));
+        }
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
+    }
+
+    #[test]
+    fn a_late_callback_after_a_reconcile_changes_nothing() {
+        for (paid, balance, owed_drop) in [(true, 4_000_000, 3_000_000), (false, 7_000_000, 0)] {
+            let (mut c, total) = a_stuck_withdrawal();
+            act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+            c.reconcile_withdrawal(U64(1), paid);
+            for result in [Ok(()), Err(PromiseError::Failed)] {
+                act_as("market.near", WITHDRAWAL_DECIDABLE_AT + 1);
+                c.on_withdraw(U64(1), result);
+                assert!(near_sdk::test_utils::get_logs().is_empty());
+                assert_eq!(c.get_balance(acct(USERS[0])).0, balance);
+                assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+                assert_eq!(c.total_owed().0, total - owed_drop);
+            }
+            assert_conserved(&c, total - owed_drop);
+        }
+    }
+
+    #[test]
+    fn the_views_report_each_state_and_change_nothing() {
+        let (mut c, total_in) = world();
+        let nothing =
+            near_sdk::serde_json::json!({ "withdrawals": "0", "withdrawal_count": 0, "legs": "0", "leg_count": 0 });
+        assert_eq!(json_of(&c.in_flight()), nothing);
+        assert_eq!(
+            json_of(&c.get_account(acct("stranger.near"))),
+            near_sdk::serde_json::json!({ "registered": false, "available": "0", "pending_withdrawals": "0", "positions": 0 })
+        );
+        assert_eq!(
+            json_of(&c.get_account(acct(USERS[0]))),
+            near_sdk::serde_json::json!({ "registered": true, "available": "0", "pending_withdrawals": "0", "positions": 0 })
+        );
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        let locked = c.locked_total;
+        let fees = c.fees;
+        let expect = |c: &MarketContract, available: u128, pending: u128| {
+            assert_eq!(
+                json_of(&c.get_account(acct(USERS[0]))),
+                near_sdk::serde_json::json!({ "registered": true, "available": available.to_string(),
+                    "pending_withdrawals": pending.to_string(), "positions": 1 })
+            );
+        };
+        expect(&c, 7_000_000, 0);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        expect(&c, 4_000_000, 3_000_000);
+        assert_eq!(
+            json_of(&c.in_flight()),
+            near_sdk::serde_json::json!({ "withdrawals": "3000000", "withdrawal_count": 1, "legs": "0", "leg_count": 0 })
+        );
+        let expected = near_sdk::serde_json::json!({
+            "balances": "4000000", "locked": locked.to_string(), "fees": fees.to_string(), "revenue_due": "0",
+            "treasury_due": "0", "unresolved": "0", "pending_withdrawals": "3000000",
+            "total": (total_in + 17_000_000).to_string() });
+        assert_eq!(json_of(&c.owed_breakdown()), expected);
+        assert_eq!(c.owed_breakdown().total.0, c.total_owed().0);
+        let (balances, pending, count) = (
+            c.balances_total,
+            c.pending_withdrawals_total,
+            c.pending_withdrawal_count,
+        );
+        let _ = (c.in_flight(), c.get_account(acct(USERS[0])), c.owed_breakdown());
+        assert_eq!(
+            (
+                c.balances_total,
+                c.pending_withdrawals_total,
+                c.pending_withdrawal_count
+            ),
+            (balances, pending, count)
+        );
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Ok(()));
+        expect(&c, 4_000_000, 0);
+        assert_eq!(json_of(&c.in_flight()), nothing);
+        assert_eq!(c.owed_breakdown().pending_withdrawals.0, 0);
+        assert_eq!(c.owed_breakdown().total.0, total_in + 14_000_000);
+        act_as(USERS[0], 6);
+        let _ = c.withdraw(U128(1_000_000));
+        act_as("market.near", 7);
+        c.on_withdraw(U64(2), Err(PromiseError::Failed));
+        expect(&c, 4_000_000, 0);
+        assert_eq!(json_of(&c.in_flight()), nothing);
+    }
+
+    #[test]
+    fn in_flight_counts_fee_legs_that_are_pending_or_unresolved() {
+        let mut c = after_a_sweep();
+        let sweep = c.get_sweep(U64(1)).unwrap();
+        let (council, treasury) = (sweep.council.amount.0, sweep.treasury.amount.0);
+        assert!(council > 0 && treasury > 0);
+        let legs = |c: &MarketContract| {
+            let v = c.in_flight();
+            (v.legs.0, v.leg_count)
+        };
+        assert_eq!(legs(&c), (council + treasury, 2));
+        act_as("market.near", 6);
+        c.on_treasury_sent(U64(1), Ok(()));
+        assert_eq!(legs(&c), (council, 1));
+        c.on_revenue_sent(U64(1), Err(PromiseError::Failed));
+        assert_eq!(legs(&c), (council, 1), "an unresolved leg is still in flight");
+        assert_eq!(c.owed_breakdown().unresolved.0, council);
+        assert_eq!(c.owed_breakdown().total.0, c.total_owed().0);
+        act_as("market.near", SETTLE_AT);
+        c.on_council_checked(U64(1), Ok(None));
+        assert_eq!(legs(&c), (0, 0));
+        assert_eq!(c.in_flight().withdrawals.0, 0, "fee legs never show as withdrawals");
+        assert_eq!(c.owed_breakdown().pending_withdrawals.0, 0);
+    }
+
+    // A withdrawal's callback can succeed, fail, or never come. Whatever the mix, total_owed moves only when a callback
+    // confirms, and money in flight stays in pending until one reports.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        #[test]
+        fn withdrawals_with_any_mix_of_callbacks_never_create_or_lose_money(
+            ops in proptest::collection::vec((0usize..3, 1u128..3_000_000, 0u8..3), 1..30)
+        ) {
+            let (mut c, total_in) = world();
+            let mut total_in = total_in;
+            for u in USERS {
+                deposit(&mut c, u, 20_000_000);
+                total_in += 20_000_000;
+            }
+            let mut confirmed = 0u128;
+            let mut never: u128 = 0;
+            let mut unreported = Vec::new();
+            let mut next_id = 1u64;
+            for (user, amount, fate) in ops {
+                let held = c.get_balance(acct(USERS[user])).0;
+                let amount = amount.min(held);
+                if amount == 0 {
+                    continue;
+                }
+                let before = c.total_owed().0;
+                act_as(USERS[user], 4);
+                let _ = c.withdraw(U128(amount));
+                prop_assert_eq!(c.total_owed().0, before);
+                prop_assert_eq!(c.get_balance(acct(USERS[user])).0, held - amount);
+                let id = next_id;
+                next_id += 1;
+                act_as("market.near", 5);
+                match fate {
+                    0 => {
+                        c.on_withdraw(U64(id), Ok(()));
+                        confirmed += amount;
+                    }
+                    1 => c.on_withdraw(U64(id), Err(PromiseError::Failed)),
+                    _ => {
+                        never += amount;
+                        unreported.push(id);
+                    }
+                }
+                prop_assert_eq!(c.pending_withdrawals_total, never);
+                prop_assert_eq!(c.total_owed().0, total_in - confirmed);
+                assert_conserved(&c, total_in - confirmed);
+            }
+            let held: u128 = unreported.iter().map(|id| c.withdrawals.get(id).unwrap().amount.0).sum();
+            prop_assert_eq!(held, never);
+            prop_assert_eq!(c.pending_withdrawal_count as usize, unreported.len());
+        }
     }
 
     // ---- payouts are verifier calls to accounts the records name ---------------------------------------------
@@ -5422,6 +6010,70 @@ mod tests {
         act_as(USERS[0], CLOSE + 2);
         let paid = c.redeem(U64(0));
         let _ = c.withdraw(paid);
+        act_as("market.near", CLOSE + 3);
+        c.on_withdraw(U64(1), Ok(()));
+        act_as(USERS[0], CLOSE + 4);
+        assert!(c.storage_unregister(None));
+        assert!(!c.is_registered(acct(USERS[0])));
+    }
+
+    // A user with nothing but one withdrawal of their whole balance in flight.
+    fn leaving_with_a_withdrawal_in_flight() -> MarketContract {
+        let (mut c, _) = world();
+        deposit(&mut c, USERS[0], 3_000_000);
+        act_as(USERS[0], WITHDRAWN_AT);
+        let _ = c.withdraw(U128(3_000_000));
+        c
+    }
+
+    #[test]
+    fn an_account_cannot_leave_while_a_withdrawal_is_in_flight() {
+        let mut c = leaving_with_a_withdrawal_in_flight();
+        act_as(USERS[0], 5);
+        assert!(refusal(|| {
+            c.storage_unregister(None);
+        })
+        .contains("a withdrawal is still pending"));
+        assert!(c.is_registered(acct(USERS[0])));
+    }
+
+    #[test]
+    fn an_account_can_leave_after_the_withdrawal_is_confirmed() {
+        let mut c = leaving_with_a_withdrawal_in_flight();
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Ok(()));
+        act_as(USERS[0], 6);
+        assert!(c.storage_unregister(None));
+        assert!(!c.is_registered(acct(USERS[0])));
+    }
+
+    #[test]
+    fn a_failed_withdrawal_credits_back_and_the_account_still_leaves_only_empty() {
+        let mut c = leaving_with_a_withdrawal_in_flight();
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Err(PromiseError::Failed));
+        act_as(USERS[0], 6);
+        assert!(refusal(|| {
+            c.storage_unregister(None);
+        })
+        .contains("withdraw your balance first"));
+        assert!(refusal(|| {
+            c.storage_unregister(Some(true));
+        })
+        .contains("force is not supported"));
+        let _ = c.withdraw(U128(3_000_000));
+        act_as("market.near", 7);
+        c.on_withdraw(U64(2), Ok(()));
+        act_as(USERS[0], 8);
+        assert!(c.storage_unregister(None));
+    }
+
+    #[test]
+    fn an_account_can_leave_after_the_owner_reconciles_its_withdrawal() {
+        let mut c = leaving_with_a_withdrawal_in_flight();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        c.reconcile_withdrawal(U64(1), true);
+        act_as(USERS[0], WITHDRAWAL_DECIDABLE_AT + 1);
         assert!(c.storage_unregister(None));
         assert!(!c.is_registered(acct(USERS[0])));
     }
