@@ -47,29 +47,31 @@ export function CouncilView() {
 
       <Membership />
 
-      <div id="cases" className="tribunal-layout taste-case-layout council-cases">
+      <div id="cases" className="council-cases">
         <section className="case-docket" aria-labelledby="cases-title">
           <div className="docket-heading"><h2 id="cases-title">Cases and results</h2><span className="num docket-count">{data ? `${cases.length} recorded cases` : "Awaiting records"}</span></div>
           <p className="council-case-intro">Read the evidence, follow a challenge, or see how a market was settled.</p>
           {loading && !data && <><p role="status" className="sr-only">Loading case records…</p><div className="case-skeleton" aria-hidden="true">{[0, 1, 2].map(i => <div key={i} className="skeleton" />)}</div></>}
           {error && <p role="alert" className="text-muted">Could not load cases. <button className="btn btn-ghost btn-sm" onClick={reload}>Retry</button></p>}
           {data && cases.length === 0 && <p className="case-empty">No case records yet. Proposed answers, disputed outcomes and final results will appear here.</p>}
-          <ul className="case-list">{cases.map(({ market, record }, i) => {
-            const outcome = record?.final_outcome ? `Result: ${record.final_outcome.toUpperCase()}` : record?.stage === "disputed" ? "In dispute" : "Answer proposed";
-            return <li key={market.id} className="enter" style={{ "--i": i } as React.CSSProperties}><Link href={`/market?id=${market.id}`} data-stage={record?.stage}>
-              {record?.final_outcome ? <MarketSeal hash={market.rule_hash} id={market.id} tone="council" className="case-seal" /> : <span className="case-pending" data-stage={record?.stage} aria-hidden="true" />}<span className="case-number mono">CASE / {market.id.padStart(3, "0")}</span><h3>{market.title}</h3>
-              <div className="case-meta"><StateBadge status={market.status} caseStage={record?.stage} /><span>{record?.votes.length ?? 0} revealed votes</span></div>
-              <span className="case-outcome" data-final={record?.final_outcome ? true : undefined}>{outcome}<ArrowRight size={16} /></span>
-            </Link></li>;
-          })}</ul>
+          <div className="case-docket-body">
+            <ul className="case-list">{cases.map(({ market, record }, i) => {
+              const outcome = record?.final_outcome ? `Result: ${record.final_outcome.toUpperCase()}` : record?.stage === "disputed" ? "In dispute" : "Answer proposed";
+              return <li key={market.id} className="enter" style={{ "--i": i } as React.CSSProperties}><Link href={`/market?id=${market.id}`} data-stage={record?.stage}>
+                {record?.final_outcome ? <MarketSeal hash={market.rule_hash} id={market.id} tone="council" className="case-seal" /> : <span className="case-pending" data-stage={record?.stage} aria-hidden="true" />}<span className="case-number mono">CASE / {market.id.padStart(3, "0")}</span><h3>{market.title}</h3>
+                <div className="case-meta"><StateBadge status={market.status} caseStage={record?.stage} /><span>{record?.votes.length ?? 0} revealed votes</span></div>
+                <span className="case-outcome" data-final={record?.final_outcome ? true : undefined}>{outcome}<ArrowRight size={16} /></span>
+              </Link></li>;
+            })}</ul>
+            <aside className="tribunal-sidebar" aria-labelledby="jury-title">
+              <CouncilSeal className="council-seal" />
+              <h2 id="jury-title">How juries are selected</h2>
+              <p>Jurors are selected from eligible staked seats. There is no single permanent panel deciding every market.</p>
+              <p>Each case has its own deadlines. Once votes are revealed, the market page shows the jurors and their reasons.</p>
+              <a href="#process" className="ritual-link">Follow the dispute process <ArrowDown size={16} /></a>
+            </aside>
+          </div>
         </section>
-        <aside className="tribunal-sidebar" aria-labelledby="jury-title">
-          <CouncilSeal className="council-seal" />
-          <h2 id="jury-title">How juries are selected</h2>
-          <p>Jurors are selected from eligible staked seats. There is no single permanent panel deciding every market.</p>
-          <p>Each case has its own deadlines. Once votes are revealed, the market page shows the jurors and their reasons.</p>
-          <a href="#process" className="ritual-link">Follow the dispute process <ArrowDown size={16} /></a>
-        </aside>
       </div>
 
       <section id="process" className="council-journey" aria-labelledby="process-title">

@@ -9,7 +9,7 @@
 /* Main column and a sticky ticket; on phones the ticket follows the price. */
 .market-detail-layout {
   display: grid; grid-template-columns: minmax(0, 1fr) var(--ticket-w); column-gap: clamp(2rem, 4vw, 4rem); row-gap: var(--s-7);
-  grid-template-areas: "head ticket" "price ticket" "body ticket";
+  grid-template-areas: "head head" "price ticket" "body ticket";
   align-items: start; margin-top: var(--s-5);
 }
 .market-detail-header { grid-area: head; display: flex; align-items: flex-start; gap: var(--s-5); min-width: 0; }

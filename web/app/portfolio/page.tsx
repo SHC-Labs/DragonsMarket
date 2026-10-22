@@ -35,7 +35,7 @@ function Title() {
 
 function Balance({ label, value, children, tone }: { label: string; value: bigint; children?: React.ReactNode; tone: "wallet" | "market" }) {
   return <div className="balance-tile" data-tone={tone}>
-    <Embers height={0.85} intensity={0.8} spark={tone === "market" ? "--council" : "--yes"} smoke={tone === "market" ? "--council" : "--accent"} />
+    <Embers height={0.85} intensity={0.7} speed={0.16} spark={tone === "market" ? "--council" : "--yes"} smoke={tone === "market" ? "--council" : "--accent"} />
     <dt><Wallet size={18} variant="Bulk" />{label}</dt>
     <dd>
       <span className="balance-figure" aria-hidden="true"><CountUp value={Number(value) / 1e6} format={money} className="num" duration={1100} /> <span className="balance-unit">{config.tokenSymbol}</span></span>

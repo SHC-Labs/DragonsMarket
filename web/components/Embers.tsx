@@ -16,22 +16,23 @@ function rgb(variable: string, from: Element): [number, number, number] {
 }
 
 // Dragon's breath: sparks and smoke rising behind a section, drawn by canvas-ui's Blaze shader over the live page.
-// Dark theme only; Blaze itself stops when off screen and renders a still frame under reduced motion.
-export function Embers({ height = 0.75, intensity = 1, spark = "--yes", smoke = "--accent" }: { height?: number; intensity?: number; spark?: string; smoke?: string }) {
+// Screened onto dark grounds, multiplied onto light paper; Blaze stops off screen and renders a still frame under reduced motion.
+export function Embers({ height = 0.75, intensity = 1, speed = 0.55, spark = "--yes", smoke = "--accent" }: { height?: number; intensity?: number; speed?: number; spark?: string; smoke?: string }) {
   const theme = useSyncExternalStore(subscribe, () => document.documentElement.dataset.theme || "dark", () => "light");
   const box = useRef<HTMLDivElement>(null);
   const source = useRef<HTMLCanvasElement>(null);
   const output = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
-    if (theme !== "dark" || !box.current || !source.current || !output.current) return;
+    if (!box.current || !source.current || !output.current) return;
+    const light = theme === "light";
     let blaze: BlazeInstance | null = null;
     try {
       blaze = createBlaze(
         { source: source.current, content: box.current, output: output.current },
         {
-          height, distortion: 0, speed: 0.55, sparks: 0.55 * intensity, sparkDensity: 1.4, sparkSize: 1.25, layers: 6,
-          smoke: 0.35 * intensity, glow: 0.9 * intensity, sparkColor: rgb(spark, box.current), smokeColor: rgb(smoke, box.current),
+          height, distortion: 0, speed, sparks: (light ? 0.9 : 0.55) * intensity, sparkDensity: 1.4, sparkSize: light ? 1.5 : 1.25, layers: 6,
+          smoke: (light ? 0.18 : 0.35) * intensity, glow: (light ? 0.35 : 0.9) * intensity, sparkColor: rgb(spark, box.current), smokeColor: rgb(smoke, box.current),
         },
         { overlayOnly: true },
       );
@@ -39,10 +40,9 @@ export function Embers({ height = 0.75, intensity = 1, spark = "--yes", smoke = 
       blaze = null; // No WebGL2: the section simply has no embers.
     }
     return () => blaze?.destroy();
-  }, [theme, height, intensity, spark, smoke]);
+  }, [theme, height, intensity, speed, spark, smoke]);
 
-  if (theme !== "dark") return null;
-  return <div ref={box} className="embers" aria-hidden="true">
+  return <div ref={box} className="embers" data-theme-mode={theme} aria-hidden="true">
     <canvas ref={source} hidden />
     <canvas ref={output} className="embers-canvas" />
   </div>;
