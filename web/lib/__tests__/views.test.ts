@@ -79,7 +79,7 @@ describe("new refusal copy", () => {
     expect(sells).not.toBe(friendlyError("paused", "r"));
   });
   it("explains a pending withdrawal", () => {
-    expect(friendlyError("a withdrawal is still pending", "r")).toContain("withdrawal is still on its way");
+    expect(friendlyError("a withdrawal is still pending", "r")).toContain("withdrawal is pending");
   });
   it("explains a fee sweep inside the waiting time, for both wordings of the refusal", () => {
     const copy = "Fees were swept a moment ago. Try again after the waiting time has passed.";
@@ -94,6 +94,6 @@ describe("new refusal copy", () => {
 describe("first release wallet rule", () => {
   it("states NEAR wallets only", async () => {
     const { WALLET_RULE_V1 } = await vi.importActual<typeof import("../config")>("../config");
-    expect(WALLET_RULE_V1).toBe("Version 1 works with NEAR wallets only. Wallets from other chains arrive in version 2.");
+    expect(WALLET_RULE_V1).toBe("This version connects NEAR wallets. Support for wallets on other chains is planned.");
   });
 });

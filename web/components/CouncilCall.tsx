@@ -16,8 +16,8 @@ const DRAGONS = [
 export function CouncilCall() {
   return <section className="council-call" aria-labelledby="council-call-title">
     <div className="council-call-copy">
-      <h2 id="council-call-title">When an answer is challenged, the dragons decide.</h2>
-      <p>Disputed results go to a jury drawn from staked Dragon NFT seats. Every vote and its reason joins the public case record.</p>
+      <h2 id="council-call-title">A challenged answer needs a jury.</h2>
+      <p>We are building a Council of Dragon jurors to review challenged results against the market rules. Eligible staked seats can be selected, with revealed votes and reasons recorded in public.</p>
       <Link href="/council" className="text-link">Meet the Council <ArrowRight size={16} /></Link>
     </div>
     <ul className="council-call-art">

@@ -32,7 +32,7 @@ const process = [
 const questions = [
   ["Do I need an NFT to trade?", "You can browse without an NFT. When trading opens, you will also be able to trade without joining the Council. Dragon NFTs are for Council membership."],
   ["Can I mint or stake here now?", "Minting and staking are not open yet. We will publish the supply, price, launch date and final participation terms before launch."],
-  ["Does every NFT holder earn?", "Only eligible staked seats earn a share of Council fees. Quarterly payouts are planned, and we will publish final claim terms before launch. Earnings vary and are not guaranteed."],
+  ["Does every NFT holder earn?", "Fee sharing is planned for eligible staked seats. We plan quarterly claims and will publish final participation terms before the mint opens. An unstaked NFT does not earn a share, and the amount depends on actual fees."],
   ["Is this the whole collection?", "These are a few Dragons from the larger collection."],
   ["What does Void mean?", "Void means the market is cancelled. Yes pays the published time-weighted closing price; No pays one token minus that price. The payout is not fixed at half a token."],
   ["Where can I read a jury's decision?", "Select a case under Cases and results. Its market page shows the evidence, revealed votes, reasons and final result in the Resolution section."],

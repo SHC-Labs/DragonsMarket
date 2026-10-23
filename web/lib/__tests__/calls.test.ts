@@ -110,7 +110,7 @@ describe("council calls", () => {
 describe("contract refusals", () => {
   it("explains the new strings", () => {
     expect(friendlyError("that market contract is not allowed", "r")).toBe("This market is not served by the oracle.");
-    expect(friendlyError("bad market account", "r")).toContain("malformed");
+    expect(friendlyError("bad market account", "r")).toContain("could not read this request");
     expect(friendlyError("send exactly the bond", "r")).toBe("Send exactly the bond amount.");
     expect(friendlyError("the panel deadline passed", "r")).toBe("The jury deadline has passed.");
     expect(friendlyError("that quarter is not final", "r")).toContain("still open");

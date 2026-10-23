@@ -36,4 +36,4 @@ export const isConfigured = Boolean(config.marketId && config.oracleId && config
 export const isTestMoney = network !== "mainnet";
 
 // Shown before funding. Plain text for the interface to display.
-export const WALLET_RULE_V1 = "Version 1 works with NEAR wallets only. Wallets from other chains arrive in version 2.";
+export const WALLET_RULE_V1 = "This version connects NEAR wallets. Support for wallets on other chains is planned.";
