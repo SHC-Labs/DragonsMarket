@@ -207,8 +207,10 @@ npm run e2e
 ```
 
 `build:dev` exports the website against the running sandbox. Playwright serves that export on
-port 3390. `npm run serve` serves it separately. The palette source is `web/design/palette.json`;
-`npm run tokens` generates the stylesheet and checks its configured contrast pairs.
+port 3390. `npm run serve` serves it separately. Every design value lives in `web/design/tokens.json`;
+`npm run tokens` generates the stylesheet and the DESIGN.md front matter and checks contrast.
+`npm run check:brand` fails on code that bypasses the tokens. The brand guide is
+[design/BRAND.md](design/BRAND.md).
 
 The project is under development. Production settlement, the complete funding and withdrawal
 flow, an external security audit and launch requirements remain open work.

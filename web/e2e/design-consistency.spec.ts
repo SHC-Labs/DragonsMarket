@@ -18,7 +18,7 @@ test("main pages start with content and keep Dragons Market as the shared brand"
       const padding = await page.locator(".page-content").evaluate(e => getComputedStyle(e).paddingTop);
       contentPadding ??= padding;
       expect(padding).toBe(contentPadding);
-      expect(await page.locator("header .brand-wordmark").first().evaluate(e => getComputedStyle(e).fontFamily)).toContain("Sora");
+      expect(await page.locator("header .brand-wordmark").first().evaluate(e => getComputedStyle(e).maskImage)).toContain("/brand/wordmark.svg");
       expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);
     }
     await page.goto("/council");

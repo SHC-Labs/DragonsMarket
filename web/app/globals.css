@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./tokens.generated.css";
 @import "./tokens.css";
 @import "./theme.css";
 @import "./styles/base.css";
@@ -13,3 +14,4 @@
 @import "./styles/dialogs.css";
 @import "./styles/legal.css";
 @import "./styles/showreel.css";
+@import "./styles/brand.css";
