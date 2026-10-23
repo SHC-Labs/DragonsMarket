@@ -1150,3 +1150,103 @@ pub async fn relock_seat(w: &World, token_id: &str, case: u64) -> anyhow::Result
     w.worker.patch_state(w.council.id(), &jury_key, &jury).await?;
     Ok(())
 }
+
+pub fn tg(g: Gas) -> f64 {
+    g.as_gas() as f64 / 1e12
+}
+
+// Gas burnt by the receipts that ran on `who`, in TGas. A transaction's own total also holds the verifier and every other contract.
+pub fn burnt_on(r: &near_workspaces::result::ExecutionFinalResult, who: &AccountId) -> f64 {
+    r.receipt_outcomes()
+        .iter()
+        .filter(|o| &o.executor_id == who)
+        .map(|o| tg(o.gas_burnt))
+        .sum()
+}
+
+// The account's storage usage in bytes.
+pub async fn storage_used(w: &World, who: &AccountId) -> anyhow::Result<u64> {
+    Ok(w.worker.view_account(who).await?.storage_usage)
+}
+
+// Gives a contract account enough NEAR to hold a very large state.
+pub async fn top_up(w: &World, who: &AccountId) -> anyhow::Result<()> {
+    let details = w.worker.view_account(who).await?;
+    w.worker
+        .patch(who)
+        .account(near_workspaces::AccountDetailsPatch::from(details).balance(NearToken::from_near(3_000)))
+        .transact()
+        .await?;
+    Ok(())
+}
+
+// A funded sub-account of the sandbox root whose whole id is `id_len` characters long, named from `tag`.
+pub async fn account_with_id_len(w: &World, id_len: usize, tag: &str) -> anyhow::Result<Account> {
+    let name_len = id_len - ".test.near".len();
+    let name = format!("{:a<name_len$}", tag);
+    anyhow::ensure!(name.len() == name_len, "the tag is longer than the name");
+    let account = w
+        .worker
+        .root_account()?
+        .create_subaccount(&name)
+        .initial_balance(NearToken::from_near(20))
+        .transact()
+        .await?
+        .into_result()?;
+    anyhow::ensure!(
+        account.id().as_str().len() == id_len,
+        "wrong id length: {}",
+        account.id()
+    );
+    Ok(account)
+}
+
+// Creates `count` markets that close in 30 days and seeds each with 3 USD from the owner's Intents balance, which must already
+// hold enough. Returns the id of the first. Creation goes four to a transaction at 70 TGas each.
+pub async fn bulk_seeded_markets(w: &World, count: u64, yes_price: Option<&str>) -> anyhow::Result<u64> {
+    use near_workspaces::operations::Function;
+    const PER_CALL: u64 = 70;
+    const BATCH: u64 = 4;
+    let first: u64 = w.market.view("config").await?.json::<serde_json::Value>()?["markets"]
+        .as_str()
+        .map_or(0, |s| s.parse().unwrap_or(0));
+    let mut made = 0;
+    while made < count {
+        let take = BATCH.min(count - made);
+        let close_at = now(&w.worker).await + 30 * 24 * 3_600 * 1_000_000_000;
+        let mut create = w.owner.batch(w.market.id());
+        let mut seed = w.owner.batch(w.verifier.id());
+        for i in 0..take {
+            let id = first + made + i;
+            create = create.call(
+                Function::new("create_market")
+                    .args_json(json!({
+                        "title": format!("Bulk market number {id}"), "rule_text": "Resolves Yes if the test says so.",
+                        "resolution_source": "https://example.com/source", "void_policy": "Void if the test is cancelled.",
+                        "category": "world", "subcategory": "science",
+                        "close_at": close_at.to_string(), "resolve_by": (close_at + 3_600 * 1_000_000_000).to_string()
+                    }))
+                    .gas(Gas::from_tgas(PER_CALL)),
+            );
+            let msg = match yes_price {
+                Some(p) => format!("seed:{id}:{p}"),
+                None => format!("seed:{id}"),
+            };
+            seed = seed.call(
+                Function::new("mt_transfer_call")
+                    .args_json(json!({ "receiver_id": w.market.id(), "token_id": token_id(w),
+                                        "amount": (3 * USD).to_string(), "msg": msg }))
+                    .deposit(NearToken::from_yoctonear(1))
+                    .gas(Gas::from_tgas(PER_CALL)),
+            );
+        }
+        create.transact().await?.into_result()?;
+        seed.transact().await?.into_result()?;
+        made += take;
+    }
+    anyhow::ensure!(
+        market_json(w, first + count - 1).await["seeded"] == true,
+        "the last bulk market was not seeded"
+    );
+    Ok(first)
+}
