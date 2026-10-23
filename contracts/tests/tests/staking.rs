@@ -189,7 +189,7 @@ async fn a_drawn_seat_cannot_leave_until_its_case_is_final() -> anyhow::Result<(
     let id = disputed(&w).await?;
     let jury = draw_jury(&w, id).await?;
     for j in &jury {
-        assert_eq!(stake_of(&w, tok(j)).await["serving"], json!(id.to_string()));
+        assert_eq!(stake_of(&w, tok(j)).await["serving"], json!(council_key(&w, id).await));
         refused(
             request_unstake(&w, j, tok(j)).await,
             "this seat is serving on an open case",
@@ -257,7 +257,10 @@ async fn a_draw_picks_only_staked_seats_that_are_not_serving_or_leaving() -> any
     // A new seat makes up the numbers, and the seat on its way out is still not drawn.
     mint_nft(&w, &w.alice, "alice-seat").await?;
     stake(&w, &w.alice, "alice-seat").await?;
-    assert_eq!(event_names(&resolve_draw(&w, second).await?), vec!["jury_drawn"]);
+    assert_eq!(
+        event_names(&resolve_draw(&w, second).await?),
+        vec!["jury_drawn", "jury_drawn"]
+    );
     assert_eq!(
         sorted(&panel(&w, second).await.iter().collect::<Vec<_>>()),
         sorted(&[&j[3], &j[4], &w.alice])

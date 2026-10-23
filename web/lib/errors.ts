@@ -15,6 +15,8 @@ const RULES: [RegExp, string][] = [
   [/not registered with the oracle/i, "This market is not ready yet."],
   [/no liquidity|no such market|cannot buy|cannot sell/i, "This trade is not possible right now."],
   [/the money must come from the sender's own balance|only the verifier can deliver money|exactly one token and amount/i, "That transfer was refused. Send it from your own Intents balance."],
+  [/that market contract is not allowed/i, "This market is not served by the oracle."],
+  [/bad market account/i, "That request was malformed. Reload the page and try again."],
   [/bad min shares|unknown action|bad market id/i, "That request was malformed. Reload the page and try again."],
   [/send exactly the bond/i, "Send exactly the bond amount."],
   [/an answer was already proposed|nothing to challenge/i, "There is no open answer to propose or challenge on this market."],

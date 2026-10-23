@@ -210,18 +210,18 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
             &Contractish::Oracle,
             "register_market",
             json!({ "market_id": "9", "close_at": "1", "resolve_by": "2", "rule_hash": "x" }),
-            "market contract only",
+            "that market contract is not allowed",
         ),
         (
             &Contractish::Oracle,
             "on_drawn",
-            json!({ "market_id": "0", "round": 0 }),
+            json!({ "market": me, "market_id": "0", "round": 0 }),
             "private",
         ),
         (
             &Contractish::Oracle,
             "on_applied",
-            json!({ "market_id": "0" }),
+            json!({ "market": me, "market_id": "0" }),
             "private",
         ),
         (
@@ -256,7 +256,7 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
         ),
         (
             &Contractish::Council,
-            "set_market",
+            "allow_market",
             json!({ "market": me }),
             "owner only",
         ),
@@ -377,12 +377,12 @@ async fn value_moving_methods_need_exactly_one_yocto() -> anyhow::Result<()> {
         (
             w.oracle.id(),
             "commit_vote",
-            json!({ "market_id": "0", "commitment": "0".repeat(64) }),
+            json!({ "market": w.market.id(), "market_id": "0", "commitment": "0".repeat(64) }),
         ),
         (
             w.oracle.id(),
             "reveal_vote",
-            json!({ "market_id": "0", "outcome": "yes", "salt": "s", "reason": "r" }),
+            json!({ "market": w.market.id(), "market_id": "0", "outcome": "yes", "salt": "s", "reason": "r" }),
         ),
         (
             w.council.id(),
@@ -456,8 +456,8 @@ async fn a_token_the_contracts_do_not_trust_cannot_deposit_bond_or_pay_revenue()
         (w.market.id(), "deposit".to_string()),
         (w.market.id(), format!("buy:{id}:yes:1")),
         (w.market.id(), format!("seed:{id}")),
-        (w.oracle.id(), format!("propose:{id}:yes:https://x")),
-        (w.oracle.id(), format!("challenge:{id}:no")),
+        (w.oracle.id(), format!("propose:{}:{id}:yes:https://x", w.market.id())),
+        (w.oracle.id(), format!("challenge:{}:{id}:no", w.market.id())),
         (w.council.id(), "revenue:1".to_string()),
     ] {
         w.dave
@@ -510,13 +510,13 @@ async fn the_token_hooks_cannot_be_called_directly() -> anyhow::Result<()> {
             w.oracle.id(),
             "mt_on_transfer",
             json!({ "sender_id": w.dave.id(), "previous_owner_ids": [w.dave.id()], "token_ids": [token_id(&w)],
-                    "amounts": [BOND.to_string()], "msg": format!("propose:{id}:yes:x") }),
+                    "amounts": [BOND.to_string()], "msg": format!("propose:{}:{id}:yes:x", w.market.id()) }),
             "only the verifier can deliver money",
         ),
         (
             w.oracle.id(),
             "ft_on_transfer",
-            json!({ "sender_id": w.dave.id(), "amount": BOND.to_string(), "msg": format!("propose:{id}:yes:x") }),
+            json!({ "sender_id": w.dave.id(), "amount": BOND.to_string(), "msg": format!("propose:{}:{id}:yes:x", w.market.id()) }),
             "MethodNotFound",
         ),
         (
@@ -626,22 +626,24 @@ async fn malformed_messages_bounce_with_the_money_back() -> anyhow::Result<()> {
     assert_eq!(holdings(&w, w.alice.id()).await + USD, tokens);
     assert_eq!(market_balance(&w, w.alice.id()).await, held + USD);
 
+    let mk = w.market.id();
     for msg in [
-        "",
-        "propose",
-        "propose:0",
-        "propose:0:bogus:x",
-        "propose:abc:yes:x",
-        "challenge",
-        "challenge:abc",
-        "challenge:99999",
-        "challenge:0",
-        "challenge:0:maybe",
-        "price:0:abc:x",
-        "unknown:0",
+        "".to_string(),
+        "propose".to_string(),
+        format!("propose:{mk}:0"),
+        format!("propose:{mk}:0:bogus:x"),
+        format!("propose:{mk}:abc:yes:x"),
+        "propose:0:yes:x".to_string(),
+        "challenge".to_string(),
+        format!("challenge:{mk}:abc"),
+        format!("challenge:{mk}:99999"),
+        format!("challenge:{mk}:0"),
+        format!("challenge:{mk}:0:maybe"),
+        format!("price:{mk}:0:abc:x"),
+        "unknown:0".to_string(),
     ] {
         let before = holdings(&w, w.carol.id()).await;
-        let _ = ft_call(&w, &w.carol, w.oracle.id(), BOND, msg).await;
+        let _ = ft_call(&w, &w.carol, w.oracle.id(), BOND, &msg).await;
         assert_eq!(
             holdings(&w, w.carol.id()).await,
             before,
@@ -650,7 +652,14 @@ async fn malformed_messages_bounce_with_the_money_back() -> anyhow::Result<()> {
     }
     // The wrong bond amount bounces too.
     let before = holdings(&w, w.carol.id()).await;
-    let _ = ft_call(&w, &w.carol, w.oracle.id(), BOND + 1, &format!("propose:{id}:yes:x")).await;
+    let _ = ft_call(
+        &w,
+        &w.carol,
+        w.oracle.id(),
+        BOND + 1,
+        &format!("propose:{}:{id}:yes:x", w.market.id()),
+    )
+    .await;
     assert_eq!(holdings(&w, w.carol.id()).await, before);
     Ok(())
 }
@@ -668,7 +677,7 @@ async fn hostile_text_cannot_break_the_event_logs() -> anyhow::Result<()> {
         &w.carol,
         w.oracle.id(),
         BOND,
-        &format!("propose:{id}:yes:{evidence}"),
+        &format!("propose:{}:{id}:yes:{evidence}", w.market.id()),
     )
     .await?
     .into_result()?;
@@ -811,7 +820,7 @@ async fn starving_the_settling_call_of_gas_cannot_half_settle_a_case() -> anyhow
     // The second reveal settles the case. With 40 TGas it cannot reserve what the settlement needs, so it fails whole.
     let starved = jury[1]
         .call(w.oracle.id(), "reveal_vote")
-        .args_json(json!({ "market_id": id.to_string(), "outcome": "no", "salt": "salt-for-no-0123456789", "reason": "second" }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string(), "outcome": "no", "salt": "salt-for-no-0123456789", "reason": "second" }))
         .deposit(NearToken::from_yoctonear(1))
         .gas(Gas::from_tgas(40))
         .transact()
@@ -827,13 +836,13 @@ async fn starving_the_settling_call_of_gas_cannot_half_settle_a_case() -> anyhow
     assert!(market_json(&w, id).await["outcome"].is_null());
     assert_eq!(claimable(&w, w.dave.id()).await, 0);
     assert!(
-        stake_of(&w, jury[0].id().as_str()).await["serving"] == json!(id.to_string()),
+        stake_of(&w, jury[0].id().as_str()).await["serving"] == json!(council_key(&w, id).await),
         "seats still held"
     );
 
     jury[1]
         .call(w.oracle.id(), "reveal_vote")
-        .args_json(json!({ "market_id": id.to_string(), "outcome": "no", "salt": "salt-for-no-0123456789", "reason": "second" }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string(), "outcome": "no", "salt": "salt-for-no-0123456789", "reason": "second" }))
         .deposit(NearToken::from_yoctonear(1))
         .gas(Gas::from_tgas(100))
         .transact()
@@ -864,7 +873,7 @@ async fn a_transfer_with_too_little_gas_for_the_receiver_never_loses_the_senders
     for tgas in [10u64, 20, 21, 22, 25, 30, 32, 34, 36, 40, 45, 50, 60] {
         for (target, msg) in [
             (w.market.id(), "deposit".to_string()),
-            (w.oracle.id(), format!("propose:{id}:yes:https://x")),
+            (w.oracle.id(), format!("propose:{}:{id}:yes:https://x", w.market.id())),
         ] {
             let tokens = holdings(&w, w.carol.id()).await;
             let held = market_balance(&w, w.carol.id()).await;
@@ -1189,7 +1198,7 @@ async fn a_function_call_key_cannot_buy_sell_commit_or_reveal() -> anyhow::Resul
             &juror_key,
             w.oracle.id(),
             "commit_vote",
-            json!({ "market_id": id.to_string(), "commitment": commitment(juror.id(), "no", "a-long-random-salt") }),
+            json!({ "market": w.market.id(), "market_id": id.to_string(), "commitment": commitment(juror.id(), "no", "a-long-random-salt") }),
         ),
     ];
     for (key, to, method, args) in attempts {
@@ -1361,7 +1370,7 @@ async fn at_the_deadline_an_unfinalized_proposal_is_applied_and_not_voided_over(
             &w.dave,
             w.oracle.id(),
             "resolve_by_deadline",
-            json!({ "market_id": id.to_string() }),
+            json!({ "market": w.market.id(), "market_id": id.to_string() }),
         )
         .await?
         .into_result()?;
@@ -1452,7 +1461,7 @@ async fn halting_after_a_pump_cannot_pin_the_void_price_at_the_pumped_price() ->
         &w.dave,
         w.oracle.id(),
         "resolve_by_deadline",
-        json!({ "market_id": id.to_string() }),
+        json!({ "market": w.market.id(), "market_id": id.to_string() }),
     )
     .await?
     .into_result()?;

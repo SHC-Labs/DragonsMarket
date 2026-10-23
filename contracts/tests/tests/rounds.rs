@@ -38,9 +38,9 @@ async fn a_challenge_must_name_a_different_answer_and_the_case_records_it() -> a
     // Naming the proposed answer, or no answer, or a word that is not an answer, bounces and the bond comes back.
     let before = holdings(&w, w.dave.id()).await;
     for msg in [
-        format!("challenge:{id}:yes"),
-        format!("challenge:{id}"),
-        format!("challenge:{id}:maybe"),
+        format!("challenge:{}:{id}:yes", w.market.id()),
+        format!("challenge:{}:{id}", w.market.id()),
+        format!("challenge:{}:{id}:maybe", w.market.id()),
     ] {
         let _ = ft_call(&w, &w.dave, w.oracle.id(), BOND, &msg).await;
         assert_eq!(holdings(&w, w.dave.id()).await, before, "{msg} was not bounced");
@@ -108,8 +108,9 @@ async fn a_first_jury_that_does_not_decide_is_followed_by_one_larger_disjoint_ju
     );
     assert_eq!(case["first_panel"], json!([first[0].id()]));
     assert_eq!(case["panel"], json!([]));
+    // The first jury was seated under the case's own id; the second round's key only differs by its top bit.
     assert!(
-        stake_of(&w, tok(&first[0])).await["serving"] == json!(id.to_string()),
+        stake_of(&w, tok(&first[0])).await["serving"] == json!(case_time(&w, id, "case_uid").await.to_string()),
         "the first jury's seat is held until the case is final"
     );
 

@@ -204,7 +204,8 @@ The site tracks these states. The contract-sourced ones are in the third column.
 type Stage = "proposed" | "disputed" | "final";
 interface Vote   { juror: AccountId; outcome: Outcome; reason: string }
 interface Commit { juror: AccountId; commitment: string }
-interface Case {                               // oracle.get_case   EXISTING
+interface Case {                               // oracle.get_case   BUILT (case_uid added)
+  case_uid: U64;                               // unique across every market the oracle serves; never changes
   stage: Stage; proposer: AccountId; proposed: Outcome; bond: U128; evidence: string;
   window_ends_at: U64; challenger: AccountId | null; challenger_answer: Outcome | null;
   round: number; jury_size: number; draw_by: U64; draw_after_height: U64;
@@ -219,7 +220,7 @@ interface OracleMarketInfo { close_at: U64; resolve_by: U64; rule_hash: string; 
 BUILT (`list_cases`, `bond_totals`):
 
 ```ts
-interface CaseSummary { market_id: U64; stage: Stage; proposed: Outcome; challenger_answer: Outcome | null;
+interface CaseSummary { market: AccountId; market_id: U64; stage: Stage; proposed: Outcome; challenger_answer: Outcome | null;
                         round: number; final_outcome: Outcome | null; applied: boolean; votes: number;
                         window_ends_at: U64; draw_by: U64; panel_deadline: U64 }
 interface BondTotals { bonds_held: U128; claimable: U128; pending_payouts: U128; total: U128 }   // total equals total_owed
@@ -231,33 +232,34 @@ interface BondTotals { bonds_held: U128; claimable: U128; pending_payouts: U128;
 
 | View | Args | Returns | Status |
 | --- | --- | --- | --- |
-| `get_case` | `{market_id: U64}` | `Case \| null` | EXISTING |
-| `get_market_info` | `{market_id: U64}` | `OracleMarketInfo \| null` | EXISTING |
+| `get_case` | `{market: AccountId, market_id: U64}` | `Case \| null` | BUILT |
+| `get_market_info` | `{market: AccountId, market_id: U64}` | `OracleMarketInfo \| null` | BUILT |
 | `claimable_of` | `{account_id}` | `U128` | EXISTING |
 | `config` | `{}` | See below | EXISTING |
-| `list_cases` | `{from_market_id: U64, limit: number}` | `CaseSummary[]` | BUILT |
+| `list_cases` | `{market: AccountId, from_market_id: U64, limit: number}` | `CaseSummary[]` | BUILT |
 | `bond_totals` | `{}` | `BondTotals` | BUILT |
 | `total_owed` | `{}` | `U128` | EXISTING |
 
-`list_cases` looks at `limit` consecutive market ids from `from_market_id`, clamped to 50, and returns a row for each id that has a case. An id without a case is skipped, so a page can hold fewer than `limit` rows and the caller advances by `limit`. `votes` is the count of revealed votes.
+Every per-market view and call takes the market contract account first, then the market id. The site has one market, so `web/lib/market.ts` passes `config.marketId` as `market`. `list_cases` looks at `limit` consecutive market ids of that market from `from_market_id`, clamped to 50, and returns a row for each id that has a case. An id without a case is skipped, so a page can hold fewer than `limit` rows and the caller advances by `limit`. `votes` is the count of revealed votes.
 
-`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `market`, `verifier`, `collateral_token_id`, `bond: U128`, `window_ns`, `panel_deadline_ns`, `draw_window_ns`, `min_proposal_ns`, `min_resolve_gap_ns`, `apply_buffer_ns` (all `U64`), `council`, `jury_size: number`, `draw_delay_blocks: U64`, `operator`, `network: string`, `publishers: string[]`, `price_threshold: number`, `no_decision_recipient`, `juror_share_bps: number`, `no_decision_share_bps: number`, `max_publishers: number`, `reconcile_wait_ns: U64`.
+`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `markets: AccountId[]` (the market contracts the oracle accepts; replaces `market`), `verifier`, `collateral_token_id`, `bond: U128`, `window_ns`, `panel_deadline_ns`, `draw_window_ns`, `min_proposal_ns`, `min_resolve_gap_ns`, `apply_buffer_ns` (all `U64`), `council`, `jury_size: number`, `draw_delay_blocks: U64`, `operator`, `network: string`, `publishers: string[]`, `price_threshold: number`, `no_decision_recipient: AccountId \| null`, `juror_share_bps: number`, `no_decision_share_bps: number`, `max_publishers: number`, `reconcile_wait_ns: U64`. These are the keys the view returns; the source lists them in this order (`oracle/src/lib.rs`, `config`).
 
 ### 6.3 Calls and messages
 
 | Action | Receiver | Method | Args | Deposit | Gas | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| Propose | verifier (NEW). Token contract today | `mt_transfer_call` (NEW). `ft_transfer_call` today | `{receiver_id: oracle, token_id, amount: bond, msg: "propose:<id>:<outcome>:<evidence>"}` | `1` | 100 TGas | CHANGED |
-| Challenge | same | same | `msg: "challenge:<id>:<answer>"` | `1` | 100 TGas | CHANGED. See section 12 |
-| Commit | oracle | `commit_vote` | `{market_id, commitment}` | `1` | 100 TGas | EXISTING contract, no builder |
-| Reveal | oracle | `reveal_vote` | `{market_id, outcome, salt, reason}` | `1` | 100 TGas, floor 80 | EXISTING contract, no builder |
-| Finalize | oracle | `finalize` | `{market_id}` | `0` | 100 TGas, floor 80 | EXISTING (`market.ts:177-183`) |
-| Retry apply | oracle | `retry_apply` | `{market_id}` | `0` | 100 TGas | EXISTING (`market.ts:185-191`) |
-| Draw a jury | oracle | `resolve_draw` | `{market_id}` | `0` | 300 TGas, floor 275 | EXISTING contract, no builder |
+| Propose | verifier (NEW). Token contract today | `mt_transfer_call` (NEW). `ft_transfer_call` today | `{receiver_id: oracle, token_id, amount: bond, msg: "propose:<market account>:<id>:<outcome>:<evidence>"}` | `1` | 100 TGas | BUILT |
+| Challenge | same | same | `msg: "challenge:<market account>:<id>:<answer>"` | `1` | 100 TGas | BUILT |
+| Commit | oracle | `commit_vote` | `{market, market_id, commitment} | `1` | 100 TGas | EXISTING contract, no builder |
+| Reveal | oracle | `reveal_vote` | `{market, market_id, outcome, salt, reason} | `1` | 100 TGas, floor 80 | EXISTING contract, no builder |
+| Finalize | oracle | `finalize` | `{market, market_id} | `0` | 100 TGas, floor 80 | EXISTING (`market.ts:177-183`) |
+| Retry apply | oracle | `retry_apply` | `{market, market_id} | `0` | 100 TGas | EXISTING (`market.ts:185-191`) |
+| Draw a jury | oracle | `resolve_draw` | `{market, market_id} | `0` | 300 TGas, floor 275 | EXISTING contract, no builder |
+| Resolve by deadline | oracle | `resolve_by_deadline` | `{market, market_id}` | `0` | 100 TGas, floor 80 | BUILT contract, no builder |
+| Retry unlock | oracle | `retry_unlock` | `{market, market_id}` | `0` | see contract floor | BUILT contract, no builder |
 | Withdraw bond | oracle | `withdraw_bond` | `{}` | `1` | 100 TGas | EXISTING (`market.ts:193-199`) |
-| Push a payout | oracle | `payout_bond` | `{account_id}` | `0` | 100 TGas | NEW |
 
-`commitment` is `hex(sha256("<juror account>:<yes|no|void>:<salt>"))`, 64 lowercase hex characters. The salt must be random and stored durably before the commit is sent, because a lost salt makes the reveal impossible (`oracle/src/lib.rs:279-284`; the site's own note at `market.ts:174-175`). A juror may vote only for the proposed answer or the challenger's answer (`Case.proposed`, `Case.challenger_answer`).
+The oracle refuses a market account it does not serve with `that market contract is not allowed`, and a malformed one with `bad market account`. `commitment` is `hex(sha256("<juror account>:<yes|no|void>:<salt>"))`, 64 lowercase hex characters. The salt must be random and stored durably before the commit is sent, because a lost salt makes the reveal impossible (`oracle/src/lib.rs:279-284`; the site's own note at `market.ts:174-175`). A juror may vote only for the proposed answer or the challenger's answer (`Case.proposed`, `Case.challenger_answer`).
 
 ### 6.4 Case timeline fields
 
@@ -316,10 +318,10 @@ interface RewardTotals { total_received: U128; total_paid: U128; pending_claims:
 | `get_entitlement` | `{quarter: number, token_id, account_id}` | `EntitlementView \| null` | NEW |
 | `entitlements_of` | `{account_id, from_quarter: number, limit: number}` | `EntitlementView[]`. A page covers `min(limit, entitlements_page_quarters)` quarters; the next page starts at `from_quarter` plus that | NEW |
 | `entitlements_page_quarters` | `{account_id}` | `number`, the most quarters one `entitlements_of` page covers for that account | NEW |
-| `received_of` | `{sweep_id: U64}` | `{amount: U128, quarter: number, at: U64} \| null` | NEW |
+| `received_of` | `{market: AccountId, sweep_id: U64}` | `{amount: U128, quarter: number, at: U64} \| null` | NEW |
 | `reward_totals` | `{}` | `RewardTotals` | NEW |
 
-`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `oracle`, `nft_contract`, `verifier`, `collateral_token_id`, `cooldown_ns: U64`, `max_seats_per_account: number`, `allowlist_enabled: boolean`, `allowed_range: {first: U64, last: U64} \| null`, `total_received: U128`, `stream_ns`, `stream_remaining`, `stream_ends_at`. The three `stream_*` fields are REMOVED. NEW: `market`, `close_grace_ns`, `reconcile_wait_ns`, `next_to_finalize`, `last_tick`.
+`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `oracle`, `nft_contract`, `verifier`, `collateral_token_id`, `cooldown_ns: U64`, `max_seats_per_account: number`, `allowlist_enabled: boolean`, `markets: AccountId[]` (replaces `market`; `set_market` is gone), `allowed_range: {first: U64, last: U64} \| null`, `total_received: U128`, `stream_ns`, `stream_remaining`, `stream_ends_at`. The three `stream_*` fields are REMOVED. NEW: `close_grace_ns`, `reconcile_wait_ns`, `next_to_finalize`, `last_tick`.
 
 ### 7.3 Calls
 
@@ -342,21 +344,22 @@ TGas. A floor is a refusal the contract enforces with a message that names the a
 | Call | Floor enforced | Attach |
 | --- | --- | --- |
 | `storage_deposit` | none | 30 |
-| `mt_transfer_call` to the market or oracle | The verifier gives the receiver nothing below 21 | 100 |
-| `buy`, `sell`, `redeem`, `withdraw` | none. `withdraw` reserves 25 | 100 |
+| `mt_transfer_call` to the market or oracle | The verifier keeps about 20.6 and gives the receiver the rest; a buy landed with 24 attached in the sandbox | 100 |
+| `buy`, `sell`, `redeem`, `withdraw` | none enforced. `withdraw` sends the transfer (15) and its callback (10), so it needs at least 25 plus its own work | 100 |
 | `sweep_fees` | 87 | 100 (keeper) |
 | `commit_vote` | none | 100 |
-| `reveal_vote`, `finalize`, `resolve_by_deadline` | 80 | 100 |
+| `reveal_vote`, `finalize`, `resolve_by_deadline` | 80 (apply 20, callback 10, two jury releases 30, margin 20) | 100 |
 | `resolve_draw` | 275 | 300 |
 | `retry_apply` | none | 100 |
 | `retry_unlock` | 35 | 100 |
-| `withdraw_bond` | none, reserves 25 | 100 |
-| `unstake` | 58 today, 33 NEW | 100 |
-| `claim` today, `claim_quarter` NEW | 33 | 100 |
+| `withdraw_bond` | 33 | 100 |
+| `unstake` | 33 | 100 |
+| `claim_quarter` | 33 | 100 |
 | `upgrade` | 100 | 100 to 250 |
-| `stage_code` | none | 100 for 250 KB |
+| `stage_code` | none enforced. The attached deposit must pay the storage (1 NEAR per 100 KB); the surplus is refunded | 100 |
+| `settle_leg` (market) | 30 | 100 |
 
-Sources: `market/src/lib.rs:64-66`, `oracle/src/lib.rs:26-43`, `council/src/lib.rs:35-44`, `INTENTS-PROOF.md` gas tables. The refusal text has the form `attach at least N TGas: <reason>`.
+Sources: the `GAS_*` constants and `require_gas` calls in `market`, `oracle`, `council` and `upgrade`, and the sandbox measurements in `scale-readiness.md`. The refusal text has the form `attach at least N TGas: <reason>`.
 
 ---
 
@@ -446,23 +449,23 @@ Money states the interface must keep apart (R-08), with their source:
 
 | Item | Evidence | Difference | Fix |
 | --- | --- | --- | --- |
-| Buy sends a token transfer | `web/lib/market.ts:126-132`, `:142-143` | `ft_transfer_call` to the NEP-141 token with the market as receiver. The market has no `ft_on_transfer`, only `mt_on_transfer` (`market/src/lib.rs:715`), so the call cannot work | Verifier `mt_transfer_call` builder, section 5 |
-| Challenge message lacks the answer | `market.ts:172` sends `challenge:<id>` | The oracle requires `challenge:<id>:<yes\|no\|void>` and panics `outcome must be yes, no or void` (`oracle/src/lib.rs:674`, `:357-363`) | Add the answer |
-| Propose and challenge use the NEP-141 route | `market.ts:169-172` | Correct for the oracle today. Wrong after oracle phase I3 | Switch with the oracle change |
-| Free funds read from the token | `market.ts:100` | `ft_balance_of` on the NEP-141 contract. Free funds are the verifier's `mt_balance_of` | Section 3 |
+| Buy sends a token transfer | `web/lib/market.ts` `buyCall` | Was `ft_transfer_call` to the NEP-141 token. The market has only `mt_on_transfer` | DONE for the library layer 2026-10-23: `buyCall` and `depositCall` use the verifier `mt_transfer_call` |
+| Challenge message lacks the answer | `market.ts` `challengeCall` | The oracle requires `challenge:<market account>:<id>:<yes\|no\|void>` and panics `outcome must be yes, no or void` | DONE for the library layer 2026-10-23: the message carries the market account and the answer |
+| Propose and challenge use the NEP-141 route | `market.ts` `proposeCall`, `challengeCall` | Sent through the NEP-141 token | DONE for the library layer 2026-10-23: both go through the verifier `mt_transfer_call` with the market account in the message |
+| Free funds read from the token | `market.ts` `tokenBalance` | Was `ft_balance_of` on the NEP-141 contract | DONE for the library layer 2026-10-23: reads the verifier's `mt_balance_of` |
 | Portfolio label | `web/app/portfolio/page.tsx:77` | "In your wallet" shows the NEP-141 balance. After the change it is the Intents balance | Rename to the Intents account |
-| Market status union | `market.ts:18` | Lacks `unregistered` and `unseeded`. `isMarketListed` already treats `seeded === false` as unlisted | Add the two values |
-| `MarketView` fields | `market.ts:7-26` | Lacks `price_rule`. `seeded` is optional but always present | Add `price_rule`, make `seeded` required |
-| `Case` fields | `market.ts:34-51` | Lacks `bond`, `challenger_answer`, `round`, `jury_size`, `draw_by`, `first_panel`. `panel_deadline` is required but `0` before a jury is drawn | Section 6.1 |
-| `OracleConfig` | `market.ts:58-65` | Partial | Section 6.2 |
+| Market status union | `market.ts` `MarketStatus` | Was missing `unregistered` and `unseeded` | DONE for the library layer 2026-10-23 |
+| `MarketView` fields | `market.ts` `MarketView` | Was missing `price_rule`, and `seeded` was optional | DONE for the library layer 2026-10-23 |
+| `Case` fields | `market.ts` `Case` | Was missing `bond`, `challenger_answer`, `round`, `jury_size`, `draw_by`, `first_panel`, `case_uid` | DONE for the library layer 2026-10-23, section 6.1. `panel_deadline` is `0` before a jury is drawn |
+| `OracleConfig` | `market.ts` `OracleConfig` | Was partial | DONE for the library layer 2026-10-23, including `markets`. Section 6.2 |
 | Configuration | `web/lib/config.ts:15-27` | No verifier, council, collateral token id or NFT account. `isConfigured` needs `tokenId` | Section 2 |
 | Positions | `web/app/portfolio/page.tsx:36-43` | One `get_shares` call per market | `get_positions`. `getPositions` exists in the library layer; the page still pending |
 | Council list | `web/app/council/view.tsx:13-18` | `listMarkets`, then `getCase` per market | `list_cases`. `listCases` exists in the library layer; the page still pending |
 | Error copy | `web/lib/errors.ts:2-16` | Covers the market only | Section 10. Library layer DONE for the market, oracle and council strings listed there, including `sells are paused`, `a withdrawal is still pending` and `a jury drawn in this quarter is still open` |
 | New views and settings | `web/lib/market.ts`, `council.ts` | `get_positions`, `get_account`, `in_flight`, `owed_breakdown`, `list_cases`, `bond_totals`, `get_market_info` and the new `config` fields had no wrappers or types | Library layer DONE (`getPositions`, `getAccount`, `getInFlight`, `getOwedBreakdown`, `listCases`, `getBondTotals`, `getMarketInfo`, extended config types). Components still pending |
 | First release wallet rule | `web/lib/config.ts` | No shared text | `WALLET_RULE_V1` exported. Library layer DONE, components still pending |
-| Council calls | `web/lib/market.ts` | No stake, unstake or claim builder | Section 7.3 |
-| Voting | `web/lib/market.ts:174-175` | No commit or reveal builder, by design until the final ABI | Section 6.3 |
+| Council calls | `web/lib/council.ts` | Had no stake, unstake or claim builder | DONE for the library layer 2026-10-23: `stakeCall`, `requestUnstakeCall`, `unstakeCall`, `claimQuarterCall`. Section 7.3 |
+| Voting | `web/lib/market.ts` | Had no commit or reveal builder | DONE for the library layer 2026-10-23: `commitVoteCall`, `revealVoteCall`, `commitmentFor`, `newSalt`. Section 6.3 |
 | Redeem and withdraw | `market.ts:153-167` | Builders exist. The portfolio disables them (`portfolio/page.tsx:91`, `:124`) | Enable after the market change |
 | Trade ticket | `web/components/TradeTicket.tsx:9-12` | Local only. No quotes and no send | Wire `quote_buy`, `quote_sell` and the builders |
 | Wallet batching | `web/components/WalletProvider.tsx:116-134` | One function call per `signAndSendTransaction` | A first buy needs two transactions: `storage_deposit` on the market, then `mt_transfer_call` on the verifier. They have different receivers, so they cannot share one batch |

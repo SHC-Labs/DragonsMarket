@@ -9,7 +9,7 @@
 //   node keeper.mjs run   --rpc URL --market ID --oracle ID --council ID --account ID [--dry-run]
 //                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH] [--council-key-file PATH]
 //                         [--state-file PATH] [--min-sweep UNITS]
-//   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID [--treasury ID] [--min-margin NEAR]
+//   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID [--treasury ID] [--min-margin NEAR] [--release FILE|-]
 //                         [--expect-sealed] [--watch-dao]
 //
 // `run` needs an account with a little NEAR for gas. The calls it makes move no money of the keeper's own, and none
@@ -50,6 +50,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { b58decode, b58encode, rpc, view, viewer } from "./chain.mjs";
+import { compareCodeHashes, describeRelease, liveCodeHashes, parseReleaseHashes } from "./release-check.mjs";
 import { reviewKind } from "./treasury.mjs";
 
 const TGAS = 10n ** 12n;
@@ -106,7 +107,7 @@ export function quarterEnd(quarter) {
   return BigInt(Date.UTC(Math.floor(next / 4), (next % 4) * 3, 1)) * 1_000_000n;
 }
 
-// snapshot: { now, height, markets: [{ id, outcome, resolve_by }], cases: { [id]: case | null }, locked: { [id]: bool },
+// snapshot: { market (the market account the oracle calls name), now, height, markets: [{ id, outcome, resolve_by }], cases: { [id]: case | null }, locked: { [id]: bool },
 // feesDue, minSweep, council: { lastTick, nextToFinalize, closeGraceNs }, sweeps: [{ id, at, council: { status } }] oldest
 // first, lastSweepAt, sweepIntervalNs, settleWaitNs }. feesDue is what a sweep would send now, in token units. lastSweepAt
 // is null before the first sweep.
@@ -117,7 +118,7 @@ export function quarterEnd(quarter) {
 export function dueActions(snapshot) {
   const actions = [];
   const call = (contract, method, id, tgas) =>
-    actions.push({ contract, method, args: { market_id: String(id) }, gas: BigInt(tgas) * TGAS });
+    actions.push({ contract, method, args: { market: snapshot.market, market_id: String(id) }, gas: BigInt(tgas) * TGAS });
   for (const market of snapshot.markets) {
     const id = market.id;
     const c = snapshot.cases[id];
@@ -217,12 +218,11 @@ async function snapshot(opts, firstMarket) {
   const cases = {};
   const locked = {};
   for (const m of markets) {
-    cases[m.id] = await view(opts.rpc, opts.oracle, "get_case", { market_id: m.id });
+    cases[m.id] = await view(opts.rpc, opts.oracle, "get_case", { market: opts.market, market_id: m.id });
     const settledDispute = cases[m.id] && cases[m.id].stage === "final" && cases[m.id].challenger;
-    const secondKey = String(BigInt(m.id) | SECOND_ROUND_KEY);
     locked[m.id] = settledDispute
-      ? (await view(opts.rpc, opts.council, "jury_of", { case_key: m.id })).length > 0 ||
-        (await view(opts.rpc, opts.council, "jury_of", { case_key: secondKey })).length > 0
+      ? (await view(opts.rpc, opts.council, "jury_of", { case_key: cases[m.id].case_uid })).length > 0 ||
+        (await view(opts.rpc, opts.council, "jury_of", { case_key: String(BigInt(cases[m.id].case_uid) | SECOND_ROUND_KEY) })).length > 0
       : false;
   }
   const council = await view(opts.rpc, opts.council, "config");
@@ -235,7 +235,7 @@ async function snapshot(opts, firstMarket) {
   const feesDue = BigInt(fees.collected) + BigInt(fees.revenue_due) + BigInt(fees.treasury_due);
   const minSweep = opts["min-sweep"] === undefined ? DEFAULT_MIN_SWEEP : BigInt(opts["min-sweep"]);
   return {
-    now: BigInt(block.header.timestamp_nanosec), height: BigInt(block.header.height), markets, cases, locked, feesDue, minSweep,
+    market: opts.market, now: BigInt(block.header.timestamp_nanosec), height: BigInt(block.header.height), markets, cases, locked, feesDue, minSweep,
     council: { lastTick: BigInt(council.last_tick), nextToFinalize: council.next_to_finalize, closeGraceNs: BigInt(council.close_grace_ns) },
     sweeps, lastSweepAt,
     sweepIntervalNs: BigInt(marketConfig.min_sweep_interval_minutes) * NS_PER_MINUTE,
@@ -518,14 +518,31 @@ async function openProposals(opts, read, now) {
   return open.sort((a, b) => a.id - b.id);
 }
 
+// The release hash list from a file, or from stdin when the flag is "-".
+function readReleaseList(source) {
+  return fs.readFileSync(source === "-" ? 0 : source, "utf8");
+}
+
+// The live code hashes of the three contracts against a parsed release list: the lines to print, and whether any differ.
+export async function releaseReport(opts, expected) {
+  const live = await liveCodeHashes(opts.rpc, { market: opts.market, oracle: opts.oracle, council: opts.council });
+  const problems = compareCodeHashes({ expected, live });
+  return { lines: describeRelease(problems), differs: problems.length > 0 };
+}
+
 async function check(opts) {
   const minMargin = nearToYocto(opts["min-margin"] ?? DEFAULT_MIN_MARGIN_NEAR);
   if (opts["watch-dao"] && !opts.treasury) throw new Error("--watch-dao needs --treasury, the DAO whose proposals to list");
+  const expectedRelease = opts.release === undefined ? null : parseReleaseHashes(readReleaseList(opts.release));
   const block = await rpc(opts.rpc, "block", { finality: "final" });
   const at = block.header.height;
   const configs = {};
   for (const name of CONTRACTS) configs[name] = await view(opts.rpc, opts[name], "config", {}, at);
   const oracle = configs.oracle;
+  const problems = [];
+  for (const name of ["oracle", "council"]) {
+    if (!configs[name].markets.includes(opts.market)) problems.push(`${opts.market} is not in the ${name}'s market allow-list (${configs[name].markets.join(", ") || "empty"}): it will refuse this market`);
+  }
 
   const books = {};
   let owners;
@@ -542,7 +559,7 @@ async function check(opts) {
     books[name] = reconciliation({ name, ...(await reconcile(read, () => waitForBlocks(opts.rpc, RECHECK_BLOCKS))), exact: name !== "council" });
   }
 
-  const problems = juryProblems({ jurySize: oracle.jury_size, holders: owners.size });
+  problems.push(...juryProblems({ jurySize: oracle.jury_size, holders: owners.size }));
   if (oracle.publishers.length < oracle.price_threshold) problems.push(`${oracle.publishers.length} price publishers but ${oracle.price_threshold} must sign: no price market can open`);
   console.log(`jury size ${oracle.jury_size} then ${secondJurySize(oracle.jury_size)}, ${owners.size} drawable seat holders, ${oracle.publishers.length} publishers (${oracle.price_threshold} must sign)`);
   for (const name of CONTRACTS) {
@@ -600,9 +617,16 @@ async function check(opts) {
     problems.push(...dao.problems);
   }
 
+  let releaseDiffers = false;
+  if (expectedRelease) {
+    const release = await releaseReport(opts, expectedRelease);
+    for (const line of release.lines) console.log(line);
+    releaseDiffers = release.differs;
+  }
+
   for (const p of problems) console.log(`PROBLEM: ${p}`);
-  if (!problems.length) console.log("ok");
-  return problems.length ? 1 : 0;
+  if (!problems.length && !releaseDiffers) console.log("ok");
+  return problems.length || releaseDiffers ? 1 : 0;
 }
 
 // ---- command line ------------------------------------------------------------------------------------------------

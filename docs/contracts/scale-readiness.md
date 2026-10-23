@@ -39,7 +39,7 @@ Ordered by how soon each one bites:
 | 2 | The keeper scans every market after the oldest unfinished one | About 100,000 sequential calls per run at the target; misses draw and deadline windows | Drive it from events or a due-queue |
 | 3 | The operator's and owner's own position views | `get_positions` passes 200 TGas at about 750 held markets (measured) | Keep exempt accounts out of the index and page their view |
 | 4 | `entitlements_of` for an account with many tokens | The 250-lookup page budget holds up to 250 tokens; one quarter alone passes 200 TGas at about 767 tokens | Page by token as well, or bound the token history |
-| 5 | Dispute capacity | About 333 disputes can run at once at a jury of 3, since a serving seat cannot be drawn again | Design decision (section 6) |
+| 5 | Dispute capacity | About 333 disputes can run at once at a jury of 3, and about 100 if every case escalates (10 seats each), since a serving seat cannot be drawn again | Design decision (section 6) |
 | 6 | Storage with no payer | About 1,900 to 4,800 NEAR per 100,000 markets, paid from the contract balance | Design decision (section 6) |
 | 7 | One market contract is one hot account | Unknown ceiling; the code cannot run several market instances | Design decision (section 6) |
 
@@ -168,7 +168,7 @@ Each quarter does one lookup per token the account has ever staked, and `tokens_
 
 ### Issue 5. Dispute capacity
 
-A jury draw is affordable up to the seat cap (163 TGas at 1,000 seats, extrapolated limit near 1,550). The limit that matters is concurrency. A seat serving on an open case cannot be drawn again, so at most seats divided by jury size disputes can be open at once: about 333 at a jury of 3 and fewer after an escalation to 7 or 21. A draw that cannot find enough free seats fails. If no jury is ever seated, the case returns both bonds and an event market is Void; if the first jury sat and the second cannot be drawn, it ends with no decision and the challenger loses half a bond.
+A jury draw is affordable up to the seat cap (163 TGas at 1,000 seats, extrapolated limit near 1,550). The limit that matters is concurrency. A seat serving on an open case cannot be drawn again, so at most seats divided by seats held per case disputes can be open at once: about 333 at a jury of 3, and about 100 when every case escalates to a second jury of 7 (10 seats per case). A draw that cannot find enough free seats fails. If no jury is ever seated, the case returns both bonds and an event market is Void; if the first jury sat and the second cannot be drawn, it ends with no decision and the challenger loses half a bond.
 
 - The draw reads every seat, whether or not it is serving or leaving, so the cap cannot rise much without changing it.
 - **Options:** (a) keep the cap and accept the concurrency ceiling, and size the collection to the dispute rate we expect; (b) change the draw to sample candidates instead of reading every seat, which lifts the cap; (c) add a queue that holds a case until enough seats are free. Section 6, decision 3.
@@ -268,6 +268,22 @@ Before setting a production capacity target, measure browser/API latency, RPC vo
 | 5 | Single market instance, or key the oracle and Council by (market account, id) now so instances can be added? | Key by (market account, id) now. It is cheap before launch and expensive after |
 | 6 | Version-tag every stored record now? | Yes |
 | 7 | Page `entitlements_of` by token, or bound `tokens_of`? The tokens-times-quarters budget and a hard position cap of 30 are now in place | Decide before one account can have staked a few hundred tokens |
+
+### Answers received, and the order of work
+
+Answers received on 2026-10-23:
+
+1. **Indexer: yes.** Read finalized blocks for our contract accounts only, save the events and the cursor for each block in one transaction, use replay-safe keys, and run a reconcile job for gaps. Index only receipts that succeeded, and treat withdraw, sweep and claim events as pending until their confirmed or failed event lands.
+2. **Exempt accounts: yes.** Keep their share entries, leave them out of the index, and page their view. Seed from a dedicated operator account, not the DAO.
+3. **Dispute capacity: keep it for launch.** The ceiling is below 333, because an escalated case holds 10 seats (3 plus 7), so concurrent disputes sit between about 100 (all escalated) and 333 (none escalated). Revisit when open disputes approach 100.
+4. **Storage: changed.** Because a withdrawal now writes a record, a market contract that runs out of NEAR stops users withdrawing. So `create_market` pays for its own storage (as `stage_code` does), the oracle and Council get top-ups and an alarm, and resolved markets are pruned, but never received sweep ids, paid claims or unsettled sweeps.
+5. **Key by (market account, id): yes**, with an allow-list of one at launch. The Intents verifier is shared, so load test on testnet before adding any second instance.
+6. **Version tags: yes, as soon as possible.** An earlier change altered stored layouts without a state version bump.
+7. **Done:** the lookup budget and the position cap of 30. Paging by token matters only past a few hundred tokens.
+
+Order: decisions 5 and 6 and the new events in one layout pass with a state version bump before testnet. Then decisions 1, 2 and 4 before mainnet. Decision 3 and the rest of decision 7 after launch.
+
+**Status of that order, 2026-10-23.** The layout pass is built and tested in the contracts, keeper, sandbox tests and website library: records carry a version tag, the oracle and Council keep an allow-list of market accounts and key their records by market account and id, each case has an oracle-assigned id that the Council uses as its jury key, and the events an indexer needs are added. State versions are market 3, oracle 2 and Council 3. The signed price message now names the market account (`price:v2`), because a signature over only the market id could be replayed on the same id of another market. Decisions 1, 2 and 4 are still to do.
 
 ---
 

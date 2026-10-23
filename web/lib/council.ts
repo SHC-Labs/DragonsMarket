@@ -55,7 +55,7 @@ export interface RewardTotals {
 export interface CouncilConfig {
   verifier: string;
   collateral_token_id: string;
-  market: string | null;
+  markets: string[];
   nft_contract: string | null;
   cooldown_ns: string;
   max_seats_per_account: number;

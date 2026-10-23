@@ -42,6 +42,8 @@ export interface Vote {
 }
 
 export interface Case {
+  // Unique across every market the oracle serves; never changes
+  case_uid: string;
   stage: "proposed" | "disputed" | "final";
   proposer: string;
   proposed: Outcome;
@@ -72,6 +74,7 @@ export interface Case {
 
 // One row of list_cases: where a case stands, without the evidence, the panel or the vote text.
 export interface CaseSummary {
+  market: string;
   market_id: string;
   stage: Case["stage"];
   proposed: Outcome;
@@ -110,6 +113,8 @@ export interface PricePoint {
 }
 
 export interface OracleConfig {
+  // Market contracts the oracle accepts cases from
+  markets: string[];
   verifier: string;
   collateral_token_id: string;
   bond: string;
@@ -268,11 +273,11 @@ export interface SellQuote { collateral_out: string; shares_in: string; fee: str
 
 export const getMarket = (id: string) => view<MarketView | null>(market(), "get_market", { market_id: id });
 export const getHistory = (id: string) => view<PricePoint[]>(market(), "get_history", { market_id: id });
-export const getCase = (id: string) => view<Case | null>(oracle(), "get_case", { market_id: id });
-export const getMarketInfo = (id: string) => view<OracleMarketInfo | null>(oracle(), "get_market_info", { market_id: id });
+export const getCase = (id: string) => view<Case | null>(oracle(), "get_case", { market: market(), market_id: id });
+export const getMarketInfo = (id: string) => view<OracleMarketInfo | null>(oracle(), "get_market_info", { market: market(), market_id: id });
 // Looks at `limit` consecutive market ids and returns a row for each one that has a case, so advance by `limit`.
 export const listCases = (fromMarketId: number, limit: number) =>
-  view<CaseSummary[]>(oracle(), "list_cases", { from_market_id: String(fromMarketId), limit });
+  view<CaseSummary[]>(oracle(), "list_cases", { market: market(), from_market_id: String(fromMarketId), limit });
 export const getBondTotals = () => view<BondTotals>(oracle(), "bond_totals");
 export const getOracleConfig = () => view<OracleConfig>(oracle(), "config");
 export const getMarketConfig = () => view<MarketConfig>(market(), "config");
@@ -376,16 +381,16 @@ export const withdrawCall = (amount: bigint): FunctionCall => ({
 });
 
 export const proposeCall = (id: string, outcome: Outcome, evidence: string, bond: bigint) =>
-  verifierTransfer(oracle(), bond, `propose:${id}:${outcome}:${evidence}`);
+  verifierTransfer(oracle(), bond, `propose:${market()}:${id}:${outcome}:${evidence}`);
 
 // The challenger names the answer they say is right; jurors vote for it or for the proposal.
 export const challengeCall = (id: string, answer: Outcome, bond: bigint) =>
-  verifierTransfer(oracle(), bond, `challenge:${id}:${answer}`);
+  verifierTransfer(oracle(), bond, `challenge:${market()}:${id}:${answer}`);
 
 export const commitVoteCall = (id: string, commitment: string): FunctionCall => ({
   receiverId: oracle(),
   methodName: "commit_vote",
-  args: { market_id: id, commitment },
+  args: { market: market(), market_id: id, commitment },
   gas: GAS,
   deposit: ONE_YOCTO,
 });
@@ -393,7 +398,7 @@ export const commitVoteCall = (id: string, commitment: string): FunctionCall => 
 export const revealVoteCall = (id: string, outcome: Outcome, salt: string, reason: string): FunctionCall => ({
   receiverId: oracle(),
   methodName: "reveal_vote",
-  args: { market_id: id, outcome, salt, reason },
+  args: { market: market(), market_id: id, outcome, salt, reason },
   gas: GAS,
   deposit: ONE_YOCTO,
 });
@@ -401,7 +406,7 @@ export const revealVoteCall = (id: string, outcome: Outcome, salt: string, reaso
 export const resolveDrawCall = (id: string): FunctionCall => ({
   receiverId: oracle(),
   methodName: "resolve_draw",
-  args: { market_id: id },
+  args: { market: market(), market_id: id },
   gas: GAS_DRAW,
   deposit: "0",
 });
@@ -418,7 +423,7 @@ export const newSalt = () => Array.from(crypto.getRandomValues(new Uint8Array(16
 export const finalizeCall = (id: string): FunctionCall => ({
   receiverId: oracle(),
   methodName: "finalize",
-  args: { market_id: id },
+  args: { market: market(), market_id: id },
   gas: GAS,
   deposit: "0",
 });
@@ -426,7 +431,7 @@ export const finalizeCall = (id: string): FunctionCall => ({
 export const retryApplyCall = (id: string): FunctionCall => ({
   receiverId: oracle(),
   methodName: "retry_apply",
-  args: { market_id: id },
+  args: { market: market(), market_id: id },
   gas: GAS,
   deposit: "0",
 });

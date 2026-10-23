@@ -144,12 +144,28 @@ async fn a_message_the_oracle_refuses_is_refunded_in_full_by_the_verifier() -> a
 
     let cases = [
         (&w.carol, BOND, "hello".to_string()),
-        (&w.carol, BOND, format!("propose:{closed}:maybe:https://x")),
-        (&w.carol, BOND, format!("propose:{open}:yes:https://x")),
-        (&w.carol, BOND, "propose:99:yes:https://x".to_string()),
-        (&w.carol, BOND + 1, format!("propose:{closed}:yes:https://x")),
-        (&w.carol, BOND - 1, format!("propose:{closed}:yes:https://x")),
-        (&w.dave, BOND, format!("challenge:{closed}:no")),
+        (
+            &w.carol,
+            BOND,
+            format!("propose:{}:{closed}:maybe:https://x", w.market.id()),
+        ),
+        (
+            &w.carol,
+            BOND,
+            format!("propose:{}:{open}:yes:https://x", w.market.id()),
+        ),
+        (&w.carol, BOND, format!("propose:{}:99:yes:https://x", w.market.id())),
+        (
+            &w.carol,
+            BOND + 1,
+            format!("propose:{}:{closed}:yes:https://x", w.market.id()),
+        ),
+        (
+            &w.carol,
+            BOND - 1,
+            format!("propose:{}:{closed}:yes:https://x", w.market.id()),
+        ),
+        (&w.dave, BOND, format!("challenge:{}:{closed}:no", w.market.id())),
         (&w.dave, BOND, "revenue".to_string()),
         (&w.dave, BOND, "deposit".to_string()),
     ];
@@ -183,7 +199,7 @@ async fn a_message_the_oracle_refuses_is_refunded_in_full_by_the_verifier() -> a
         &w.carol,
         w.oracle.id(),
         BOND,
-        &format!("propose:{closed}:yes:https://x"),
+        &format!("propose:{}:{closed}:yes:https://x", w.market.id()),
     )
     .await?
     .into_result()?;
@@ -245,7 +261,7 @@ async fn a_token_id_that_is_not_the_collateral_is_refused_by_the_oracle_and_refu
         .call(w.verifier.id(), "mt_transfer_call")
         .args_json(json!({
             "receiver_id": w.oracle.id(), "token_id": other_id, "amount": BOND.to_string(),
-            "msg": format!("propose:{id}:yes:https://x")
+            "msg": format!("propose:{}:{id}:yes:https://x", w.market.id())
         }))
         .deposit(NearToken::from_yoctonear(1))
         .max_gas()
@@ -272,7 +288,7 @@ async fn the_hook_refuses_an_unauthenticated_call_and_checks_the_delivery_as_wel
 {
     let w = setup().await?;
     let id = closed_market(&w).await?;
-    let msg = format!("propose:{id}:yes:https://x");
+    let msg = format!("propose:{}:{id}:yes:https://x", w.market.id());
 
     let direct = w
         .dave
@@ -386,7 +402,7 @@ async fn a_plain_deposit_to_the_oracle_is_surplus_with_no_callback_and_no_credit
     let id = closed_market(&w).await?;
     assert_oracle_reconciled(&w).await;
 
-    let propose_msg = format!("propose:{id}:yes:https://x");
+    let propose_msg = format!("propose:{}:{id}:yes:https://x", w.market.id());
     let old_form =
         json!({ "receiver_id": w.oracle.id(), "msg": propose_msg, "min_gas": 30_000_000_000_000u64 }).to_string();
     let mut surplus = 0;

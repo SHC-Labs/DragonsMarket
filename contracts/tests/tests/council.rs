@@ -37,7 +37,10 @@ async fn the_drawn_panel_never_includes_the_proposer_or_the_challenger() -> anyh
     assert_eq!(case_json(&w, id).await["panel"], json!([]));
 
     stake(&w, &j[2], j[2].id().as_str()).await?;
-    assert_eq!(event_names(&resolve_draw(&w, id).await?), vec!["jury_drawn"]);
+    assert_eq!(
+        event_names(&resolve_draw(&w, id).await?),
+        vec!["jury_drawn", "jury_drawn"]
+    );
     assert_eq!(ids(&panel(&w, id).await), ids(&j[..3]));
     Ok(())
 }
@@ -77,7 +80,10 @@ async fn not_enough_seats_fails_the_draw_and_a_retry_works_after_a_seat_is_stake
     assert_eq!(case_json(&w, id).await["panel"], json!([]));
 
     stake(&w, &j[0], j[0].id().as_str()).await?;
-    assert_eq!(event_names(&resolve_draw(&w, id).await?), vec!["jury_drawn"]);
+    assert_eq!(
+        event_names(&resolve_draw(&w, id).await?),
+        vec!["jury_drawn", "jury_drawn"]
+    );
     assert_eq!(
         ids(&panel(&w, id).await),
         ids(&[j[0].clone(), j[3].clone(), j[4].clone()])
@@ -94,7 +100,7 @@ async fn two_draws_in_flight_end_with_one_jury() -> anyhow::Result<()> {
     for who in [&w.alice, &w.bob] {
         pending.push(
             who.call(w.oracle.id(), "resolve_draw")
-                .args_json(json!({ "market_id": id.to_string() }))
+                .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
                 .gas(Gas::from_tgas(300))
                 .transact_async()
                 .await?,
@@ -108,13 +114,14 @@ async fn two_draws_in_flight_end_with_one_jury() -> anyhow::Result<()> {
         for l in r.logs() {
             let e: serde_json::Value = serde_json::from_str(l.strip_prefix("EVENT_JSON:").unwrap())?;
             events.push(e["event"].as_str().unwrap().to_string());
-            if e["event"] == "jury_drawn" {
+            // The oracle's event carries the panel; the Council's carries the tokens.
+            if e["event"] == "jury_drawn" && !e["data"]["panel"].is_null() {
                 drawn.push(e["data"]["panel"].clone());
             }
         }
     }
     events.sort();
-    assert_eq!(events, vec!["draw_failed", "jury_drawn"]);
+    assert_eq!(events, vec!["draw_failed", "jury_drawn", "jury_drawn"]);
     assert_eq!(
         case_json(&w, id).await["panel"],
         drawn[0],

@@ -42,8 +42,7 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
 
         contract.call("new").args_json(&args).transact().await?.into_result()?;
         let config: serde_json::Value = contract.view("config").await?.json()?;
-        // The oracle's layout is still version 1: only the market and the Council changed.
-        let version = if name == "oracle" { 1 } else { 2 };
+        let version = if name == "oracle" { 2 } else { 3 };
         assert_eq!(
             config["state_version"], version,
             "{name} initialised by its own account"
@@ -784,7 +783,11 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
         .json()?;
     skip_secs(&w.worker, 130).await;
 
-    let message = format!("price:v1:{}:{NETWORK}:{id}:{close_at}:10500:2", w.oracle.id());
+    let message = format!(
+        "price:v2:{}:{NETWORK}:{}:{id}:{close_at}:10500:2",
+        w.oracle.id(),
+        w.market.id()
+    );
     let entries = [signed_entry(&keys[2], &message), signed_entry(&keys[0], &message)];
     deposit_to_intents(&w, &w.carol, w.carol.id(), BOND).await?;
     let r = intents_call(
@@ -792,7 +795,7 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
         &w.carol,
         w.oracle.id(),
         BOND,
-        &format!("price:{id}:10500:{}", entries.join(",")),
+        &format!("price:{}:{id}:10500:{}", w.market.id(), entries.join(",")),
     )
     .await?
     .into_result()?;

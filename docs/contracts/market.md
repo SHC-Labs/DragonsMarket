@@ -9,7 +9,7 @@ sends either, each leg has its own status, the Council takes each sweep id once,
 result is settled from the Council's own record. The treasury and the Council's account are not
 written in the code and are not arguments of `new`: the owner sets them with `set_fee_recipients`,
 and a sweep refuses until it has. The 75/25 split is a share in basis points the owner can move
-(2,500 to start). `business_wallet` is now `treasury`. State version 2. See "Fees".
+(2,500 to start). `business_wallet` is now `treasury`. State version 3. See "Fees".
 
 Status, 2026-10-20, phase I2 of the Intents migration: the money path in this manual is the NEAR
 Intents path. The market keeps all its backing in its own account inside the Intents verifier. Money
@@ -381,10 +381,16 @@ build.
 | Prove   | `migrate` refuses to run unless `upgrade_in_flight` is set (`migrate runs only inside an upgrade`), then clears it and sets `upgrade_proven`. A hand-called `migrate` therefore proves nothing. When the batch fails, the old code keeps the mark set and the next `upgrade` sets it again. `config` shows both flags with `state_version`.                                                     |
 | Seal    | `seal(public_key)` deletes an access key. It is refused until `upgrade_proven` is true (`prove the upgrade path before deleting keys`), so keys are deleted only after one upgrade has worked on this chain.                                                                                                                                                                                    |
 
-The state struct starts with `state_version: u16`, 1 today. `migrate` reads the first two bytes of
-the stored state and refuses anything but 1 (`migrate expects version 2`), then reads the version 1
-struct. It never guesses a layout from bytes. A version 2 build keeps the version 1 struct as
-`StateV1`, reads that, builds its state and writes `state_version: 2`.
+The state struct starts with `state_version: u16`, 3 today. `migrate` reads the first two bytes of
+the stored state and refuses anything but 3 (`migrate expects version 3`), then reads the version 3
+struct. It never guesses a layout from bytes. A version 4 build keeps the version 3 struct as
+`StateV3`, reads that, builds its state and writes `state_version: 4`.
+
+Every market, sweep and withdrawal is stored inside a one-byte version tag (an enum such as
+`VersionedMarket::V1(Market)`, so the stored bytes start with 0). Reads go through `into_current`, which
+turns an older variant into the current record, and every write stores the newest variant. A tag no build
+has written fails to decode (`Cannot deserialize element`) instead of being misread. A later layout of a
+record adds a variant and a conversion, and old records upgrade as they are read, with no pass over the map.
 
 Withdraw and redeem stay unpausable: `set_paused` does not touch them, an upgrade does not touch
 them, and neither does `halt`. `set_paused` does not stop `sell` either: only the owner's `set_sells_paused`
@@ -531,7 +537,8 @@ not send it. Every unit is in exactly one of collected, due, unresolved, on its 
 or gone.
 
 Anyone settles it with `settle_leg(sweep_id)` ten minutes after the sweep. The market asks the
-Council for `received_of(sweep_id)`. The Council takes each sweep id once, so its answer cannot change
+Council for `received_of(market, sweep_id)`, passing this contract's own account as `market`, because the
+Council keeps its records per market. The Council takes each sweep id once, so its answer cannot change
 afterwards. A record means the money arrived: the leg is `settled`. No record means it did not: the
 leg is `refused` and the amount is due again, so the next sweep sends it under a new id. If the
 Council cannot answer, the leg stays unresolved and anyone can ask again.
@@ -697,8 +704,10 @@ Every state change logs one line starting `EVENT_JSON:` followed by JSON of the 
 | `owner_proposed`          | `propose_owner`                                                       | owner, proposed                                   |
 | `owner_changed`           | `accept_owner`                                                        | from, to                                          |
 | `operator_set`            | `set_operator`                                                        | operator                                          |
-| `market_created`          | `create_market`                                                       | market_id, rule_hash                              |
+| `market_created`          | `create_market`                                                       | market_id, rule_hash, title, category, subcategory, close_at, resolve_by |
 | `market_registered`       | oracle accepted it                                                    | market_id                                         |
+| `market_registration_failed` | the oracle call failed (`on_registered`)                           | market_id                                         |
+| `market_registration_retried` | `retry_register`                                                  | market_id                                         |
 | `market_halted`           | `halt`                                                                | market_id, reason                                 |
 | `market_resumed`          | `resume`                                                              | market_id                                         |
 | `paused`                  | `set_paused`                                                          | paused                                            |
@@ -715,20 +724,20 @@ Every state change logs one line starting `EVENT_JSON:` followed by JSON of the 
 | `max_positions_set`       | `set_max_positions`                                                   | max_positions                                     |
 | `fee_limits_set`          | `set_fee_limits`                                                      | max_fee_rate_bps, max_create_fee, min_revenue_share_bps, max_revenue_share_bps, max_min_sweep |
 | `residual_claimed`        | `claim_residual`                                                      | market_id, amount, to                             |
-| `outcome_set`             | `set_outcome`, or `void_if_unresolved` (which adds `"by":"deadline"`) | market_id, outcome                                |
+| `outcome_set`             | `set_outcome`, or `void_if_unresolved` (which adds `"by":"deadline"`) | market_id, outcome, void_price_yes (null unless void) |
 | `deposit`                 | a deposit                                                             | account, amount                                   |
-| `market_seeded`           | a seed                                                                | market_id, amount, fee, yes_price, seeder         |
-| `buy`                     | a buy                                                                 | market_id, account, side, shares, collateral, fee |
-| `sell`                    | a sell                                                                | market_id, account, side, shares, collateral, fee |
-| `redeemed`                | `redeem`                                                              | market_id, account, amount                        |
+| `market_seeded`           | a seed                                                                | market_id, amount, fee, yes_price, seeder, price_yes, price_no, pool_yes, pool_no (after the trade) |
+| `buy`                     | a buy                                                                 | market_id, account, side, shares, collateral, fee, price_yes, price_no, pool_yes, pool_no (after the trade) |
+| `sell`                    | a sell                                                                | market_id, account, side, shares, collateral, fee, price_yes, price_no, pool_yes, pool_no (after the trade) |
+| `redeemed`                | `redeem`                                                              | market_id, account, amount, yes_shares, no_shares (burned) |
 | `withdraw`                | `withdraw`, before the transfer is sent                               | account, amount, id                               |
 | `withdraw_confirmed`      | the verifier moved the money                                          | account, amount, id                               |
 | `withdraw_failed`         | the verifier refused the transfer, balance restored                     | account, amount, id                               |
 | `fees_swept`              | `sweep_fees`                                                          | id, total, revenue_pool, council (leg amount), treasury_account, treasury (leg amount) |
-| `fee_leg_settled`         | a leg ended with the recipient holding the money                      | id, leg, amount                                   |
+| `fee_leg_settled`         | a leg ended with the recipient holding the money                      | id, leg, to, amount                               |
 | `fee_transfer_failed`     | a fee transfer failed, amount owed again                              | id, leg, to, amount                               |
-| `fee_transfer_unresolved` | a revenue transfer returned no report, amount parked                  | id, to, amount                                    |
-| `fee_leg_reconciled`      | `reconcile_leg`                                                       | id, leg, amount, arrived                          |
+| `fee_transfer_unresolved` | a revenue transfer returned no report, amount parked                  | id, leg, to, amount                               |
+| `fee_leg_reconciled`      | `reconcile_leg`                                                       | id, leg, to, amount, arrived                      |
 | `withdrawal_reconciled`    | `reconcile_withdrawal`                                                | account, amount, id, paid                         |
 | `registered`              | `storage_deposit` registered an account                               | account, paid_by                                  |
 | `unregistered`            | `storage_unregister`                                                  | account                                           |

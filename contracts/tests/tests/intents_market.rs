@@ -294,7 +294,7 @@ async fn the_hook_checks_the_delivery_as_well_as_the_caller() -> anyhow::Result<
         .into_result()?;
     // The Council takes revenue only from its market, which here is the account the test delivers it as.
     w.owner
-        .call(council.id(), "set_market")
+        .call(council.id(), "allow_market")
         .args_json(json!({ "market": w.alice.id() }))
         .transact()
         .await?

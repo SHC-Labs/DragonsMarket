@@ -39,7 +39,7 @@ async fn an_unanswered_market_is_voided_by_anyone_after_its_deadline_so_money_is
     let (_, bob_no) = shares(&w, id, w.bob.id()).await;
     let deadline_call = |who: &near_workspaces::Account| {
         who.call(w.oracle.id(), "resolve_by_deadline")
-            .args_json(json!({ "market_id": id.to_string() }))
+            .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
             .gas(Gas::from_tgas(100))
             .transact()
     };
@@ -155,7 +155,7 @@ async fn a_keeper_outage_for_the_whole_answer_period_still_ends_with_the_propose
     // Whoever comes back first asks the oracle, and it settles the case instead of voiding over it.
     w.dave
         .call(w.oracle.id(), "resolve_by_deadline")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .gas(Gas::from_tgas(100))
         .transact()
         .await?
@@ -222,7 +222,7 @@ async fn a_keeper_outage_through_a_dispute_ends_in_a_void_at_the_deadline_not_in
 
     w.alice
         .call(w.oracle.id(), "resolve_by_deadline")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .gas(Gas::from_tgas(100))
         .transact()
         .await?
@@ -491,7 +491,7 @@ async fn oversized_evidence_and_reasons_are_refused() -> anyhow::Result<()> {
         &w.carol,
         w.oracle.id(),
         BOND,
-        &format!("propose:{id}:yes:https://example.com/{long}"),
+        &format!("propose:{}:{id}:yes:https://example.com/{long}", w.market.id()),
     )
     .await;
     assert_eq!(holdings(&w, w.carol.id()).await, before);
@@ -527,7 +527,7 @@ async fn a_failed_unlock_leaves_seats_locked_until_anyone_retries_it() -> anyhow
     skip_secs(&w.worker, 130).await;
     let retry = |who: &near_workspaces::Account| {
         who.call(w.oracle.id(), "retry_unlock")
-            .args_json(json!({ "market_id": id.to_string() }))
+            .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
             .gas(Gas::from_tgas(100))
             .transact()
     };
@@ -556,7 +556,7 @@ async fn a_failed_unlock_leaves_seats_locked_until_anyone_retries_it() -> anyhow
 
     // Put one seat back as a failed unlock would have left it.
     relock_seat(&w, &token, id).await?;
-    assert_eq!(stake_of(&w, &token).await["serving"], id.to_string());
+    assert_eq!(stake_of(&w, &token).await["serving"], council_key(&w, id).await);
     refused(
         request_unstake(&w, &jury[2], &token).await,
         "this seat is serving on an open case",
@@ -584,7 +584,7 @@ async fn an_unchallenged_case_has_no_jury_to_unlock() -> anyhow::Result<()> {
     refused(
         w.dave
             .call(w.oracle.id(), "retry_unlock")
-            .args_json(json!({ "market_id": id.to_string() }))
+            .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
             .gas(Gas::from_tgas(100))
             .transact()
             .await?

@@ -231,7 +231,7 @@ async fn build(
             .await?
             .into_result()?;
         admin
-            .call(council.id(), "set_market")
+            .call(council.id(), "allow_market")
             .args_json(json!({ "market": market.id() }))
             .transact()
             .await?
@@ -528,7 +528,7 @@ pub async fn market_json(w: &World, id: u64) -> serde_json::Value {
 pub async fn case_json(w: &World, id: u64) -> serde_json::Value {
     w.oracle
         .view("get_case")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .await
         .unwrap()
         .json()
@@ -589,7 +589,10 @@ pub async fn propose(w: &World, who: &Account, id: u64, outcome: &str) -> anyhow
         who,
         w.oracle.id(),
         BOND,
-        &format!("propose:{id}:{outcome}:https://example.com/evidence?a=b"),
+        &format!(
+            "propose:{}:{id}:{outcome}:https://example.com/evidence?a=b",
+            w.market.id()
+        ),
     )
     .await
 }
@@ -605,7 +608,14 @@ pub async fn challenge(w: &World, who: &Account, id: u64) -> anyhow::Result<()> 
 }
 
 pub async fn challenge_with(w: &World, who: &Account, id: u64, answer: &str) -> anyhow::Result<()> {
-    ft_call(w, who, w.oracle.id(), BOND, &format!("challenge:{id}:{answer}")).await
+    ft_call(
+        w,
+        who,
+        w.oracle.id(),
+        BOND,
+        &format!("challenge:{}:{id}:{answer}", w.market.id()),
+    )
+    .await
 }
 
 // Returns the logs of the whole call, the verifier's payout and the callback included.
@@ -670,7 +680,7 @@ pub async fn resolve_draw(w: &World, id: u64) -> anyhow::Result<Vec<String>> {
     let r = w
         .bob
         .call(w.oracle.id(), "resolve_draw")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .gas(Gas::from_tgas(300))
         .transact()
         .await?
@@ -701,7 +711,8 @@ pub async fn panel(w: &World, id: u64) -> Vec<Account> {
 pub async fn draw_jury(w: &World, id: u64) -> anyhow::Result<Vec<Account>> {
     wait_for_draw(w, id).await;
     let logs = resolve_draw(w, id).await?;
-    assert_eq!(event_names(&logs), vec!["jury_drawn"]);
+    // The Council logs the draw, then the oracle logs the seated jury.
+    assert_eq!(event_names(&logs), vec!["jury_drawn", "jury_drawn"]);
     Ok(panel(w, id).await)
 }
 
@@ -715,7 +726,7 @@ pub fn commitment(juror: &AccountId, outcome: &str, salt: &str) -> String {
 pub async fn commit_vote(w: &World, juror: &Account, id: u64, commitment: &str) -> anyhow::Result<()> {
     juror
         .call(w.oracle.id(), "commit_vote")
-        .args_json(json!({ "market_id": id.to_string(), "commitment": commitment }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string(), "commitment": commitment }))
         .deposit(NearToken::from_yoctonear(1))
         .transact()
         .await?
@@ -750,7 +761,7 @@ pub async fn reveal_logs(
 ) -> anyhow::Result<Vec<String>> {
     let r = juror
         .call(w.oracle.id(), "reveal_vote")
-        .args_json(json!({ "market_id": id.to_string(), "outcome": outcome, "salt": salt, "reason": reason }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string(), "outcome": outcome, "salt": salt, "reason": reason }))
         .deposit(NearToken::from_yoctonear(1))
         .gas(Gas::from_tgas(100))
         .transact()
@@ -796,9 +807,21 @@ pub async fn send_revenue(w: &World, amount: u128) -> anyhow::Result<()> {
     set_council_market(w, w.market.id()).await
 }
 
+// Leaves `market` as the only allowed market on the Council: it is allowed first, then the others are removed.
 pub async fn set_council_market(w: &World, market: &AccountId) -> anyhow::Result<()> {
+    let markets: Vec<String> = serde_json::from_value(config(&w.council).await["markets"].clone())?;
+    if !markets.iter().any(|m| m == market.as_str()) {
+        council_owner_call(w, "allow_market", market).await?;
+    }
+    for other in markets.iter().filter(|m| m.as_str() != market.as_str()) {
+        council_owner_call(w, "disallow_market", &other.parse()?).await?;
+    }
+    Ok(())
+}
+
+pub async fn council_owner_call(w: &World, method: &str, market: &AccountId) -> anyhow::Result<()> {
     w.owner
-        .call(w.council.id(), "set_market")
+        .call(w.council.id(), method)
         .args_json(json!({ "market": market }))
         .transact()
         .await?
@@ -824,7 +847,7 @@ pub async fn to_reveal_phase(w: &World, id: u64) {
 pub async fn finalize(w: &World, id: u64) -> anyhow::Result<()> {
     w.oracle
         .call("finalize")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .gas(Gas::from_tgas(100))
         .transact()
         .await?
@@ -963,6 +986,7 @@ pub async fn finalize_quarter(w: &World, quarter: u32) -> anyhow::Result<Vec<Str
 
 // The Council's storage keys: the enum prefix, then the Borsh key. Quarters = 5, SeatWeight = 6, Forfeits = 7, Claims = 8,
 // Received = 9. A quarter is a u32 and a sweep id a u64, both little endian.
+const SECOND_ROUND_KEY: u64 = 1 << 63;
 const QUARTERS_KEY: u8 = 5;
 const SEAT_WEIGHT_KEY: u8 = 6;
 const FORFEITS_KEY: u8 = 7;
@@ -1024,18 +1048,18 @@ async fn age_quarter(w: &World, with_seats: bool) -> anyhow::Result<u32> {
         moved[1..5].copy_from_slice(&aged.to_le_bytes());
         match key[0] {
             QUARTERS_KEY => {
-                // QuarterBook = revenue_in: u128, carry_in: u128, seat_ns: u128, ...
+                // QuarterBook = version: u8, revenue_in: u128, carry_in: u128, seat_ns: u128, ...
                 let mut book = value.clone();
                 if with_seats {
-                    book[32..48].copy_from_slice(&counted.to_le_bytes());
+                    book[33..49].copy_from_slice(&counted.to_le_bytes());
                     w.worker.patch_state(w.council.id(), &moved, &book).await?;
                     w.worker
                         .patch_state(w.council.id(), key, &vec![0u8; value.len()])
                         .await?;
                 } else {
                     let mut kept = value.clone();
-                    kept[..16].fill(0);
-                    book[32..].fill(0);
+                    kept[1..17].fill(0);
+                    book[33..].fill(0);
                     w.worker.patch_state(w.council.id(), &moved, &book).await?;
                     w.worker.patch_state(w.council.id(), key, &kept).await?;
                 }
@@ -1050,11 +1074,11 @@ async fn age_quarter(w: &World, with_seats: bool) -> anyhow::Result<u32> {
         }
     }
     for (key, value) in &state {
-        if key.first() == Some(&RECEIVED_KEY) && key.len() == 9 {
-            // Received = amount: u128, quarter: u32, at: u64
+        if key.first() == Some(&RECEIVED_KEY) {
+            // Received = version: u8, amount: u128, quarter: u32, at: u64
             let mut value = value.clone();
-            if value[16..20] == from {
-                value[16..20].copy_from_slice(&aged.to_le_bytes());
+            if value[17..21] == from {
+                value[17..21].copy_from_slice(&aged.to_le_bytes());
                 w.worker.patch_state(w.council.id(), key, &value).await?;
             }
         }
@@ -1124,18 +1148,32 @@ pub fn borsh_string(s: &str) -> Vec<u8> {
     v
 }
 
+// The key the Council keeps a case's jury under: the oracle's case_uid, with the top bit set for the second round.
+pub async fn council_key(w: &World, id: u64) -> String {
+    let case = case_json(w, id).await;
+    let uid = case_u64(&case, "case_uid");
+    if case["round"] == 0 {
+        uid
+    } else {
+        uid | SECOND_ROUND_KEY
+    }
+    .to_string()
+}
+
 // Puts a seat back in the state a failed unlock_case would have left it in: marked as serving `case`, and the case's
 // jury list still holding it. Storage keys are the enum prefix (Stakes = 1, Juries = 3) then the borsh key.
-pub async fn relock_seat(w: &World, token_id: &str, case: u64) -> anyhow::Result<()> {
+pub async fn relock_seat(w: &World, token_id: &str, market_id: u64) -> anyhow::Result<()> {
+    let case: u64 = council_key(w, market_id).await.parse()?;
     let state = w.worker.view_state(w.council.id()).await?;
     let stake_key = [vec![1u8], borsh_string(token_id)].concat();
     let old = state
         .get(&stake_key)
         .expect("the staked seat is stored under the key this test expects")
         .clone();
-    // Stake = owner: String, staked_at: u64, unlock_requested_at: Option<u64>, serving: Option<u64>, index: u32, reward_debt: u128
-    let owner_len = u32::from_le_bytes(old[..4].try_into()?) as usize;
-    let mut at = 4 + owner_len + 8;
+    // Stake = version: u8, owner: String, staked_at: u64, unlock_requested_at: Option<u64>, serving: Option<u64>, booked_to: u64,
+    // serving_from: u64, index: u32
+    let owner_len = u32::from_le_bytes(old[1..5].try_into()?) as usize;
+    let mut at = 1 + 4 + owner_len + 8;
     let mut new = old[..at].to_vec();
     assert_eq!(old[at], 0, "the seat has not asked to unstake");
     new.push(0);

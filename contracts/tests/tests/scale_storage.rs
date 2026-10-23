@@ -341,7 +341,7 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
         &w.carol,
         w.oracle.id(),
         BOND,
-        &format!("propose:{long_b}:yes:{}", "e".repeat(LONG_EVIDENCE)),
+        &format!("propose:{}:{long_b}:yes:{}", w.market.id(), "e".repeat(LONG_EVIDENCE)),
     )
     .await?;
     row(

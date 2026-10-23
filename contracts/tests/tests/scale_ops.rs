@@ -351,7 +351,7 @@ async fn operator_index_cost() -> anyhow::Result<()> {
         skip_secs(&w.worker, PAST_WINDOW_SECS).await;
         w.oracle
             .call("finalize")
-            .args_json(json!({ "market_id": probe.to_string() }))
+            .args_json(json!({ "market": w.market.id(), "market_id": probe.to_string() }))
             .gas(Gas::from_tgas(100))
             .transact()
             .await?
@@ -605,7 +605,7 @@ async fn trade_gas_by_account_length_and_positions() -> anyhow::Result<()> {
             skip_secs(&w.worker, PAST_WINDOW_SECS).await;
             w.oracle
                 .call("finalize")
-                .args_json(json!({ "market_id": r_id.to_string() }))
+                .args_json(json!({ "market": w.market.id(), "market_id": r_id.to_string() }))
                 .gas(Gas::from_tgas(100))
                 .transact()
                 .await?

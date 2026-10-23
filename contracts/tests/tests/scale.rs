@@ -448,7 +448,7 @@ async fn views_keep_working_as_markets_pile_up() -> anyhow::Result<()> {
         n,
         &w.oracle,
         "list_cases",
-        json!({ "from_market_id": "0", "limit": PAGE }),
+        json!({ "market": w.market.id(), "from_market_id": "0", "limit": PAGE }),
         len_is(cases as usize),
     )
     .await;
@@ -460,7 +460,7 @@ async fn views_keep_working_as_markets_pile_up() -> anyhow::Result<()> {
             &w,
             &w.oracle,
             "list_cases",
-            &json!({ "from_market_id": from.to_string(), "limit": PAGE }),
+            &json!({ "market": w.market.id(), "from_market_id": from.to_string(), "limit": PAGE }),
         )
         .await
         {

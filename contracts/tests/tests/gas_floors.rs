@@ -54,7 +54,7 @@ async fn panel_of(w: &World, all: &[Account], id: u64) -> Vec<Account> {
 async fn finalize_with(w: &World, id: u64, tgas: u64) -> anyhow::Result<ExecutionFinalResult> {
     Ok(w.bob
         .call(w.oracle.id(), "finalize")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .gas(Gas::from_tgas(tgas))
         .transact()
         .await?)
@@ -62,7 +62,7 @@ async fn finalize_with(w: &World, id: u64, tgas: u64) -> anyhow::Result<Executio
 
 async fn reveal_with(w: &World, j: &Account, id: u64, salt: &str, tgas: u64) -> anyhow::Result<ExecutionFinalResult> {
     Ok(j.call(w.oracle.id(), "reveal_vote")
-        .args_json(json!({ "market_id": id.to_string(), "outcome": "no", "salt": salt, "reason": "r".repeat(1000) }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string(), "outcome": "no", "salt": salt, "reason": "r".repeat(1000) }))
         .deposit(NearToken::from_yoctonear(1))
         .gas(Gas::from_tgas(tgas))
         .transact()
@@ -73,7 +73,7 @@ async fn draw_with(w: &World, id: u64, tgas: u64) -> anyhow::Result<ExecutionFin
     wait_for_draw(w, id).await;
     Ok(w.bob
         .call(w.oracle.id(), "resolve_draw")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .gas(Gas::from_tgas(tgas))
         .transact()
         .await?)
@@ -199,7 +199,7 @@ async fn the_settling_floor_covers_the_largest_case_there_is() -> anyhow::Result
     let retry = |tgas: u64| {
         w.bob
             .call(w.oracle.id(), "retry_unlock")
-            .args_json(json!({ "market_id": id.to_string() }))
+            .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
             .gas(Gas::from_tgas(tgas))
             .transact()
     };
@@ -263,14 +263,14 @@ async fn a_retry_with_exactly_the_floor_frees_a_seat_a_failed_unlock_left_held()
     let retry = |tgas: u64| {
         w.dave
             .call(w.oracle.id(), "retry_unlock")
-            .args_json(json!({ "market_id": id.to_string() }))
+            .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
             .gas(Gas::from_tgas(tgas))
             .transact()
     };
     refused(retry(34).await?.into_result(), "attach at least 35 TGas");
     assert_eq!(
         stake_of(&w, &token).await["serving"],
-        id.to_string(),
+        council_key(&w, id).await,
         "a refused retry changed nothing"
     );
     assert_clean("retry_unlock at its floor", &retry(35).await?);
@@ -441,7 +441,7 @@ async fn the_deadline_answer_refuses_less_than_the_settling_floor() -> anyhow::R
     let call = |tgas: u64| {
         w.dave
             .call(w.oracle.id(), "resolve_by_deadline")
-            .args_json(json!({ "market_id": id.to_string() }))
+            .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
             .gas(Gas::from_tgas(tgas))
             .transact()
     };
@@ -549,7 +549,7 @@ async fn a_bond_gets_through_the_verifier_into_the_oracle_with_what_a_wallet_att
         let r = attempt(
             &w.carol,
             *tgas,
-            format!("propose:{id}:yes:https://example.com/evidence"),
+            format!("propose:{}:{id}:yes:https://example.com/evidence", w.market.id()),
         )
         .await?;
         let opened = !case_json(&w, *id).await.is_null();
@@ -572,12 +572,12 @@ async fn a_bond_gets_through_the_verifier_into_the_oracle_with_what_a_wallet_att
                 &w.carol,
                 w.oracle.id(),
                 BOND,
-                &format!("propose:{id}:yes:https://x"),
+                &format!("propose:{}:{id}:yes:https://x", w.market.id()),
             )
             .await?
             .into_result()?;
         }
-        let r = attempt(&w.dave, *tgas, format!("challenge:{id}:no")).await?;
+        let r = attempt(&w.dave, *tgas, format!("challenge:{}:{id}:no", w.market.id())).await?;
         let opened = case_json(&w, *id).await["stage"] == "disputed";
         println!(
             "challenge with {tgas} TGas: tx {}, challenged: {opened}, oracle burnt {:.1} TGas, {} TGas in all",

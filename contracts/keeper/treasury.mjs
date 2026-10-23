@@ -273,6 +273,8 @@ export const ALLOWED = {
   oracle: {
     ...upgradePath,
     set_operator: setOperator,
+    allow_market: call({ market: account }),
+    disallow_market: call({ market: account }),
     set_bond: call({ bond: u128(1n) }),
     set_window_ms: call({ window_ms: windowMs }),
     set_panel_deadline_ms: call({ panel_deadline_ms: windowMs }),
@@ -300,7 +302,8 @@ export const ALLOWED = {
     ...upgradePath,
     set_cooldown_ns: call({ cooldown_ns: u64(1n) }),
     set_close_grace_ns: call({ close_grace_ns: u64(CLOSE_GRACE_DAYS.min * NS_PER_DAY, CLOSE_GRACE_DAYS.max * NS_PER_DAY) }),
-    set_market: call({ market: exactly("market") }),
+    allow_market: call({ market: account }),
+    disallow_market: call({ market: account }),
     set_max_seats_per_account: call({ max_seats_per_account: integer(U32_MAX, 1) }),
     set_nft_contract: call({ nft_contract: account }),
     allow_tokens: call({ token_ids: list(text(ID_TEXT_MAX), LIMIT_COUNCIL.MAX_ALLOW_BATCH) }),

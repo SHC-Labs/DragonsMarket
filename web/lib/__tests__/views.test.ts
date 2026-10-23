@@ -17,7 +17,7 @@ vi.mock("../rpc", () => ({ view }));
 
 import { friendlyError } from "../errors";
 import {
-  getAccount, getBondTotals, getFees, getInFlight, getMarketConfig, getMarketInfo, getOracleConfig, getOwedBreakdown,
+  getAccount, getBondTotals, getCase, getFees, getInFlight, getMarketConfig, getMarketInfo, getOracleConfig, getOwedBreakdown,
   getPositions, listCases,
 } from "../market";
 import { getCouncilConfig } from "../council";
@@ -48,13 +48,17 @@ describe("market views", () => {
 describe("oracle views", () => {
   it("lists cases with the start id as a decimal string and the limit as a number", async () => {
     await listCases(40, 25);
-    expect(view).toHaveBeenLastCalledWith("oracle.near", "list_cases", { from_market_id: "40", limit: 25 });
+    expect(view).toHaveBeenLastCalledWith("oracle.near", "list_cases", { market: "market.near", from_market_id: "40", limit: 25 });
+  });
+  it("reads one case with the market account first", async () => {
+    await getCase("7");
+    expect(view).toHaveBeenLastCalledWith("oracle.near", "get_case", { market: "market.near", market_id: "7" });
   });
   it("reads bond totals, market info and config", async () => {
     await getBondTotals();
     expect(view).toHaveBeenLastCalledWith("oracle.near", "bond_totals");
     await getMarketInfo("7");
-    expect(view).toHaveBeenLastCalledWith("oracle.near", "get_market_info", { market_id: "7" });
+    expect(view).toHaveBeenLastCalledWith("oracle.near", "get_market_info", { market: "market.near", market_id: "7" });
     await getOracleConfig();
     expect(view).toHaveBeenLastCalledWith("oracle.near", "config");
   });

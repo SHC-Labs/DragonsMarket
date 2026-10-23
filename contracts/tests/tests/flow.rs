@@ -198,7 +198,7 @@ async fn unchallenged_answer_becomes_final_and_pays_out_with_no_deadline() -> an
     let r = w
         .oracle
         .call("finalize")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .transact()
         .await?;
     assert!(r.is_failure());
@@ -206,7 +206,7 @@ async fn unchallenged_answer_becomes_final_and_pays_out_with_no_deadline() -> an
     skip_secs(&w.worker, 70).await; // past the 60 s window
     w.oracle
         .call("finalize")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .gas(Gas::from_tgas(100))
         .transact()
         .await?

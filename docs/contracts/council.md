@@ -13,9 +13,9 @@ passed (7 days to start, the owner can move it between 1 and 30 days), and each 
 quarter once with `claim_quarter`. The 30-day stream, `claim` and `pending_reward` are gone, and
 `unstake` returns the NFT and pays nothing. A silent juror loses the seat time of the case instead of
 revenue. Neither the NFT collection nor the market is written in the code or taken by `new`: the owner
-sets them with `set_nft_contract` and `set_market`, and staking, revenue and claims refuse until it
-has. State version 2. Revenue arrives through the NEAR Intents verifier as `mt_on_transfer` with the
-message `revenue:<sweep id>`, only from the market, and claims are paid out of the Council's own
+sets the collection with `set_nft_contract` and the markets with `allow_market`, and staking, revenue and claims refuse until it
+has. State version 3. Revenue arrives through the NEAR Intents verifier as `mt_on_transfer` with the
+message `revenue:<sweep id>`, only from an allowed market account, and claims are paid out of the Council's own
 account in it with `mt_transfer` of 1 yocto, with no signed intent and no key registered in the
 verifier. The DAO voting period is the only delay before an owner action (decided 2026-10-21, R-07).
 
@@ -105,12 +105,12 @@ belongs to the owner (the DAO).
 
 | Role                 | Set by                                         | Can do                                                                                                                                                                                                                        |
 | -------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Owner                | `new`, then `propose_owner` and `accept_owner` | `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract`, `set_market`, `set_close_grace_ns`, `set_reconcile_wait_ns`, `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`, `propose_owner`, `upgrade` and `seal`. Normally the DAO. |
+| Owner                | `new`, then `propose_owner` and `accept_owner` | `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract`, `allow_market`, `disallow_market`, `set_close_grace_ns`, `set_reconcile_wait_ns`, `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`, `propose_owner`, `upgrade` and `seal`. Normally the DAO. |
 | Oracle               | `new` (fixed)                                  | `draw` and `unlock_case`.                                                                                                                                                                                                     |
 | Seat holder          | Stakes an NFT                                  | `request_unstake`, `unstake` for their own seats, and `claim_quarter` for a seat they staked, including one they have since unstaked.                                                                                         |
 | The verifier         | `new` (fixed)                                  | Only `mt_on_transfer`, which is how revenue arrives.                                                                                                                                                                          |
 | The NFT collection   | `set_nft_contract`, changeable only while nothing is staked | Only `nft_on_transfer`, which is how seats are staked.                                                                                                                                                           |
-| The market           | `set_market`                                   | The only account whose `revenue:<sweep id>` message counts as revenue.                                                                                                                                                        |
+| The markets          | `allow_market` and `disallow_market`           | The accounts whose `revenue:<sweep id>` message counts as revenue. There can be several.                                                                                                                                                        |
 | Anyone               | n/a                                            | `finalize_quarter`, `advance_quarters`, `book_seat_time`, `stage_code` (paying for the storage), and every view.                                                                                                              |
 
 There is no operator role in this contract.
@@ -136,10 +136,10 @@ anyone else gets `Method new is private`.
 There is also a fixed cap of 1,000 seats in the whole council, written into the code.
 
 `new` takes neither the NFT collection nor the market, because neither may be guessed at deploy time.
-The owner sets them afterwards with `set_nft_contract` and `set_market`. Until the collection is set
+The owner sets them afterwards with `set_nft_contract` and `allow_market`. Until the collection is set
 nothing can be staked and no token can be allowed (`the NFT collection is not set, the owner must
-call set_nft_contract`). Until the market is set no revenue is taken and no claim is paid (`the
-Council is not configured, the owner must call set_market`). The starting grace period is 7 days.
+call set_nft_contract`). Until a market is allowed no revenue is taken and no claim is paid (`the
+Council is not configured, the owner must call allow_market`). The starting grace period is 7 days.
 The first quarter to finalize is the one the contract was created in.
 
 ---
@@ -284,15 +284,15 @@ already in the Council's Intents account when the hook runs. The hook refuses:
 | -------------------------------------------------------------- | ------------------------------------------------------------------ |
 | `only the verifier can deliver money`                          | The caller is not the verifier.                                    |
 | `exactly one token and amount` / `wrong token`                 | A batch, or a token id other than the configured one.              |
-| `the Council is not configured, the owner must call set_market` | The owner has not set the market yet.                              |
+| `the Council is not configured, the owner must call allow_market` | The owner has not allowed a market yet.                            |
 | `unknown action`                                               | A message that is not `revenue:` and a whole number. A bare `revenue` is refused. |
-| `revenue comes from the market only`                           | The sender is not the account the owner set as the market.         |
+| `revenue comes from an allowed market only`                    | The sender is not on the allow-list.                               |
 | `that sweep was already received`                              | The sweep id was taken before.                                     |
 
 A refusal makes the verifier return the money to the sender. The answer is the amounts to hand back,
 and the Council always answers `[0]`, which keeps everything. The Council records each sweep id with
-its amount, quarter and time (`received_of(sweep_id)`), so a repeated send is harmless and the market
-can ask what arrived when a transfer's result was lost.
+its amount, quarter and time, under the market account and the sweep id (`received_of(market, sweep_id)`),
+so two markets can use the same sweep id, a repeated send is harmless and the market can ask what arrived when a transfer's result was lost.
 
 Tokens sent to the Council's Intents account any other way, a plain deposit for example, never reach
 the hook. They are not counted in `total_received` and are not shared with anyone. They sit in the
@@ -353,7 +353,7 @@ refused if:
 
 | Refusal message                                           | Cause                                                                                            |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `the Council is not configured, the owner must call set_market` | The owner has not set the market.                                                          |
+| `the Council is not configured, the owner must call allow_market` | The owner has not allowed a market.                                                       |
 | `that quarter is not final`                               | The quarter is still running, closing, or has not started.                                       |
 | `claim is already pending` / `already claimed`            | A record exists for this quarter, token and caller.                                              |
 | `book this seat first`                                    | The caller's seat needs more than eight quarters counted. Call `book_seat_time` first.           |
@@ -413,7 +413,7 @@ When a disputed case is final, the oracle calls `unlock_case(case_key, delinquen
 jurors who never voted. For every seat of that jury: if its owner is on the delinquent list, the
 seat loses the seat time of the case, and then the seat stops serving. A second call for the same
 case does nothing, so nobody is penalised twice. The call cannot fail for want of work to do, so a
-case is always released. If it fails for another reason, anyone can retry it through the oracle's
+case is always released and logs `jury_released` with the delinquent list, once. If it fails for another reason, anyone can retry it through the oracle's
 `retry_unlock`, and `jury_of(case_key)` shows whether seats are still held.
 
 ### What a silent juror loses
@@ -439,7 +439,8 @@ The penalty is small when the case is short, so on its own it is a weak deterren
 | `set_cooldown_ns(cooldown_ns)`                                                                                     | Owner                     | Changes the unstake wait. Above zero.                                                                                                                                                                               |
 | `set_max_seats_per_account(n)`                                                                                     | Owner                     | Changes the per-account cap. At least 1.                                                                                                                                                                            |
 | `set_nft_contract(nft_contract)`                                                                                   | Owner                     | Sets or changes the collection. Only while nothing is staked. The allowlist stays stored and applies to the old collection only. Event `nft_contract_set`.                                                           |
-| `set_market(market)`                                                                                               | Owner                     | Sets the only account whose sweeps count as revenue. Event `market_set`.                                                                                                                                            |
+| `allow_market(market)`                                                                                             | Owner                     | Adds an account whose sweeps count as revenue. Refused if already on the list. Event `market_allowed`.                                                                                                              |
+| `disallow_market(market)`                                                                                          | Owner                     | Takes an account off the list, so its sweeps are refused from then on. What it already sent stays. The last one cannot be removed (`keep at least one allowed market`), so claims keep working. Event `market_disallowed`. |
 | `set_close_grace_ns(close_grace_ns)`                                                                               | Owner                     | Sets the wait after a quarter's end before it can be finalized and claimed, from 1 to 30 days. Applies to every quarter not final yet. Event `close_grace_set`.                                                      |
 | `set_reconcile_wait_ns(reconcile_wait_ns)`                                                                         | Owner                     | Sets how long a claim must be pending before `reconcile_claim` can decide it, from 10 minutes to 7 days. Live: it applies to every claim from now on. Event `reconcile_wait_set`.                                    |
 | `allow_tokens(token_ids)`, `set_token_range(first, last)`, `clear_token_range()`, `set_allowlist_enabled(enabled)` | Owner                     | The allowlist, above.                                                                                                                                                                                               |
@@ -479,11 +480,18 @@ it (`migrate runs only inside an upgrade`), clears it and sets `upgrade_proven`,
 `migrate` proves nothing. When the batch fails, the old code keeps the mark and the next `upgrade`
 sets it again. Both flags are shown in `config` next to `state_version`. `seal` is refused until it
 is true (`prove the upgrade path before deleting keys`). The state struct starts with
-`state_version: u16`, 2 today (version 2 is the quarterly books). `migrate` reads the first two bytes
-of the stored state and refuses anything but 2 (`migrate expects version 2`), then reads the version 2
-struct. It never guesses a layout from bytes. A version 3 build keeps the version 2 struct as
-`StateV2`, reads that, builds its state and writes `state_version: 3`. A state written by version 1
+`state_version: u16`, 3 today (version 2 is the quarterly books, version 3 keys received sweeps by market
+account and tags every map record with a version). `migrate` reads the first two bytes
+of the stored state and refuses anything but 3 (`migrate expects version 3`), then reads the version 3
+struct. It never guesses a layout from bytes. A version 4 build keeps the version 3 struct as
+`StateV3`, reads that, builds its state and writes `state_version: 4`. A state written by version 1
 (the 30-day stream) is refused, so an upgrade from it reverts instead of reading it wrongly.
+
+Every record in the maps (stake, quarter book, claim, received sweep) is stored behind a one-byte version tag,
+0 today. A read goes through the stored enum's `into_current`, which is where an older layout is upgraded,
+and a write always uses the current version. A tag this code does not know panics with `a stored record has
+a newer version than this code can read`. The case keys the oracle passes are opaque numbers to the Council:
+the oracle builds them from a unique case number, so two market accounts never share a jury.
 
 SputnikDAO runs a proposal in the same call as the approval that reaches its threshold. By owner
 decision (2026-10-21, R-07) the voting period is the only delay, and no delay after approval will be
@@ -514,13 +522,13 @@ integration evidence.
 | `get_entitlement(quarter, token_id, account_id)` | What one token earned for one owner in one quarter: seat time, amount, `estimated`, status (`accruing`, `closing`, `claimable`, `pending`, `paid`) and the times of the request and the payment. While the quarter is not final the amount is a guess. Null when the owner earned nothing there.                |
 | `entitlements_of(account_id, from_quarter, limit)` | The entitlements of every token the account has ever staked, oldest first, for `min(limit, entitlements_page_quarters(account_id))` quarters from `from_quarter`. The next page starts that many quarters later. Tokens and quarters with nothing earned are left out. |
 | `entitlements_page_quarters(account_id)` | The most quarters one `entitlements_of` page covers for the account: 25, or fewer so a page stays within 250 lookups (one per quarter for each token the account has ever staked), and never less than 1. |
-| `received_of(sweep_id)`            | What the market sent under a sweep id (amount, quarter, time), or null. The market reads it to settle a transfer whose result was lost.                                                                                                                                                                                       |
+| `received_of(market, sweep_id)`    | What a market account sent under a sweep id (amount, quarter, time), or null. The market calls it with its own account id to settle a transfer whose result was lost.                                                                                                                                                                                       |
 | `reward_totals()`                  | Total received, total paid, claims in flight, money in quarters still open, money in final quarters not yet claimed (the dust included), and the total rolled forward.                                                                                                                                                         |
 | `total_received()`                 | Every revenue token this contract has taken in since the start, whether claimed yet or not. Forfeits are not money and are not counted.                                                                                                                                                                                       |
 | `is_allowed(token_id)`             | Whether the token could be staked now.                                                                                                                                                                                                                                                                                        |
 | `jury_of(case_key)`                | The tokens still held for a case. Empty once released.                                                                                                                                                                                                                                                                        |
 | `is_staged(code_hash)`             | Whether a wasm with that sha256 is staged.                                                                                                                                                                                                                                                                                    |
-| `config()`                         | state version, upgrade proven, upgrade in flight, owner, pending owner, oracle, NFT collection and market (null until set), verifier, collateral token id, cooldown, grace period (`close_grace_ns`), reconcile wait (`reconcile_wait_ns`), seat cap, allowlist on or off, the allowed range, `total_received`, the next quarter to finalize and the time seat time is counted up to. |
+| `config()`                         | state version, upgrade proven, upgrade in flight, owner, pending owner, oracle, NFT collection (null until set), the allowed market accounts (`markets`, empty until one is allowed), verifier, collateral token id, cooldown, grace period (`close_grace_ns`), reconcile wait (`reconcile_wait_ns`), seat cap, allowlist on or off, the allowed range, `total_received`, the next quarter to finalize and the time seat time is counted up to. |
 
 ---
 
@@ -542,10 +550,15 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `staked`                          | A seat is staked                            | token_id, owner                    |
 | `unstake_requested`               | `request_unstake`                           | token_id, owner, unlock_at         |
 | `nft_contract_set`                | `set_nft_contract`                          | nft_contract                       |
-| `market_set`                      | `set_market`                                | market                             |
+| `market_allowed`                  | `allow_market`                              | market                             |
+| `market_disallowed`               | `disallow_market`                           | market                             |
+| `jury_drawn`                      | `draw`, for a case not drawn before         | case_key, tokens, owners           |
+| `jury_released`                   | `unlock_case`, for a jury still held        | case_key, delinquent               |
+| `quarters_advanced`               | `advance_quarters`                          | steps                              |
+| `seat_time_booked`                | `book_seat_time`                            | token_id, quarters                 |
 | `close_grace_set`                 | `set_close_grace_ns`                        | close_grace_ns                     |
 | `reconcile_wait_set`              | `set_reconcile_wait_ns`                     | reconcile_wait_ns                  |
-| `revenue`                         | Revenue arrives                             | from, amount, sweep_id, quarter, seats |
+| `revenue`                         | Revenue arrives                             | from, market (the same account), amount, sweep_id, quarter, seats |
 | `quarter_finalized`               | `finalize_quarter`                          | quarter, pool, weight_ns, rolled_to (null or the next quarter) |
 | `claim_requested`                 | `claim_quarter`, before the payout is sent  | quarter, token_id, owner, amount   |
 | `claim_paid`                      | The payout went through                     | quarter, token_id, owner, amount   |
@@ -567,7 +580,8 @@ Each logs `EVENT_JSON:` and JSON of the form
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
 | `owner only` / `oracle only` / `not the proposed owner`                                                                                                      | Access refusals.                                                 |
 | `only the verifier can deliver money` / `exactly one token and amount` / `wrong token` / `unknown action`                                                    | Revenue from a caller that is not the verifier, a batch, another token id, or a message other than `revenue:<sweep id>`. |
-| `revenue comes from the market only` / `that sweep was already received` / `the Council is not configured, the owner must call set_market`                    | Revenue from any other sender, a repeated sweep id, or before the owner set the market.          |
+| `revenue comes from an allowed market only` / `that sweep was already received` / `the Council is not configured, the owner must call allow_market`                    | Revenue from an account not on the list, a repeated sweep id from the same market, or before the owner allowed a market.          |
+| `already an allowed market` / `not an allowed market` / `keep at least one allowed market`                                                                  | `allow_market` for an account already on the list, `disallow_market` for one that is not, or for the last one. |
 | `the NFT collection is not set, the owner must call set_nft_contract`                                                                                        | Staking or allowing a token before the owner set the collection.                                 |
 | `the collateral token id must look like nep141:<token>`                                                                                                      | `new` with a token id in the wrong form.                         |
 | `wrong NFT contract` / `that token is not on the allowlist` / `already staked` / `the council is full` / `that account already holds the most seats allowed` | A refused stake.                                                 |
@@ -590,7 +604,7 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `no code is staged under that hash`                                                                                                                          | `upgrade` for a hash nobody staged, or one already used.         |
 | `attach at least <amount> to pay for the storage` / `the wasm goes in the call input`                                                                        | `stage_code` with too little deposit or no input.                |
 | `prove the upgrade path before deleting keys`                                                                                                                | `seal` before an upgrade has gone through `migrate`.             |
-| `migrate expects version 2`                                                                                                                                  | `migrate` found state written by another version.                |
+| `migrate expects version 3`                                                                                                                                  | `migrate` found state written by another version.                |
 | `migrate runs only inside an upgrade`                                                                                                                        | `migrate` called without `upgrade` having sent the batch.        |
 | `Method <name> is private`                                                                                                                                   | A callback called from outside.                                  |
 
@@ -621,7 +635,7 @@ inside the range stake, and `007` and `+7` do not; names and a range made for on
 nothing in the next; a hand-called `migrate` is refused; `unstake` and `claim_quarter` refuse less than
 their gas floors; `total_received` counts every revenue arrival and no forfeit; a fake NFT
 collection cannot stake seats and a call to `nft_on_transfer` made directly is refused; a fake token
-cannot add revenue, whether it arrives through the verifier or is called directly; only the market's
+cannot add revenue, whether it arrives through the verifier or is called directly; only an allowed market's
 sweeps count as revenue and a sweep id is taken once, including against the real verifier, which gives
 a refused send back; a seat staked by an approved relayer belongs to its real owner; two claims or
 two unstakes sent at once pay once; a failed NFT return restores the seat; a seat that asked to

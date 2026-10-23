@@ -120,8 +120,8 @@ const GAS_SETTLE_FLOOR: Gas =
 // Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
 const NEP141_PREFIX: &str = "nep141:";
 // The layout of the state below. migrate reads exactly this one and refuses any other. Version 2 holds the sweep ledger and
-// the optional fee recipients.
-const STATE_VERSION: u16 = 2;
+// the optional fee recipients. Version 3 keeps every market, sweep and withdrawal inside a version tag.
+const STATE_VERSION: u16 = 3;
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
@@ -238,6 +238,69 @@ pub struct Withdrawal {
     account: AccountId,
     amount: U128,
     at: U64,
+}
+
+// Each stored record sits behind a one-byte version tag, so a later layout can be read next to this one and upgraded as it
+// is loaded. Reads go through into_current and every write stores the newest variant. A tag nobody wrote yet fails to
+// decode, which stops the read instead of misreading the bytes.
+#[near(serializers=[borsh])]
+#[derive(Clone)]
+enum VersionedMarket {
+    V1(Market),
+}
+
+impl VersionedMarket {
+    fn into_current(self) -> Market {
+        match self {
+            Self::V1(m) => m,
+        }
+    }
+}
+
+impl From<Market> for VersionedMarket {
+    fn from(m: Market) -> Self {
+        Self::V1(m)
+    }
+}
+
+#[near(serializers=[borsh])]
+#[derive(Clone)]
+enum VersionedSweep {
+    V1(Sweep),
+}
+
+impl VersionedSweep {
+    fn into_current(self) -> Sweep {
+        match self {
+            Self::V1(s) => s,
+        }
+    }
+}
+
+impl From<Sweep> for VersionedSweep {
+    fn from(s: Sweep) -> Self {
+        Self::V1(s)
+    }
+}
+
+#[near(serializers=[borsh])]
+#[derive(Clone)]
+enum VersionedWithdrawal {
+    V1(Withdrawal),
+}
+
+impl VersionedWithdrawal {
+    fn into_current(self) -> Withdrawal {
+        match self {
+            Self::V1(w) => w,
+        }
+    }
+}
+
+impl From<Withdrawal> for VersionedWithdrawal {
+    fn from(w: Withdrawal) -> Self {
+        Self::V1(w)
+    }
 }
 
 #[near(serializers=[json])]
@@ -435,10 +498,10 @@ pub trait Oracle {
     );
 }
 
-// What the Council recorded for a sweep id is the evidence settle_leg uses for a transfer whose result was lost.
+// What the Council recorded for a market's sweep id is the evidence settle_leg uses for a transfer whose result was lost.
 #[ext_contract(ext_council)]
 pub trait Council {
-    fn received_of(&self, sweep_id: U64);
+    fn received_of(&self, market: AccountId, sweep_id: U64);
 }
 
 #[near(
@@ -493,7 +556,7 @@ pub struct MarketContract {
     reconcile_wait_minutes: u32,
     min_sweep_interval_minutes: u32,
     next_market_id: u64,
-    markets: LookupMap<u64, Market>,
+    markets: LookupMap<u64, VersionedMarket>,
     balances: LookupMap<AccountId, u128>,
     // The sum of every entry in balances, kept so total_owed can add it up without walking a map.
     balances_total: u128,
@@ -527,14 +590,14 @@ pub struct MarketContract {
     next_sweep_id: u64,
     // When the last sweep ran, in ns. None until the first one.
     last_sweep_at: Option<u64>,
-    sweeps: LookupMap<u64, Sweep>,
+    sweeps: LookupMap<u64, VersionedSweep>,
     // The sum and number of fee legs that are pending or unresolved, kept so in_flight does not walk the sweeps.
     legs_in_flight_total: u128,
     legs_in_flight_count: u32,
     // Withdrawals sent and not yet reported, by id. Ids start at 1 and only go up. The total is part of total_owed: the money
     // is still owed until the verifier confirms it, and a callback that never reports leaves it here, in view.
     next_withdrawal_id: u64,
-    withdrawals: LookupMap<u64, Withdrawal>,
+    withdrawals: LookupMap<u64, VersionedWithdrawal>,
     pending_withdrawals_total: u128,
     pending_withdrawal_count: u32,
     // account -> the part of the total that is theirs, so get_account does not walk the withdrawals. Absent when zero.
@@ -800,15 +863,15 @@ impl MarketContract {
 
         let id = self.next_market_id;
         self.next_market_id += 1;
-        self.markets.insert(
+        self.store_market(
             id,
             Market {
-                title,
+                title: title.clone(),
                 rule_text,
                 resolution_source,
                 void_policy,
-                category,
-                subcategory,
+                category: category.clone(),
+                subcategory: subcategory.clone(),
                 rule_hash: rule_hash.clone(),
                 price_rule,
                 close_at: close_at.0,
@@ -832,7 +895,8 @@ impl MarketContract {
         );
         emit(
             "market_created",
-            json!({ "market_id": id.to_string(), "rule_hash": rule_hash }),
+            json!({ "market_id": id.to_string(), "rule_hash": rule_hash, "title": title, "category": category,
+                    "subcategory": subcategory, "close_at": close_at.0.to_string(), "resolve_by": resolve_by.0.to_string() }),
         );
         self.register_with_oracle(id);
         U64(id)
@@ -843,6 +907,10 @@ impl MarketContract {
         self.only_operator_or_owner();
         let m = self.market(market_id.0);
         require!(!m.registered, "already registered");
+        emit(
+            "market_registration_retried",
+            json!({ "market_id": market_id.0.to_string() }),
+        );
         self.register_with_oracle(market_id.0);
     }
 
@@ -851,8 +919,13 @@ impl MarketContract {
         if result.is_ok() {
             let mut m = self.market(market_id.0);
             m.registered = true;
-            self.markets.insert(market_id.0, m);
+            self.store_market(market_id.0, m);
             emit("market_registered", json!({ "market_id": market_id.0.to_string() }));
+        } else {
+            emit(
+                "market_registration_failed",
+                json!({ "market_id": market_id.0.to_string() }),
+            );
         }
     }
 
@@ -869,7 +942,7 @@ impl MarketContract {
         );
         m.advance_twap(env::block_timestamp());
         m.halted = true;
-        self.markets.insert(market_id.0, m);
+        self.store_market(market_id.0, m);
         emit(
             "market_halted",
             json!({ "market_id": market_id.0.to_string(), "reason": reason }),
@@ -882,7 +955,7 @@ impl MarketContract {
         require!(m.outcome.is_none(), "already resolved");
         m.advance_twap(env::block_timestamp());
         m.halted = false;
-        self.markets.insert(market_id.0, m);
+        self.store_market(market_id.0, m);
         emit("market_resumed", json!({ "market_id": market_id.0.to_string() }));
     }
 
@@ -1144,7 +1217,7 @@ impl MarketContract {
             .unwrap_or_else(|| env::panic_str("invariant broken"));
         m.locked = owed;
         m.residual_claimed = true;
-        self.markets.insert(market_id.0, m);
+        self.store_market(market_id.0, m);
         self.locked_total -= residual;
         self.treasury_due += residual;
         emit(
@@ -1165,10 +1238,11 @@ impl MarketContract {
             Some(existing) => require!(existing == outcome, "market already resolved differently"),
             None => {
                 m.resolve(outcome);
-                self.markets.insert(market_id.0, m);
+                let void_price_yes = m.void_price_yes.map(|p| p.to_string());
+                self.store_market(market_id.0, m);
                 emit(
                     "outcome_set",
-                    json!({ "market_id": market_id.0.to_string(), "outcome": outcome }),
+                    json!({ "market_id": market_id.0.to_string(), "outcome": outcome, "void_price_yes": void_price_yes }),
                 );
             }
         }
@@ -1189,10 +1263,12 @@ impl MarketContract {
             )
         );
         m.resolve(Outcome::Void);
-        self.markets.insert(market_id.0, m);
+        let void_price_yes = m.void_price_yes.map(|p| p.to_string());
+        self.store_market(market_id.0, m);
         emit(
             "outcome_set",
-            json!({ "market_id": market_id.0.to_string(), "outcome": Outcome::Void, "by": "deadline" }),
+            json!({ "market_id": market_id.0.to_string(), "outcome": Outcome::Void, "by": "deadline",
+                    "void_price_yes": void_price_yes }),
         );
     }
 
@@ -1315,14 +1391,13 @@ impl MarketContract {
         m.locked -= collateral_out.0;
         self.locked_total -= collateral_out.0;
         m.record_price();
-        self.markets.insert(market_id.0, m);
+        let mut data = json!({ "market_id": market_id.0.to_string(), "account": who, "side": side,
+                    "shares": shares_in.to_string(), "collateral": collateral_out.0.to_string(), "fee": fee.to_string() });
+        m.add_pools(&mut data);
+        self.store_market(market_id.0, m);
         self.fees += fee;
         self.credit(&who, collateral_out.0 - fee);
-        emit(
-            "sell",
-            json!({ "market_id": market_id.0.to_string(), "account": who, "side": side,
-                    "shares": shares_in.to_string(), "collateral": collateral_out.0.to_string(), "fee": fee.to_string() }),
-        );
+        emit("sell", data);
     }
 
     // Pays out after resolution. No deadline.
@@ -1344,11 +1419,12 @@ impl MarketContract {
         m.user_no -= no;
         m.locked -= payout;
         self.locked_total -= payout;
-        self.markets.insert(market_id.0, m);
+        self.store_market(market_id.0, m);
         self.credit(&who, payout);
         emit(
             "redeemed",
-            json!({ "market_id": market_id.0.to_string(), "account": who, "amount": payout.to_string() }),
+            json!({ "market_id": market_id.0.to_string(), "account": who, "amount": payout.to_string(),
+                    "yes_shares": yes.to_string(), "no_shares": no.to_string() }),
         );
         U128(payout)
     }
@@ -1364,7 +1440,7 @@ impl MarketContract {
         self.debit(&who, amount.0);
         let id = self.next_withdrawal_id;
         self.next_withdrawal_id += 1;
-        self.withdrawals.insert(
+        self.store_withdrawal(
             id,
             Withdrawal {
                 account: who.clone(),
@@ -1397,7 +1473,7 @@ impl MarketContract {
     // so a repeat changes nothing. A callback that never runs leaves the withdrawal in the pending total, still owed.
     #[private]
     pub fn on_withdraw(&mut self, id: U64, #[callback_result] result: Result<(), PromiseError>) {
-        let Some(w) = self.withdrawals.get(&id.0).cloned() else {
+        let Some(w) = self.find_withdrawal(id.0) else {
             return;
         };
         let data = self.close_withdrawal(id.0, w, result.is_err());
@@ -1418,9 +1494,7 @@ impl MarketContract {
     pub fn reconcile_withdrawal(&mut self, id: U64, paid: bool) {
         self.only_owner();
         let w = self
-            .withdrawals
-            .get(&id.0)
-            .cloned()
+            .find_withdrawal(id.0)
             .unwrap_or_else(|| env::panic_str("no withdrawal is pending with that id"));
         require!(
             env::block_timestamp()
@@ -1522,7 +1596,7 @@ impl MarketContract {
                 self.legs_in_flight_count += 1;
             }
         }
-        self.sweeps.insert(id, sweep.clone());
+        self.store_sweep(id, sweep.clone());
         emit(
             "fees_swept",
             json!({ "id": id.to_string(), "total": sweep.total, "revenue_pool": recipients.revenue_pool, "council": sweep.council.amount,
@@ -1621,7 +1695,7 @@ impl MarketContract {
         );
         ext_council::ext(sweep.council.to)
             .with_static_gas(GAS_COUNCIL_VIEW)
-            .received_of(sweep_id)
+            .received_of(env::current_account_id(), sweep_id)
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_CALLBACK)
@@ -1651,7 +1725,11 @@ impl MarketContract {
     pub fn reconcile_leg(&mut self, sweep_id: U64, leg: LegKind, arrived: bool) {
         self.only_owner();
         let sweep = self.sweep(sweep_id.0);
-        let (status, amount) = (sweep.leg(leg).status, sweep.leg(leg).amount.0);
+        let (status, amount, to) = (
+            sweep.leg(leg).status,
+            sweep.leg(leg).amount.0,
+            sweep.leg(leg).to.clone(),
+        );
         require!(
             matches!(status, LegStatus::Pending | LegStatus::Unresolved),
             "the leg is neither pending nor unresolved"
@@ -1673,7 +1751,7 @@ impl MarketContract {
         self.end_leg(sweep_id.0, leg, if arrived { amount } else { 0 });
         emit(
             "fee_leg_reconciled",
-            json!({ "id": sweep_id.0.to_string(), "leg": leg, "amount": amount.to_string(), "arrived": arrived }),
+            json!({ "id": sweep_id.0.to_string(), "leg": leg, "to": to, "amount": amount.to_string(), "arrived": arrived }),
         );
     }
 
@@ -1710,15 +1788,13 @@ impl MarketContract {
     }
 
     pub fn get_sweep(&self, sweep_id: U64) -> Option<Sweep> {
-        self.sweeps.get(&sweep_id.0).cloned()
+        self.find_sweep(sweep_id.0)
     }
 
     // Sweeps by id from `from_index`, oldest first, at most 50 a call. An id that was skipped with set_next_sweep_id is absent.
     pub fn list_sweeps(&self, from_index: U64, limit: U64) -> Vec<Sweep> {
         let end = self.next_sweep_id.min(from_index.0.saturating_add(limit.0.min(50)));
-        (from_index.0..end)
-            .filter_map(|id| self.sweeps.get(&id).cloned())
-            .collect()
+        (from_index.0..end).filter_map(|id| self.find_sweep(id)).collect()
     }
 
     pub fn is_registered(&self, account_id: AccountId) -> bool {
@@ -1798,7 +1874,7 @@ impl MarketContract {
             .filter_map(|id| {
                 let yes = self.shares.get(&(id, account_id.clone(), 0)).copied().unwrap_or(0);
                 let no = self.shares.get(&(id, account_id.clone(), 1)).copied().unwrap_or(0);
-                let m = self.markets.get(&id)?;
+                let m = self.find_market(id)?;
                 Some(PositionView {
                     market_id: U64(id),
                     yes: U128(yes),
@@ -1812,20 +1888,19 @@ impl MarketContract {
     }
 
     pub fn get_market(&self, market_id: U64) -> Option<MarketView> {
-        self.markets.get(&market_id.0).map(|m| self.view(market_id.0, m))
+        self.find_market(market_id.0).map(|m| self.view(market_id.0, &m))
     }
 
     pub fn list_markets(&self, from_index: U64, limit: U64) -> Vec<MarketView> {
         let end = self.next_market_id.min(from_index.0.saturating_add(limit.0.min(50)));
         (from_index.0..end)
-            .filter_map(|id| self.markets.get(&id).map(|m| self.view(id, m)))
+            .filter_map(|id| self.find_market(id).map(|m| self.view(id, &m)))
             .collect()
     }
 
     // Yes price after each trade, oldest first. The website draws its chart from this.
     pub fn get_history(&self, market_id: U64) -> Vec<PricePoint> {
-        self.markets
-            .get(&market_id.0)
+        self.find_market(market_id.0)
             .map(|m| {
                 m.history
                     .iter()
@@ -1844,7 +1919,7 @@ impl MarketContract {
             shares_out: U128(0),
             fee: U128(0),
         };
-        let Some(m) = self.markets.get(&market_id.0) else {
+        let Some(m) = self.find_market(market_id.0) else {
             return none;
         };
         let (target, other) = if side_index(&side) == 0 {
@@ -1868,7 +1943,7 @@ impl MarketContract {
             shares_in: U128(0),
             fee: U128(0),
         };
-        let Some(m) = self.markets.get(&market_id.0) else {
+        let Some(m) = self.find_market(market_id.0) else {
             return none;
         };
         let (target, other) = if side_index(&side) == 0 {
@@ -1890,12 +1965,12 @@ impl MarketContract {
     // Collateral locked must equal shares outstanding on both sides while trading, and must cover
     // every payout still owed after resolution.
     pub fn check_invariant(&self, market_id: U64) -> bool {
-        let Some(m) = self.markets.get(&market_id.0) else {
+        let Some(m) = self.find_market(market_id.0) else {
             return false;
         };
         match m.outcome {
             None => m.locked == m.pool_yes + m.user_yes && m.locked == m.pool_no + m.user_no,
-            Some(o) => m.locked >= Self::owed(m, o),
+            Some(o) => m.locked >= Self::owed(&m, o),
         }
     }
 }
@@ -2053,6 +2128,15 @@ impl Market {
         }
     }
 
+    // Adds the pools and the Yes and No prices as they stand, so an indexer can follow the market without a view call.
+    fn add_pools(&self, data: &mut near_sdk::serde_json::Value) {
+        let price_yes = curve::price_micro(self.pool_yes, self.pool_no);
+        data["price_yes"] = json!(price_yes.to_string());
+        data["price_no"] = json!((1_000_000 - price_yes).to_string());
+        data["pool_yes"] = json!(self.pool_yes.to_string());
+        data["pool_no"] = json!(self.pool_no.to_string());
+    }
+
     fn record_price(&mut self) {
         self.record_price_at(env::block_timestamp(), curve::price_micro(self.pool_yes, self.pool_no));
     }
@@ -2103,11 +2187,35 @@ impl MarketContract {
         );
     }
 
-    fn market(&self, id: u64) -> Market {
-        self.markets
+    fn find_market(&self, id: u64) -> Option<Market> {
+        self.markets.get(&id).cloned().map(VersionedMarket::into_current)
+    }
+
+    fn store_market(&mut self, id: u64, m: Market) {
+        self.markets.insert(id, m.into());
+    }
+
+    fn find_sweep(&self, id: u64) -> Option<Sweep> {
+        self.sweeps.get(&id).cloned().map(VersionedSweep::into_current)
+    }
+
+    fn store_sweep(&mut self, id: u64, sweep: Sweep) {
+        self.sweeps.insert(id, sweep.into());
+    }
+
+    fn find_withdrawal(&self, id: u64) -> Option<Withdrawal> {
+        self.withdrawals
             .get(&id)
             .cloned()
-            .unwrap_or_else(|| env::panic_str("no such market"))
+            .map(VersionedWithdrawal::into_current)
+    }
+
+    fn store_withdrawal(&mut self, id: u64, w: Withdrawal) {
+        self.withdrawals.insert(id, w.into());
+    }
+
+    fn market(&self, id: u64) -> Market {
+        self.find_market(id).unwrap_or_else(|| env::panic_str("no such market"))
     }
 
     fn open_market(&self, id: u64) -> Market {
@@ -2133,14 +2241,12 @@ impl MarketContract {
     }
 
     fn sweep(&self, id: u64) -> Sweep {
-        self.sweeps
-            .get(&id)
-            .cloned()
+        self.find_sweep(id)
             .unwrap_or_else(|| env::panic_str("no sweep to settle"))
     }
 
     fn leg_is(&self, id: u64, kind: LegKind, status: LegStatus) -> bool {
-        self.sweeps.get(&id).is_some_and(|s| s.leg(kind).status == status)
+        self.find_sweep(id).is_some_and(|s| s.leg(kind).status == status)
     }
 
     // Ends a leg that was pending or unresolved. `kept` is how much of the leg its recipient has: all of it settles the leg,
@@ -2161,11 +2267,11 @@ impl MarketContract {
             LegKind::Council => self.revenue_due += back,
             LegKind::Treasury => self.treasury_due += back,
         }
-        self.sweeps.insert(id, sweep);
+        self.store_sweep(id, sweep);
         if back == 0 {
             emit(
                 "fee_leg_settled",
-                json!({ "id": id.to_string(), "leg": kind, "amount": amount.to_string() }),
+                json!({ "id": id.to_string(), "leg": kind, "to": to, "amount": amount.to_string() }),
             );
         } else {
             emit(
@@ -2181,9 +2287,9 @@ impl MarketContract {
         self.revenue_unresolved += sweep.council.amount.0;
         emit(
             "fee_transfer_unresolved",
-            json!({ "id": id.to_string(), "to": sweep.council.to, "amount": sweep.council.amount }),
+            json!({ "id": id.to_string(), "leg": LegKind::Council, "to": sweep.council.to, "amount": sweep.council.amount }),
         );
-        self.sweeps.insert(id, sweep);
+        self.store_sweep(id, sweep);
     }
 
     fn credit(&mut self, who: &AccountId, amount: u128) {
@@ -2251,13 +2357,12 @@ impl MarketContract {
             m.user_no += amount - pool_no;
         }
         m.record_price();
-        self.markets.insert(id, m);
+        let mut data = json!({ "market_id": id.to_string(), "amount": amount.to_string(), "fee": self.create_fee.to_string(),
+                    "yes_price": curve::price_micro(pool_yes, pool_no).to_string(), "seeder": seeder });
+        m.add_pools(&mut data);
+        self.store_market(id, m);
         self.fees += self.create_fee;
-        emit(
-            "market_seeded",
-            json!({ "market_id": id.to_string(), "amount": amount.to_string(), "fee": self.create_fee.to_string(),
-                    "yes_price": curve::price_micro(pool_yes, pool_no).to_string(), "seeder": seeder }),
-        );
+        emit("market_seeded", data);
     }
 
     // Spend `amount` that has already left the buyer's balance (or arrived by mt_transfer_call). The fee comes out
@@ -2292,13 +2397,12 @@ impl MarketContract {
         m.locked += amount - fee;
         self.locked_total += amount - fee;
         m.record_price();
-        self.markets.insert(id, m);
+        let mut data = json!({ "market_id": id.to_string(), "account": who, "side": if idx == 0 { "yes" } else { "no" },
+                    "shares": out.to_string(), "collateral": amount.to_string(), "fee": fee.to_string() });
+        m.add_pools(&mut data);
+        self.store_market(id, m);
         self.fees += fee;
-        emit(
-            "buy",
-            json!({ "market_id": id.to_string(), "account": who, "side": if idx == 0 { "yes" } else { "no" },
-                    "shares": out.to_string(), "collateral": amount.to_string(), "fee": fee.to_string() }),
-        );
+        emit("buy", data);
     }
 
     fn add_shares(&mut self, who: &AccountId, id: u64, idx: u8, amount: u128) {
@@ -2522,7 +2626,7 @@ mod tests {
         for id in 0..2 {
             let mut m = c.market(id);
             m.registered = true;
-            c.markets.insert(id, m);
+            c.store_market(id, m);
         }
         // The owner is registered because the second market opens at 30%, which leaves the seeder holding shares.
         for u in USERS.iter().chain([&OWNER]) {
@@ -3006,7 +3110,7 @@ mod tests {
         );
         let mut m = c.market(id.0);
         m.registered = true;
-        c.markets.insert(id.0, m);
+        c.store_market(id.0, m);
         let before = c.fees;
         act_as(VERIFIER, 6);
         let _ = receive(&mut c, acct(OWNER), U128(SEED_UNITS), format!("seed:{}", id.0));
@@ -3038,7 +3142,7 @@ mod tests {
         let id = price_market(c, None).0;
         let mut m = c.market(id);
         m.registered = true;
-        c.markets.insert(id, m);
+        c.store_market(id, m);
         id
     }
 
@@ -3896,7 +4000,7 @@ mod tests {
             .0;
         let mut m = c.market(id);
         m.registered = true;
-        c.markets.insert(id, m);
+        c.store_market(id, m);
         act_unpaid(VERIFIER, 2);
         let _ = receive(&mut c, acct("op.near"), U128(100_000_000), format!("seed:{id}"));
         c.accounts.insert(acct("pumper.near"), 0);
@@ -4014,7 +4118,7 @@ mod tests {
         assert_eq!(status_and_seeded(&c, id), ("unregistered".into(), false));
         let mut m = c.market(id);
         m.registered = true;
-        c.markets.insert(id, m);
+        c.store_market(id, m);
         assert_eq!(status_and_seeded(&c, id), ("unseeded".into(), false));
         act_unpaid(VERIFIER, 6);
         let _ = receive(&mut c, acct(OWNER), U128(SEED_UNITS), format!("seed:{id}"));
@@ -4047,7 +4151,7 @@ mod tests {
         assert_eq!(status_and_seeded(&c, id).0, "closed");
         let mut m = c.market(id);
         m.outcome = Some(Outcome::No);
-        c.markets.insert(id, m);
+        c.store_market(id, m);
         assert_eq!(status_and_seeded(&c, id).0, "resolved");
     }
 
@@ -4084,7 +4188,7 @@ mod tests {
         );
         let mut m = c.market(id.0);
         m.registered = true;
-        c.markets.insert(id.0, m);
+        c.store_market(id.0, m);
         id.0
     }
 
@@ -4397,7 +4501,7 @@ mod tests {
             e["data"],
             near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1" })
         );
-        let w = c.withdrawals.get(&1).unwrap();
+        let w = c.find_withdrawal(1).unwrap();
         assert_eq!((w.account.as_str(), w.amount.0, w.at.0), (USERS[0], 3_000_000, 4));
         assert_eq!(
             (c.pending_withdrawals_total, c.pending_withdrawal_count),
@@ -4424,7 +4528,7 @@ mod tests {
             e["data"],
             near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1" })
         );
-        assert!(c.withdrawals.get(&1).is_none());
+        assert!(c.find_withdrawal(1).is_none());
         assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
         assert_eq!(c.get_balance(acct(USERS[0])).0, 4_000_000);
         assert_eq!(c.total_owed().0, total_in + 4_000_000);
@@ -4497,7 +4601,7 @@ mod tests {
             (3_000_000, 1)
         );
         assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 3_000_000);
-        assert_eq!(c.withdrawals.get(&1).unwrap().amount.0, 3_000_000);
+        assert_eq!(c.find_withdrawal(1).unwrap().amount.0, 3_000_000);
         c.on_withdraw(U64(1), Ok(()));
         assert_eq!(c.pending_withdrawals_total, 0);
         assert_eq!(c.total_owed().0, total_in + 9_000_000);
@@ -4579,7 +4683,7 @@ mod tests {
             e["data"],
             near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1", "paid": true })
         );
-        assert!(c.withdrawals.get(&1).is_none());
+        assert!(c.find_withdrawal(1).is_none());
         assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
         assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 0);
         assert_eq!(c.get_balance(acct(USERS[0])).0, 4_000_000);
@@ -4598,7 +4702,7 @@ mod tests {
             e["data"],
             near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1", "paid": false })
         );
-        assert!(c.withdrawals.get(&1).is_none());
+        assert!(c.find_withdrawal(1).is_none());
         assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
         assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 0);
         assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
@@ -4776,7 +4880,7 @@ mod tests {
                 prop_assert_eq!(c.total_owed().0, total_in - confirmed);
                 assert_conserved(&c, total_in - confirmed);
             }
-            let held: u128 = unreported.iter().map(|id| c.withdrawals.get(id).unwrap().amount.0).sum();
+            let held: u128 = unreported.iter().map(|id| c.find_withdrawal(*id).unwrap().amount.0).sum();
             prop_assert_eq!(held, never);
             prop_assert_eq!(c.pending_withdrawal_count as usize, unreported.len());
         }
@@ -5796,7 +5900,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "migrate expects version 2")]
+    #[should_panic(expected = "migrate expects version 3")]
     fn migrate_refuses_state_written_by_another_version() {
         let (mut c, _) = world();
         c.state_version = STATE_VERSION + 1;
@@ -6584,7 +6688,7 @@ mod tests {
             let yes = c.shares.get(&(id, account_id.clone(), 0)).copied().unwrap_or(0);
             let no = c.shares.get(&(id, account_id.clone(), 1)).copied().unwrap_or(0);
             left = left.saturating_sub(u32::from(yes > 0) + u32::from(no > 0));
-            let Some(m) = c.markets.get(&id).filter(|_| yes + no > 0) else {
+            let Some(m) = c.find_market(id).filter(|_| yes + no > 0) else {
                 continue;
             };
             out.push(PositionView {
@@ -6787,5 +6891,419 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- events an indexer rebuilds state from, and the version tags on stored records ----------------------------
+
+    fn event_named(name: &str) -> near_sdk::serde_json::Value {
+        near_sdk::test_utils::get_logs()
+            .iter()
+            .rev()
+            .filter_map(|l| {
+                near_sdk::serde_json::from_str::<near_sdk::serde_json::Value>(l.strip_prefix("EVENT_JSON:")?).ok()
+            })
+            .find(|e| e["event"] == name)
+            .unwrap_or_else(|| panic!("no {name} event was logged"))["data"]
+            .clone()
+    }
+
+    fn pool_fields(c: &MarketContract, id: u64) -> [String; 4] {
+        let m = c.market(id);
+        let price_yes = curve::price_micro(m.pool_yes, m.pool_no);
+        [
+            price_yes.to_string(),
+            (1_000_000 - price_yes).to_string(),
+            m.pool_yes.to_string(),
+            m.pool_no.to_string(),
+        ]
+    }
+
+    fn assert_pools(e: &near_sdk::serde_json::Value, c: &MarketContract, id: u64) {
+        let [price_yes, price_no, pool_yes, pool_no] = pool_fields(c, id);
+        assert_eq!(
+            (
+                e["price_yes"].as_str(),
+                e["price_no"].as_str(),
+                e["pool_yes"].as_str(),
+                e["pool_no"].as_str()
+            ),
+            (
+                Some(price_yes.as_str()),
+                Some(price_no.as_str()),
+                Some(pool_yes.as_str()),
+                Some(pool_no.as_str())
+            )
+        );
+    }
+
+    #[test]
+    fn a_new_market_logs_what_an_indexer_needs_to_list_it() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.create_market(
+            "Will it rain".into(),
+            "r".into(),
+            "s".into(),
+            "v".into(),
+            "weather".into(),
+            "rain".into(),
+            U64(CLOSE),
+            U64(RESOLVE_BY),
+            None,
+        );
+        let e = event_named("market_created");
+        assert_eq!(e["market_id"], "2");
+        assert_eq!(
+            (
+                e["title"].as_str(),
+                e["category"].as_str(),
+                e["subcategory"].as_str(),
+                e["close_at"].as_str(),
+                e["resolve_by"].as_str()
+            ),
+            (
+                Some("Will it rain"),
+                Some("weather"),
+                Some("rain"),
+                Some("10000"),
+                Some("20000")
+            )
+        );
+        assert!(e["rule_hash"].as_str().is_some_and(|h| h.len() == 64));
+    }
+
+    #[test]
+    fn a_seed_logs_the_pools_and_both_prices() {
+        let (c, _) = unconfigured_world();
+        let e = event_named("market_seeded");
+        assert_eq!(
+            (e["market_id"].as_str(), e["yes_price"].as_str()),
+            (Some("1"), Some("299999"))
+        );
+        assert_eq!(
+            (e["pool_yes"].as_str(), e["pool_no"].as_str()),
+            (Some("99000000"), Some("42428571"))
+        );
+        assert_eq!(
+            (e["price_yes"].as_str(), e["price_no"].as_str()),
+            (Some("299999"), Some("700001"))
+        );
+        assert_pools(&e, &c, 1);
+    }
+
+    #[test]
+    fn a_buy_and_a_sell_log_the_pools_and_prices_after_the_trade() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        let e = event_named("buy");
+        assert_eq!((e["market_id"].as_str(), e["side"].as_str()), (Some("0"), Some("yes")));
+        assert_pools(&e, &c, 0);
+        let bought = holdings(&c, 0, USERS[0]).0;
+
+        let s = c.quote_sell(U64(0), "yes".into(), U128(bought));
+        act_as(USERS[0], 4);
+        c.sell(U64(0), "yes".into(), s.collateral_out, U128(bought));
+        let e = event_named("sell");
+        assert_eq!(
+            (e["side"].as_str(), e["fee"].as_str()),
+            (Some("yes"), Some(s.fee.0.to_string().as_str()))
+        );
+        assert_pools(&e, &c, 0);
+    }
+
+    #[test]
+    fn a_redeem_logs_the_shares_it_burned() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        let yes = holdings(&c, 0, USERS[0]).0;
+        act_as(ORACLE, CLOSE);
+        c.set_outcome(U64(0), Outcome::Yes);
+        act_as(USERS[0], CLOSE + 1);
+        let paid = c.redeem(U64(0));
+        let e = event_named("redeemed");
+        assert_eq!(
+            (e["amount"].as_str(), e["yes_shares"].as_str(), e["no_shares"].as_str()),
+            (
+                Some(paid.0.to_string().as_str()),
+                Some(yes.to_string().as_str()),
+                Some("0")
+            )
+        );
+    }
+
+    #[test]
+    fn outcome_set_carries_the_void_price_only_for_a_void() {
+        let (mut c, _) = world();
+        act_as(ORACLE, CLOSE);
+        c.set_outcome(U64(0), Outcome::Yes);
+        let e = event_named("outcome_set");
+        assert_eq!(
+            (e["outcome"].as_str(), e["void_price_yes"].is_null()),
+            (Some("yes"), true)
+        );
+
+        act_as(ORACLE, CLOSE);
+        c.set_outcome(U64(1), Outcome::Void);
+        let price = c.market(1).void_price_yes.unwrap().to_string();
+        let e = event_named("outcome_set");
+        assert_eq!(
+            (
+                e["market_id"].as_str(),
+                e["outcome"].as_str(),
+                e["void_price_yes"].as_str()
+            ),
+            (Some("1"), Some("void"), Some(price.as_str()))
+        );
+    }
+
+    #[test]
+    fn the_deadline_void_carries_its_price_too() {
+        let (mut c, _) = world();
+        act_as(USERS[2], VOID_OPEN);
+        c.void_if_unresolved(U64(0));
+        let price = c.market(0).void_price_yes.unwrap().to_string();
+        let e = event_named("outcome_set");
+        assert_eq!(
+            (e["by"].as_str(), e["void_price_yes"].as_str()),
+            (Some("deadline"), Some(price.as_str()))
+        );
+    }
+
+    #[test]
+    fn a_failed_registration_and_its_retry_are_logged() {
+        let (mut c, _) = world();
+        let mut m = c.market(0);
+        m.registered = false;
+        c.store_market(0, m);
+        act_as("market.near", 5);
+        c.on_registered(U64(0), Err(PromiseError::Failed));
+        assert_eq!(event_named("market_registration_failed")["market_id"], "0");
+        assert!(!c.market(0).registered);
+
+        act_as(OWNER, 6);
+        c.retry_register(U64(0));
+        assert_eq!(event_named("market_registration_retried")["market_id"], "0");
+
+        act_as("market.near", 7);
+        c.on_registered(U64(0), Ok(()));
+        assert_eq!(event_named("market_registered")["market_id"], "0");
+    }
+
+    #[test]
+    fn withdrawal_events_carry_the_id_the_account_and_the_amount() {
+        let (mut c, _) = world();
+        c.credit(&acct(USERS[0]), 5_000_000);
+        act_as(USERS[0], 5);
+        let _ = c.withdraw(U128(3_000_000));
+        let sent = event_named("withdraw");
+        act_as("market.near", 6);
+        c.on_withdraw(U64(1), Ok(()));
+        let done = event_named("withdraw_confirmed");
+        for e in [sent, done] {
+            assert_eq!(
+                (e["id"].as_str(), e["account"].as_str(), e["amount"].as_str()),
+                (Some("1"), Some(USERS[0]), Some("3000000"))
+            );
+        }
+
+        act_as(USERS[0], 7);
+        let _ = c.withdraw(U128(1_000_000));
+        act_as("market.near", 8);
+        c.on_withdraw(U64(2), Err(PromiseError::Failed));
+        let e = event_named("withdraw_failed");
+        assert_eq!(
+            (e["id"].as_str(), e["account"].as_str(), e["amount"].as_str()),
+            (Some("2"), Some(USERS[0]), Some("1000000"))
+        );
+
+        act_as(USERS[0], 9);
+        let _ = c.withdraw(U128(500_000));
+        act_as(OWNER, 9 + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE);
+        c.reconcile_withdrawal(U64(3), true);
+        let e = event_named("withdrawal_reconciled");
+        assert_eq!(
+            (
+                e["id"].as_str(),
+                e["account"].as_str(),
+                e["amount"].as_str(),
+                e["paid"].as_bool()
+            ),
+            (Some("3"), Some(USERS[0]), Some("500000"), Some(true))
+        );
+    }
+
+    #[test]
+    fn every_fee_leg_event_names_the_sweep_the_leg_and_the_recipient() {
+        let mut c = after_a_sweep();
+        let e = event_named("fees_swept");
+        assert_eq!(
+            (
+                e["id"].as_str(),
+                e["revenue_pool"].as_str(),
+                e["treasury_account"].as_str()
+            ),
+            (Some("1"), Some(COUNCIL), Some(TREASURY))
+        );
+
+        act_as("market.near", 6);
+        c.on_treasury_sent(U64(1), Ok(()));
+        let e = event_named("fee_leg_settled");
+        assert_eq!(
+            (
+                e["id"].as_str(),
+                e["leg"].as_str(),
+                e["to"].as_str(),
+                e["amount"].as_str()
+            ),
+            (Some("1"), Some("treasury"), Some(TREASURY), Some("750000"))
+        );
+
+        c.on_revenue_sent(U64(1), Err(PromiseError::Failed));
+        let e = event_named("fee_transfer_unresolved");
+        assert_eq!(
+            (
+                e["id"].as_str(),
+                e["leg"].as_str(),
+                e["to"].as_str(),
+                e["amount"].as_str()
+            ),
+            (Some("1"), Some("council"), Some(COUNCIL), Some("250000"))
+        );
+
+        act_as(OWNER, RECONCILE_AT);
+        c.reconcile_leg(U64(1), LegKind::Council, false);
+        let e = event_named("fee_leg_reconciled");
+        assert_eq!(
+            (
+                e["id"].as_str(),
+                e["leg"].as_str(),
+                e["to"].as_str(),
+                e["amount"].as_str(),
+                e["arrived"].as_bool()
+            ),
+            (Some("1"), Some("council"), Some(COUNCIL), Some("250000"), Some(false))
+        );
+    }
+
+    #[test]
+    fn a_refused_leg_names_the_recipient_and_the_amount_that_came_back() {
+        let mut c = after_a_sweep();
+        act_as("market.near", 6);
+        c.on_revenue_sent(U64(1), Ok(vec![U128(100_000)]));
+        let e = event_named("fee_transfer_failed");
+        assert_eq!(
+            (
+                e["id"].as_str(),
+                e["leg"].as_str(),
+                e["to"].as_str(),
+                e["amount"].as_str()
+            ),
+            (Some("1"), Some("council"), Some(COUNCIL), Some("150000"))
+        );
+    }
+
+    #[test]
+    fn settle_leg_asks_the_council_about_this_market_and_the_sweep() {
+        let mut c = lost_report();
+        settle(&mut c, SETTLE_AT);
+        let sent = receipts();
+        let (method, args, _, _) = call_of(&sent[0]);
+        assert_eq!(method, "received_of");
+        assert_eq!(sent[0].receiver_id, acct(COUNCIL));
+        assert_eq!(args["market"], env::current_account_id().as_str());
+        assert_eq!(args["sweep_id"], "1");
+    }
+
+    use near_sdk::borsh::BorshDeserialize;
+
+    fn storage_key<K: near_sdk::borsh::BorshSerialize>(prefix: Key, id: K) -> Vec<u8> {
+        [
+            near_sdk::borsh::to_vec(&prefix).unwrap(),
+            near_sdk::borsh::to_vec(&id).unwrap(),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn a_stored_market_starts_with_version_byte_zero_and_reads_back() {
+        let (mut c, _) = world();
+        c.markets.flush();
+        let bytes = env::storage_read(&storage_key(Key::Markets, 0u64)).unwrap();
+        assert_eq!(bytes[0], 0);
+        let again = VersionedMarket::try_from_slice(&bytes).unwrap().into_current();
+        assert_eq!(
+            near_sdk::borsh::to_vec(&again).unwrap(),
+            near_sdk::borsh::to_vec(&c.market(0)).unwrap()
+        );
+        assert_eq!(bytes[1..], near_sdk::borsh::to_vec(&c.market(0)).unwrap()[..]);
+    }
+
+    #[test]
+    fn a_stored_sweep_starts_with_version_byte_zero_and_reads_back() {
+        let mut c = after_a_sweep();
+        c.sweeps.flush();
+        let bytes = env::storage_read(&storage_key(Key::Sweeps, 1u64)).unwrap();
+        assert_eq!(bytes[0], 0);
+        let again = VersionedSweep::try_from_slice(&bytes).unwrap().into_current();
+        assert_eq!(again.council.amount.0, 250_000);
+        assert_eq!(bytes[1..], near_sdk::borsh::to_vec(&c.sweep(1)).unwrap()[..]);
+    }
+
+    #[test]
+    fn a_stored_withdrawal_starts_with_version_byte_zero_and_reads_back() {
+        let (mut c, _) = world();
+        c.credit(&acct(USERS[0]), 5_000_000);
+        act_as(USERS[0], 5);
+        let _ = c.withdraw(U128(3_000_000));
+        c.withdrawals.flush();
+        let bytes = env::storage_read(&storage_key(Key::Withdrawals, 1u64)).unwrap();
+        assert_eq!(bytes[0], 0);
+        let again = VersionedWithdrawal::try_from_slice(&bytes).unwrap().into_current();
+        assert_eq!((again.account, again.amount.0), (acct(USERS[0]), 3_000_000));
+    }
+
+    // No second layout exists yet, so what can be checked is that a tag nobody wrote is refused on the real read path.
+    #[test]
+    #[should_panic(expected = "Cannot deserialize element")]
+    fn a_market_with_an_unknown_version_tag_is_refused() {
+        let (mut c, _) = world();
+        c.markets.flush();
+        let key = storage_key(Key::Markets, 0u64);
+        let mut bytes = env::storage_read(&key).unwrap();
+        bytes[0] = 1;
+        env::storage_write(&key, &bytes);
+        c.markets = LookupMap::new(Key::Markets);
+        c.market(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot deserialize element")]
+    fn a_sweep_with_an_unknown_version_tag_is_refused() {
+        let mut c = after_a_sweep();
+        c.sweeps.flush();
+        let key = storage_key(Key::Sweeps, 1u64);
+        let mut bytes = env::storage_read(&key).unwrap();
+        bytes[0] = 1;
+        env::storage_write(&key, &bytes);
+        c.sweeps = LookupMap::new(Key::Sweeps);
+        c.sweep(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot deserialize element")]
+    fn a_withdrawal_with_an_unknown_version_tag_is_refused() {
+        let (mut c, _) = world();
+        c.credit(&acct(USERS[0]), 5_000_000);
+        act_as(USERS[0], 5);
+        let _ = c.withdraw(U128(3_000_000));
+        c.withdrawals.flush();
+        let key = storage_key(Key::Withdrawals, 1u64);
+        let mut bytes = env::storage_read(&key).unwrap();
+        bytes[0] = 1;
+        env::storage_write(&key, &bytes);
+        c.withdrawals = LookupMap::new(Key::Withdrawals);
+        c.find_withdrawal(1);
     }
 }

@@ -128,7 +128,7 @@ async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once() -
     let received: serde_json::Value = w
         .council
         .view("received_of")
-        .args_json(json!({ "sweep_id": "1" }))
+        .args_json(json!({ "market": w.market.id(), "sweep_id": "1" }))
         .await?
         .json()?;
     assert_eq!(u(&received["amount"]), 273_798);
@@ -201,10 +201,10 @@ async fn nothing_is_swept_or_claimed_until_the_owner_has_configured_the_recipien
     assert_eq!((&cfg["revenue_pool"], &cfg["treasury"]), (&json!(null), &json!(null)));
     assert_eq!(
         (
-            &config(&w.council).await["market"],
+            &config(&w.council).await["markets"],
             &config(&w.council).await["nft_contract"]
         ),
-        (&json!(null), &json!(w.nft.id()))
+        (&json!([]), &json!(w.nft.id()))
     );
     let id = create_seeded_market(&w, 600).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
@@ -248,7 +248,7 @@ async fn nothing_is_swept_or_claimed_until_the_owner_has_configured_the_recipien
     assert_eq!(fees(&w).await, (1, 273_798, 0), "the Council's share is due again");
     refused(
         claim_quarter(&w, &w.jurors[0], 0, w.jurors[0].id().as_str()).await,
-        "the Council is not configured, the owner must call set_market",
+        "the Council is not configured, the owner must call allow_market",
     );
     assert_reconciled(&w).await;
     Ok(())
@@ -325,7 +325,7 @@ async fn a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_o
     let received: serde_json::Value = w
         .council
         .view("received_of")
-        .args_json(json!({ "sweep_id": "1" }))
+        .args_json(json!({ "market": w.market.id(), "sweep_id": "1" }))
         .await?
         .json()?;
     assert!(received.is_null(), "the Council never took sweep 1");

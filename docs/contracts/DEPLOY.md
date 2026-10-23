@@ -17,7 +17,8 @@ Release requirements for Intents-backed settlement and Trezu/Sputnik administrat
 3. [Administration and upgrades](#3-administration-and-upgrades)
 4. [Website and operations](#4-website-and-operations)
 5. [Opening the venue](#5-opening-the-venue)
-6. [View cost at scale](#view-cost-at-scale)
+6. [Release and verification](#release-and-verification)
+7. [View cost at scale](#view-cost-at-scale)
 
 ---
 
@@ -45,21 +46,25 @@ example DAO names and sandbox keys are not production configuration.
 - [x] Quarterly entitlement and claim rules, with repeat and cross-path claims refused (built
       2026-10-21, sandbox and unit tests in [AUDIT.md](AUDIT.md#fee-split-and-quarterly-claims-2026-10-21)).
       A run against the real USDC contract and a real DAO is still open.
+- [ ] Run a testnet load test before adding any second market instance: parallel signers sending buys,
+      recording the transactions included per block and the rejections, over the complete deposit,
+      trade, callback, settlement and fee-sweep paths.
 - [ ] Test interrupted callbacks, uncertain transfers, retries, restarts and backend-down recovery.
 - [ ] Verify selected provider fees, slippage, refund behaviour and destination confirmation.
 
 ### Configuration order
 
 Nothing the owner still has to choose is written in the contracts or taken by `new`. The market and
-the Council deploy with no fee recipient, no market and no NFT collection, and refuse to sweep, take
-revenue, stake or pay a claim until the owner has set them. Each step below is an owner call, a DAO
+the Council deploy with no fee recipient and no NFT collection, and the Council deploys with no market
+on its allow-list. They refuse to sweep, take revenue, stake or pay a claim until the owner has set them.
+The oracle's `new` takes the market account, which becomes the first entry of its allow-list. Each step below is an owner call, a DAO
 proposal once the DAO owns the contract, and the helper in `contracts/keeper` prepares each one.
 
 | Step | Contract | Call | Notes |
 | ---- | -------- | ---- | ----- |
 | 1 | council | `set_nft_contract(nft_contract)` | Only while nothing is staked. The collection must have a fixed supply with minting closed first. |
 | 2 | council | `allow_tokens(token_ids)` or `set_token_range(first, last)` | The allowlist starts on with nothing allowed. |
-| 3 | council | `set_market(market)` | The market contract. Revenue and claims refuse until it is set. |
+| 3 | council | `allow_market(market)` | The market contract. Revenue and claims refuse until a market is on the list. The last entry cannot be removed, so add a new market before `disallow_market` on the old one. |
 | 4 | council | `set_close_grace_ns(close_grace_ns)` | Optional. 7 days to start, 1 to 30 days allowed. This is the wait after a quarter ends before it can be finalized and claimed. |
 | 5 | market | `set_fee_recipients(revenue_pool, treasury)` | The Council contract and the verified Trezu treasury. A sweep refuses until it is set. Read the treasury account back from the DAO before the proposal. |
 | 6 | market | `set_revenue_share_bps(revenue_share_bps)` | Optional. 2,500 (25% to the Council, 75% to the treasury) to start, 1,000 to 5,000 allowed. |
@@ -91,6 +96,7 @@ every contract, that its policy matches the
 - [ ] Check owner handover on every application contract and reconcile pending-owner state.
 - [ ] Prove the upgrade path before removing deployment keys; verify the resulting key list.
 - [ ] Confirm routine operators cannot redirect fees or spend backing.
+- [ ] Seed markets from a dedicated operator account, not the DAO owner account.
 
 [The treasury handoff](governance.md) describes what remains unconfigured. Do not turn its
 proposal-preparation helper into a production submitter without reviewing the chosen interfaces.
@@ -126,6 +132,35 @@ are sealed, `keeper.mjs check --expect-sealed` is the release gate.
 Launch only against evidence for [R-01 through R-08](../spec.md#requirements-to-implementation-map),
 with the implemented limitations disclosed. Publishing, deployment and real-money testing need
 explicit authorisation. This document records requirements and does not perform those actions.
+
+## Release and verification
+
+The wasm hashes of a release are what lets the DAO and the keeper agree on what runs. Do these in
+order.
+
+1. Build reproducibly. From `contracts/`, with every change committed and docker running, run
+   `./release.sh`. It runs `./build.sh --reproducible`, checks the three wasm files and prints the
+   release message on stdout: `Release hashes`, a blank line, one `<contract> sha256:<hex>` line each
+   for market, oracle and council, then `commit <hash>` and `toolchain <version>`. Build on a second
+   machine and compare the hashes before going on.
+2. Run the build check. `node verify-build.mjs target/near/market/market.wasm
+   target/near/oracle/oracle.wasm target/near/council/council.wasm` (`release.sh` already does this).
+   It reads the source metadata embedded in each wasm and prints the crate, the wasm sha256, the
+   commit and the image digest.
+3. Publish the hash list in the message of an annotated git tag (`git tag -a <tag name>`, with the
+   release message as its message), made by a person. Never commit the hashes to a file: the commit
+   is baked into the wasm, so a commit that holds its own hashes changes them. No script here
+   creates the tag.
+4. Stage the wasm and let the DAO vote on the code hash. Members compare the hash in the proposal
+   with the tag message before approving.
+5. After an upgrade, run the keeper check against the tag (it also confirms the market is on the oracle's and the Council's allow-list). Save the tag message
+   (`git tag -l --format='%(contents)' <tag name>`) and pass it with `--release <file>`, or `-` for
+   stdin, as in `node keeper/keeper.mjs check --rpc <url> --market <id> --oracle <id> --council <id> --release <file>`. A match prints `release: live code matches the release hash list`. Any contract whose live code hash differs from the tag is reported and the check exits 1.
+6. Refuse to deploy a build whose embedded build info is empty. A wasm from `./build.sh` has
+   `build_info` null and `verify-build.mjs` rejects it. Only a build from `./build.sh --reproducible`
+   passes.
+
+---
 
 ## View cost at scale
 
