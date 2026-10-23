@@ -293,7 +293,7 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
         (
             &Contractish::Council,
             "on_claim_paid",
-            json!({ "quarter": 1, "token_id": "x", "owner": me, "amount": "1" }),
+            json!({ "quarter": 1, "token_id": "x", "owner": me, "requested_at": "1" }),
             "private",
         ),
     ];

@@ -105,7 +105,7 @@ belongs to the owner (the DAO).
 
 | Role                 | Set by                                         | Can do                                                                                                                                                                                                                        |
 | -------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Owner                | `new`, then `propose_owner` and `accept_owner` | `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract`, `set_market`, `set_close_grace_ns`, `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`, `propose_owner`, `upgrade` and `seal`. Normally the DAO. |
+| Owner                | `new`, then `propose_owner` and `accept_owner` | `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract`, `set_market`, `set_close_grace_ns`, `set_reconcile_wait_ns`, `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`, `propose_owner`, `upgrade` and `seal`. Normally the DAO. |
 | Oracle               | `new` (fixed)                                  | `draw` and `unlock_case`.                                                                                                                                                                                                     |
 | Seat holder          | Stakes an NFT                                  | `request_unstake`, `unstake` for their own seats, and `claim_quarter` for a seat they staked, including one they have since unstaked.                                                                                         |
 | The verifier         | `new` (fixed)                                  | Only `mt_on_transfer`, which is how revenue arrives.                                                                                                                                                                          |
@@ -153,7 +153,7 @@ The first quarter to finalize is the one the contract was created in.
 | Big numbers in JSON        | `U64` and `U128` travel as strings.                                                                                                                                      |
 | Revenue amounts            | Raw units of the collateral token.                                                                                                                                       |
 | Quarters                   | UTC calendar quarters. The id is `year * 4 + (quarter - 1)`, so 2026 Q4 is 8107. A quarter starts at 00:00 UTC on the first day of its first month and ends where the next one starts. A time exactly on a boundary belongs to the new quarter. |
-| Seat time                  | Nanoseconds a seat was staked, inside a quarter. The seat counts from the block it is staked until the block it is unstaked, and it keeps counting through a case and through the cooldown. |
+| Seat time                  | Nanoseconds a seat was staked, inside a quarter. The seat counts from the block it is staked until the block it is unstaked, and it keeps counting through a case. It stops at the request to unstake. |
 | Rounding                   | Each seat's share is the quarter's pool times its seat time over the quarter's total seat time, rounded down. The dust stays in the Council as unallocated backing and is at most one unit per seat. |
 
 ---
@@ -200,17 +200,18 @@ and when the seat was drawn.
 It takes two steps and a wait.
 
 1. `request_unstake(token_id)`. The holder asks to leave. Refused if the seat is serving on an open
-   case or a request is already pending. From now on the seat is not available to be drawn.
+   case or a request is already pending. From now on the seat is not available to be drawn and
+   earns nothing more. Its time so far is counted by this call, which can need `advance_quarters` or
+   `book_seat_time` first after a long idle stretch.
 2. After the cooldown has passed, `unstake(token_id)` with 1 yoctoNEAR attached. The seat's staked
-   time is counted up to now, the seat is removed, and the NFT is returned. Unstaking pays no money,
+   time was counted at the request, the seat is removed, and the NFT is returned. Unstaking pays no money,
    so it never touches reward backing. What the seat earned stays claimable by quarter, whoever holds
    the NFT afterwards, and an NFT sold after unstaking carries nothing with it.
 
 If the NFT transfer fails (for example the collection is broken), the seat is restored, and it can
-be unstaked again without waiting a new cooldown. It starts counting again from the moment it is
-restored, so the time it was out earns nothing, for it or for the other seats.
+be unstaked again without waiting a new cooldown. It keeps its request, so it does not earn again.
 
-Between the request and the unstake the seat still counts as staked time, and it cannot be drawn.
+Between the request and the unstake the seat earns nothing and cannot be drawn.
 
 A seat cannot leave while serving on a case, and a seat that has asked to leave cannot be drawn, so
 no seat is ever both.
@@ -245,6 +246,7 @@ collection's own resolve step, like any other refusal.
 | `set_token_range(first, last)`   | For a collection whose ids are decimal numbers. Allows every id from `first` to `last`, both included, in the current collection, and replaces any earlier range. Refused if `first` is above `last`. Event `token_range_set` with the collection.                                                                                                                                                                                                              |
 | `clear_token_range()`            | Removes the range. Event `token_range_cleared`.                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `set_allowlist_enabled(enabled)` | Off lets any token of the collection stake. On again unstakes nobody. Event `allowlist_set`.                                                                                                                                                                                                                                                                                                                                                                    |
+| `reconcile_claim(quarter, token_id, owner, paid)` | Owner only, and not before `reconcile_wait_ns` (an hour at the start) after the claim. Decides a claim whose payout callback never arrived, which would otherwise stay pending and refuse every retry. The owner checks the verifier's events first. `paid` true books the payout as made, false deletes the record so the seat can claim again. A callback that arrives later changes nothing. Event `claim_reconciled`. Refuses with `no claim is pending for that seat` and `wait <n> minutes after the claim before reconciling` (60 at the start). |
 | `is_allowed(token_id)` (view)    | Whether the token could be staked now.                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 An id counts as a number only in its plain decimal form. `007`, `+7`, a space, or a number past the
@@ -329,6 +331,10 @@ have passed, and quarters finalize in order. It fixes the pool (the quarter's re
 rolled in) and the total seat time less what silent jurors lost, and opens the quarter's claims. A
 quarter with no seat time moves its whole pool into the next quarter, where it joins that pool, and
 has nothing to claim. The money never leaves the Council.
+
+It also refuses while any jury drawn before the quarter's end is still open (`a jury drawn in this
+quarter is still open`), so a silent juror cannot finalize the quarter first and keep seat time the
+forfeit would take. If a release is lost, the quarter can be finalized anyway 30 days after its end.
 
 | State     | Meaning                                                                                      |
 | --------- | -------------------------------------------------------------------------------------------- |
@@ -435,6 +441,7 @@ The penalty is small when the case is short, so on its own it is a weak deterren
 | `set_nft_contract(nft_contract)`                                                                                   | Owner                     | Sets or changes the collection. Only while nothing is staked. The allowlist stays stored and applies to the old collection only. Event `nft_contract_set`.                                                           |
 | `set_market(market)`                                                                                               | Owner                     | Sets the only account whose sweeps count as revenue. Event `market_set`.                                                                                                                                            |
 | `set_close_grace_ns(close_grace_ns)`                                                                               | Owner                     | Sets the wait after a quarter's end before it can be finalized and claimed, from 1 to 30 days. Applies to every quarter not final yet. Event `close_grace_set`.                                                      |
+| `set_reconcile_wait_ns(reconcile_wait_ns)`                                                                         | Owner                     | Sets how long a claim must be pending before `reconcile_claim` can decide it, from 10 minutes to 7 days. Live: it applies to every claim from now on. Event `reconcile_wait_set`.                                    |
 | `allow_tokens(token_ids)`, `set_token_range(first, last)`, `clear_token_range()`, `set_allowlist_enabled(enabled)` | Owner                     | The allowlist, above.                                                                                                                                                                                               |
 | `stage_code()` (payable)                                                                                           | Anyone                    | The call input is a wasm. It is stored under its own sha256, which is returned. The deposit pays for the storage (1 NEAR per 100 KB) and the surplus is refunded. Attach 100 TGas, because 250 KB burns about 31.   |
 | `upgrade(code_hash)`                                                                                               | Owner                     | Deploys the staged wasm with that sha256 and runs its `migrate`, in one batch. Needs at least 100 TGas attached.                                                                                                    |
@@ -451,6 +458,10 @@ The penalty is small when the case is short, so on its own it is a weak deterren
 | `draw(case_key, n, exclude)`                                                                                       | Oracle only               | Draws a jury.                                                                                                                                                                                                       |
 | `unlock_case(case_key, delinquent)`                                                                                | Oracle only               | Releases a jury and takes the forfeit.                                                                                                                                                                              |
 | `on_unstaked`, `on_claim_paid`                                                                                     | The contract itself       | Callbacks.                                                                                                                                                                                                          |
+
+The cooldown, the seat cap per account, the grace period and the reconcile wait are the owner's to change, each within a hard range
+where one applies. The seat limit, the quarter step limits, the view page size and the allowlist batch size stay constants,
+because they bound gas or storage, and so do the `nep141:` prefix and the state version.
 
 ---
 
@@ -501,14 +512,15 @@ integration evidence.
 | `current_quarter()`, `get_quarter(quarter)`, `list_quarters(from_quarter, limit)` | A quarter: id and label (`2026Q4`), start, end, when its claims open (`claimable_from`), state (`open`, `closing`, `final`), revenue in, rolled in, pool, seat time, forfeited seat time, paid, pending and where its pool rolled to. A quarter with no activity shows empty. A list is at most 50 quarters. `get_quarter` is null for a quarter that has not started. |
 | `quarter_of(at)`                   | The quarter a time falls in: id, label, start and end.                                                                                                                                                                                                                                                                         |
 | `get_entitlement(quarter, token_id, account_id)` | What one token earned for one owner in one quarter: seat time, amount, `estimated`, status (`accruing`, `closing`, `claimable`, `pending`, `paid`) and the times of the request and the payment. While the quarter is not final the amount is a guess. Null when the owner earned nothing there.                |
-| `entitlements_of(account_id, from_quarter, limit)` | The entitlements of every token the account has ever staked, for `limit` quarters from `from_quarter` (at most 50), oldest first. Tokens and quarters with nothing earned are left out.                                                                                                                         |
+| `entitlements_of(account_id, from_quarter, limit)` | The entitlements of every token the account has ever staked, oldest first, for `min(limit, entitlements_page_quarters(account_id))` quarters from `from_quarter`. The next page starts that many quarters later. Tokens and quarters with nothing earned are left out. |
+| `entitlements_page_quarters(account_id)` | The most quarters one `entitlements_of` page covers for the account: 25, or fewer so a page stays within 250 lookups (one per quarter for each token the account has ever staked), and never less than 1. |
 | `received_of(sweep_id)`            | What the market sent under a sweep id (amount, quarter, time), or null. The market reads it to settle a transfer whose result was lost.                                                                                                                                                                                       |
 | `reward_totals()`                  | Total received, total paid, claims in flight, money in quarters still open, money in final quarters not yet claimed (the dust included), and the total rolled forward.                                                                                                                                                         |
 | `total_received()`                 | Every revenue token this contract has taken in since the start, whether claimed yet or not. Forfeits are not money and are not counted.                                                                                                                                                                                       |
 | `is_allowed(token_id)`             | Whether the token could be staked now.                                                                                                                                                                                                                                                                                        |
 | `jury_of(case_key)`                | The tokens still held for a case. Empty once released.                                                                                                                                                                                                                                                                        |
 | `is_staged(code_hash)`             | Whether a wasm with that sha256 is staged.                                                                                                                                                                                                                                                                                    |
-| `config()`                         | state version, upgrade proven, upgrade in flight, owner, pending owner, oracle, NFT collection and market (null until set), verifier, collateral token id, cooldown, grace period (`close_grace_ns`), seat cap, allowlist on or off, the allowed range, `total_received`, the next quarter to finalize and the time seat time is counted up to. |
+| `config()`                         | state version, upgrade proven, upgrade in flight, owner, pending owner, oracle, NFT collection and market (null until set), verifier, collateral token id, cooldown, grace period (`close_grace_ns`), reconcile wait (`reconcile_wait_ns`), seat cap, allowlist on or off, the allowed range, `total_received`, the next quarter to finalize and the time seat time is counted up to. |
 
 ---
 
@@ -526,11 +538,13 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `token_range_set`                 | `set_token_range`                           | nft_contract, first, last          |
 | `token_range_cleared`             | `clear_token_range`                         | none                               |
 | `allowlist_set`                   | `set_allowlist_enabled`                     | enabled                            |
+| `claim_reconciled`                | `reconcile_claim`                           | quarter, token_id, owner, amount, paid |
 | `staked`                          | A seat is staked                            | token_id, owner                    |
 | `unstake_requested`               | `request_unstake`                           | token_id, owner, unlock_at         |
 | `nft_contract_set`                | `set_nft_contract`                          | nft_contract                       |
 | `market_set`                      | `set_market`                                | market                             |
 | `close_grace_set`                 | `set_close_grace_ns`                        | close_grace_ns                     |
+| `reconcile_wait_set`              | `set_reconcile_wait_ns`                     | reconcile_wait_ns                  |
 | `revenue`                         | Revenue arrives                             | from, amount, sweep_id, quarter, seats |
 | `quarter_finalized`               | `finalize_quarter`                          | quarter, pool, weight_ns, rolled_to (null or the next quarter) |
 | `claim_requested`                 | `claim_quarter`, before the payout is sent  | quarter, token_id, owner, amount   |
@@ -563,8 +577,10 @@ Each logs `EVENT_JSON:` and JSON of the form
 | `claim is already pending` / `already claimed` / `nothing to claim`                                                                                          | A refused claim.                                                 |
 | `call advance_quarters first` / `book this seat first`                                                                                                       | More than eight idle quarters of seat time or of one seat's time to count. |
 | `the grace period must be between 1 and 30 days`                                                                                                             | `set_close_grace_ns` out of its bounds.                          |
+| `the reconcile wait must be between 10 minutes and 7 days`                                                                                                   | `set_reconcile_wait_ns` out of its bounds.                       |
 | `not staked` / `not your seat`                                                                                                                               | Acting on a seat you do not hold.                                |
 | `unstake already requested` / `request an unstake first` / `the cooldown has not passed`                                                                     | Wrong unstake order or timing.                                   |
+| `a jury drawn in this quarter is still open` / `book this seat first` | `finalize_quarter` while an earlier jury is open (until 30 days after the quarter ends). `book this seat first` on a request or claim after a long idle stretch. |
 | `this seat is serving on an open case`                                                                                                                       | A seat held for a case.                                          |
 | `not enough seat holders to draw a jury: N eligible, M needed`                                                                                               | Too few different holders.                                       |
 | `unstake every seat before changing the NFT contract`                                                                                                        | `set_nft_contract` while seats exist.                            |

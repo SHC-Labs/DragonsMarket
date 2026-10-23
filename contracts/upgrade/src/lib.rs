@@ -15,8 +15,9 @@ const MIGRATE_METHOD: &str = "migrate";
 // Gas given to migrate in the deploy batch. The version 1 migrate reads the state and writes it back, which burned
 // about 3 TGas in the sandbox. A later migrate that rewrites more raises this in the same release.
 pub const GAS_MIGRATE: Gas = Gas::from_tgas(30);
-// What upgrade needs attached: the deploy of a wasm up to about 300 KB, the migrate gas above and a margin. Measured in
-// the sandbox, see contracts/AUDIT.md.
+// What upgrade needs attached: the deploy of a wasm of the size the contracts build to (the market is about 340 KB), the
+// migrate gas above and a margin. The sandbox upgrade test deploys each contract's real build at exactly this amount, so a
+// larger build that no longer fits fails that test. See contracts/AUDIT.md.
 pub const GAS_UPGRADE: Gas = Gas::from_tgas(100);
 
 pub struct Staged {

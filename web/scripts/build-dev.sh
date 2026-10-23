@@ -10,4 +10,8 @@ export NEXT_PUBLIC_RPC_URL="$(read_key "['rpc']")"
 export NEXT_PUBLIC_MARKET_ID="$(read_key "['market']")"
 export NEXT_PUBLIC_ORACLE_ID="$(read_key "['oracle']")"
 export NEXT_PUBLIC_TOKEN_ID="$(read_key "['token']")"
+export NEXT_PUBLIC_COUNCIL_ID="$(read_key "['council']")"
+export NEXT_PUBLIC_VERIFIER_ID="$(read_key "['verifier']")"
+export NEXT_PUBLIC_NFT_ID="$(read_key "['nft']")"
+export NEXT_PUBLIC_COLLATERAL_TOKEN_ID="nep141:$NEXT_PUBLIC_TOKEN_ID"
 npx next build

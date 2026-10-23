@@ -54,7 +54,7 @@ The oracle decides outcomes. Someone proposes an answer with a bond. A challenge
 
 | Role | Set by | Powers |
 | --- | --- | --- |
-| Owner | `new`, `propose_owner` and `accept_owner` | `upgrade`, `seal`, `set_bond`, `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms`, `set_draw_delay_blocks`, `set_jury_size`, `set_operator`, `set_no_decision_recipient`, `add_publisher`, `set_price_threshold`, `propose_owner`. DECIDED: the owner is the DAO |
+| Owner | `new`, `propose_owner` and `accept_owner` | `upgrade`, `seal`, `set_bond`, `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms`, `set_draw_delay_blocks`, `set_juror_shares`, `set_apply_buffer_ms`, `set_max_publishers`, `set_jury_size`, `set_operator`, `set_no_decision_recipient`, `add_publisher`, `set_price_threshold`, `propose_owner`. DECIDED: the owner is the DAO |
 | Operator | `set_operator`, owner only | `remove_publisher` only, so a leaked publisher key can be cut off in one call |
 | Market | `new`, no setter | `register_market` only |
 | Jurors | Drawn per case | `commit_vote`, `reveal_vote` for the case they sit on |
@@ -84,9 +84,10 @@ Settlement math is unchanged and already built (`oracle/src/lib.rs:1179-1250`). 
 | --- | --- |
 | Unchallenged | The proposer gets their own bond back |
 | Decided by a majority | The loser's bond is split. A quarter, rounded down, is split equally among the jurors who revealed the winning answer. The rest goes to the winner, who also keeps the rounding remainder and their own bond. The loser gets nothing back |
+| No jury ever seated, in either round (added 2026-10-22) | The proposer and the challenger each get their own bond back. Nobody else is paid. The `final` ruling is `no_jury` and the event market is Void as before |
 | No decision after two juries | The proposer gets their own bond back plus the part of the challenger's bond that jurors do not take. Half of the challenger's bond, rounded down, is split equally among every juror who revealed. If nobody revealed, that half goes to `no_decision_recipient` |
 
-`JUROR_SHARE_BPS = 2500` and `NO_DECISION_JUROR_SHARE_BPS = 5000` (`oracle/src/lib.rs:63`, `:67`). PROPOSED: the no-decision recipient is the Trezu treasury. The sandbox harness already sets it to the business account (`tests/tests/common/mod.rs:171`). Juror pay is separate from the holder revenue share. A juror who never votes forfeits the revenue their seat earned while serving. That money never passes through the oracle. The Council handles it in its own accounting ([council.md](council.md#6-the-quarterly-accounting-proposal)).
+`juror_share_bps` 2500 and `no_decision_share_bps` 5000 at the start, set with `set_juror_shares` and copied onto each case when it is proposed. PROPOSED: the no-decision recipient is the Trezu treasury. The sandbox harness already sets it to the business account (`tests/tests/common/mod.rs:171`). Juror pay is separate from the holder revenue share. A juror who never votes forfeits the revenue their seat earned while serving. That money never passes through the oracle. The Council handles it in its own accounting ([council.md](council.md#6-the-quarterly-accounting-proposal)).
 
 ---
 
@@ -105,17 +106,20 @@ All EXISTING (`oracle/src/lib.rs:212-253`).
 | `bond_token` | `AccountId` | The NEP-141 contract. CHANGED, see below |
 | `bond` | `u128` | Bond in force for new cases |
 | `window_ns`, `panel_deadline_ns`, `draw_window_ns`, `min_proposal_ns` | `u64` | Windows, applied to markets registered from now on |
+| `apply_buffer_ns`                                                     | `u64` | Room left for apply() to land. Default 30 s, owner range 5 s to 5 minutes. Copied onto each market at registration |
+| `juror_share_bps`, `no_decision_share_bps`                            | `u32` | Juror shares of the loser's bond and of the challenger's bond when no jury decided. Defaults 2500 and 5000, owner ranges 500 to 5000 and 1000 to 10000. Copied onto each case when proposed |
+| `max_publishers`                                                      | `u32` | Most publishers that can be added. Default 10, owner range 1 to 25, not below `price_threshold` |
 | `council` | `AccountId` | Draws juries and releases seats |
 | `jury_size` | `u32` | Odd, at most 21 |
 | `draw_delay_blocks` | `u64` | Blocks between a challenge and the earliest draw |
 | `network` | `String` | Signed into every price |
-| `publishers`, `price_threshold` | `Vec<PublicKey>`, `u32` | Price signers, at most 10, and how many must agree |
+| `publishers`, `price_threshold` | `Vec<PublicKey>`, `u32` | Price signers, at most `max_publishers`, and how many must agree |
 | `no_decision_recipient` | `AccountId` | Receives the jurors' half when nobody revealed |
 | `markets` | `LookupMap<u64, MarketInfo>` | Per registered market: `close_at`, `resolve_by`, `rule_hash`, `price_rule` and the three windows in force at registration |
 | `cases` | `LookupMap<u64, Case>` | One case per market |
 | `claimable` | `LookupMap<AccountId, u128>` | Bonds waiting to be withdrawn |
 
-`Case` (`:154-192`): `stage`, `proposer`, `proposed`, `bond`, `evidence`, `window_ends_at`, `challenger`, `challenger_answer`, `round`, `jury_size`, `draw_by`, `draw_after_height`, `commit_ends_at`, `panel_deadline`, `panel`, `first_panel`, `commits`, `votes`, `final_outcome`, `applied`, `challenged_at`, `delinquent`.
+`Case` (`:154-192`): `stage`, `proposer`, `proposed`, `bond`, `evidence`, `window_ends_at`, `challenger`, `challenger_answer`, `round`, `jury_size`, `draw_by`, `draw_after_height`, `commit_ends_at`, `panel_deadline`, `panel`, `first_panel`, `commits`, `votes`, `final_outcome`, `applied`, `challenged_at`, `juror_share_bps`, `no_decision_share_bps`, `delinquent`.
 
 ### 4.2 Changes (PROPOSED)
 
@@ -124,7 +128,7 @@ All EXISTING (`oracle/src/lib.rs:212-253`).
 | `bond_token: AccountId` | Removed. Replaced by `verifier: AccountId` and `collateral_token_id: String`, the exact `nep141:<contract>` string, validated like the market |
 | `bonds_held: u128` | NEW. Sum of the bonds of every case that is not final: one bond after a proposal, two after a challenge |
 | `claimable_total: u128` | NEW. Sum of `claimable` |
-| `pending_payouts_total: u128` | NEW. Amounts zeroed in `claimable` whose transfer has not reported yet |
+| `pending_payouts_total: u128` | BUILT. Amounts zeroed in `claimable` whose transfer has not reported yet. A `payouts` map keyed by a payout id (`last_payout_id`, from 1) holds `{account, amount, at}` for each |
 | `state_version` | Bump to 2. Nothing is deployed, so no migration is needed |
 
 ---
@@ -192,11 +196,14 @@ Gas floors are enforced with `upgrade::require_gas` (`oracle/src/lib.rs:26-43`).
 | `set_bond` (`:472`) | Owner | `bond: U128` | none | none | none | Applies to new cases. A case keeps its own bond. Refuses zero | `bond_set` |
 | `set_window_ms` (`:481`), `set_panel_deadline_ms` (`:488`), `set_min_proposal_ms` (`:495`), `set_draw_window_ms` (`:502`) | Owner | `U64` milliseconds | none | none | none | Apply to markets registered from now on. Refuse zero | `window_set`, `panel_deadline_set`, `min_proposal_set`, `draw_window_set` |
 | `set_draw_delay_blocks` (`:510`) | Owner | `U64` | none | none | none | Zero is allowed | `draw_delay_set` |
+| `set_juror_shares` | Owner | `decided_bps: u32`, `no_decision_bps: u32` | none | none | none | 500 to 5000 and 1000 to 10000. Applies to cases proposed afterwards | `juror_shares_set` |
+| `set_apply_buffer_ms` | Owner | `apply_buffer_ms: U64` | none | none | none | 5000 to 300000. Applies to markets registered afterwards | `apply_buffer_set` |
+| `set_max_publishers` | Owner | `max_publishers: u32` | none | none | none | 1 to 25, not below the threshold. Live, removes no publisher | `max_publishers_set` |
 | `propose_owner` (`:517`), `accept_owner` (`:523`) | Owner, proposed account | `new_owner: AccountId` | none | none | none | As the market | `owner_proposed`, `owner_changed` |
 | `set_jury_size` (`:532`) | Owner | `jury_size: u32` | none | none | none | Odd and at most 21. Applies to new challenges and new rounds | none today, NEW `jury_size_set` |
 | `set_operator` (`:538`) | Owner | `operator_id` | none | none | none | | `operator_set` |
 | `set_no_decision_recipient` (`:544`) | Owner | `recipient: AccountId` | none | none | none | | `no_decision_recipient_set` |
-| `add_publisher` (`:551`) | Owner | `key: PublicKey` | none | none | none | ed25519 only, no duplicates, at most 10 | `publisher_added` |
+| `add_publisher` (`:551`) | Owner | `key: PublicKey` | none | none | none | ed25519 only, no duplicates, at most `max_publishers` | `publisher_added` |
 | `remove_publisher` (`:565`) | Operator or owner | `key: PublicKey` | none | none | none | Refuses a key that is not a publisher and a removal that leaves fewer than the threshold | `publisher_removed` |
 | `set_price_threshold` (`:581`) | Owner | `threshold: u32` | none | none | none | Between 1 and the publisher count | `price_threshold_set` |
 | `register_market` (`:596`) | Market | `market_id: U64`, `close_at: U64`, `resolve_by: U64`, `rule_hash: String`, `price_rule: Option<PriceRule>` | none | none | 20 TGas reserved by the market | Idempotent. Refuses a market with too little time and a price market with too few publishers | `market_registered` |
@@ -245,14 +252,14 @@ An error from `mt_transfer` means the verifier receipt failed and nothing moved.
 | Item | Specification |
 | --- | --- |
 | `bonds_held` | Increment by the bond in `propose` and again in `challenge`. Decrement in `settle` by the case's bonds (one when unchallenged, two otherwise) as they move into `claimable` |
-| `bond_totals()` NEW | `{bonds_held: U128, claimable: U128, pending_payouts: U128, total: U128}` |
-| `total_owed()` NEW | `bonds_held + claimable_total + pending_payouts_total`. The keeper compares it with `mt_balance_of(O, token)` |
+| `bond_totals()` BUILT | `{bonds_held: U128, claimable: U128, pending_payouts: U128, total: U128}` |
+| `total_owed()` BUILT | `bonds_held + claimable_total + pending_payouts_total`. The keeper compares it with `mt_balance_of(O, token)` |
 
 ### 8.4 Case list for the website and keeper
 
 | Item | Specification |
 | --- | --- |
-| `list_cases(from_market_id: U64, limit: u32)` NEW | At most 50 ids from `from_market_id`. Returns only ids that have a case, each as `CaseSummary {market_id: U64, stage, proposed, challenger_answer: Option<Outcome>, round: u8, final_outcome: Option<Outcome>, applied: bool, votes: u32, window_ends_at: U64, draw_by: U64, panel_deadline: U64}` |
+| `list_cases(from_market_id: U64, limit: u32)` BUILT | At most 50 ids from `from_market_id`. Returns only ids that have a case, each as `CaseSummary {market_id: U64, stage, proposed, challenger_answer: Option<Outcome>, round: u8, final_outcome: Option<Outcome>, applied: bool, votes: u32, window_ends_at: U64, draw_by: U64, panel_deadline: U64}` |
 
 The website's Council page loads every market and then every case one by one (`web/app/council/view.tsx:13-18`). One page of this view replaces that fan-out. The keeper can also use it instead of `get_case` per market (`keeper/keeper.mjs:153-178`).
 
@@ -271,11 +278,11 @@ The website's Council page loads every market and then every case one by one (`w
 | Quantity | Source | Status |
 | --- | --- | --- |
 | A case and its public votes | `get_case` | EXISTING. Includes `votes[].reason` and `commits` |
-| Cases for a list page | `list_cases` | NEW |
+| Cases for a list page | `list_cases` | BUILT |
 | Bond required to propose or challenge | `config.bond`, `Case.bond` | EXISTING |
 | Windows of one market | `get_market_info` | EXISTING |
 | Claimable bond of an account | `claimable_of` | EXISTING |
-| Pending payout | `bond_totals().pending_payouts`, events `bond_paid`, `bond_payout_failed` | NEW |
+| Pending payout | `bond_totals().pending_payouts`, events `bond_payout_requested`, `bond_paid`, `bond_payout_failed` | BUILT |
 | Reconciliation | `total_owed`, `bond_totals` | NEW |
 | Publishers and threshold, network | `config` | EXISTING |
 
@@ -294,7 +301,7 @@ Envelope: `EVENT_JSON:{"standard":"oracle","version":"1.0.0","event":"<name>","d
 | `vote_committed` | `market_id`, `juror`, `commitment` | EXISTING |
 | `vote_revealed` | `market_id`, `juror`, `outcome`, `reason` | EXISTING |
 | `escalated` | `market_id`, `jury_size` (number), `draw_by` | EXISTING |
-| `final` | `market_id`, `outcome`, `ruling` (`unchallenged`, `decided`, `no_decision`), `juror_pay_each`, `paid_jurors`, `delinquent` | EXISTING |
+| `final` | `market_id`, `outcome`, `ruling` (`unchallenged`, `decided`, `no_decision`, `no_jury`), `juror_pay_each`, `paid_jurors`, `delinquent` | EXISTING |
 | `outcome_applied` | `market_id` | EXISTING |
 | `deadline_void` | `market_id` | EXISTING |
 | `market_registered` | `market_id` | EXISTING |
@@ -302,8 +309,9 @@ Envelope: `EVENT_JSON:{"standard":"oracle","version":"1.0.0","event":"<name>","d
 | `owner_proposed`, `owner_changed`, `code_staged`, `upgrade_sent`, `migrated`, `seal_sent` | as the market | EXISTING |
 | `jury_size_set` | `jury_size` | NEW |
 | `bond_received` | `account`, `amount`, `action` (`propose`, `price`, `challenge`), `market_id` | NEW |
-| `bond_paid` | `account`, `amount` | NEW |
-| `bond_payout_failed` | `account`, `amount` | NEW |
+| `bond_payout_requested` | `account`, `amount`, `id` | BUILT |
+| `bond_paid` | `account`, `amount`, `id` | BUILT |
+| `bond_payout_failed` | `account`, `amount`, `id` | BUILT |
 
 The `final` event carries who is paid but not the amounts that went into `claimable`. An indexer rebuilds them from the rules in section 3, or the event gains `credits: [{account, amount}]` (PROPOSED, small).
 
@@ -336,7 +344,7 @@ Exact panic strings (Checked in source: `oracle/src/lib.rs`).
 | Settlement | `challenge window is still open`, `the panel still has time`, `already final`, `the answer deadline has not passed`, `already resolved`, `the case still has time; finalize it when its round is over`, `nothing to apply`, `no final outcome`, `no settled dispute to unlock`, `nothing to withdraw` |
 | Registration | `resolve_by is too soon after close_at for a case to finish`, `not enough price publishers are configured`, `observation_time must not be before close_at` |
 | Price | `the observation time has not come`, `not enough valid publisher signatures`, `a signature is 128 hex characters`, `a signature is hex`, `a signature is <publisher key>.<hex>`, `bad publisher key`, `not a publisher`, `a publisher signed twice`, `a signature does not match` |
-| Settings | `bond must be positive`, `windows must be positive`, `jury size must be odd and at most 21`, `publishers use ed25519 keys`, `already a publisher`, `there can be at most 10 publishers`, `that would leave fewer publishers than must sign`, `the threshold must be between 1 and the number of publishers`, `the network name must be a word without a colon`, `at least one publisher must sign a price` |
+| Settings | `bond must be positive`, `windows must be positive`, `jury size must be odd and at most 21`, `publishers use ed25519 keys`, `already a publisher`, `there can be at most <n> publishers`, `that would leave fewer publishers than must sign`, `the threshold must be between 1 and the number of publishers`, `the network name must be a word without a colon`, `at least one publisher must sign a price` |
 | Gas | `attach at least 80 TGas: a call that settles a case sends the answer to the market and releases the juries`, `attach at least 275 TGas: the jury draw reads every staked seat`, `attach at least 35 TGas: each jury's release gets an equal share of what is attached`, `attach at least 100 TGas to upgrade` |
 
 ---

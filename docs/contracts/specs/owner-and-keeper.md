@@ -10,7 +10,7 @@
 | Source | Working tree on top of commit `6cad02e`, SputnikDAO source at revision `5434a59dec23ee0c49df8c8c4350c208a7e75b0b` (version 2.3.1), read 2026-10-21 |
 | Index | [README.md](README.md) |
 
-**Build status, 2026-10-21.** The new owner methods are in the allow-list of `contracts/keeper/treasury.mjs` with their argument checks: market `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id` (it must not be below the market's `next_sweep_id`) and `reconcile_leg`; Council `set_close_grace_ns` and `set_market`. `reconcile_revenue` is removed (see market.md). `set_fee_recipients` now takes `revenue_pool` and `treasury`. The Council reconciliation of section 9.2 uses `reward_totals`: the floor is total received less total paid less the claims in flight. `settle_leg` and `payout_bond` are still not prepared (anyone calls them). The quarter calls of the keeper (`advance_quarters`, `finalize_quarter`, `settle_leg`) are not built. Tests: `treasury.test.mjs` (`the next sweep id can only move up from where the market is`, `the grace period bounds are the ones in the Council's source`, the sample table, the limits) and `keeper.test.mjs` (`the Council's floor is what it took in less what it paid and less the claims on their way`).
+**Build status, 2026-10-21.** The new owner methods are in the allow-list of `contracts/keeper/treasury.mjs` with their argument checks: market `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id` (it must not be below the market's `next_sweep_id`), `reconcile_leg` and `reconcile_withdrawal`; oracle `set_reconcile_wait_ns` and `reconcile_bond_payout`; Council `set_close_grace_ns` and `set_market`. `reconcile_revenue` is removed (see market.md). `set_fee_recipients` now takes `revenue_pool` and `treasury`. The Council reconciliation of section 9.2 uses `reward_totals`: the floor is total received less total paid less the claims in flight. `settle_leg` and `payout_bond` are still not prepared (anyone calls them). The keeper sends `advance_quarters`, `finalize_quarter` and `settle_leg` (section 9.1), and holds back `sweep_fees` for an hour after the last sweep. Tests: `treasury.test.mjs` (`the next sweep id can only move up from where the market is`, `the grace period bounds are the ones in the Council's source`, the sample table, the limits) and `keeper.test.mjs` (`the Council's floor is what it took in less what it paid and less the claims on their way`).
 
 ---
 
@@ -34,7 +34,7 @@
 
 The three contracts treat their owner as a plain account. Nothing in them depends on a DAO, and a source guard fails the build if any contract names a governance contract. That part is done.
 
-The two gaps the first reading found are closed in code on 2026-10-21. `treasury.mjs` is an allow-list builder that prepares every owner method of the three contracts, including `upgrade`, `seal`, `propose_owner`, `accept_owner` and `set_fee_recipients`, and its vote helper judges all 17 Sputnik proposal kinds (section 5). `keeper.mjs check` reconciles the market, the oracle and the Council against the verifier, reads what the verifier says about each of them and can list the DAO's open proposals that name them (section 9). What remains: nothing ran against a real SputnikDAO, the DAO policy of section 7 is not checked by the keeper, and the quarter calls and the status file of section 9.2 are not built. Section 5.1 keeps the finding about the old deny-list, which prepared proposals for `set_operator`, `set_fee_rate_bps`, `set_nft_contract`, `add_publisher` and `set_no_decision_recipient`, blocked only three of the 17 kinds on the vote side, and refused `upgrade`, `seal` and the owner handover for a delay route that will not be built.
+The two gaps the first reading found are closed in code on 2026-10-21. `treasury.mjs` is an allow-list builder that prepares every owner method of the three contracts, including `upgrade`, `seal`, `propose_owner`, `accept_owner` and `set_fee_recipients`, and its vote helper judges all 17 Sputnik proposal kinds (section 5). `keeper.mjs check` reconciles the market, the oracle and the Council against the verifier, reads what the verifier says about each of them and can list the DAO's open proposals that name them (section 9). What remains: nothing ran against a real SputnikDAO, the DAO policy of section 7 is not checked by the keeper, and the status file of section 9.2 is not built. Section 5.1 keeps the finding about the old deny-list, which prepared proposals for `set_operator`, `set_fee_rate_bps`, `set_nft_contract`, `add_publisher` and `set_no_decision_recipient`, blocked only three of the 17 kinds on the vote side, and refused `upgrade`, `seal` and the owner handover for a delay route that will not be built.
 
 SputnikDAO executes a proposal in the same call as the approval that reaches the threshold. The voting period is a deadline and a window for public visibility. It is not a delay between approval and execution. Section 2 says what that means and what to do about it.
 
@@ -82,7 +82,7 @@ A DAO majority that is captured can upgrade a contract and drain it in one trans
 
 | Step | Effect |
 | --- | --- |
-| Exits never pause: the market's `withdraw` and `redeem` ignore `paused`, and the Council has no pause at all | A user can leave any time the code still allows it. A malicious upgrade could remove that, so this is only partial |
+| Exits stay open under the operator: the market's `withdraw` and `redeem` ignore both pause flags, `sell` stops only when the owner sets `sells_paused`, and the Council has no pause at all | A user can leave any time the code still allows it. A malicious upgrade could remove that, so this is only partial |
 | Public staging: `stage_code` is open to anyone and `is_staged(hash)` is a view. `upgrade` deploys only staged code and sets `upgrade_in_flight`, and `migrate` refuses to run without it | Anyone can read the exact wasm before a vote. A hand-called `migrate` proves nothing. The keeper can flag a proposal whose hash was staged less than 24 hours before submission |
 | Keys sealed only after a proven upgrade: `seal` is refused until `upgrade_proven` | A deploy key cannot be removed before one upgrade has worked through the DAO, so a broken upgrade path is found while the key can still fix it |
 | Policy design (section 7): unanimity for membership, policy and upgrade kinds, four of five for every function call | A single compromised member cannot act alone |
@@ -103,13 +103,20 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `set_fee_rate_bps` | Owner | `fee_rate_bps: u32` | 0 | 30 TGas | 1 | Refused above 500 |
 | `set_create_fee` | Owner | `create_fee: U128` | 0 | 30 TGas | 1 | Refused above 10,000,000 |
 | NEW `set_min_sweep` | Owner | `min_sweep: U128` | 0 | 30 TGas | 1 | At most 100,000,000 |
-| `set_paused` | Operator or owner | `paused: bool` | 0 | 30 TGas | 1 | Emergency stop for new trades. Exits stay open |
+| `set_paused` | Operator or owner | `paused: bool` | 0 | 30 TGas | 1 | Emergency stop for buys, deposits and seeds. Sells and exits stay open |
+| `set_sells_paused` | Owner | `sells_paused: bool` | 0 | 30 TGas | 1 | Stops `sell`. Withdraw and redeem stay open |
+| `set_void_rules` | Owner | `price_window_ns: U64`, `grace_ns: U64` | 0 | 30 TGas | 1 | Void price window 1 hour to 7 days, void grace 1 to 60 days. Applies to markets created afterwards |
+| `set_sweep_timing` | Owner | `settle_wait_minutes`, `reconcile_wait_minutes`, `min_interval_minutes` (u32) | 0 | 30 TGas | 1 | Settle wait 1 to 1440, reconcile wait 10 to 10080 and not below the settle wait, sweep interval 1 to 1440. Live |
+| `set_open_price_bounds` | Owner | `min: U128`, `max: U128` | 0 | 30 TGas | 1 | Opening price range within 1000 to 999000 millionths, min below max. Live |
+| `set_max_positions` | Owner | `max_positions: u32` | 0 | 30 TGas | 1 | 5 to 30, the most the 0.05 NEAR deposit pays for with a 64-character id. Positions already held stay |
+| `set_fee_limits` | Owner | `max_fee_rate_bps`, `max_create_fee`, `min_revenue_share_bps`, `max_revenue_share_bps`, `max_min_sweep` | 0 | 30 TGas | 1 | The ceilings and floors the fee setters check against, each inside a hard range. Refused if it would leave a current value outside |
 | `halt`, `resume` | Operator or owner | `market_id: U64`, `reason: String` | 0 | 30 TGas | 1 | The operator cannot halt in the last 24 hours before close |
 | `create_market`, `retry_register`, `claim_residual` | Operator or owner | as in market.md | 0 | 100 TGas for `create_market` | 1 | Routine. The operator normally calls them |
 | `set_operator` | Owner | `operator_id: AccountId` | 0 | 30 TGas | 2 | Changes who can seed, halt and pause |
 | `set_fee_recipients` | Owner | `revenue_pool: AccountId`, `business_wallet: AccountId` (NEW name `treasury`) | 0 | 30 TGas | 2 | Redirects fees. `revenue_pool` must equal the Council. The treasury must be the verified Trezu account |
 | `reconcile_revenue` | Owner | `amount: U128`, `arrived: bool` | 0 | 30 TGas | 2 | Needs evidence from the Council's `total_received` |
 | NEW `reconcile_leg` | Owner | `sweep_id: U64`, `arrived: bool` | 0 | 30 TGas | 2 | Treasury leg fallback |
+| NEW `reconcile_withdrawal` | Owner | `id: U64`, `paid: bool` | 0 | 30 TGas | 2 | Decides a withdrawal whose callback never arrived, after the market's reconcile wait. The owner checks the verifier's events first |
 | `upgrade` | Owner | `code_hash: Base58CryptoHash` | 0 | at least 100 TGas, 250 maximum | 3 | The hash must be staged. A panicking `migrate` reverts |
 | `seal` | Owner | `public_key: PublicKey` | 0 | 30 TGas | 3 | Refused until `upgrade_proven`. Deletes an access key |
 | `propose_owner` | Owner | `new_owner: AccountId` | 0 | 30 TGas | 3 | |
@@ -123,11 +130,16 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms` | Owner | `U64` milliseconds | 0 | 30 TGas | 1 | Apply to markets registered afterwards. The Council cooldown must stay at least the window plus the panel deadline |
 | `set_draw_delay_blocks` | Owner | `U64` | 0 | 30 TGas | 1 | |
 | `set_jury_size` | Owner | `jury_size: u32` | 0 | 30 TGas | 1 | Odd, at most 21 |
+| `set_juror_shares` | Owner | `decided_bps: u32`, `no_decision_bps: u32` | 0 | 30 TGas | 1 | 500 to 5000 and 1000 to 10000. Applies to cases proposed afterwards |
+| `set_apply_buffer_ms` | Owner | `apply_buffer_ms: U64` | 0 | 30 TGas | 1 | 5 seconds to 5 minutes. Applies to markets registered afterwards |
+| `set_max_publishers` | Owner | `max_publishers: u32` | 0 | 30 TGas | 1 | 1 to 25, not below the price threshold. Removes no one |
 | `remove_publisher` | Operator or owner | `key: PublicKey` | 0 | 30 TGas | 1 | Only removes power |
 | `set_operator` | Owner | `operator_id: AccountId` | 0 | 30 TGas | 2 | |
 | `set_no_decision_recipient` | Owner | `recipient: AccountId` | 0 | 30 TGas | 2 | Receives the jurors' half when nobody revealed. Should be the treasury |
 | `add_publisher` | Owner | `key: PublicKey` | 0 | 30 TGas | 2 | Grants power over prices |
 | `set_price_threshold` | Owner | `threshold: u32` | 0 | 30 TGas | 2 | |
+| NEW `set_reconcile_wait_ns` | Owner | `reconcile_wait_ns: U64` | 0 | 30 TGas | 2 | 10 minutes to 7 days, 1 hour to start. Live |
+| NEW `reconcile_bond_payout` | Owner | `id: U64`, `paid: bool` | 0 | 30 TGas | 2 | Decides a payout whose callback never arrived, after the reconcile wait. The owner checks the verifier's events first |
 | `upgrade`, `seal`, `propose_owner`, `accept_owner` | as the market | | 0 | as the market | 3 | |
 
 ### 3.3 council
@@ -141,6 +153,8 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `allow_tokens` | Owner | `token_ids: Vec<String>` | 0 | 30 TGas | 2 | Decides who can earn and serve. At most 100 ids. The arguments of a Sputnik call stay small, so a long list needs several proposals |
 | `set_token_range` | Owner | `first: U64`, `last: U64` | 0 | 30 TGas | 2 | |
 | `set_allowlist_enabled` | Owner | `enabled: bool` | 0 | 30 TGas | 2 | Off lets any token of the collection stake |
+| `reconcile_claim` | Owner | `quarter: u32`, `token_id`, `owner`, `paid: bool` | 0 | 30 TGas | 2 | Decides a claim whose payout callback never arrived, an hour after the claim. The owner checks the verifier's events first |
+| `set_reconcile_wait_ns` | Owner | `reconcile_wait_ns: U64` | 0 | 30 TGas | 2 | 10 minutes to 7 days. Live |
 | `set_nft_contract` | Owner | `nft_contract: AccountId` | 0 | 30 TGas | 2 | Only while nothing is staked |
 | NEW `set_market` | Owner | `market: AccountId` | 0 | 30 TGas | 2 | Changes the only revenue sender |
 | `upgrade`, `seal`, `propose_owner`, `accept_owner` | as the market | | 0 | as the market | 3 | |
@@ -236,6 +250,13 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | market | `set_create_fee` | `create_fee`: U128 0 to 10,000,000 | 0 | 5 to 30 |
 | market | `reconcile_revenue` | `amount`: U128 above 0, `arrived`: boolean | 0 | 5 to 30 |
 | market | `set_paused` | `paused`: boolean | 0 | 5 to 30 |
+| market | `set_sells_paused` | `sells_paused`: boolean | 0 | 5 to 30 |
+| market | `set_void_rules` | `price_window_ns`, `grace_ns`: decimal strings in range | 0 | 5 to 30 |
+| market | `set_sweep_timing` | three integers in range, settle wait not above reconcile wait | 0 | 5 to 30 |
+| market | `reconcile_withdrawal` | `id`: decimal string from 1, `paid`: boolean | 0 | 5 to 30 |
+| market | `set_open_price_bounds` | `min`, `max`: decimal strings in range, min not above max | 0 | 5 to 30 |
+| market | `set_max_positions` | integer 5 to 30 | 0 | 5 to 30 |
+| market | `set_fee_limits` | five values in range, share floor not above ceiling | 0 | 5 to 30 |
 | market | `halt` | `market_id`: U64, `reason`: non-blank text up to 500 bytes | 0 | 5 to 30 |
 | market | `resume`, `claim_residual` | `market_id`: U64 | 0 | 5 to 30 |
 | market | `retry_register` | `market_id`: U64 | 0 | 50 to 150, 100 attached |
@@ -245,9 +266,14 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | oracle | `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms` | U64 from 1 to 18,446,744,073,709, the most whose product with 1,000,000 fits a U64 | 0 | 5 to 30 |
 | oracle | `set_draw_delay_blocks` | U64 | 0 | 5 to 30 |
 | oracle | `set_jury_size` | odd integer 1 to 21 | 0 | 5 to 30 |
+| oracle | `set_juror_shares` | `decided_bps` 500 to 5000, `no_decision_bps` 1000 to 10000 | 0 | 5 to 30 |
+| oracle | `set_apply_buffer_ms` | decimal string 5000 to 300000 | 0 | 5 to 30 |
+| oracle | `set_max_publishers` | integer 1 to 25 | 0 | 5 to 30 |
 | oracle | `set_no_decision_recipient` | `recipient` must be the treasury | 0 | 5 to 30 |
 | oracle | `add_publisher`, `remove_publisher` | `key`: an ed25519 key | 0 | 5 to 30 |
 | oracle | `set_price_threshold` | integer 1 to 10 | 0 | 5 to 30 |
+| oracle | `set_reconcile_wait_ns` | decimal string 600e9 to 604800e9 | 0 | 5 to 30 |
+| oracle | `reconcile_bond_payout` | `id`: decimal string from 1, `paid`: boolean | 0 | 5 to 30 |
 | oracle | `withdraw_bond` | none. The DAO's own claimable balance, not an owner method | 1 | 50 to 150, 100 attached |
 | council | `set_cooldown_ns` | U64 above 0 | 0 | 5 to 30 |
 | council | `set_max_seats_per_account` | integer 1 to 4,294,967,295 | 0 | 5 to 30 |
@@ -256,6 +282,8 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | council | `set_token_range` | `first` and `last`: U64, `first` not above `last` | 0 | 5 to 30 |
 | council | `clear_token_range` | none | 0 | 5 to 30 |
 | council | `set_allowlist_enabled` | `enabled`: boolean | 0 | 5 to 30 |
+| council | `reconcile_claim` | `quarter`: integer, `token_id`: text, `owner`: account, `paid`: boolean | 0 | 5 to 30 |
+| council | `set_reconcile_wait_ns` | decimal string 600e9 to 604800e9 | 0 | 5 to 30 |
 
 The ceilings in the table (500, 10,000,000, the text limits, 21, 10 and 100) are copied from constants in the contract source, and the 100 TGas floor of `upgrade` from `upgrade::GAS_UPGRADE`. A test reads the source and fails when one of them differs.
 
@@ -379,7 +407,7 @@ PROPOSED. The numbers follow the threshold rule in 2.2 for a role of five member
 
 ### 9.1 What it does today
 
-Checked in source and by run on 2026-10-21: `contracts/keeper/keeper.mjs`, with its reads in `chain.mjs`. `node --test keeper/keeper.test.mjs keeper/treasury.test.mjs` passes 49 tests (26 keeper, 23 treasury). Seven sandbox tests in `tests/tests/keeper.rs` run the script against the real contracts and the real verifier, and all passed.
+Checked in source and by run on 2026-10-21: `contracts/keeper/keeper.mjs`, with its reads in `chain.mjs`. `node --test keeper/keeper.test.mjs keeper/treasury.test.mjs` passes 62 tests (39 keeper, 23 treasury). Seven sandbox tests in `tests/tests/keeper.rs` run the script against the real contracts and the real verifier, and all passed.
 
 | Duty | Call or check | Gas | Source |
 | --- | --- | --- | --- |
@@ -388,7 +416,10 @@ Checked in source and by run on 2026-10-21: `contracts/keeper/keeper.mjs`, with 
 | Resend a final answer to the market | `oracle.retry_apply` | 100 TGas | `dueActions` |
 | Release the seats of a settled dispute | `oracle.retry_unlock` | 100 TGas | `dueActions` |
 | Answer a market past `resolve_by` | `oracle.resolve_by_deadline` | 100 TGas | `dueActions` |
-| Sweep fees once `collected + revenue_due + business_due` reaches 10 USDC | `market.sweep_fees` | 100 TGas (floor 87) | `dueActions` |
+| Sweep fees once `collected + revenue_due + business_due` reaches 10 USDC, and not within an hour of the last sweep (read from `list_sweeps`) | `market.sweep_fees` | 100 TGas (floor 87) | `dueActions` |
+| Settle a Council fee leg left `unresolved`, 10 minutes after its sweep, among the newest 20 sweeps | `market.settle_leg(sweep_id)` | 50 TGas (floor 30) | `dueActions` |
+| Move seat time forward when the quarter of now is not the quarter of `last_tick` | `council.advance_quarters` | 50 TGas | `councilActions` |
+| Finalize `next_to_finalize` once its end plus `close_grace_ns` has passed and one advance can reach that end. The contract refuses while a jury drawn in the quarter is open, and the keeper reports that as waiting | `council.finalize_quarter(quarter)` | 50 TGas (30 measured clean) | `councilActions`, `describeOutcome` |
 | Check that the Council can seat a jury and a second jury | `check` | none | `juryProblems` |
 | Check publisher count against the threshold | `check` | none | `check` |
 | Check NEAR left after storage for each contract and an optional treasury | `check` | none | `marginReport` |
@@ -403,8 +434,8 @@ Checked in source and by run on 2026-10-21: `contracts/keeper/keeper.mjs`, with 
 
 | Check | How | Level | Status |
 | --- | --- | --- | --- |
-| Market reconciliation | `market.total_owed()` against `verifier.mt_balance_of(M, T)`, both read at one `block_id`. `in_flight()` does not exist in the market | Surplus is reported. A shortfall seen on three reads, 3 blocks apart, is a problem | BUILT. Sandbox: `the_deploy_check_reconciles_all_three_contracts_and_reads_what_the_verifier_says_about_each`, `the_deploy_check_reports_money_missing_from_the_verifier_only_after_reading_again` |
-| Oracle reconciliation | `oracle.total_owed()` against `mt_balance_of(O, T)` | Same | BUILT. Sandbox: `the_deploy_check_reconciles_the_oracle_with_what_the_verifier_holds_for_it` |
+| Market reconciliation | `market.total_owed()` against `verifier.mt_balance_of(M, T)`, both read at one `block_id`, less `in_flight().withdrawals` | Surplus is reported. The verifier must hold at least owed less what is in flight. A shortfall below that seen on three reads, 3 blocks apart, is a problem | BUILT. Sandbox: `the_deploy_check_reconciles_all_three_contracts_and_reads_what_the_verifier_says_about_each`, `the_deploy_check_reports_money_missing_from_the_verifier_only_after_reading_again` |
+| Oracle reconciliation | `oracle.total_owed()` against `mt_balance_of(O, T)`, less `bond_totals().pending_payouts` | Same | BUILT. Sandbox: `the_deploy_check_reconciles_the_oracle_with_what_the_verifier_holds_for_it` |
 | Council reconciliation | The Council has no `reward_totals` or total owed yet. The keeper adds `config.stream_remaining` and the `pending_reward` of every staked token at one block, a floor that is at most what the Council owes, and compares it with `mt_balance_of(C, T)` | Shortfall is a problem. More than the floor is normal (rounding stays in the stream) | BUILT as a floor. The exact check with `reward_totals` waits for the quarterly change, which removes `pending_reward` |
 | Market to Council consistency | Sum of settled Council legs in `market.list_sweeps` equals `council.total_received` | Page on a difference | NOT BUILT. `list_sweeps` does not exist |
 | No key registered | `verifier.public_keys_of(a)` is an empty list for M, O and C | Problem | BUILT. Sandbox test above, with a key added under the Council's account |
@@ -432,17 +463,17 @@ Checked in source and by run on 2026-10-21: `contracts/keeper/keeper.mjs`, with 
 | Push a bond payout | `claimable_of(account) > 0` for more than 7 days | `oracle.payout_bond(account)` | Oracle key |
 | Price answers | A price market passes its observation time | `oracle` through a publisher service | Not built |
 
-Of the calls above only the existing oracle calls and the threshold sweep are built; the rest wait for the contract methods they call. Every call above attaches no deposit, so a function call access key scoped to one receiver and the methods it uses is enough. Scoped methods: oracle `finalize,resolve_draw,retry_apply,retry_unlock,resolve_by_deadline,payout_bond`; market `sweep_fees,settle_leg`; council `advance_quarters,finalize_quarter,book_seat_time`.
+Of the calls above the existing oracle calls, the threshold sweep (not within an hour of the last), `settle_leg`, `advance_quarters` and `finalize_quarter` are built, with the triggers listed in 9.1; the rest wait for the contract methods they call. The Council calls use the default key or `--council-key-file` / `KEEPER_COUNCIL_KEY`. Every call above attaches no deposit, so a function call access key scoped to one receiver and the methods it uses is enough. Scoped methods: oracle `finalize,resolve_draw,retry_apply,retry_unlock,resolve_by_deadline,payout_bond`; market `sweep_fees,settle_leg`; council `advance_quarters,finalize_quarter,book_seat_time`.
 
 Cadence (PROPOSED): `run` every minute, `check` every five minutes, the quarter boundary sweep scheduled from the quarter table. Keep the allowance of each key under 1 NEAR and alert at half.
 
 ### 9.3 Reconciliation procedure
 
-BUILT as follows (2026-10-21). The contracts have no `in_flight` or `pending_payouts` view, so the keeper does not wait on them. It does not need to: each contract takes a balance down in its books before it sends the money (the market in `withdraw` and `sweep_fees`, the oracle in `withdraw_bond`, the Council in `claim` and `unstake`), so a payout in flight shows as a surplus, never as a shortfall, and a deposit shows as a surplus until its hook has run. Checked in source for all three.
+BUILT as follows. A payout leaves the verifier before the contract's callback books it, and the contract keeps it in `total_owed` until then, so while it is in flight the verifier holds that much less than is owed. The keeper reads the amount in flight in the same block: the market's `in_flight().withdrawals` and the oracle's `bond_totals().pending_payouts`. The Council has no such view: its floor (`reward_totals`) already takes off the claims in flight. A deposit shows as a surplus until its hook has run.
 
 1. Read the finalized height. Read each contract's owed figure and the verifier's `mt_balance_of` for it at that `block_id`. The three contracts are read one after another, each at the final height current when its turn comes.
 2. `held > owed`: surplus nobody is credited for, for example a plain deposit. Show the amount and do not call it a problem. It is never credited automatically.
-3. `held < owed`: read both again at the then final height, after the final height has moved 3 blocks (it gives up waiting after 30 seconds), up to two more times. Report a problem only if the last read still shows the shortfall, with the amount from that read.
+3. `held < owed` less the amount in flight: read both again at the then final height, after the final height has moved 3 blocks (it gives up waiting after 30 seconds), up to two more times. Report a problem only if the last read still shows the shortfall, with the amount from that read.
 4. NOT BUILT: stopping the advertisement of deposits, paging a person, and not running `sweep_fees` until a person has looked. `check` exits 1 and prints the problem, and that is all it does.
 
 ---
@@ -461,7 +492,7 @@ Status is as of 2026-10-21. The evidence column quotes the code as it was when t
 | Cost per run | `keeper.mjs:153-178` | One `get_case` per market after the cursor, plus up to two `jury_of` calls per settled dispute. `oracle.list_cases` (oracle.md section 8.4) replaces them with pages | Open |
 | Holder count | `keeper.mjs:334-338` | One `stake_of` call per staked token. At 1,000 seats this is 1,000 calls. A `holders` figure in `council.config` would cost nothing | Open, and `check` now makes a second call per token (`pending_reward`) for the Council floor, so 2,000 calls at 1,000 seats |
 | No lock between runs | `keeper.mjs` main | Two overlapping runs both send. The contracts make every call idempotent, but each failed call burns allowance. A lock file or a single timer fixes it | Open |
-| Scoped key list in the header | `keeper.mjs:26-32` | Missing the methods in section 9.2 | Open. Those methods do not exist yet |
+| Scoped key list in the header | `keeper.mjs:26-32` | Missing the methods in section 9.2 | Fixed. The header lists `settle_leg` for the market and `advance_quarters,finalize_quarter` for the Council |
 | `treasury.mjs` bond | `treasury.mjs:22`, `:59` | The caller supplied `proposalBond`. The DAO requires exact equality with its policy (`proposals.rs:540-544`), so the helper should read it | Fixed. It reads `get_policy` and ignores a caller's bond |
 | `treasury.mjs` gas default | `treasury.mjs:24` | 30 TGas is too little for `upgrade`, which needs 100 | Fixed. `upgrade` attaches 150 by default and refuses less than 100 |
 | `treasury.mjs` vote check | `treasury.mjs:66-89` | The check ran on the kind the caller passed | Fixed. The helper reads the stored proposal and builds the vote from that kind |
@@ -477,4 +508,4 @@ Status is as of 2026-10-21. The evidence column quotes the code as it was when t
 | R-07 handover | `upgrade.rs:130` (upgrade through the owner fixture) | A sandbox with a real SputnikDAO build at the pinned revision: `propose_owner`, `accept_owner`, one call per allow-list entry, a `Failed` proposal retried with `Finalize`, an expired proposal, a vote with a wrong kind |
 | R-07 policy | none | A test that builds the section 7 policy and checks the approval counts for 5 members, and again after adding a sixth |
 | Allow-list | `treasury.test.mjs`, 23 tests, listed in 5.4. All 109 mutations of the node code and the contract sources were caught | Run against a real SputnikDAO: the argument format the DAO accepts for `gas` (a string is assumed) and for `deposit`, and a `get_proposal` of a `FunctionCall` as the helper reads it |
-| Keeper | `keeper.test.mjs` (26 tests) and `keeper.rs` (7 tests). The new checks have unit tests for the reconciliation decision, the re-read, the verifier decisions, the access key report, the DAO report and the flags, and sandbox tests for a key registered in the verifier, a locked account, a paused feature, a plain deposit surplus, a deficit and the access key flag | The quarter calls. The DAO watch against a real DAO. A sandbox test with `is_auth_by_predecessor_id_enabled` off |
+| Keeper | `keeper.test.mjs` (39 tests) and `keeper.rs` (7 tests). The new checks have unit tests for the reconciliation decision, the re-read, the verifier decisions, the access key report, the DAO report and the flags, and sandbox tests for a key registered in the verifier, a locked account, a paused feature, a plain deposit surplus, a deficit and the access key flag | The DAO watch against a real DAO. A sandbox test with `is_auth_by_predecessor_id_enabled` off |

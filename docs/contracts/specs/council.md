@@ -5,7 +5,7 @@
 | Field | Value |
 | --- | --- |
 | Date | 2026-10-21 |
-| Status | Draft. Existing rows are checked in source. Section 6 and every row marked NEW or CHANGED are PROPOSED |
+| Status | The quarterly model in section 6 is built. Rows marked NEW or CHANGED describe what was built, and the error and field tables were checked against the source on 2026-10-22 |
 | Scope | `contracts/council/src/lib.rs` |
 | Source | Working tree on top of commit `6cad02e`, read 2026-10-21 09:00 to 09:22 |
 | Revision checked | `council/src/lib.rs` sha256 prefix `cc840f4fdbe5caf9` (2510 lines, unchanged between copies, 267 lines differ from `HEAD`) |
@@ -77,7 +77,7 @@ Section 6 is the concrete proposal. In one paragraph: quarters are UTC calendar 
 
 | Role | Set by | Powers |
 | --- | --- | --- |
-| Owner | `new`, `propose_owner` and `accept_owner`. DECIDED: the DAO | `upgrade`, `seal`, `propose_owner`, `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract` (only with nothing staked), `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`. NEW: `set_close_grace_ns`, `set_market` |
+| Owner | `new`, `propose_owner` and `accept_owner`. DECIDED: the DAO | `upgrade`, `seal`, `propose_owner`, `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract` (only with nothing staked), `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`. NEW: `set_close_grace_ns`, `set_market`, `set_reconcile_wait_ns` |
 | Oracle | `new`, no setter | `draw` and `unlock_case` only |
 | Seat owner | Staking | `request_unstake`, `unstake`, and the claim of their own seats |
 | NFT contract | `new`, `set_nft_contract` | `nft_on_transfer` only |
@@ -127,7 +127,7 @@ EXISTING (`council/src/lib.rs:169-213`).
 | `acc_per_seat`, `stream` | `u128`, `Stream` | The 30-day stream. REMOVED by this proposal |
 | `total_received` | `u128` | Every unit of revenue taken in |
 
-`Stake` today: `owner`, `staked_at`, `unlock_requested_at`, `serving`, and three fields hidden from JSON, `serving_since_acc`, `index`, `reward_debt`.
+`Stake` as built: `owner`, `staked_at`, `unlock_requested_at`, `serving`, `booked_to`, and two fields hidden from JSON, `serving_from` and `index`. Before the quarterly change it held `serving_since_acc` and `reward_debt` instead of `booked_to` and `serving_from`.
 
 ### 4.2 Fields after the change (PROPOSED)
 
@@ -137,6 +137,7 @@ EXISTING (`council/src/lib.rs:169-213`).
 | --- | --- | --- |
 | `market` | `AccountId` | NEW. The only revenue sender |
 | `close_grace_ns` | `u64` | NEW. Wait after a quarter ends before it can be finalized. Default 7 days, bounds 1 to 30 days |
+| `reconcile_wait_ns` | `u64` | NEW. How long a claim must be pending before `reconcile_claim`. Default 1 hour, owner range 10 minutes to 7 days |
 | `last_tick` | `u64` | NEW. Nanosecond time up to which seat time has been added to the quarter books |
 | `first_quarter`, `next_to_finalize` | `u32` | NEW. Oldest quarter with a book and the next one to finalize |
 | `quarters` | `LookupMap<u32, QuarterBook>` | NEW. One book per quarter from `first_quarter` to the current one, with no gaps |
@@ -226,9 +227,9 @@ A seat's weight in a quarter is the number of nanoseconds, inside that quarter, 
 
 Rules:
 
-1. A seat counts from the block it is staked until the block it is unstaked. It keeps counting while it serves on a case and while it waits out the unstake cooldown (OPEN, README OD-03). Recommended default: keep counting, because the cooldown protects jury integrity and not revenue.
+1. A seat counts from the block it is staked until the block it is unstaked. It keeps counting while it serves on a case. It stops counting at `request_unstake`, so a seat waiting out the cooldown, or one that asked to leave and stayed, earns nothing after the request (README OD-03, reversed 2026-10-22).
 2. A new stake of the same token by another owner starts a new span with its own weights. The weights are keyed by quarter, token and owner, so both owners can claim their own spans.
-3. Total weight of a quarter, `seat_ns`, is the integral of the staked seat count over the quarter. The contract adds `staked_count * (to - last_tick)` to the right quarter at every stake, unstake and revenue arrival, and once per quarter boundary crossed. `advance_quarters` lets anyone move it forward.
+3. Total weight of a quarter, `seat_ns`, is the integral of the staked seat count over the quarter. The contract adds `earning_count * (to - last_tick)` to the right quarter at every stake, unstake and revenue arrival, and once per quarter boundary crossed. `advance_quarters` lets anyone move it forward.
 4. Per seat weights are booked lazily from `Stake.booked_to`. `unstake`, `claim_quarter`, forfeits and `book_seat_time` book the span up to a point, splitting it across the quarters it covers. A single call books at most 8 quarters, so one span longer than two years needs `book_seat_time` first.
 5. The sum of booked weights of a quarter equals `seat_ns - forfeit_ns` once every seat is booked.
 
@@ -395,11 +396,13 @@ Views today: `total_received` (`:665`), `seat_count` (`:669`), `jury_of(case_key
 | `advance_quarters(max_steps: Option<u32>)` NEW | Anyone | steps up to 8 | `u32` quarters advanced | none | 30 TGas | Moves `last_tick` towards now, adding seat time and creating empty books. Does nothing when current | none |
 | `finalize_quarter(quarter: u32)` NEW | Anyone | quarter id | none | none | none | Ticks seat time to the end of the quarter first. Refuses before `ends_at + close_grace_ns`, a quarter that is not `next_to_finalize`, and one already final. Fixes pool and weight, rolls an empty quarter forward | `quarter_finalized` |
 | `claim_quarter(quarter: u32, token_id: TokenId)` NEW | Seat owner | quarter id, token | `Promise` | exactly 1 | 33 TGas floor | Section 6.8 | `claim_requested`, `claim_paid`, `claim_failed` |
-| `on_claim_paid(quarter, token_id, owner, amount)` NEW | The account itself | | none | none | 10 TGas | Settles the claim record | `claim_paid`, `claim_failed` |
+| `reconcile_claim(quarter: u32, token_id: TokenId, owner: AccountId, paid: bool)` NEW | Owner | quarter id, token, claim owner, whether the payout was made | none | none | none | Decides a claim whose payout callback never arrived, an hour after the claim. A late callback changes nothing | `claim_reconciled` |
+| `on_claim_paid(quarter, token_id, owner, requested_at)` NEW | The account itself | | none | none | 10 TGas | Settles the claim record written at `requested_at`. A callback for an earlier record under the same key, one `reconcile_claim` deleted, changes nothing | `claim_paid`, `claim_failed` |
 | `book_seat_time(token_id: TokenId, max_quarters: Option<u32>)` NEW | Anyone | token, steps up to 8 | `u32` quarters booked | none | 30 TGas | Books the span of a staked token up to the last finished quarter. Needed only for spans longer than 8 quarters | none |
 | `unstake` CHANGED | Seat owner | `token_id` | `Promise` | exactly 1 | 33 TGas floor | Books the span, removes the stake, returns the NFT, no payout. Refuses `book this seat first` when the span exceeds 8 quarters | `unstaked`, `unstake_failed` |
 | `unlock_case` CHANGED | Oracle | as above | none | none | 15 TGas | Forfeits weight (6.5) | `seat_time_forfeited`, `forfeit_skipped` |
 | `set_close_grace_ns(close_grace_ns: U64)` NEW | Owner | nanoseconds | none | none | none | Between 1 day and 30 days | `close_grace_set` |
+| `set_reconcile_wait_ns(reconcile_wait_ns: U64)` NEW | Owner | nanoseconds | none | none | none | Between 10 minutes and 7 days. Live. `reconcile_claim` reads it | `reconcile_wait_set` |
 | `set_market(market: AccountId)` NEW | Owner | account | none | none | none | Changes the only revenue sender | `market_set` |
 
 Every owner row is a plain `AccountId` check. No row names or calls a governance contract (guard test `guards.rs:179-191`).
@@ -416,7 +419,8 @@ R-08 asks for accrued, claimable and paid amounts, operation states and quarters
 | Any quarter | `get_quarter(quarter: u32)`, `list_quarters(from_quarter: u32, limit: u32)` | `Option<QuarterView>`, `Vec<QuarterView>` (limit at most 50) |
 | Which quarter a time belongs to | `quarter_of(at: U64)` | `{quarter: u32, label: String, starts_at: U64, ends_at: U64}` |
 | A seat's entitlement | `get_entitlement(quarter: u32, token_id: String, account_id: AccountId)` | `Option<EntitlementView>` |
-| All of an account's entitlements | `entitlements_of(account_id: AccountId, from_quarter: u32, limit: u32)` | `Vec<EntitlementView>` over the account's seats and past seats |
+| All of an account's entitlements | `entitlements_of(account_id: AccountId, from_quarter: u32, limit: u32)` | `Vec<EntitlementView>` over the account's seats and past seats, `min(limit, entitlements_page_quarters)` quarters a page |
+| An account's page length | `entitlements_page_quarters(account_id: AccountId)` | `u32`, at most 25, fewer so a page stays within 250 lookups, at least 1 |
 | An account's staked seats | `seats_of(account_id: AccountId)` | `Vec<TokenId>` |
 | Revenue by sweep | `received_of(sweep_id: U64)` | `Option<{amount: U128, quarter: u32, at: U64}>` |
 | Totals for reconciliation | `reward_totals()` | `{total_received, total_paid, pending_claims, open_pool, final_unclaimed, rolled: U128}` |
@@ -466,6 +470,7 @@ Envelope: `EVENT_JSON:{"standard":"council","version":"1.0.0","event":"<name>","
 | `claim_requested` | `quarter`, `token_id`, `owner`, `amount` | NEW |
 | `claim_paid` | `quarter`, `token_id`, `owner`, `amount` | NEW |
 | `close_grace_set`, `market_set`, `nft_contract_set` | the new value | NEW |
+| `reconcile_wait_set` | `reconcile_wait_ns` | NEW |
 | `cooldown_set`, `max_seats_per_account_set`, `tokens_allowed`, `token_range_set`, `token_range_cleared`, `allowlist_set` | the changed value | EXISTING |
 | `owner_proposed`, `owner_changed`, `code_staged`, `upgrade_sent`, `migrated`, `seal_sent` | as the market | EXISTING |
 
@@ -489,19 +494,19 @@ Envelope: `EVENT_JSON:{"standard":"council","version":"1.0.0","event":"<name>","
 
 ## 11. Errors
 
-Exact panic strings today (Checked in source: `council/src/lib.rs`).
+Exact panic strings as built (checked in source: `council/src/lib.rs`).
 
 | Group | Strings |
 | --- | --- |
 | Access | `owner only`, `oracle only`, `not the proposed owner`, `not your seat`, `not staked`, `wrong NFT contract`, `only the verifier can deliver money` |
 | Delivery | `exactly one token and amount`, `wrong token`, `unknown action` |
 | Staking | `that token is not on the allowlist`, `already staked`, `the council is full`, `that account already holds the most seats allowed` |
-| Unstake and claim | `unstake already requested`, `this seat is serving on an open case`, `request an unstake first`, `the cooldown has not passed`, `this seat is serving on an open case, claim after it is final`, `an unstake is requested, and unstaking pays what the seat earned`, `nothing to claim`, and the gas refusals `attach at least 58 TGas: an unstake pays what the seat earned and then returns the NFT` and `attach at least 33 TGas: a claim sends the payout and then settles it` |
+| Unstake and claim | `unstake already requested`, `this seat is serving on an open case`, `request an unstake first`, `the cooldown has not passed`, `nothing to claim`, and the gas refusals `attach at least 33 TGas: an unstake returns the NFT and then settles it` and `attach at least 33 TGas: a claim sends the payout and then settles it` |
 | Settings | `the cooldown must be positive`, `an account must be allowed at least one seat`, `unstake every seat before changing the NFT contract`, `name at least one token`, `at most 100 tokens in one call`, `the first id must not be above the last`, `the collateral token id must look like nep141:<token>` |
 | Draw | `not enough seat holders to draw a jury: {} eligible, {} needed` |
 | Upgrade | `there is no state to migrate`, `migrate runs only inside an upgrade`, `prove the upgrade path before deleting keys` |
 
-New strings (PROPOSED): `revenue comes from the market only`, `that sweep was already received`, `call advance_quarters first`, `that quarter is not final`, `the quarter cannot be finalized yet`, `finalize the earlier quarter first`, `claim is already pending`, `already claimed`, `book this seat first`, `the grace period must be between 1 and 30 days`.
+Strings added with the quarterly model: `revenue comes from the market only`, `that sweep was already received`, `call advance_quarters first`, `that quarter is not final`, `the quarter cannot be finalized yet`, `finalize the earlier quarter first`, `claim is already pending`, `already claimed`, `book this seat first`, `the grace period must be between 1 and 30 days`, `a jury drawn in this quarter is still open`.
 
 ---
 
@@ -511,7 +516,7 @@ Existing tests were not run in this task.
 
 | Requirement | Evidence that exists | Evidence still required |
 | --- | --- | --- |
-| R-04 eligibility, jury, case locks | `staking.rs`, `council.rs`, `hardening.rs:267-433` (allowlist), unit tests `council lib.rs:1016-1530` | Seat weight keeps counting while a seat serves and while it waits out the cooldown (if OD-03 stands) |
+| R-04 eligibility, jury, case locks | `staking.rs`, `council.rs`, `hardening.rs:267-433` (allowlist), unit tests `council lib.rs:1016-1530` | Seat weight keeps counting while a seat serves and stops at its unstake request (OD-03 reversed) |
 | R-05 quarterly accounting | None. The stream tests (`revenue.rs:188`, `:253`, `attacks.rs:1341`, unit `council lib.rs:1216`, `:1603-1700`) test behaviour that is removed | Every example in 6.11 as a unit test with controlled block times. Boundary vectors in 6.1. Proptests for I-C2 and I-C3. Late arrival, no-seat roll, forfeit before and after finalization, `finalize_quarter` ordering, claim states including a refused transfer with a paused verifier (`pause_transfers` helper exists in `common/mod.rs:414`). Sweep id dedupe against the real verifier. Reconciliation of `C` after a full quarter |
 | R-05 timing in the sandbox | none | A real boundary is about 72 days away and the sandbox cannot skip that far (the audit measured a 72 hour skip as too slow). Use unit tests with controlled timestamps for the calendar, and patch stored timestamps in the sandbox as `relock_seat` does for the money path. Label such runs accelerated. Do not add a test-only constant to the shipped wasm: the audit rejected that |
 | R-03 Council receipt | `revenue.rs:95`, `hardening.rs:606` | A repeated sweep id is refused and refunded. A sender other than the market is refused and refunded |
