@@ -1,0 +1,6 @@
+# Check out every text file with LF on every OS. This overrides core.autocrlf, which Git for Windows
+# sets to true by default; CRLF checkouts break the keeper's Rust source scan.
+* text=auto eol=lf
+
+# The marketing CSVs keep the line endings they were committed with.
+*.csv -text

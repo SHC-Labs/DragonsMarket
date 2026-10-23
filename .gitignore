@@ -19,3 +19,6 @@ web/site-tour*.mp4
 # OS/editor cruft
 .DS_Store
 *.swp
+
+# Verify skill run state and evidence (.claude/skills/verify)
+.verify/
