@@ -397,7 +397,7 @@ Views today: `total_received` (`:665`), `seat_count` (`:669`), `jury_of(case_key
 | `finalize_quarter(quarter: u32)` NEW | Anyone | quarter id | none | none | none | Ticks seat time to the end of the quarter first. Refuses before `ends_at + close_grace_ns`, a quarter that is not `next_to_finalize`, and one already final. Fixes pool and weight, rolls an empty quarter forward | `quarter_finalized` |
 | `claim_quarter(quarter: u32, token_id: TokenId)` NEW | Seat owner | quarter id, token | `Promise` | exactly 1 | 33 TGas floor | Section 6.8 | `claim_requested`, `claim_paid`, `claim_failed` |
 | `reconcile_claim(quarter: u32, token_id: TokenId, owner: AccountId, paid: bool)` NEW | Owner | quarter id, token, claim owner, whether the payout was made | none | none | none | Decides a claim whose payout callback never arrived, an hour after the claim. A late callback changes nothing | `claim_reconciled` |
-| `on_claim_paid(quarter, token_id, owner, amount)` NEW | The account itself | | none | none | 10 TGas | Settles the claim record | `claim_paid`, `claim_failed` |
+| `on_claim_paid(quarter, token_id, owner, requested_at)` NEW | The account itself | | none | none | 10 TGas | Settles the claim record written at `requested_at`. A callback for an earlier record under the same key, one `reconcile_claim` deleted, changes nothing | `claim_paid`, `claim_failed` |
 | `book_seat_time(token_id: TokenId, max_quarters: Option<u32>)` NEW | Anyone | token, steps up to 8 | `u32` quarters booked | none | 30 TGas | Books the span of a staked token up to the last finished quarter. Needed only for spans longer than 8 quarters | none |
 | `unstake` CHANGED | Seat owner | `token_id` | `Promise` | exactly 1 | 33 TGas floor | Books the span, removes the stake, returns the NFT, no payout. Refuses `book this seat first` when the span exceeds 8 quarters | `unstaked`, `unstake_failed` |
 | `unlock_case` CHANGED | Oracle | as above | none | none | 15 TGas | Forfeits weight (6.5) | `seat_time_forfeited`, `forfeit_skipped` |
@@ -419,7 +419,8 @@ R-08 asks for accrued, claimable and paid amounts, operation states and quarters
 | Any quarter | `get_quarter(quarter: u32)`, `list_quarters(from_quarter: u32, limit: u32)` | `Option<QuarterView>`, `Vec<QuarterView>` (limit at most 50) |
 | Which quarter a time belongs to | `quarter_of(at: U64)` | `{quarter: u32, label: String, starts_at: U64, ends_at: U64}` |
 | A seat's entitlement | `get_entitlement(quarter: u32, token_id: String, account_id: AccountId)` | `Option<EntitlementView>` |
-| All of an account's entitlements | `entitlements_of(account_id: AccountId, from_quarter: u32, limit: u32)` | `Vec<EntitlementView>` over the account's seats and past seats |
+| All of an account's entitlements | `entitlements_of(account_id: AccountId, from_quarter: u32, limit: u32)` | `Vec<EntitlementView>` over the account's seats and past seats, `min(limit, entitlements_page_quarters)` quarters a page |
+| An account's page length | `entitlements_page_quarters(account_id: AccountId)` | `u32`, at most 25, fewer so a page stays within 250 lookups, at least 1 |
 | An account's staked seats | `seats_of(account_id: AccountId)` | `Vec<TokenId>` |
 | Revenue by sweep | `received_of(sweep_id: U64)` | `Option<{amount: U128, quarter: u32, at: U64}>` |
 | Totals for reconciliation | `reward_totals()` | `{total_received, total_paid, pending_claims, open_pool, final_unclaimed, rolled: U128}` |

@@ -42,6 +42,7 @@ const MAX_VIEW_QUARTERS: u32 = 50;
 // Quarters one entitlements_of call walks. Each quarter costs a lookup for every token the account has ever staked, so this
 // bounds the gas of the view for an account with many seats.
 const MAX_ENTITLEMENT_QUARTERS: u32 = 25;
+const MAX_ENTITLEMENT_LOOKUPS: usize = 250;
 const GAS_NFT_TRANSFER: Gas = Gas::from_tgas(15);
 // The verifier burned 3.8 TGas for a payout from a contract in the sandbox (INTENTS-PROOF.md), so this is a wide margin.
 const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
@@ -294,6 +295,10 @@ fn entitlement(pool: u128, weight: u128, total: u128) -> u128 {
         return 0;
     }
     pool / total * weight + pool % total * weight / total
+}
+
+fn entitlement_page(limit: u32, tokens: usize) -> usize {
+    (limit.min(MAX_ENTITLEMENT_QUARTERS) as usize).min((MAX_ENTITLEMENT_LOOKUPS / tokens.max(1)).max(1))
 }
 
 // ponytail: every draw walks every staked token and reads its record. Measured directly at 1,000 seats with
@@ -872,7 +877,7 @@ impl CouncilContract {
         self.pay(&who, amount).then(
             Self::ext(env::current_account_id())
                 .with_static_gas(GAS_CALLBACK)
-                .on_claim_paid(quarter, token_id, who, U128(amount)),
+                .on_claim_paid(quarter, token_id, who, U64(now)),
         )
     }
 
@@ -884,14 +889,14 @@ impl CouncilContract {
         quarter: u32,
         token_id: TokenId,
         owner: AccountId,
-        _amount: U128,
+        requested_at: U64,
         #[callback_result] result: Result<(), PromiseError>,
     ) {
         let key = (quarter, token_id.clone(), owner.clone());
         let Some(claim) = self.claims.get(&key).cloned() else {
             return;
         };
-        if claim.status != ClaimStatus::Pending {
+        if claim.status != ClaimStatus::Pending || claim.requested_at != requested_at.0 {
             return;
         }
         let paid = result.is_ok();
@@ -1118,16 +1123,21 @@ impl CouncilContract {
         self.entitlement_view(quarter, &token_id, &account_id)
     }
 
-    // The entitlements of every token the account has staked, for `limit` quarters from `from_quarter` (at most 25), oldest
-    // first. A token and quarter with nothing earned is left out.
+    // The entitlements of every token the account has staked, for `limit` quarters from `from_quarter` (at most 25, fewer for an
+    // account with many tokens), oldest first. A token and quarter with nothing earned is left out.
     pub fn entitlements_of(&self, account_id: AccountId, from_quarter: u32, limit: u32) -> Vec<EntitlementView> {
         let last = quarter_containing(env::block_timestamp());
         let tokens = self.tokens_of.get(&account_id).cloned().unwrap_or_default();
         (from_quarter..=last)
-            .take(limit.min(MAX_ENTITLEMENT_QUARTERS) as usize)
+            .take(entitlement_page(limit, tokens.len()))
             .flat_map(|q| tokens.iter().map(move |t| (q, t)))
             .filter_map(|(q, t)| self.entitlement_view(q, t, &account_id))
             .collect()
+    }
+
+    pub fn entitlements_page_quarters(&self, account_id: AccountId) -> u32 {
+        let tokens = self.tokens_of.get(&account_id).map_or(0, Vec::len);
+        entitlement_page(MAX_ENTITLEMENT_QUARTERS, tokens) as u32
     }
 
     // Whether a wasm with this sha256 is staged here, for the members to check before they vote to deploy it.
@@ -1642,8 +1652,21 @@ mod tests {
     fn claim(c: &mut CouncilContract, quarter: u32, token: &str, owner: &str) -> u128 {
         let amount = claim_without_reply(c, quarter, token, owner);
         act_as("council.near");
-        c.on_claim_paid(quarter, token.into(), acct(owner), U128(amount), Ok(()));
+        c.on_claim_paid(
+            quarter,
+            token.into(),
+            acct(owner),
+            requested_at(c, quarter, token, owner),
+            Ok(()),
+        );
         amount
+    }
+
+    fn requested_at(c: &CouncilContract, quarter: u32, token: &str, owner: &str) -> U64 {
+        U64(c
+            .claims
+            .get(&(quarter, token.into(), acct(owner)))
+            .map_or(0, |claim| claim.requested_at))
     }
 
     // Claims and leaves the transfer's result unreported. Returns the amount the claim reserved.
@@ -2190,12 +2213,13 @@ mod tests {
             "claim is already pending"
         );
         // The verifier's feature is paused: the transfer fails and the record goes.
+        let first = requested_at(&c, Q4_2026, "1", "seat1.near");
         act_as("council.near");
         c.on_claim_paid(
             Q4_2026,
             "1".into(),
             acct("seat1.near"),
-            U128(871_005),
+            first,
             Err(PromiseError::Failed),
         );
         assert_eq!(last_event()["event"], "claim_failed");
@@ -2221,16 +2245,12 @@ mod tests {
         let mut c = example_one();
         finalize(&mut c);
         claim(&mut c, Q4_2026, "1", "seat1.near");
+        let paid = requested_at(&c, Q4_2026, "1", "seat1.near");
         act_as("council.near");
-        c.on_claim_paid(
-            Q4_2026,
-            "1".into(),
-            acct("seat1.near"),
-            U128(871_005),
-            Err(PromiseError::Failed),
-        );
-        c.on_claim_paid(Q4_2026, "1".into(), acct("seat1.near"), U128(871_005), Ok(()));
-        c.on_claim_paid(Q4_2026, "2".into(), acct("seat2.near"), U128(5), Ok(()));
+        c.on_claim_paid(Q4_2026, "1".into(), acct("seat1.near"), paid, Err(PromiseError::Failed));
+        c.on_claim_paid(Q4_2026, "1".into(), acct("seat1.near"), paid, Ok(()));
+        let none = requested_at(&c, Q4_2026, "2", "seat2.near");
+        c.on_claim_paid(Q4_2026, "2".into(), acct("seat2.near"), none, Ok(()));
         assert_eq!(
             (c.total_paid, c.pending_total, c.book(Q4_2026).paid),
             (871_005, 0, 871_005)
@@ -2308,13 +2328,14 @@ mod tests {
                 .status,
             EntitlementStatus::Paid
         );
+        let stuck = requested_at(&c, Q4_2026, "1", "seat1.near");
         act_as("council.near");
-        c.on_claim_paid(Q4_2026, "1".into(), acct("seat1.near"), U128(871_005), Ok(()));
+        c.on_claim_paid(Q4_2026, "1".into(), acct("seat1.near"), stuck, Ok(()));
         c.on_claim_paid(
             Q4_2026,
             "1".into(),
             acct("seat1.near"),
-            U128(871_005),
+            stuck,
             Err(PromiseError::Failed),
         );
         assert_eq!((c.total_paid, c.book(Q4_2026).paid), (871_005, 871_005));
@@ -2327,6 +2348,43 @@ mod tests {
         assert_eq!(
             refusal(|| c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false)),
             "no claim is pending for that seat"
+        );
+    }
+
+    #[test]
+    fn a_late_callback_of_a_reconciled_claim_does_not_settle_the_claim_that_replaced_it() {
+        let mut c = stuck_claim();
+        let first = requested_at(&c, Q4_2026, "1", "seat1.near");
+        set_time(clock() + RECONCILE_WAIT_NS);
+        c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false);
+        let amount = claim_without_reply(&mut c, Q4_2026, "1", "seat1.near");
+        let second = requested_at(&c, Q4_2026, "1", "seat1.near");
+        assert_ne!(first, second);
+        act_as("council.near");
+        c.on_claim_paid(
+            Q4_2026,
+            "1".into(),
+            acct("seat1.near"),
+            first,
+            Err(PromiseError::Failed),
+        );
+        assert_eq!(
+            c.get_entitlement(Q4_2026, "1".into(), acct("seat1.near"))
+                .unwrap()
+                .status,
+            EntitlementStatus::Pending,
+            "the first payout's callback must not touch the second claim"
+        );
+        assert_eq!(c.reward_totals().pending_claims.0, amount);
+        c.on_claim_paid(Q4_2026, "1".into(), acct("seat1.near"), second, Ok(()));
+        assert_eq!(
+            (c.total_paid, c.book(Q4_2026).paid, c.pending_total),
+            (amount, amount, 0)
+        );
+        act_paid("seat1.near");
+        assert_eq!(
+            refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
+            "already claimed"
         );
     }
 
@@ -2840,7 +2898,13 @@ mod tests {
             (EntitlementStatus::Pending, true, None)
         );
         act_as("council.near");
-        c.on_claim_paid(Q4_2026, "1".into(), acct("a.near"), U128(500), Ok(()));
+        c.on_claim_paid(
+            Q4_2026,
+            "1".into(),
+            acct("a.near"),
+            requested_at(&c, Q4_2026, "1", "a.near"),
+            Ok(()),
+        );
         let e = c.get_entitlement(Q4_2026, "1".into(), acct("a.near")).unwrap();
         assert_eq!(
             (e.status, e.paid_at.map(|t| t.0)),
@@ -2865,6 +2929,36 @@ mod tests {
             Some(Q4_2026 + MAX_ENTITLEMENT_QUARTERS - 1)
         );
         assert_eq!(c.entitlements_of(acct("a.near"), Q4_2026, 5).len(), 5);
+    }
+
+    #[test]
+    fn a_page_covers_fewer_quarters_the_more_tokens_an_account_has_staked_but_at_least_one() {
+        assert_eq!(entitlement_page(25, 0), 25);
+        assert_eq!(entitlement_page(25, 10), 25);
+        assert_eq!(entitlement_page(25, 20), 12);
+        assert_eq!(entitlement_page(25, 250), 1);
+        assert_eq!(entitlement_page(25, 1_000), 1);
+        assert_eq!(entitlement_page(3, 20), 3);
+        assert_eq!(entitlement_page(0, 20), 0);
+    }
+
+    #[test]
+    fn an_account_with_twenty_tokens_reads_twelve_quarters_a_page_and_the_next_page_carries_on() {
+        let mut c = council();
+        for t in 0..20 {
+            stake(&mut c, &t.to_string(), "big.near");
+        }
+        set_time(quarter_start(Q4_2026 + 20) + DAY);
+        assert_eq!(c.entitlements_page_quarters(acct("big.near")), 12);
+        assert_eq!(c.entitlements_page_quarters(acct("nobody.near")), 25);
+        let page = |from: u32| -> BTreeSet<u32> {
+            c.entitlements_of(acct("big.near"), from, 25)
+                .iter()
+                .map(|e| e.quarter)
+                .collect()
+        };
+        assert_eq!(page(Q4_2026), (Q4_2026..Q4_2026 + 12).collect());
+        assert_eq!(page(Q4_2026 + 12), (Q4_2026 + 12..=Q4_2026 + 20).collect());
     }
 
     #[test]
@@ -3162,13 +3256,14 @@ mod tests {
                             let view = c.get_entitlement(q, t.to_string(), acct(&format!("o{o}.near")));
                             if view.as_ref().is_some_and(|e| e.status == EntitlementStatus::Claimable && e.amount.0 > 0) {
                                 let got = claim_without_reply(&mut c, q, &t.to_string(), &format!("o{o}.near"));
+                                let at = requested_at(&c, q, &t.to_string(), &format!("o{o}.near"));
                                 act_as("council.near");
                                 if op == 7 {
-                                    c.on_claim_paid(q, t.to_string(), acct(&format!("o{o}.near")), U128(got), Ok(()));
+                                    c.on_claim_paid(q, t.to_string(), acct(&format!("o{o}.near")), at, Ok(()));
                                     prop_assert!(paid_keys.insert((q, t, o)), "claim paid twice");
                                     paid += got;
                                 } else {
-                                    c.on_claim_paid(q, t.to_string(), acct(&format!("o{o}.near")), U128(got), Err(PromiseError::Failed));
+                                    c.on_claim_paid(q, t.to_string(), acct(&format!("o{o}.near")), at, Err(PromiseError::Failed));
                                 }
                             }
                         }

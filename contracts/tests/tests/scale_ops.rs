@@ -391,7 +391,7 @@ const BUILD_PER_CALL: u64 = 28;
 const R_CLOSE_SECS: u64 = 3_000;
 const R_PAST_CLOSE_SECS: u64 = 3_030;
 const ATTACHED_TRIES: [u64; 13] = [22, 24, 26, 28, 30, 35, 40, 50, 60, 80, 100, 150, 300];
-const MAX_POSITIONS: u32 = 100;
+const MAX_POSITIONS: u32 = 30;
 const TRADE: u128 = USD;
 
 fn row(what: &str, size: &str, market: f64, total: f64, ms: u128, note: &str) {

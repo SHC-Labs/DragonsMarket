@@ -13,8 +13,8 @@ const NEAR_PER_BYTE: f64 = 1e-5;
 const TRADES: usize = 130;
 const PRE_TRADES: usize = 2;
 const HISTORY_POINTS: i64 = 120;
-const POSITION_STEPS: [usize; 3] = [1, 20, 100];
-const POSITION_POOL: u64 = 100;
+const POSITION_STEPS: [usize; 3] = [1, 20, 30];
+const POSITION_POOL: u64 = 30;
 const SEED_AMOUNT: u128 = 3 * USD;
 const CLOSE_SECS: u64 = 100;
 const PAST_CLOSE_SECS: u64 = 130;
@@ -141,7 +141,7 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
     ft_call(&w, &w.bob, w.market.id(), 500 * USD, "deposit").await?;
     w.owner
         .call(w.market.id(), "set_max_positions")
-        .args_json(json!({ "max_positions": 100 }))
+        .args_json(json!({ "max_positions": 30 }))
         .transact()
         .await?
         .into_result()?;

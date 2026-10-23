@@ -68,10 +68,8 @@ const DEFAULT_MIN_MARGIN_NEAR = "5";
 const DEFAULT_MIN_SWEEP = 10_000_000n;
 // sweep_fees refuses less than 87 TGas.
 const SWEEP_GAS_TGAS = 100;
-// sweep_fees refuses a second sweep within this long of the last one.
-const MIN_SWEEP_INTERVAL_NS = 3_600n * 10n ** 9n;
-// settle_leg refuses a sweep younger than this. It needs 30 TGas; the measured cost is 6 in all.
-const SETTLE_WAIT_NS = 10n * 60n * 10n ** 9n;
+const NS_PER_MINUTE = 60n * 10n ** 9n;
+// settle_leg needs 30 TGas; the measured cost is 6 in all.
 const SETTLE_GAS_TGAS = 50;
 // How many of the newest sweeps are looked at for a leg that needs settling.
 const RECENT_SWEEPS = 20;
@@ -110,7 +108,8 @@ export function quarterEnd(quarter) {
 
 // snapshot: { now, height, markets: [{ id, outcome, resolve_by }], cases: { [id]: case | null }, locked: { [id]: bool },
 // feesDue, minSweep, council: { lastTick, nextToFinalize, closeGraceNs }, sweeps: [{ id, at, council: { status } }] oldest
-// first, lastSweepAt }. feesDue is what a sweep would send now, in token units. lastSweepAt is null before the first sweep.
+// first, lastSweepAt, sweepIntervalNs, settleWaitNs }. feesDue is what a sweep would send now, in token units. lastSweepAt
+// is null before the first sweep.
 // A disputed case that has no jury yet can be drawn until draw_by and is over after it. One that has a jury is over once
 // its panel_deadline has passed. Finalizing a round that is over calls for the second jury or settles the case.
 // Times are BigInt nanoseconds, height, feesDue and minSweep are BigInt. Returns the calls to send now, in the order to
@@ -138,11 +137,11 @@ export function dueActions(snapshot) {
   }
   actions.push(...councilActions(snapshot));
   for (const sweep of snapshot.sweeps ?? []) {
-    if (sweep.council.status === "unresolved" && snapshot.now >= BigInt(sweep.at) + SETTLE_WAIT_NS) {
+    if (sweep.council.status === "unresolved" && snapshot.now >= BigInt(sweep.at) + snapshot.settleWaitNs) {
       actions.push({ contract: "market", method: "settle_leg", args: { sweep_id: String(sweep.id) }, gas: BigInt(SETTLE_GAS_TGAS) * TGAS });
     }
   }
-  const sweepOpen = snapshot.lastSweepAt == null || snapshot.now >= BigInt(snapshot.lastSweepAt) + MIN_SWEEP_INTERVAL_NS;
+  const sweepOpen = snapshot.lastSweepAt == null || snapshot.now >= BigInt(snapshot.lastSweepAt) + snapshot.sweepIntervalNs;
   if (sweepOpen && snapshot.feesDue > 0n && snapshot.feesDue >= snapshot.minSweep) {
     actions.push({ contract: "market", method: "sweep_fees", args: {}, gas: BigInt(SWEEP_GAS_TGAS) * TGAS });
   }
@@ -239,6 +238,8 @@ async function snapshot(opts, firstMarket) {
     now: BigInt(block.header.timestamp_nanosec), height: BigInt(block.header.height), markets, cases, locked, feesDue, minSweep,
     council: { lastTick: BigInt(council.last_tick), nextToFinalize: council.next_to_finalize, closeGraceNs: BigInt(council.close_grace_ns) },
     sweeps, lastSweepAt,
+    sweepIntervalNs: BigInt(marketConfig.min_sweep_interval_minutes) * NS_PER_MINUTE,
+    settleWaitNs: BigInt(marketConfig.settle_wait_minutes) * NS_PER_MINUTE,
   };
 }
 

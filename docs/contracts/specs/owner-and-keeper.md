@@ -108,7 +108,7 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `set_void_rules` | Owner | `price_window_ns: U64`, `grace_ns: U64` | 0 | 30 TGas | 1 | Void price window 1 hour to 7 days, void grace 1 to 60 days. Applies to markets created afterwards |
 | `set_sweep_timing` | Owner | `settle_wait_minutes`, `reconcile_wait_minutes`, `min_interval_minutes` (u32) | 0 | 30 TGas | 1 | Settle wait 1 to 1440, reconcile wait 10 to 10080 and not below the settle wait, sweep interval 1 to 1440. Live |
 | `set_open_price_bounds` | Owner | `min: U128`, `max: U128` | 0 | 30 TGas | 1 | Opening price range within 1000 to 999000 millionths, min below max. Live |
-| `set_max_positions` | Owner | `max_positions: u32` | 0 | 30 TGas | 1 | 5 to 100. Positions already held stay |
+| `set_max_positions` | Owner | `max_positions: u32` | 0 | 30 TGas | 1 | 5 to 30, the most the 0.05 NEAR deposit pays for with a 64-character id. Positions already held stay |
 | `set_fee_limits` | Owner | `max_fee_rate_bps`, `max_create_fee`, `min_revenue_share_bps`, `max_revenue_share_bps`, `max_min_sweep` | 0 | 30 TGas | 1 | The ceilings and floors the fee setters check against, each inside a hard range. Refused if it would leave a current value outside |
 | `halt`, `resume` | Operator or owner | `market_id: U64`, `reason: String` | 0 | 30 TGas | 1 | The operator cannot halt in the last 24 hours before close |
 | `create_market`, `retry_register`, `claim_residual` | Operator or owner | as in market.md | 0 | 100 TGas for `create_market` | 1 | Routine. The operator normally calls them |
@@ -255,7 +255,7 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | market | `set_sweep_timing` | three integers in range, settle wait not above reconcile wait | 0 | 5 to 30 |
 | market | `reconcile_withdrawal` | `id`: decimal string from 1, `paid`: boolean | 0 | 5 to 30 |
 | market | `set_open_price_bounds` | `min`, `max`: decimal strings in range, min not above max | 0 | 5 to 30 |
-| market | `set_max_positions` | integer 5 to 100 | 0 | 5 to 30 |
+| market | `set_max_positions` | integer 5 to 30 | 0 | 5 to 30 |
 | market | `set_fee_limits` | five values in range, share floor not above ceiling | 0 | 5 to 30 |
 | market | `halt` | `market_id`: U64, `reason`: non-blank text up to 500 bytes | 0 | 5 to 30 |
 | market | `resume`, `claim_residual` | `market_id`: U64 | 0 | 5 to 30 |

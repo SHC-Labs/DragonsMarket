@@ -117,7 +117,7 @@ Fitted lines (three points for seed and redeem, two for the views): seed 2.637 +
 | User with 20 positions, 20-char / 64-char id | 2,179 / 3,191 | n/a | The 0.05 NEAR deposit |
 | User with 100 positions, 20-char / 64-char id | 10,019 / 14,551 | n/a | The 0.05 NEAR deposit |
 
-- The deposit buys 5,000 bytes. It covers about 45 positions for a 20-character id and about 30 for a 64-character id. The hard maximum for the position cap is 100.
+- The deposit buys 5,000 bytes. It covers about 45 positions for a 20-character id and 31 for a 64-character id. The hard maximum for the position cap is now 30, so every account fits inside its deposit (unit test `the_deposit_pays_for_an_account_at_the_hard_position_cap_with_the_longest_id`). The 100-position row above is kept as the measurement that set it.
 - A sweep every hour for five years is 43,800 records, about 143 NEAR across the market and the Council.
 
 ### 3.5 Protocol constants
@@ -161,6 +161,7 @@ The index fixed ordinary accounts. The operator and owner are exempt from the po
 The 25-quarter cap bounds the quarters, not the tokens. Each quarter does one lookup per token the account has ever staked, and `tokens_of` is an append-only history that is never shrunk, so an account that stakes and unstakes many different tokens over the years grows without bound. Measured: 163.5 TGas at 25 tokens; the fit reaches 200 TGas at about 31.
 
 - **Fix:** bound the product, not just the quarters: accept a page where tokens times quarters stays under a budget (about 250 lookups, roughly 65 TGas), page by token as well as by quarter, and bound or compact `tokens_of`.
+- **Done (budget):** a page now covers `max(1, 250 / tokens)` quarters at most, so an account with up to 250 tokens stays near 67 TGas a page. `entitlements_page_quarters` returns the page length, so a caller never computes it. Still open: a single quarter passes 200 TGas at about 767 tokens (2.76 + 0.257 per token), so paging by token, or compacting `tokens_of`, is still needed before one account can have staked most of the collection.
 
 ### Issue 5. Dispute capacity
 

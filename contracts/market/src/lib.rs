@@ -22,11 +22,11 @@ use curve::MAX_POOL;
 const STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(50);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 // ponytail: flat 0.05 NEAR deposit and a position cap instead of per-byte storage accounting; revisit if users need more positions.
-// The cap starts at this and the owner can move it within the hard range. The deposit above covers 100 entries, so the range
-// stops there, and 5 keeps an account able to hold a few markets.
+// The cap starts at this and the owner can move it within the hard range. The deposit above covers 30 entries for the longest
+// account id, so the range stops there, and 5 keeps an account able to hold a few markets.
 const MAX_POSITIONS: u32 = 20;
 const HARD_MIN_POSITIONS: u32 = 5;
-const HARD_MAX_POSITIONS: u32 = 100;
+const HARD_MAX_POSITIONS: u32 = 30;
 // Price points kept per market for the chart. Oldest is dropped past this, so storage per market stays bounded.
 const HISTORY_MAX: usize = 120;
 // Text limits (bytes). Every trade rewrites the whole market record, so unbounded text would make trading expensive.
@@ -1054,7 +1054,7 @@ impl MarketContract {
         self.only_owner();
         require!(
             (HARD_MIN_POSITIONS..=HARD_MAX_POSITIONS).contains(&max_positions),
-            "the position cap must be between 5 and 100"
+            "the position cap must be between 5 and 30"
         );
         emit("max_positions_set", json!({ "max_positions": max_positions }));
         self.max_positions = max_positions;
@@ -1728,7 +1728,7 @@ impl MarketContract {
     // Everything this contract owes, in collateral units: user balances, what is locked in every market, and every fee
     // bucket. The keeper compares it with the verifier's mt_balance_of for this account at the same finalized block. More
     // there than here is surplus nobody is credited for. Less is an incident. A withdrawal in flight is still counted, because
-    // the verifier has not confirmed it, so the verifier's balance covers total_owed at every moment. A fee leg that is pending
+    // the verifier has not confirmed it, until its callback runs. A fee leg that is pending
     // is out of the books because its money is already on its way, so an unfinished transfer shows as surplus here and never
     // as a shortfall.
     pub fn total_owed(&self) -> U128 {
@@ -6375,12 +6375,42 @@ mod tests {
         let (mut c, _) = world();
         act_as(OWNER, 3);
         c.set_max_positions(5);
-        c.set_max_positions(100);
+        c.set_max_positions(30);
         assert_eq!(last_event()["event"], "max_positions_set");
-        for bad in [0, 4, 101] {
+        for bad in [0, 4, 31, 100] {
             assert!(refused(|| c.set_max_positions(bad)), "{bad}");
         }
-        assert_eq!(c.config()["max_positions"], 100);
+        assert_eq!(c.config()["max_positions"], 30);
+    }
+
+    #[test]
+    fn the_deposit_pays_for_an_account_at_the_hard_position_cap_with_the_longest_id() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        let flush = |c: &mut MarketContract| {
+            c.accounts.flush();
+            c.balances.flush();
+            c.shares.flush();
+            c.position_markets.flush();
+            c.pending_by_account.flush();
+        };
+        flush(&mut c);
+        let who: AccountId = "f".repeat(64).parse().unwrap();
+        let before = env::storage_usage();
+        c.accounts.insert(who.clone(), 0);
+        c.max_positions = HARD_MAX_POSITIONS;
+        c.credit(&who, 1);
+        c.pending_by_account.insert(who.clone(), 1);
+        for id in 0..u64::from(HARD_MAX_POSITIONS) {
+            c.add_shares(&who, 1_000 + id, 0, 1);
+        }
+        flush(&mut c);
+        let used = u128::from(env::storage_usage() - before);
+        let paid = STORAGE_DEPOSIT.as_yoctonear() / env::storage_byte_cost().as_yoctonear();
+        assert!(
+            used <= paid,
+            "{used} bytes at {HARD_MAX_POSITIONS} positions, the deposit pays for {paid}"
+        );
     }
 
     #[test]

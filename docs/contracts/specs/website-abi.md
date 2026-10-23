@@ -314,7 +314,8 @@ interface RewardTotals { total_received: U128; total_paid: U128; pending_claims:
 | `get_quarter`, `list_quarters` | `{quarter: number}`, `{from_quarter: number, limit: number}` | `QuarterView \| null`, `QuarterView[]` | NEW |
 | `quarter_of` | `{at: U64}` | `{quarter: number, label: string, starts_at: U64, ends_at: U64}` | NEW |
 | `get_entitlement` | `{quarter: number, token_id, account_id}` | `EntitlementView \| null` | NEW |
-| `entitlements_of` | `{account_id, from_quarter: number, limit: number}` | `EntitlementView[]`. `limit` is clamped to 25 quarters; page with `from_quarter` | NEW |
+| `entitlements_of` | `{account_id, from_quarter: number, limit: number}` | `EntitlementView[]`. A page covers `min(limit, entitlements_page_quarters)` quarters; the next page starts at `from_quarter` plus that | NEW |
+| `entitlements_page_quarters` | `{account_id}` | `number`, the most quarters one `entitlements_of` page covers for that account | NEW |
 | `received_of` | `{sweep_id: U64}` | `{amount: U128, quarter: number, at: U64} \| null` | NEW |
 | `reward_totals` | `{}` | `RewardTotals` | NEW |
 

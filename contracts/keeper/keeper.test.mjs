@@ -19,6 +19,7 @@ test("retired controller flags are rejected before any RPC call", () => {
 });
 const base = {
   now: NOW, height: 100n, markets: [{ id: "0", outcome: null, resolve_by: "9000000" }], locked: {}, feesDue: 0n, minSweep: 1_000n,
+  sweepIntervalNs: 3_600n * 10n ** 9n, settleWaitNs: 600n * 10n ** 9n,
 };
 const proposed = { stage: "proposed", window_ends_at: "1000000", panel: [], challenger: null, applied: false };
 const disputed = {
@@ -429,4 +430,14 @@ test("no sweep is sent within an hour of the last one, and one is sent from the 
   assert.equal(sweeps(last + HOUR - 1n, last).length, 0);
   assert.equal(sweeps(last + HOUR, last).length, 1);
   assert.equal(sweeps(last + 1n, null).length, 1, "no sweep yet");
+});
+
+test("the sweep gap and the settle wait follow the market's settings once the owner has changed them", () => {
+  const at = ns("2027-01-01T00:00:00Z");
+  const timing = { sweepIntervalNs: 2n * HOUR, settleWaitNs: 30n * MINUTE };
+  const due = (now) => dueActions({ ...idle, ...timing, now, feesDue: 1_000n, lastSweepAt: at, sweeps: [sweepAt(1, at, "unresolved")] });
+  assert.deepEqual(due(at + 30n * MINUTE - 1n).map((a) => a.method), []);
+  assert.deepEqual(due(at + 30n * MINUTE).map((a) => a.method), ["settle_leg"]);
+  assert.deepEqual(due(at + HOUR).map((a) => a.method), ["settle_leg"], "an hour is not enough once the gap is two");
+  assert.deepEqual(due(at + 2n * HOUR).map((a) => a.method), ["settle_leg", "sweep_fees"]);
 });
