@@ -21,8 +21,12 @@ use curve::MAX_POOL;
 // (about 100 bytes each at 1 NEAR per 100 KB), so spam accounts cannot drain the contract's storage.
 const STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(50);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
-// ponytail: flat 0.05 NEAR deposit and a 20-position cap instead of per-byte storage accounting; revisit if users need more positions.
+// ponytail: flat 0.05 NEAR deposit and a position cap instead of per-byte storage accounting; revisit if users need more positions.
+// The cap starts at this and the owner can move it within the hard range. The deposit above covers 30 entries for the longest
+// account id, so the range stops there, and 5 keeps an account able to hold a few markets.
 const MAX_POSITIONS: u32 = 20;
+const HARD_MIN_POSITIONS: u32 = 5;
+const HARD_MAX_POSITIONS: u32 = 30;
 // Price points kept per market for the chart. Oldest is dropped past this, so storage per market stays bounded.
 const HISTORY_MAX: usize = 120;
 // Text limits (bytes). Every trade rewrites the whole market record, so unbounded text would make trading expensive.
@@ -30,23 +34,36 @@ const MAX_TITLE: usize = 200;
 const MAX_RULE: usize = 2000;
 const MAX_SOURCE: usize = 300;
 const MAX_VOID: usize = 500;
-// The Yes prices a market can open at, in millionths: 1% to 99%, the range prices are allowed in.
-const MIN_OPEN_PRICE: u128 = 10_000;
-const MAX_OPEN_PRICE: u128 = 990_000;
+// The Yes prices a market can open at, in millionths: 1% to 99% to start, and the owner can move them within the hard
+// range. Never below 0.1% or above 99.9%, so a market cannot open at a price where one side is nearly free.
+const DEFAULT_MIN_OPEN_PRICE: u128 = 10_000;
+const DEFAULT_MAX_OPEN_PRICE: u128 = 990_000;
+const HARD_MIN_OPEN_PRICE: u128 = 1_000;
+const HARD_MAX_OPEN_PRICE: u128 = 999_000;
+const NS_PER_DAY: u64 = 86_400_000_000_000;
 // A Void pays each Yes share the Yes price averaged over this long before close, so a trade just before close
-// cannot set it. 24 hours in nanoseconds.
-const VOID_PRICE_WINDOW_NS: u64 = 86_400_000_000_000;
+// cannot set it. 24 hours in nanoseconds to start. A market keeps the window it was created with. The hard range is 1 hour
+// to 7 days: shorter is easy to move with one trade, longer reaches back past most of the market's life.
+const VOID_PRICE_WINDOW_NS: u64 = NS_PER_DAY;
+const HARD_MIN_VOID_WINDOW_NS: u64 = NS_PER_DAY / 24;
+const HARD_MAX_VOID_WINDOW_NS: u64 = 7 * NS_PER_DAY;
 // The oracle answers a market that nobody answered once resolve_by has passed. This much later anyone can void it
-// here instead, for the case of an oracle that is gone. 7 days in nanoseconds.
-const VOID_GRACE_NS: u64 = 7 * 86_400_000_000_000;
+// here instead, for the case of an oracle that is gone. 7 days in nanoseconds to start, kept per market like the window.
+// The hard range is 1 to 60 days: under a day leaves the oracle no time to answer, over 60 leaves money stuck too long.
+const VOID_GRACE_NS: u64 = 7 * NS_PER_DAY;
+const HARD_MIN_VOID_GRACE_NS: u64 = NS_PER_DAY;
+const HARD_MAX_VOID_GRACE_NS: u64 = 60 * NS_PER_DAY;
 // The fee on a trade is rate × shares × p × (1 − p). 2% costs about 1% of what a 50c trade pays. Both fees start at
-// these values and the owner (the DAO) can change them, but never above the ceilings, which are written here so that even
-// a captured owner cannot set a confiscatory fee.
+// these values and the owner (the DAO) can change them, but never above the ceilings. The ceilings start at the values
+// below and the owner can move them, but only within the hard limits, so that even a captured owner cannot set a
+// confiscatory fee and a bad vote cannot lock fees at zero or lift them without bound.
 const DEFAULT_FEE_RATE_BPS: u128 = 200;
 const MAX_FEE_RATE_BPS: u128 = 500;
+const HARD_MAX_FEE_RATE_BPS: u128 = 2_000;
 // ponytail: placeholder, 1 unit of the 6-decimal test token, taken out of the seed transfer. The ceiling is 10 units.
 const DEFAULT_CREATE_FEE: u128 = 1_000_000;
 const MAX_CREATE_FEE: u128 = 10_000_000;
+const HARD_MAX_CREATE_FEE: u128 = 100_000_000;
 // Fees are split between the Council (revenue) and the treasury in basis points of 10,000. The accepted decision is 25% to the
 // Council and 75% to the treasury, so 2,500 is the starting share, and the owner can move it between the two bounds. The
 // treasury always gets the rest, so the whole of every fee is accounted for whatever the owner sets.
@@ -54,16 +71,33 @@ const BPS_DENOMINATOR: u128 = 10_000;
 const DEFAULT_REVENUE_SHARE_BPS: u128 = 2_500;
 const MIN_REVENUE_SHARE_BPS: u128 = 1_000;
 const MAX_REVENUE_SHARE_BPS: u128 = 5_000;
+// The floor cannot go under 5% and the ceiling cannot go over 90%, so neither the Council nor the treasury can be cut out.
+const HARD_MIN_REVENUE_SHARE_BPS: u128 = 500;
+const HARD_MAX_REVENUE_SHARE_BPS: u128 = 9_000;
 // A sweep with less than this to act on does nothing, so the record count stays bounded by the fees collected. 1 unit of the
 // 6-decimal collateral to start, with a ceiling of 100.
 const DEFAULT_MIN_SWEEP: u128 = 1_000_000;
 const MAX_MIN_SWEEP: u128 = 100_000_000;
+const HARD_MAX_MIN_SWEEP: u128 = 1_000_000_000;
 const FIRST_SWEEP_ID: u64 = 1;
+const FIRST_WITHDRAWAL_ID: u64 = 1;
 // How long after a sweep its result can be asked for (settle_leg) or overridden by the owner (reconcile_leg). The first lets
 // the Council's receipt finish whatever it is doing, the second leaves a callback an hour to arrive before a person decides.
 const NS_PER_MINUTE: u64 = 60 * 1_000_000_000;
+// Both start at these and the owner can move them live. The hard ranges: settle 1 minute to a day, reconcile 10 minutes to a
+// week and never under the settle wait, so settling always comes first.
 const SETTLE_WAIT_MINUTES: u64 = 10;
 const RECONCILE_WAIT_MINUTES: u64 = 60;
+const HARD_MIN_SETTLE_WAIT_MINUTES: u32 = 1;
+const HARD_MAX_SETTLE_WAIT_MINUTES: u32 = 1_440;
+const HARD_MIN_RECONCILE_WAIT_MINUTES: u32 = 10;
+const HARD_MAX_RECONCILE_WAIT_MINUTES: u32 = 10_080;
+// The least time between two sweeps. A refused due is retried on purpose, so without this a stranger could sweep it again
+// and again, and every sweep keeps a record. At the starting hour this bounds the records at 24 a day whatever the dues do.
+// The hard range is 1 minute to a day: a sweep must stay rate-limited, and must still happen at least daily.
+const MIN_SWEEP_INTERVAL_NS: u64 = 60 * NS_PER_MINUTE;
+const HARD_MIN_SWEEP_INTERVAL_MINUTES: u32 = 1;
+const HARD_MAX_SWEEP_INTERVAL_MINUTES: u32 = 1_440;
 // The verifier burned 3.8 TGas for a payout from a contract in the sandbox (INTENTS-PROOF.md), so this is a wide margin.
 const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
 // mt_transfer_call needs 21 TGas attached before the receiver gets any (measured), so the verifier's own part is rounded up
@@ -97,6 +131,9 @@ enum Key {
     Accounts,
     Shares,
     Sweeps,
+    Withdrawals,
+    PendingByAccount,
+    PositionMarkets,
 }
 
 #[near(serializers=[borsh, json])]
@@ -139,13 +176,13 @@ pub struct Twap {
 impl Twap {
     // Counts the price in force up to `now`, never past close_at, and fixes the window's start the first time it is
     // passed. Time that passes while the market is not trading moves `at` and counts for nothing.
-    fn advance(&mut self, close_at: u64, now: u64, trading: bool) {
+    fn advance(&mut self, window_ns: u64, close_at: u64, now: u64, trading: bool) {
         let to = now.min(close_at);
         if to <= self.at {
             return;
         }
         let held = |from: u64, until: u64| if trading { (until - from) as u128 } else { 0 };
-        let window_start = close_at.saturating_sub(VOID_PRICE_WINDOW_NS);
+        let window_start = close_at.saturating_sub(window_ns);
         if self.anchor.is_none() && to >= window_start {
             let at = window_start.max(self.at);
             self.anchor = Some((
@@ -173,6 +210,9 @@ pub struct Market {
     price_rule: Option<PriceRule>,
     close_at: u64,
     resolve_by: u64,
+    // The void rules in force when the market was created. Changing the rules later does not touch a market that exists.
+    void_price_window_ns: u64,
+    void_grace_ns: u64,
     halted: bool,
     registered: bool,
     seeded: bool,
@@ -189,6 +229,45 @@ pub struct Market {
     history: Vec<(u64, u32)>,
     // What a Void pays is averaged from this, not from the log: see Twap.
     twap: Option<Twap>,
+}
+
+// A withdrawal whose transfer has been sent and whose callback has not reported. It stays owed until the verifier confirms it.
+#[near(serializers=[borsh, json])]
+#[derive(Clone)]
+pub struct Withdrawal {
+    account: AccountId,
+    amount: U128,
+    at: U64,
+}
+
+#[near(serializers=[json])]
+pub struct AccountView {
+    registered: bool,
+    available: U128,
+    pending_withdrawals: U128,
+    positions: u32,
+}
+
+// Money that has been sent and not yet reported: withdrawals, and fee legs that are pending or unresolved.
+#[near(serializers=[json])]
+pub struct InFlightView {
+    withdrawals: U128,
+    withdrawal_count: u32,
+    legs: U128,
+    leg_count: u32,
+}
+
+// The buckets total_owed adds, and their sum.
+#[near(serializers=[json])]
+pub struct OwedView {
+    balances: U128,
+    locked: U128,
+    fees: U128,
+    revenue_due: U128,
+    treasury_due: U128,
+    unresolved: U128,
+    pending_withdrawals: U128,
+    total: U128,
 }
 
 #[near(serializers=[json])]
@@ -214,6 +293,17 @@ pub struct MarketView {
     price_yes: U128,
     price_no: U128,
     locked: U128,
+}
+
+// One market in which an account holds shares. redeemable is what redeem would credit now, 0 until the market resolves.
+#[near(serializers=[json])]
+pub struct PositionView {
+    market_id: U64,
+    yes: U128,
+    no: U128,
+    status: String,
+    outcome: Option<Outcome>,
+    redeemable: U128,
 }
 
 #[near(serializers=[json])]
@@ -379,10 +469,29 @@ pub struct MarketContract {
     // The Intents verifier that holds every unit of backing, and the exact id of the collateral in it, "nep141:<token>".
     verifier: AccountId,
     collateral_token_id: String,
+    // Blocks buy, deposit, seed and new markets. The operator can set it. It never blocks sell, withdraw or redeem.
     paused: bool,
+    // Blocks sell. Owner only, so the operator cannot trap open positions.
+    sells_paused: bool,
     // What a trade and a new market pay now. Each applies from the next trade or seed; nothing already paid changes.
     fee_rate_bps: u128,
     create_fee: u128,
+    // The ceilings and floors the fee setters check against, and the other policy values the owner can tune. Each starts at
+    // the number the contract was built with and moves only within a hard range.
+    max_fee_rate_bps: u128,
+    max_create_fee: u128,
+    min_revenue_share_bps: u128,
+    max_revenue_share_bps: u128,
+    max_min_sweep: u128,
+    max_positions: u32,
+    min_open_price: u128,
+    max_open_price: u128,
+    // Applied to markets created from now on, and copied onto each.
+    void_price_window_ns: u64,
+    void_grace_ns: u64,
+    settle_wait_minutes: u32,
+    reconcile_wait_minutes: u32,
+    min_sweep_interval_minutes: u32,
     next_market_id: u64,
     markets: LookupMap<u64, Market>,
     balances: LookupMap<AccountId, u128>,
@@ -392,6 +501,10 @@ pub struct MarketContract {
     accounts: LookupMap<AccountId, u32>,
     // (market, account, 0 = yes / 1 = no) -> shares
     shares: LookupMap<(u64, AccountId, u8), u128>,
+    // account -> the market ids, sorted and without repeats, in which it holds a non-empty share entry on either side. Kept
+    // only by add_shares and take_shares, and absent when empty. An account that holds one position in every market, as
+    // the operator and the owner can, has one record of 8 bytes a market that a trade rewrites whole.
+    position_markets: LookupMap<AccountId, Vec<u64>>,
     // The Council, which shares its part among staked seats, and the treasury. None until the owner sets them, and a sweep
     // refuses until then, so nothing is sent to an account nobody chose.
     recipients: Option<FeeRecipients>,
@@ -412,7 +525,20 @@ pub struct MarketContract {
     // The least a sweep acts on, and the id the next sweep takes. Ids only go up, and the Council refuses a repeat.
     min_sweep: u128,
     next_sweep_id: u64,
+    // When the last sweep ran, in ns. None until the first one.
+    last_sweep_at: Option<u64>,
     sweeps: LookupMap<u64, Sweep>,
+    // The sum and number of fee legs that are pending or unresolved, kept so in_flight does not walk the sweeps.
+    legs_in_flight_total: u128,
+    legs_in_flight_count: u32,
+    // Withdrawals sent and not yet reported, by id. Ids start at 1 and only go up. The total is part of total_owed: the money
+    // is still owed until the verifier confirms it, and a callback that never reports leaves it here, in view.
+    next_withdrawal_id: u64,
+    withdrawals: LookupMap<u64, Withdrawal>,
+    pending_withdrawals_total: u128,
+    pending_withdrawal_count: u32,
+    // account -> the part of the total that is theirs, so get_account does not walk the withdrawals. Absent when zero.
+    pending_by_account: LookupMap<AccountId, u128>,
 }
 
 // A Yes price of one half, in millionths. What a market with no price points before close falls back to.
@@ -495,14 +621,29 @@ impl MarketContract {
             verifier: verifier_id,
             collateral_token_id,
             paused: false,
+            sells_paused: false,
             fee_rate_bps: DEFAULT_FEE_RATE_BPS,
             create_fee: DEFAULT_CREATE_FEE,
+            max_fee_rate_bps: MAX_FEE_RATE_BPS,
+            max_create_fee: MAX_CREATE_FEE,
+            min_revenue_share_bps: MIN_REVENUE_SHARE_BPS,
+            max_revenue_share_bps: MAX_REVENUE_SHARE_BPS,
+            max_min_sweep: MAX_MIN_SWEEP,
+            max_positions: MAX_POSITIONS,
+            min_open_price: DEFAULT_MIN_OPEN_PRICE,
+            max_open_price: DEFAULT_MAX_OPEN_PRICE,
+            void_price_window_ns: VOID_PRICE_WINDOW_NS,
+            void_grace_ns: VOID_GRACE_NS,
+            settle_wait_minutes: SETTLE_WAIT_MINUTES as u32,
+            reconcile_wait_minutes: RECONCILE_WAIT_MINUTES as u32,
+            min_sweep_interval_minutes: (MIN_SWEEP_INTERVAL_NS / NS_PER_MINUTE) as u32,
             next_market_id: 0,
             markets: LookupMap::new(Key::Markets),
             balances: LookupMap::new(Key::Balances),
             balances_total: 0,
             accounts: LookupMap::new(Key::Accounts),
             shares: LookupMap::new(Key::Shares),
+            position_markets: LookupMap::new(Key::PositionMarkets),
             recipients: None,
             revenue_share_bps: DEFAULT_REVENUE_SHARE_BPS,
             fees: 0,
@@ -512,7 +653,15 @@ impl MarketContract {
             locked_total: 0,
             min_sweep: DEFAULT_MIN_SWEEP,
             next_sweep_id: FIRST_SWEEP_ID,
+            last_sweep_at: None,
             sweeps: LookupMap::new(Key::Sweeps),
+            legs_in_flight_total: 0,
+            legs_in_flight_count: 0,
+            next_withdrawal_id: FIRST_WITHDRAWAL_ID,
+            withdrawals: LookupMap::new(Key::Withdrawals),
+            pending_withdrawals_total: 0,
+            pending_withdrawal_count: 0,
+            pending_by_account: LookupMap::new(Key::PendingByAccount),
         }
     }
 
@@ -531,7 +680,8 @@ impl MarketContract {
 
     // Owner only, which is the DAO. SputnikDAO executes a proposal in the call of the approval that reaches its threshold,
     // so the DAO's voting period is the only delay a code change waits out (decided 2026-10-21). Withdraw and redeem never
-    // pause, so the exit is open whatever the code does next. The deploy and migrate are one batch: a migrate that panics
+    // pause. Sell stays open too unless the owner itself has set sells_paused, and the operator's pause does not touch it.
+    // A market the operator has halted does not take sells either. The deploy and migrate are one batch: a migrate that panics
     // puts the old code back. Attach at least 100 TGas.
     pub fn upgrade(&mut self, code_hash: Base58CryptoHash) -> Promise {
         upgrade::require_upgrade_gas();
@@ -663,6 +813,8 @@ impl MarketContract {
                 price_rule,
                 close_at: close_at.0,
                 resolve_by: resolve_by.0,
+                void_price_window_ns: self.void_price_window_ns,
+                void_grace_ns: self.void_grace_ns,
                 halted: false,
                 registered: false,
                 seeded: false,
@@ -712,7 +864,7 @@ impl MarketContract {
         require!(m.outcome.is_none(), "already resolved");
         require!(
             env::predecessor_account_id() == self.owner
-                || env::block_timestamp().saturating_add(VOID_PRICE_WINDOW_NS) < m.close_at,
+                || env::block_timestamp().saturating_add(m.void_price_window_ns) < m.close_at,
             "a halt in the last day before close is an owner action"
         );
         m.advance_twap(env::block_timestamp());
@@ -734,11 +886,18 @@ impl MarketContract {
         emit("market_resumed", json!({ "market_id": market_id.0.to_string() }));
     }
 
-    // Stops new trades and deposits. Withdrawals and redemptions keep working.
+    // Stops buys, deposits, seeds and new markets. Sells, withdrawals and redemptions keep working.
     pub fn set_paused(&mut self, paused: bool) {
         self.only_operator_or_owner();
         self.paused = paused;
         emit("paused", json!({ "paused": paused }));
+    }
+
+    // Owner only: stops sells. Kept apart from set_paused so the operator cannot take away the way out of an open position.
+    pub fn set_sells_paused(&mut self, sells_paused: bool) {
+        self.only_owner();
+        self.sells_paused = sells_paused;
+        emit("sells_paused", json!({ "sells_paused": sells_paused }));
     }
 
     // Where fees go: the Council and the treasury. A sweep refuses until this has been called, and the verifier does not
@@ -761,11 +920,10 @@ impl MarketContract {
     pub fn set_revenue_share_bps(&mut self, revenue_share_bps: u32) {
         self.only_owner();
         let share = revenue_share_bps as u128;
+        let (low, high) = (self.min_revenue_share_bps, self.max_revenue_share_bps);
         require!(
-            (MIN_REVENUE_SHARE_BPS..=MAX_REVENUE_SHARE_BPS).contains(&share),
-            format!(
-                "the Council share must be between {MIN_REVENUE_SHARE_BPS} and {MAX_REVENUE_SHARE_BPS} basis points"
-            )
+            (low..=high).contains(&share),
+            format!("the Council share must be between {low} and {high} basis points")
         );
         emit(
             "revenue_share_set",
@@ -777,8 +935,8 @@ impl MarketContract {
     pub fn set_min_sweep(&mut self, min_sweep: U128) {
         self.only_owner();
         require!(
-            (1..=MAX_MIN_SWEEP).contains(&min_sweep.0),
-            format!("the sweep minimum must be between 1 and {MAX_MIN_SWEEP}")
+            (1..=self.max_min_sweep).contains(&min_sweep.0),
+            format!("the sweep minimum must be between 1 and {}", self.max_min_sweep)
         );
         emit("min_sweep_set", json!({ "min_sweep": min_sweep }));
         self.min_sweep = min_sweep.0;
@@ -799,8 +957,8 @@ impl MarketContract {
     pub fn set_fee_rate_bps(&mut self, fee_rate_bps: u32) {
         self.only_owner();
         require!(
-            fee_rate_bps as u128 <= MAX_FEE_RATE_BPS,
-            "the fee rate is capped at 500 basis points"
+            fee_rate_bps as u128 <= self.max_fee_rate_bps,
+            format!("the fee rate is capped at {} basis points", self.max_fee_rate_bps)
         );
         emit("fee_rate_set", json!({ "fee_rate_bps": fee_rate_bps }));
         self.fee_rate_bps = fee_rate_bps as u128;
@@ -808,9 +966,167 @@ impl MarketContract {
 
     pub fn set_create_fee(&mut self, create_fee: U128) {
         self.only_owner();
-        require!(create_fee.0 <= MAX_CREATE_FEE, "the creation fee is capped at 10 units");
+        require!(
+            create_fee.0 <= self.max_create_fee,
+            format!(
+                "the creation fee is capped at {} units of the collateral",
+                self.max_create_fee
+            )
+        );
         emit("create_fee_set", json!({ "create_fee": create_fee }));
         self.create_fee = create_fee.0;
+    }
+
+    // Owner only. The two void times for markets created after this call; a market that exists keeps the ones it was created
+    // with, since traders priced it under them.
+    pub fn set_void_rules(&mut self, price_window_ns: U64, grace_ns: U64) {
+        self.only_owner();
+        require!(
+            (HARD_MIN_VOID_WINDOW_NS..=HARD_MAX_VOID_WINDOW_NS).contains(&price_window_ns.0),
+            "the void price window must be between 1 hour and 7 days"
+        );
+        require!(
+            (HARD_MIN_VOID_GRACE_NS..=HARD_MAX_VOID_GRACE_NS).contains(&grace_ns.0),
+            "the void grace period must be between 1 day and 60 days"
+        );
+        emit(
+            "void_rules_set",
+            json!({ "price_window_ns": price_window_ns, "grace_ns": grace_ns }),
+        );
+        self.void_price_window_ns = price_window_ns.0;
+        self.void_grace_ns = grace_ns.0;
+    }
+
+    // Owner only, live for every sweep: how long after a sweep it can be settled or reconciled, and the least time between
+    // two sweeps.
+    pub fn set_sweep_timing(
+        &mut self,
+        settle_wait_minutes: u32,
+        reconcile_wait_minutes: u32,
+        min_interval_minutes: u32,
+    ) {
+        self.only_owner();
+        require!(
+            (HARD_MIN_SETTLE_WAIT_MINUTES..=HARD_MAX_SETTLE_WAIT_MINUTES).contains(&settle_wait_minutes),
+            "the settle wait must be between 1 and 1440 minutes"
+        );
+        require!(
+            (HARD_MIN_RECONCILE_WAIT_MINUTES..=HARD_MAX_RECONCILE_WAIT_MINUTES).contains(&reconcile_wait_minutes),
+            "the reconcile wait must be between 10 and 10080 minutes"
+        );
+        require!(
+            reconcile_wait_minutes >= settle_wait_minutes,
+            "the reconcile wait cannot be shorter than the settle wait"
+        );
+        require!(
+            (HARD_MIN_SWEEP_INTERVAL_MINUTES..=HARD_MAX_SWEEP_INTERVAL_MINUTES).contains(&min_interval_minutes),
+            "the sweep interval must be between 1 and 1440 minutes"
+        );
+        emit(
+            "sweep_timing_set",
+            json!({ "settle_wait_minutes": settle_wait_minutes, "reconcile_wait_minutes": reconcile_wait_minutes,
+                    "min_interval_minutes": min_interval_minutes }),
+        );
+        self.settle_wait_minutes = settle_wait_minutes;
+        self.reconcile_wait_minutes = reconcile_wait_minutes;
+        self.min_sweep_interval_minutes = min_interval_minutes;
+    }
+
+    // Owner only, live: the Yes prices (in millionths) a market can be seeded at.
+    pub fn set_open_price_bounds(&mut self, min: U128, max: U128) {
+        self.only_owner();
+        require!(
+            min.0 >= HARD_MIN_OPEN_PRICE,
+            format!("the lowest opening price cannot be under {HARD_MIN_OPEN_PRICE}")
+        );
+        require!(
+            max.0 <= HARD_MAX_OPEN_PRICE,
+            format!("the highest opening price cannot be over {HARD_MAX_OPEN_PRICE}")
+        );
+        require!(min.0 < max.0, "the lowest opening price must be below the highest");
+        emit("open_price_bounds_set", json!({ "min": min, "max": max }));
+        self.min_open_price = min.0;
+        self.max_open_price = max.0;
+    }
+
+    // Owner only, live: how many share entries an account can hold. Accounts already over a lowered cap keep what they have.
+    pub fn set_max_positions(&mut self, max_positions: u32) {
+        self.only_owner();
+        require!(
+            (HARD_MIN_POSITIONS..=HARD_MAX_POSITIONS).contains(&max_positions),
+            "the position cap must be between 5 and 30"
+        );
+        emit("max_positions_set", json!({ "max_positions": max_positions }));
+        self.max_positions = max_positions;
+    }
+
+    // Owner only: the ceilings and floors the fee setters check against. A limit that would leave the current fee rate,
+    // creation fee, Council share or sweep minimum outside it is refused, so the value has to be moved first.
+    pub fn set_fee_limits(
+        &mut self,
+        max_fee_rate_bps: u32,
+        max_create_fee: U128,
+        min_revenue_share_bps: u32,
+        max_revenue_share_bps: u32,
+        max_min_sweep: U128,
+    ) {
+        self.only_owner();
+        let (max_rate, min_share, max_share) = (
+            max_fee_rate_bps as u128,
+            min_revenue_share_bps as u128,
+            max_revenue_share_bps as u128,
+        );
+        require!(
+            max_rate <= HARD_MAX_FEE_RATE_BPS,
+            format!("the fee rate ceiling cannot be over {HARD_MAX_FEE_RATE_BPS} basis points")
+        );
+        require!(
+            max_create_fee.0 <= HARD_MAX_CREATE_FEE,
+            format!("the creation fee ceiling cannot be over {HARD_MAX_CREATE_FEE}")
+        );
+        require!(
+            min_share >= HARD_MIN_REVENUE_SHARE_BPS,
+            format!("the Council share floor cannot be under {HARD_MIN_REVENUE_SHARE_BPS} basis points")
+        );
+        require!(
+            max_share <= HARD_MAX_REVENUE_SHARE_BPS,
+            format!("the Council share ceiling cannot be over {HARD_MAX_REVENUE_SHARE_BPS} basis points")
+        );
+        require!(
+            min_share < max_share,
+            "the Council share floor must be below its ceiling"
+        );
+        require!(
+            (1..=HARD_MAX_MIN_SWEEP).contains(&max_min_sweep.0),
+            format!("the sweep minimum ceiling must be between 1 and {HARD_MAX_MIN_SWEEP}")
+        );
+        require!(
+            self.fee_rate_bps <= max_rate,
+            "the current fee rate is above that ceiling, lower the fee rate first"
+        );
+        require!(
+            self.create_fee <= max_create_fee.0,
+            "the current creation fee is above that ceiling, lower the creation fee first"
+        );
+        require!(
+            (min_share..=max_share).contains(&self.revenue_share_bps),
+            "the current Council share is outside those limits, move the share first"
+        );
+        require!(
+            self.min_sweep <= max_min_sweep.0,
+            "the current sweep minimum is above that ceiling, lower the sweep minimum first"
+        );
+        emit(
+            "fee_limits_set",
+            json!({ "max_fee_rate_bps": max_fee_rate_bps, "max_create_fee": max_create_fee,
+                    "min_revenue_share_bps": min_revenue_share_bps, "max_revenue_share_bps": max_revenue_share_bps,
+                    "max_min_sweep": max_min_sweep }),
+        );
+        self.max_fee_rate_bps = max_rate;
+        self.max_create_fee = max_create_fee.0;
+        self.min_revenue_share_bps = min_share;
+        self.max_revenue_share_bps = max_share;
+        self.max_min_sweep = max_min_sweep.0;
     }
 
     // After resolution the pool's leftover collateral is due to the treasury, not the owner: the owner is the DAO, which has
@@ -866,8 +1182,11 @@ impl MarketContract {
         let mut m = self.market(market_id.0);
         require!(m.outcome.is_none(), "already resolved");
         require!(
-            env::block_timestamp() >= m.resolve_by.saturating_add(VOID_GRACE_NS),
-            "the answer deadline and the 7 day grace period have not passed"
+            env::block_timestamp() >= m.resolve_by.saturating_add(m.void_grace_ns),
+            format!(
+                "the answer deadline and the {} day grace period have not passed",
+                m.void_grace_ns.div_ceil(NS_PER_DAY)
+            )
         );
         m.resolve(Outcome::Void);
         self.markets.insert(market_id.0, m);
@@ -965,7 +1284,7 @@ impl MarketContract {
     #[payable]
     pub fn sell(&mut self, market_id: U64, side: String, collateral_out: U128, max_shares_in: U128) {
         assert_one_yocto();
-        require!(!self.paused, "paused");
+        require!(!self.sells_paused, "sells are paused");
         let who = env::predecessor_account_id();
         require!(self.accounts.contains_key(&who), "do the storage deposit first");
         let idx = side_index(&side);
@@ -1014,11 +1333,7 @@ impl MarketContract {
         let yes = self.shares.get(&(market_id.0, who.clone(), 0)).copied().unwrap_or(0);
         let no = self.shares.get(&(market_id.0, who.clone(), 1)).copied().unwrap_or(0);
         require!(yes + no > 0, "nothing to redeem");
-        let payout = match outcome {
-            Outcome::Yes => yes,
-            Outcome::No => no,
-            Outcome::Void => void_payout(yes, no, m.void_price()),
-        };
+        let payout = m.payout(outcome, yes, no);
         if yes > 0 {
             self.take_shares(&who, market_id.0, 0, yes);
         }
@@ -1045,9 +1360,26 @@ impl MarketContract {
         assert_one_yocto();
         let who = env::predecessor_account_id();
         require!(amount.0 > 0, "amount must be positive");
-        // Take the balance first; give it back in the callback if the transfer fails.
+        // Take the balance first and record the withdrawal as owed; the callback confirms it or gives the balance back.
         self.debit(&who, amount.0);
-        emit("withdraw", json!({ "account": who, "amount": amount.0.to_string() }));
+        let id = self.next_withdrawal_id;
+        self.next_withdrawal_id += 1;
+        self.withdrawals.insert(
+            id,
+            Withdrawal {
+                account: who.clone(),
+                amount,
+                at: U64(env::block_timestamp()),
+            },
+        );
+        self.pending_withdrawals_total += amount.0;
+        self.pending_withdrawal_count += 1;
+        let mine = self.pending_by_account.get(&who).copied().unwrap_or(0);
+        self.pending_by_account.insert(who.clone(), mine + amount.0);
+        emit(
+            "withdraw",
+            json!({ "account": who, "amount": amount.0.to_string(), "id": id.to_string() }),
+        );
         // The payout goes to the caller's own Intents account, inside the verifier. mt_transfer returns nothing, so an
         // error here means the verifier's receipt failed (paused, locked, out of gas) and nothing moved.
         ext_verifier::ext(self.verifier.clone())
@@ -1057,31 +1389,78 @@ impl MarketContract {
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_CALLBACK)
-                    .on_withdraw(who, amount),
+                    .on_withdraw(U64(id)),
             )
     }
 
+    // The amount and the account come from the stored record, never from the callback. An id with no record was already settled,
+    // so a repeat changes nothing. A callback that never runs leaves the withdrawal in the pending total, still owed.
     #[private]
-    pub fn on_withdraw(
-        &mut self,
-        account: AccountId,
-        amount: U128,
-        #[callback_result] result: Result<(), PromiseError>,
-    ) {
-        if result.is_err() {
-            self.credit(&account, amount.0);
-            emit(
-                "withdraw_failed",
-                json!({ "account": account, "amount": amount.0.to_string() }),
-            );
+    pub fn on_withdraw(&mut self, id: U64, #[callback_result] result: Result<(), PromiseError>) {
+        let Some(w) = self.withdrawals.get(&id.0).cloned() else {
+            return;
+        };
+        let data = self.close_withdrawal(id.0, w, result.is_err());
+        emit(
+            if result.is_err() {
+                "withdraw_failed"
+            } else {
+                "withdraw_confirmed"
+            },
+            data,
+        );
+    }
+
+    // Owner only, for a withdrawal whose callback never came, so it stays in the pending totals and still counts as owed. It
+    // needs the same wait as reconcile_leg, which leaves the callback time to land, and the owner checks the verifier's
+    // events first: `paid` true means the transfer happened and the record is dropped, false means it did not and the
+    // balance is credited back. A callback that comes later finds no record and changes nothing.
+    pub fn reconcile_withdrawal(&mut self, id: U64, paid: bool) {
+        self.only_owner();
+        let w = self
+            .withdrawals
+            .get(&id.0)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("no withdrawal is pending with that id"));
+        require!(
+            env::block_timestamp()
+                >= w.at
+                    .0
+                    .saturating_add(self.reconcile_wait_minutes as u64 * NS_PER_MINUTE),
+            format!(
+                "wait {} minutes after the withdrawal before reconciling",
+                self.reconcile_wait_minutes
+            )
+        );
+        let mut data = self.close_withdrawal(id.0, w, !paid);
+        data["paid"] = json!(paid);
+        emit("withdrawal_reconciled", data);
+    }
+
+    // Takes a withdrawal out of the pending totals and gives the balance back when it failed. Both the payout callback and
+    // reconcile_withdrawal end a withdrawal here, so the two cannot disagree about the books. Returns the event data.
+    fn close_withdrawal(&mut self, id: u64, w: Withdrawal, failed: bool) -> near_sdk::serde_json::Value {
+        self.withdrawals.remove(&id);
+        let amount = w.amount.0;
+        self.pending_withdrawals_total -= amount;
+        self.pending_withdrawal_count -= 1;
+        let mine = self.pending_by_account.get(&w.account).copied().unwrap_or(0) - amount;
+        if mine == 0 {
+            self.pending_by_account.remove(&w.account);
+        } else {
+            self.pending_by_account.insert(w.account.clone(), mine);
         }
+        if failed {
+            self.credit(&w.account, amount);
+        }
+        json!({ "account": w.account, "amount": amount.to_string(), "id": id.to_string() })
     }
 
     // ---- fees -----------------------------------------------------------------------------
 
     // Anyone may call it. Splits the collected fees between the Council and the treasury by the owner's share, rounding both
     // parts down so the remainder (0 or 1 unit) stays collected, adds what earlier refused legs left due, records both legs
-    // under a new sweep id, and only then sends them. A sweep with less than min_sweep to act on does nothing and takes no id.
+    // under a new sweep id, and only then sends them. A sweep with less than min_sweep to act on does nothing and takes no id. A second sweep within an hour of the last one is refused.
     // It refuses until the owner has set the recipients. It needs at least 87 TGas attached (GAS_SWEEP_FLOOR) and burns about
     // 20 TGas in all, the verifier's and the Council's receipt included, which does not depend on how many seats are staked.
     pub fn sweep_fees(&mut self) -> Option<U64> {
@@ -1100,8 +1479,20 @@ impl MarketContract {
         if council == 0 && treasury == 0 {
             return None;
         }
+        let now = env::block_timestamp();
+        let interval = self.min_sweep_interval_minutes;
+        require!(
+            self.last_sweep_at
+                .is_none_or(|last| now >= last.saturating_add(interval as u64 * NS_PER_MINUTE)),
+            if interval == 60 {
+                "wait an hour since the last sweep".to_string()
+            } else {
+                format!("wait {interval} minutes since the last sweep")
+            }
+        );
         let id = self.next_sweep_id;
         self.next_sweep_id += 1;
+        self.last_sweep_at = Some(now);
         let leg = |to: AccountId, amount: u128| Leg {
             to,
             amount: U128(amount),
@@ -1113,7 +1504,7 @@ impl MarketContract {
         };
         let sweep = Sweep {
             id: U64(id),
-            at: U64(env::block_timestamp()),
+            at: U64(now),
             total: U128(self.fees),
             carried_council: U128(self.revenue_due),
             carried_treasury: U128(self.treasury_due),
@@ -1125,6 +1516,12 @@ impl MarketContract {
         self.fees -= to_council + to_treasury;
         self.revenue_due = 0;
         self.treasury_due = 0;
+        for leg in [&sweep.council, &sweep.treasury] {
+            if leg.status == LegStatus::Pending {
+                self.legs_in_flight_total += leg.amount.0;
+                self.legs_in_flight_count += 1;
+            }
+        }
         self.sweeps.insert(id, sweep.clone());
         emit(
             "fees_swept",
@@ -1212,8 +1609,15 @@ impl MarketContract {
             "the leg is not unresolved"
         );
         require!(
-            env::block_timestamp() >= sweep.at.0.saturating_add(SETTLE_WAIT_MINUTES * NS_PER_MINUTE),
-            format!("wait {SETTLE_WAIT_MINUTES} minutes after the sweep before settling")
+            env::block_timestamp()
+                >= sweep
+                    .at
+                    .0
+                    .saturating_add(self.settle_wait_minutes as u64 * NS_PER_MINUTE),
+            format!(
+                "wait {} minutes after the sweep before settling",
+                self.settle_wait_minutes
+            )
         );
         ext_council::ext(sweep.council.to)
             .with_static_gas(GAS_COUNCIL_VIEW)
@@ -1253,8 +1657,15 @@ impl MarketContract {
             "the leg is neither pending nor unresolved"
         );
         require!(
-            env::block_timestamp() >= sweep.at.0.saturating_add(RECONCILE_WAIT_MINUTES * NS_PER_MINUTE),
-            format!("wait {RECONCILE_WAIT_MINUTES} minutes after the sweep before reconciling")
+            env::block_timestamp()
+                >= sweep
+                    .at
+                    .0
+                    .saturating_add(self.reconcile_wait_minutes as u64 * NS_PER_MINUTE),
+            format!(
+                "wait {} minutes after the sweep before reconciling",
+                self.reconcile_wait_minutes
+            )
         );
         if status == LegStatus::Unresolved {
             self.revenue_unresolved -= amount;
@@ -1278,12 +1689,19 @@ impl MarketContract {
         json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
                 "owner": self.owner, "pending_owner": self.pending_owner, "operator": self.operator, "oracle": self.oracle,
                 "verifier": self.verifier, "collateral_token_id": self.collateral_token_id,
-                "paused": self.paused, "markets": self.next_market_id.to_string(), "storage_deposit": STORAGE_DEPOSIT.as_yoctonear().to_string(),
-                "max_positions": MAX_POSITIONS, "fee_rate_bps": self.fee_rate_bps as u32, "create_fee": self.create_fee.to_string(),
+                "paused": self.paused, "sells_paused": self.sells_paused, "markets": self.next_market_id.to_string(), "storage_deposit": STORAGE_DEPOSIT.as_yoctonear().to_string(),
+                "max_positions": self.max_positions, "fee_rate_bps": self.fee_rate_bps as u32, "create_fee": self.create_fee.to_string(),
                 "revenue_pool": self.recipients.as_ref().map(|r| &r.revenue_pool), "treasury": self.recipients.as_ref().map(|r| &r.treasury),
                 "revenue_share_bps": self.revenue_share_bps as u32, "treasury_share_bps": (BPS_DENOMINATOR - self.revenue_share_bps) as u32,
                 "min_sweep": self.min_sweep.to_string(), "next_sweep_id": self.next_sweep_id.to_string(),
-                "revenue_unresolved": self.revenue_unresolved.to_string() })
+                "revenue_unresolved": self.revenue_unresolved.to_string(),
+                "void_price_window_ns": self.void_price_window_ns.to_string(), "void_grace_ns": self.void_grace_ns.to_string(),
+                "settle_wait_minutes": self.settle_wait_minutes, "reconcile_wait_minutes": self.reconcile_wait_minutes,
+                "min_sweep_interval_minutes": self.min_sweep_interval_minutes,
+                "min_open_price": self.min_open_price.to_string(), "max_open_price": self.max_open_price.to_string(),
+                "max_fee_rate_bps": self.max_fee_rate_bps as u32, "max_create_fee": self.max_create_fee.to_string(),
+                "min_revenue_share_bps": self.min_revenue_share_bps as u32, "max_revenue_share_bps": self.max_revenue_share_bps as u32,
+                "max_min_sweep": self.max_min_sweep.to_string() })
     }
 
     pub fn get_fees(&self) -> near_sdk::serde_json::Value {
@@ -1309,17 +1727,53 @@ impl MarketContract {
 
     // Everything this contract owes, in collateral units: user balances, what is locked in every market, and every fee
     // bucket. The keeper compares it with the verifier's mt_balance_of for this account at the same finalized block. More
-    // there than here is surplus nobody is credited for. Less is an incident. A leg that is pending is out of the books
-    // because its money is already on its way, so an unfinished transfer shows as surplus here and never as a shortfall.
+    // there than here is surplus nobody is credited for. Less is an incident. A withdrawal in flight is still counted, because
+    // the verifier has not confirmed it, until its callback runs. A fee leg that is pending
+    // is out of the books because its money is already on its way, so an unfinished transfer shows as surplus here and never
+    // as a shortfall.
     pub fn total_owed(&self) -> U128 {
-        U128(
-            self.balances_total
-                + self.locked_total
-                + self.fees
-                + self.revenue_due
-                + self.treasury_due
-                + self.revenue_unresolved,
-        )
+        self.owed_breakdown().total
+    }
+
+    // The buckets total_owed adds, so a reader can see what the number is made of.
+    pub fn owed_breakdown(&self) -> OwedView {
+        OwedView {
+            balances: U128(self.balances_total),
+            locked: U128(self.locked_total),
+            fees: U128(self.fees),
+            revenue_due: U128(self.revenue_due),
+            treasury_due: U128(self.treasury_due),
+            unresolved: U128(self.revenue_unresolved),
+            pending_withdrawals: U128(self.pending_withdrawals_total),
+            total: U128(
+                self.balances_total
+                    + self.locked_total
+                    + self.fees
+                    + self.revenue_due
+                    + self.treasury_due
+                    + self.revenue_unresolved
+                    + self.pending_withdrawals_total,
+            ),
+        }
+    }
+
+    pub fn get_account(&self, account_id: AccountId) -> AccountView {
+        AccountView {
+            registered: self.accounts.contains_key(&account_id),
+            available: self.get_balance(account_id.clone()),
+            pending_withdrawals: U128(self.pending_by_account.get(&account_id).copied().unwrap_or(0)),
+            positions: self.get_positions(account_id).len() as u32,
+        }
+    }
+
+    // Money sent and not yet reported: withdrawals waiting on their callback, and fee legs that are pending or unresolved.
+    pub fn in_flight(&self) -> InFlightView {
+        InFlightView {
+            withdrawals: U128(self.pending_withdrawals_total),
+            withdrawal_count: self.pending_withdrawal_count,
+            legs: U128(self.legs_in_flight_total),
+            leg_count: self.legs_in_flight_count,
+        }
     }
 
     pub fn get_balance(&self, account_id: AccountId) -> U128 {
@@ -1334,6 +1788,27 @@ impl MarketContract {
             .unwrap_or(0);
         let n = self.shares.get(&(market_id.0, account_id, 1)).copied().unwrap_or(0);
         (U128(y), U128(n))
+    }
+
+    // Every market in which the account holds shares, by market id, with what redeem would credit for each now. It reads
+    // the account's own list of markets, so its cost does not depend on how many markets exist.
+    pub fn get_positions(&self, account_id: AccountId) -> Vec<PositionView> {
+        let ids = self.position_markets.get(&account_id).cloned().unwrap_or_default();
+        ids.into_iter()
+            .filter_map(|id| {
+                let yes = self.shares.get(&(id, account_id.clone(), 0)).copied().unwrap_or(0);
+                let no = self.shares.get(&(id, account_id.clone(), 1)).copied().unwrap_or(0);
+                let m = self.markets.get(&id)?;
+                Some(PositionView {
+                    market_id: U64(id),
+                    yes: U128(yes),
+                    no: U128(no),
+                    status: m.status().to_string(),
+                    outcome: m.outcome,
+                    redeemable: U128(m.outcome.map_or(0, |o| m.payout(o, yes, no))),
+                })
+            })
+            .collect()
     }
 
     pub fn get_market(&self, market_id: U64) -> Option<MarketView> {
@@ -1485,7 +1960,13 @@ impl StorageManagement for MarketContract {
             self.balances.get(&who).copied().unwrap_or(0) == 0,
             "withdraw your balance first"
         );
+        // A failed withdrawal credits the balance back, which would be stranded if the account had already left.
+        require!(
+            self.pending_by_account.get(&who).copied().unwrap_or(0) == 0,
+            "a withdrawal is still pending"
+        );
         self.accounts.remove(&who);
+        self.position_markets.remove(&who);
         self.balances.remove(&who);
         emit("unregistered", json!({ "account": who }));
         let _ = Promise::new(who).transfer(STORAGE_DEPOSIT.saturating_add(ONE_YOCTO));
@@ -1516,19 +1997,44 @@ impl Market {
         }
     }
 
+    // What holders of `yes` and `no` shares redeem once the market has `outcome`.
+    fn payout(&self, outcome: Outcome, yes: u128, no: u128) -> u128 {
+        match outcome {
+            Outcome::Yes => yes,
+            Outcome::No => no,
+            Outcome::Void => void_payout(yes, no, self.void_price()),
+        }
+    }
+
+    fn status(&self) -> &'static str {
+        if self.outcome.is_some() {
+            "resolved"
+        } else if self.halted {
+            "halted"
+        } else if env::block_timestamp() >= self.close_at {
+            "closed"
+        } else if !self.registered {
+            "unregistered"
+        } else if !self.seeded {
+            "unseeded"
+        } else {
+            "open"
+        }
+    }
+
     fn void_price(&self) -> u128 {
         self.void_price_yes
             .unwrap_or_else(|| env::panic_str("a voided market has no closing price"))
     }
 
-    // The Yes price a Void pays: its time-weighted average over the trading time in the last VOID_PRICE_WINDOW_NS before
+    // The Yes price a Void pays: its time-weighted average over the trading time in the market's void price window before
     // close_at, or since the market opened if that was later. Nothing trades after close, so the price in force at close
     // holds to the end. A market with no trading time in the window pays the average over all its trading time, so a halt
     // that covers the whole window cannot leave the last traded price to set it. Only a market that never traded at all
     // falls back to its last price.
     fn closing_price(&self) -> u128 {
         let Some(mut twap) = self.twap.clone() else { return HALF };
-        twap.advance(self.close_at, self.close_at, !self.halted);
+        twap.advance(self.void_price_window_ns, self.close_at, self.close_at, !self.halted);
         match twap.anchor {
             Some((acc_from, weight_from)) if twap.weight > weight_from => {
                 (twap.acc - acc_from) / (twap.weight - weight_from)
@@ -1543,7 +2049,7 @@ impl Market {
     fn advance_twap(&mut self, now: u64) {
         let trading = !self.halted;
         if let Some(twap) = &mut self.twap {
-            twap.advance(self.close_at, now, trading);
+            twap.advance(self.void_price_window_ns, self.close_at, now, trading);
         }
     }
 
@@ -1649,6 +2155,8 @@ impl MarketContract {
             LegStatus::Refused
         };
         let (to, amount) = (leg.to.clone(), leg.amount.0);
+        self.legs_in_flight_total -= amount;
+        self.legs_in_flight_count -= 1;
         match kind {
             LegKind::Council => self.revenue_due += back,
             LegKind::Treasury => self.treasury_due += back,
@@ -1714,8 +2222,11 @@ impl MarketContract {
         require!(amount <= MAX_POOL, "seed too large");
         if let Some(p) = yes_price {
             require!(
-                (MIN_OPEN_PRICE..=MAX_OPEN_PRICE).contains(&p),
-                "the starting price must be between 1% and 99%"
+                (self.min_open_price..=self.max_open_price).contains(&p),
+                format!(
+                    "the starting price must be between {} and {} millionths",
+                    self.min_open_price, self.max_open_price
+                )
             );
         }
         let (pool_yes, pool_no) = opening_pools(amount, yes_price);
@@ -1798,10 +2309,15 @@ impl MarketContract {
             // Seeding away from one half leaves the seeder holding shares, one position for each such market, so the
             // operator and the owner, who seed them all, are not held to the cap.
             require!(
-                n < MAX_POSITIONS || self.is_operator_or_owner(who),
+                n < self.max_positions || self.is_operator_or_owner(who),
                 "too many positions, redeem or sell one first"
             );
             self.accounts.insert(who.clone(), n + 1);
+            let mut ids = self.position_markets.get(who).cloned().unwrap_or_default();
+            if let Err(at) = ids.binary_search(&id) {
+                ids.insert(at, id);
+                self.position_markets.insert(who.clone(), ids);
+            }
         }
         self.shares.insert(key, have + amount);
     }
@@ -1816,25 +2332,24 @@ impl MarketContract {
             self.shares.remove(&key);
             let n = self.accounts.get(who).copied().unwrap_or(1);
             self.accounts.insert(who.clone(), n.saturating_sub(1));
+            // The market stays listed while the other side is still held.
+            if !self.shares.contains_key(&(id, who.clone(), 1 - idx)) {
+                let mut ids = self.position_markets.get(who).cloned().unwrap_or_default();
+                if let Ok(at) = ids.binary_search(&id) {
+                    ids.remove(at);
+                }
+                if ids.is_empty() {
+                    self.position_markets.remove(who);
+                } else {
+                    self.position_markets.insert(who.clone(), ids);
+                }
+            }
         } else {
             self.shares.insert(key, left);
         }
     }
 
     fn view(&self, id: u64, m: &Market) -> MarketView {
-        let status = if m.outcome.is_some() {
-            "resolved"
-        } else if m.halted {
-            "halted"
-        } else if env::block_timestamp() >= m.close_at {
-            "closed"
-        } else if !m.registered {
-            "unregistered"
-        } else if !m.seeded {
-            "unseeded"
-        } else {
-            "open"
-        };
         let price_yes = curve::price_micro(m.pool_yes, m.pool_no);
         MarketView {
             id: U64(id),
@@ -1848,7 +2363,7 @@ impl MarketContract {
             price_rule: m.price_rule,
             close_at: U64(m.close_at),
             resolve_by: U64(m.resolve_by),
-            status: status.to_string(),
+            status: m.status().to_string(),
             registered: m.registered,
             seeded: m.seeded,
             outcome: m.outcome,
@@ -1876,6 +2391,8 @@ mod tests {
             price_rule: None,
             close_at: 0,
             resolve_by: 0,
+            void_price_window_ns: VOID_PRICE_WINDOW_NS,
+            void_grace_ns: VOID_GRACE_NS,
             halted: false,
             registered: true,
             seeded: true,
@@ -2028,7 +2545,13 @@ mod tests {
         let balances: u128 = USERS.iter().chain([&OWNER]).map(|u| c.get_balance(acct(u)).0).sum();
         assert_eq!(c.locked_total, locked, "locked_total drifted from the markets");
         assert_eq!(
-            locked + balances + c.fees + c.revenue_due + c.treasury_due + c.revenue_unresolved,
+            locked
+                + balances
+                + c.fees
+                + c.revenue_due
+                + c.treasury_due
+                + c.revenue_unresolved
+                + c.pending_withdrawals_total,
             total_in,
             "money was created or lost"
         );
@@ -2198,7 +2721,7 @@ mod tests {
         // The next sweep resends each due to its own recipient under a new id; nothing is split again.
         act_as(OWNER, 6);
         c.set_min_sweep(U128(1));
-        act_as(USERS[2], 6);
+        act_as(USERS[2], 6 + MIN_SWEEP_INTERVAL_NS);
         assert_eq!(c.sweep_fees(), Some(U64(2)));
         let d = swept();
         assert_eq!(
@@ -2270,6 +2793,153 @@ mod tests {
             "the cheap side is paid its price, well under the old half: {paid} for {ben_no} shares"
         );
         assert_conserved(&c, total_in);
+    }
+
+    // ---- get_positions -------------------------------------------------------------------------------------
+
+    // Ann holds both sides of markets 0 to 3. Markets 2 and 3 are made here, so the order of ids is the order of creation.
+    fn positions_world() -> MarketContract {
+        let (mut c, mut total_in) = world();
+        for _ in 0..2 {
+            let id = create_registered(&mut c, OWNER);
+            seed_with(&mut c, OWNER, id, None);
+        }
+        for id in 0..4 {
+            step(&mut c, &mut total_in, 0, 0, id, 10_000_000, 1);
+            step(&mut c, &mut total_in, 1, 0, id, 4_000_000, 1);
+        }
+        c
+    }
+
+    // Market 1 resolves Yes, market 2 No, market 3 is voided, market 0 is left unresolved.
+    fn resolve_positions_world(c: &mut MarketContract) {
+        act_as(ORACLE, CLOSE + 1);
+        c.set_outcome(U64(1), Outcome::Yes);
+        c.set_outcome(U64(2), Outcome::No);
+        act_as(USERS[2], VOID_OPEN);
+        c.void_if_unresolved(U64(3));
+    }
+
+    fn positions_json(c: &MarketContract, who: &str) -> near_sdk::serde_json::Value {
+        near_sdk::serde_json::to_value(c.get_positions(acct(who))).unwrap()
+    }
+
+    #[test]
+    fn positions_of_an_open_market_show_the_shares_and_redeem_nothing() {
+        let c = positions_world();
+        act_as(USERS[0], 7);
+        let (yes, no) = holdings(&c, 0, USERS[0]);
+        assert_eq!(
+            positions_json(&c, USERS[0])[0],
+            json!({ "market_id": "0", "yes": yes.to_string(), "no": no.to_string(), "status": "open",
+                    "outcome": null, "redeemable": "0" })
+        );
+        for p in c.get_positions(acct(USERS[0])) {
+            assert_eq!((p.status.as_str(), p.redeemable.0), ("open", 0));
+        }
+    }
+
+    #[test]
+    fn positions_of_resolved_markets_show_the_outcome_and_the_exact_payout() {
+        let mut c = positions_world();
+        resolve_positions_world(&mut c);
+        let price = c.market(3).void_price_yes.unwrap();
+        let held = |id| holdings(&c, id, USERS[0]);
+        let ((y1, n1), (y2, n2), (y3, n3), (y0, n0)) = (held(1), held(2), held(3), held(0));
+        let void_pay = (y3 * price + n3 * (1_000_000 - price)) / 1_000_000;
+        assert_eq!(
+            positions_json(&c, USERS[0]),
+            json!([
+                { "market_id": "0", "yes": y0.to_string(), "no": n0.to_string(), "status": "closed",
+                  "outcome": null, "redeemable": "0" },
+                { "market_id": "1", "yes": y1.to_string(), "no": n1.to_string(), "status": "resolved",
+                  "outcome": "yes", "redeemable": y1.to_string() },
+                { "market_id": "2", "yes": y2.to_string(), "no": n2.to_string(), "status": "resolved",
+                  "outcome": "no", "redeemable": n2.to_string() },
+                { "market_id": "3", "yes": y3.to_string(), "no": n3.to_string(), "status": "resolved",
+                  "outcome": "void", "redeemable": void_pay.to_string() },
+            ])
+        );
+    }
+
+    #[test]
+    fn what_positions_say_is_redeemable_is_what_redeem_credits() {
+        let mut c = positions_world();
+        resolve_positions_world(&mut c);
+        for p in c.get_positions(acct(USERS[0])) {
+            if p.outcome.is_none() {
+                continue;
+            }
+            let before = c.get_balance(acct(USERS[0])).0;
+            act_as(USERS[0], VOID_OPEN + 1);
+            let paid = c.redeem(p.market_id).0;
+            assert_eq!(paid, p.redeemable.0, "market {}", p.market_id.0);
+            assert_eq!(c.get_balance(acct(USERS[0])).0 - before, p.redeemable.0);
+        }
+        // Redeemed positions are gone; only the unresolved market is left.
+        let left = c.get_positions(acct(USERS[0]));
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].market_id.0, 0);
+    }
+
+    #[test]
+    fn positions_are_empty_for_an_account_with_none_and_for_an_unknown_one() {
+        let c = positions_world();
+        act_as(USERS[1], 7);
+        assert!(c.get_positions(acct(USERS[1])).is_empty());
+        assert!(c.get_positions(acct("nobody.near")).is_empty());
+    }
+
+    #[test]
+    fn positions_come_in_market_id_order_and_skip_markets_without_shares() {
+        let (mut c, mut total_in) = world();
+        for _ in 0..3 {
+            let id = create_registered(&mut c, OWNER);
+            seed_with(&mut c, OWNER, id, None);
+        }
+        for id in [4, 0, 3] {
+            step(&mut c, &mut total_in, 1, 1, id, 3_000_000, 1);
+        }
+        act_as(USERS[1], 7);
+        let ids: Vec<u64> = c.get_positions(acct(USERS[1])).iter().map(|p| p.market_id.0).collect();
+        assert_eq!(ids, vec![0, 3, 4]);
+    }
+
+    #[test]
+    fn reading_positions_changes_no_state() {
+        let mut c = positions_world();
+        resolve_positions_world(&mut c);
+        let snapshot = |c: &MarketContract| {
+            let markets: Vec<Vec<u8>> = (0..4)
+                .map(|id| near_sdk::borsh::to_vec(&c.market(id)).unwrap())
+                .collect();
+            (
+                markets,
+                c.accounts.get(&acct(USERS[0])).copied(),
+                c.get_balance(acct(USERS[0])),
+                c.locked_total,
+                c.fees,
+            )
+        };
+        let before = snapshot(&c);
+        let _ = c.get_positions(acct(USERS[0]));
+        let _ = c.get_positions(acct(USERS[0]));
+        assert!(before == snapshot(&c));
+    }
+
+    #[test]
+    fn an_account_at_the_position_cap_gets_every_position() {
+        let (mut c, _) = world();
+        for i in 0..MAX_POSITIONS {
+            let id = create_registered(&mut c, OWNER);
+            seed_with(&mut c, OWNER, id, None);
+            act_as(VERIFIER, 7);
+            let _ = receive(&mut c, acct(USERS[0]), U128(1_000_000), format!("buy:{id}:yes:1"));
+            assert_eq!(c.get_positions(acct(USERS[0])).len() as u32, i + 1);
+        }
+        act_as(USERS[0], 7);
+        let ids: Vec<u64> = c.get_positions(acct(USERS[0])).iter().map(|p| p.market_id.0).collect();
+        assert_eq!(ids, (2..2 + u64::from(MAX_POSITIONS)).collect::<Vec<_>>());
     }
 
     // ---- owner-set fees, with ceilings ------------------------------------------------------------
@@ -3670,9 +4340,10 @@ mod tests {
         let _ = c.withdraw(U128(2_000_000));
         assert_eq!(
             c.total_owed().0,
-            total_in + 5_000_000 + 41,
-            "a withdrawal stops being owed once it is taken from the balance"
+            total_in + 7_000_000 + 41,
+            "a withdrawal in flight is still owed until the verifier confirms it"
         );
+        assert_eq!(c.owed_breakdown().total.0, c.total_owed().0);
     }
 
     #[test]
@@ -3682,9 +4353,9 @@ mod tests {
         let _ = receive(&mut c, acct(USERS[0]), U128(7_000_000), "deposit".to_string());
         act_as(USERS[0], 4);
         let _ = c.withdraw(U128(7_000_000));
-        assert_eq!(c.total_owed().0, total_in);
+        assert_eq!(c.total_owed().0, total_in + 7_000_000);
         act_as("market.near", 5);
-        c.on_withdraw(acct(USERS[0]), U128(7_000_000), Err(PromiseError::Failed));
+        c.on_withdraw(U64(1), Err(PromiseError::Failed));
         assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
         assert_eq!(c.total_owed().0, total_in + 7_000_000);
         assert_eq!(last_event()["event"], "withdraw_failed");
@@ -3698,9 +4369,417 @@ mod tests {
         act_as(USERS[0], 4);
         let _ = c.withdraw(U128(7_000_000));
         act_as("market.near", 5);
-        c.on_withdraw(acct(USERS[0]), U128(7_000_000), Ok(()));
+        c.on_withdraw(U64(1), Ok(()));
         assert_eq!(c.get_balance(acct(USERS[0])).0, 0);
         assert_eq!(c.total_owed().0, total_in);
+    }
+
+    // ---- withdrawals in flight ----------------------------------------------------------------------------------
+
+    fn deposit(c: &mut MarketContract, who: &str, amount: u128) {
+        act_as(VERIFIER, 3);
+        let _ = receive(c, acct(who), U128(amount), "deposit".to_string());
+    }
+
+    fn json_of<T: near_sdk::serde::Serialize>(v: &T) -> near_sdk::serde_json::Value {
+        near_sdk::serde_json::to_value(v).unwrap()
+    }
+
+    #[test]
+    fn a_withdrawal_writes_its_record_and_emits_the_event_with_an_id() {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        let e = last_event();
+        assert_eq!(e["event"], "withdraw");
+        assert_eq!(
+            e["data"],
+            near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1" })
+        );
+        let w = c.withdrawals.get(&1).unwrap();
+        assert_eq!((w.account.as_str(), w.amount.0, w.at.0), (USERS[0], 3_000_000, 4));
+        assert_eq!(
+            (c.pending_withdrawals_total, c.pending_withdrawal_count),
+            (3_000_000, 1)
+        );
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 4_000_000);
+        assert_eq!(c.total_owed().0, total_in + 7_000_000);
+        act_as(USERS[0], 5);
+        let _ = c.withdraw(U128(1));
+        assert_eq!(last_event()["data"]["id"], "2");
+    }
+
+    #[test]
+    fn a_confirmed_withdrawal_leaves_no_record_and_emits_withdraw_confirmed() {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Ok(()));
+        let e = last_event();
+        assert_eq!(e["event"], "withdraw_confirmed");
+        assert_eq!(
+            e["data"],
+            near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1" })
+        );
+        assert!(c.withdrawals.get(&1).is_none());
+        assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 4_000_000);
+        assert_eq!(c.total_owed().0, total_in + 4_000_000);
+    }
+
+    #[test]
+    fn a_failed_withdrawal_credits_back_and_emits_withdraw_failed_with_the_id() {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Err(PromiseError::Failed));
+        let e = last_event();
+        assert_eq!(e["event"], "withdraw_failed");
+        assert_eq!(
+            e["data"],
+            near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1" })
+        );
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
+        assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+        assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 0);
+        assert_eq!(c.total_owed().0, total_in + 7_000_000);
+    }
+
+    #[test]
+    fn a_repeated_or_unknown_callback_changes_nothing() {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Err(PromiseError::Failed));
+        for (id, result) in [
+            (1, Err(PromiseError::Failed)),
+            (1, Ok(())),
+            (99, Err(PromiseError::Failed)),
+        ] {
+            act_as("market.near", 6);
+            c.on_withdraw(U64(id), result);
+            assert!(near_sdk::test_utils::get_logs().is_empty());
+            assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
+            assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+            assert_eq!(c.total_owed().0, total_in + 7_000_000);
+        }
+    }
+
+    #[test]
+    fn two_withdrawals_in_flight_keep_their_own_ids_and_amounts() {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        deposit(&mut c, USERS[1], 5_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        act_as(USERS[1], 4);
+        let _ = c.withdraw(U128(2_000_000));
+        assert_eq!(last_event()["data"]["id"], "2");
+        assert_eq!(
+            (c.pending_withdrawals_total, c.pending_withdrawal_count),
+            (5_000_000, 2)
+        );
+        assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 3_000_000);
+        assert_eq!(c.get_account(acct(USERS[1])).pending_withdrawals.0, 2_000_000);
+        assert_eq!(c.total_owed().0, total_in + 12_000_000);
+        act_as("market.near", 5);
+        c.on_withdraw(U64(2), Err(PromiseError::Failed));
+        assert_eq!(c.get_balance(acct(USERS[1])).0, 5_000_000);
+        assert_eq!(
+            (c.pending_withdrawals_total, c.pending_withdrawal_count),
+            (3_000_000, 1)
+        );
+        assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 3_000_000);
+        assert_eq!(c.withdrawals.get(&1).unwrap().amount.0, 3_000_000);
+        c.on_withdraw(U64(1), Ok(()));
+        assert_eq!(c.pending_withdrawals_total, 0);
+        assert_eq!(c.total_owed().0, total_in + 9_000_000);
+    }
+
+    #[test]
+    fn a_callback_pays_the_stored_amount_and_account() {
+        let (mut c, _) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Err(PromiseError::Failed));
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
+        assert_eq!(c.get_balance(acct(USERS[1])).0, 0);
+    }
+
+    // ---- reconcile_withdrawal: the owner decides when the callback never came ---------------------------------
+
+    const WITHDRAWN_AT: u64 = 4;
+    const WITHDRAWAL_DECIDABLE_AT: u64 = WITHDRAWN_AT + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE;
+
+    // One user holds 7 000 000 and has 3 000 000 of it in flight as withdrawal 1.
+    fn a_stuck_withdrawal() -> (MarketContract, u128) {
+        let (mut c, total_in) = world();
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(USERS[0], WITHDRAWN_AT);
+        let _ = c.withdraw(U128(3_000_000));
+        (c, total_in + 7_000_000)
+    }
+
+    #[test]
+    fn only_the_owner_reconciles_a_withdrawal() {
+        let (mut c, total) = a_stuck_withdrawal();
+        act_as(OWNER, 7);
+        c.set_operator(acct("ops.near"));
+        for who in ["ops.near", USERS[0], USERS[1]] {
+            act_as(who, WITHDRAWAL_DECIDABLE_AT);
+            let caught =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.reconcile_withdrawal(U64(1), false)));
+            assert!(caught.is_err(), "{who} must be refused");
+        }
+        assert_eq!(
+            (c.pending_withdrawals_total, c.pending_withdrawal_count),
+            (3_000_000, 1)
+        );
+        assert_conserved(&c, total);
+    }
+
+    #[test]
+    fn an_unknown_withdrawal_id_is_refused() {
+        let (mut c, _) = a_stuck_withdrawal();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        assert!(refusal(|| c.reconcile_withdrawal(U64(9), true)).contains("no withdrawal is pending with that id"));
+    }
+
+    #[test]
+    fn a_withdrawal_is_decided_exactly_at_the_wait_and_not_before() {
+        let (mut c, _) = a_stuck_withdrawal();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT - 1);
+        assert_eq!(
+            refusal(|| c.reconcile_withdrawal(U64(1), true)),
+            "wait 60 minutes after the withdrawal before reconciling"
+        );
+        assert_eq!(c.pending_withdrawals_total, 3_000_000);
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        c.reconcile_withdrawal(U64(1), true);
+        assert_eq!(c.pending_withdrawals_total, 0);
+    }
+
+    #[test]
+    fn a_withdrawal_that_was_paid_is_dropped_and_no_longer_owed() {
+        let (mut c, total) = a_stuck_withdrawal();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        c.reconcile_withdrawal(U64(1), true);
+        let e = last_event();
+        assert_eq!(e["event"], "withdrawal_reconciled");
+        assert_eq!(
+            e["data"],
+            near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1", "paid": true })
+        );
+        assert!(c.withdrawals.get(&1).is_none());
+        assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+        assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 0);
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 4_000_000);
+        assert_eq!(c.total_owed().0, total - 3_000_000);
+        assert_conserved(&c, total - 3_000_000);
+    }
+
+    #[test]
+    fn a_withdrawal_that_never_happened_is_credited_back() {
+        let (mut c, total) = a_stuck_withdrawal();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        c.reconcile_withdrawal(U64(1), false);
+        let e = last_event();
+        assert_eq!(e["event"], "withdrawal_reconciled");
+        assert_eq!(
+            e["data"],
+            near_sdk::serde_json::json!({ "account": USERS[0], "amount": "3000000", "id": "1", "paid": false })
+        );
+        assert!(c.withdrawals.get(&1).is_none());
+        assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+        assert_eq!(c.get_account(acct(USERS[0])).pending_withdrawals.0, 0);
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
+        assert_eq!(c.total_owed().0, total);
+        assert_conserved(&c, total);
+    }
+
+    #[test]
+    fn a_withdrawal_cannot_be_reconciled_twice() {
+        let (mut c, _) = a_stuck_withdrawal();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        c.reconcile_withdrawal(U64(1), false);
+        for paid in [false, true] {
+            assert!(refusal(|| c.reconcile_withdrawal(U64(1), paid)).contains("no withdrawal is pending with that id"));
+        }
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 7_000_000);
+    }
+
+    #[test]
+    fn a_late_callback_after_a_reconcile_changes_nothing() {
+        for (paid, balance, owed_drop) in [(true, 4_000_000, 3_000_000), (false, 7_000_000, 0)] {
+            let (mut c, total) = a_stuck_withdrawal();
+            act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+            c.reconcile_withdrawal(U64(1), paid);
+            for result in [Ok(()), Err(PromiseError::Failed)] {
+                act_as("market.near", WITHDRAWAL_DECIDABLE_AT + 1);
+                c.on_withdraw(U64(1), result);
+                assert!(near_sdk::test_utils::get_logs().is_empty());
+                assert_eq!(c.get_balance(acct(USERS[0])).0, balance);
+                assert_eq!((c.pending_withdrawals_total, c.pending_withdrawal_count), (0, 0));
+                assert_eq!(c.total_owed().0, total - owed_drop);
+            }
+            assert_conserved(&c, total - owed_drop);
+        }
+    }
+
+    #[test]
+    fn the_views_report_each_state_and_change_nothing() {
+        let (mut c, total_in) = world();
+        let nothing =
+            near_sdk::serde_json::json!({ "withdrawals": "0", "withdrawal_count": 0, "legs": "0", "leg_count": 0 });
+        assert_eq!(json_of(&c.in_flight()), nothing);
+        assert_eq!(
+            json_of(&c.get_account(acct("stranger.near"))),
+            near_sdk::serde_json::json!({ "registered": false, "available": "0", "pending_withdrawals": "0", "positions": 0 })
+        );
+        assert_eq!(
+            json_of(&c.get_account(acct(USERS[0]))),
+            near_sdk::serde_json::json!({ "registered": true, "available": "0", "pending_withdrawals": "0", "positions": 0 })
+        );
+        deposit(&mut c, USERS[0], 7_000_000);
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        let locked = c.locked_total;
+        let fees = c.fees;
+        let expect = |c: &MarketContract, available: u128, pending: u128| {
+            assert_eq!(
+                json_of(&c.get_account(acct(USERS[0]))),
+                near_sdk::serde_json::json!({ "registered": true, "available": available.to_string(),
+                    "pending_withdrawals": pending.to_string(), "positions": 1 })
+            );
+        };
+        expect(&c, 7_000_000, 0);
+        act_as(USERS[0], 4);
+        let _ = c.withdraw(U128(3_000_000));
+        expect(&c, 4_000_000, 3_000_000);
+        assert_eq!(
+            json_of(&c.in_flight()),
+            near_sdk::serde_json::json!({ "withdrawals": "3000000", "withdrawal_count": 1, "legs": "0", "leg_count": 0 })
+        );
+        let expected = near_sdk::serde_json::json!({
+            "balances": "4000000", "locked": locked.to_string(), "fees": fees.to_string(), "revenue_due": "0",
+            "treasury_due": "0", "unresolved": "0", "pending_withdrawals": "3000000",
+            "total": (total_in + 17_000_000).to_string() });
+        assert_eq!(json_of(&c.owed_breakdown()), expected);
+        assert_eq!(c.owed_breakdown().total.0, c.total_owed().0);
+        let (balances, pending, count) = (
+            c.balances_total,
+            c.pending_withdrawals_total,
+            c.pending_withdrawal_count,
+        );
+        let _ = (c.in_flight(), c.get_account(acct(USERS[0])), c.owed_breakdown());
+        assert_eq!(
+            (
+                c.balances_total,
+                c.pending_withdrawals_total,
+                c.pending_withdrawal_count
+            ),
+            (balances, pending, count)
+        );
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Ok(()));
+        expect(&c, 4_000_000, 0);
+        assert_eq!(json_of(&c.in_flight()), nothing);
+        assert_eq!(c.owed_breakdown().pending_withdrawals.0, 0);
+        assert_eq!(c.owed_breakdown().total.0, total_in + 14_000_000);
+        act_as(USERS[0], 6);
+        let _ = c.withdraw(U128(1_000_000));
+        act_as("market.near", 7);
+        c.on_withdraw(U64(2), Err(PromiseError::Failed));
+        expect(&c, 4_000_000, 0);
+        assert_eq!(json_of(&c.in_flight()), nothing);
+    }
+
+    #[test]
+    fn in_flight_counts_fee_legs_that_are_pending_or_unresolved() {
+        let mut c = after_a_sweep();
+        let sweep = c.get_sweep(U64(1)).unwrap();
+        let (council, treasury) = (sweep.council.amount.0, sweep.treasury.amount.0);
+        assert!(council > 0 && treasury > 0);
+        let legs = |c: &MarketContract| {
+            let v = c.in_flight();
+            (v.legs.0, v.leg_count)
+        };
+        assert_eq!(legs(&c), (council + treasury, 2));
+        act_as("market.near", 6);
+        c.on_treasury_sent(U64(1), Ok(()));
+        assert_eq!(legs(&c), (council, 1));
+        c.on_revenue_sent(U64(1), Err(PromiseError::Failed));
+        assert_eq!(legs(&c), (council, 1), "an unresolved leg is still in flight");
+        assert_eq!(c.owed_breakdown().unresolved.0, council);
+        assert_eq!(c.owed_breakdown().total.0, c.total_owed().0);
+        act_as("market.near", SETTLE_AT);
+        c.on_council_checked(U64(1), Ok(None));
+        assert_eq!(legs(&c), (0, 0));
+        assert_eq!(c.in_flight().withdrawals.0, 0, "fee legs never show as withdrawals");
+        assert_eq!(c.owed_breakdown().pending_withdrawals.0, 0);
+    }
+
+    // A withdrawal's callback can succeed, fail, or never come. Whatever the mix, total_owed moves only when a callback
+    // confirms, and money in flight stays in pending until one reports.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        #[test]
+        fn withdrawals_with_any_mix_of_callbacks_never_create_or_lose_money(
+            ops in proptest::collection::vec((0usize..3, 1u128..3_000_000, 0u8..3), 1..30)
+        ) {
+            let (mut c, total_in) = world();
+            let mut total_in = total_in;
+            for u in USERS {
+                deposit(&mut c, u, 20_000_000);
+                total_in += 20_000_000;
+            }
+            let mut confirmed = 0u128;
+            let mut never: u128 = 0;
+            let mut unreported = Vec::new();
+            let mut next_id = 1u64;
+            for (user, amount, fate) in ops {
+                let held = c.get_balance(acct(USERS[user])).0;
+                let amount = amount.min(held);
+                if amount == 0 {
+                    continue;
+                }
+                let before = c.total_owed().0;
+                act_as(USERS[user], 4);
+                let _ = c.withdraw(U128(amount));
+                prop_assert_eq!(c.total_owed().0, before);
+                prop_assert_eq!(c.get_balance(acct(USERS[user])).0, held - amount);
+                let id = next_id;
+                next_id += 1;
+                act_as("market.near", 5);
+                match fate {
+                    0 => {
+                        c.on_withdraw(U64(id), Ok(()));
+                        confirmed += amount;
+                    }
+                    1 => c.on_withdraw(U64(id), Err(PromiseError::Failed)),
+                    _ => {
+                        never += amount;
+                        unreported.push(id);
+                    }
+                }
+                prop_assert_eq!(c.pending_withdrawals_total, never);
+                prop_assert_eq!(c.total_owed().0, total_in - confirmed);
+                assert_conserved(&c, total_in - confirmed);
+            }
+            let held: u128 = unreported.iter().map(|id| c.withdrawals.get(id).unwrap().amount.0).sum();
+            prop_assert_eq!(held, never);
+            prop_assert_eq!(c.pending_withdrawal_count as usize, unreported.len());
+        }
     }
 
     // ---- payouts are verifier calls to accounts the records name ---------------------------------------------
@@ -3930,7 +5009,7 @@ mod tests {
         assert_eq!(legs(&c, 1).0, LegStatus::Refused);
         act_as(OWNER, SETTLE_AT);
         c.set_min_sweep(U128(1));
-        act_as(USERS[2], SETTLE_AT + 1);
+        act_as(USERS[2], SETTLE_AT + MIN_SWEEP_INTERVAL_NS);
         assert_eq!(c.sweep_fees(), Some(U64(2)));
         assert_eq!(c.get_sweep(U64(2)).unwrap().council.amount.0, 250_000);
         assert_eq!(c.get_sweep(U64(2)).unwrap().carried_council.0, 250_000);
@@ -4140,9 +5219,100 @@ mod tests {
         );
         assert_eq!(c.list_sweeps(U64(0), U64(10)).len(), 1);
         c.fees = 2_000_000;
-        act_as(USERS[2], 6);
+        act_as(USERS[2], 6 + MIN_SWEEP_INTERVAL_NS);
         assert_eq!(c.sweep_fees(), Some(U64(2)));
         assert_eq!(c.get_sweep(U64(3)).map(|s| s.id), None);
+    }
+
+    fn refusal(f: impl FnOnce()) -> String {
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err("expected a refusal");
+        err.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
+    // A world where the first user already holds Yes shares in market 0, bought before any pause.
+    fn world_with_a_holder() -> MarketContract {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        c
+    }
+
+    #[test]
+    fn a_second_sweep_inside_the_interval_is_refused_and_one_after_it_works() {
+        let (mut c, _) = world();
+        c.fees = 2_000_000;
+        act_as(USERS[2], 5);
+        assert_eq!(c.sweep_fees(), Some(U64(1)));
+        c.fees = 2_000_000;
+        act_as(USERS[2], 5 + MIN_SWEEP_INTERVAL_NS - 1);
+        let message = refusal(|| {
+            let _ = c.sweep_fees();
+        });
+        assert_eq!(message, "wait an hour since the last sweep");
+        assert_eq!(c.next_sweep_id, 2);
+        act_as(USERS[2], 5 + MIN_SWEEP_INTERVAL_NS);
+        assert_eq!(c.sweep_fees(), Some(U64(2)));
+    }
+
+    // A refused due stays owed and is retried on purpose, so a stranger could keep re-sweeping it. 200 tries in a day make
+    // at most 24 records.
+    #[test]
+    fn two_hundred_sweep_attempts_in_a_day_leave_at_most_24_records() {
+        let (mut c, _) = world();
+        c.revenue_due = DEFAULT_MIN_SWEEP;
+        let step = 24 * MIN_SWEEP_INTERVAL_NS / 200;
+        for i in 0..200u64 {
+            act_as(USERS[2], 5 + i * step);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.sweep_fees()));
+            c.revenue_due = DEFAULT_MIN_SWEEP;
+        }
+        assert!(
+            c.next_sweep_id - FIRST_SWEEP_ID <= 24,
+            "{} records",
+            c.next_sweep_id - FIRST_SWEEP_ID
+        );
+    }
+
+    #[test]
+    fn the_operator_pause_leaves_sell_working_and_blocks_buy_deposit_and_seed() {
+        let mut c = world_with_a_holder();
+        act_as(OWNER, 5);
+        c.set_operator(acct("ops.near"));
+        act_as("ops.near", 6);
+        c.set_paused(true);
+        assert_eq!(c.config()["sells_paused"], false);
+        act_as(USERS[0], 7);
+        c.sell(U64(0), "yes".into(), U128(1_000_000), U128(u128::MAX));
+        act_as(VERIFIER, 8);
+        for msg in ["deposit", "buy:0:yes:1", "seed:1"] {
+            let sender = if msg == "seed:1" { OWNER } else { USERS[0] };
+            let message = refusal(|| drop(receive(&mut c, acct(sender), U128(10_000_000), msg.into())));
+            assert_eq!(message, "paused", "{msg}");
+        }
+    }
+
+    #[test]
+    fn only_the_owner_pauses_sells_and_it_stops_sell_alone() {
+        let mut c = world_with_a_holder();
+        act_as(OWNER, 5);
+        c.set_operator(acct("ops.near"));
+        act_as("ops.near", 6);
+        assert_eq!(refusal(|| c.set_sells_paused(true)), "owner only");
+        act_as(OWNER, 7);
+        c.set_sells_paused(true);
+        assert_eq!(c.config()["sells_paused"], true);
+        act_as(USERS[0], 8);
+        let message = refusal(|| c.sell(U64(0), "yes".into(), U128(1_000_000), U128(u128::MAX)));
+        assert_eq!(message, "sells are paused");
+        act_as(VERIFIER, 9);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "deposit".into());
+        act_as(OWNER, 10);
+        c.set_sells_paused(false);
+        act_as(USERS[0], 11);
+        c.sell(U64(0), "yes".into(), U128(1_000_000), U128(u128::MAX));
     }
 
     #[test]
@@ -4372,6 +5542,7 @@ mod tests {
             let (mut added, mut gone) = (c.fees, 0u128);
             let mut on_the_way: Vec<(u64, LegKind, u128)> = vec![];
             let mut unresolved: Vec<(u64, u128)> = vec![];
+            let mut sweep_clock = 5;
             for (op, amount, how) in ops {
                 match op {
                     0 => {
@@ -4379,7 +5550,8 @@ mod tests {
                         added += amount;
                     }
                     1 => {
-                        act_as(USERS[2], 5);
+                        sweep_clock += MIN_SWEEP_INTERVAL_NS;
+                        act_as(USERS[2], sweep_clock);
                         if let Some(id) = c.sweep_fees() {
                             let s = c.get_sweep(id).unwrap();
                             if s.council.status == LegStatus::Pending { on_the_way.push((id.0, LegKind::Council, s.council.amount.0)); }
@@ -4406,13 +5578,13 @@ mod tests {
                     }
                     4 if !unresolved.is_empty() => {
                         let (id, sent) = unresolved.remove(amount as usize % unresolved.len());
-                        act_as(OWNER, 5 + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE);
+                        act_as(OWNER, sweep_clock + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE);
                         c.reconcile_leg(U64(id), LegKind::Council, how == 0);
                         if how == 0 { gone += sent; }
                     }
                     5 if !on_the_way.is_empty() => {
                         let (id, kind, sent) = on_the_way.remove(amount as usize % on_the_way.len());
-                        act_as(OWNER, 5 + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE);
+                        act_as(OWNER, sweep_clock + RECONCILE_WAIT_MINUTES * NS_PER_MINUTE);
                         c.reconcile_leg(U64(id), kind, how == 0);
                         if how == 0 { gone += sent; }
                     }
@@ -4856,7 +6028,764 @@ mod tests {
         act_as(USERS[0], CLOSE + 2);
         let paid = c.redeem(U64(0));
         let _ = c.withdraw(paid);
+        act_as("market.near", CLOSE + 3);
+        c.on_withdraw(U64(1), Ok(()));
+        act_as(USERS[0], CLOSE + 4);
         assert!(c.storage_unregister(None));
         assert!(!c.is_registered(acct(USERS[0])));
+    }
+
+    // A user with nothing but one withdrawal of their whole balance in flight.
+    fn leaving_with_a_withdrawal_in_flight() -> MarketContract {
+        let (mut c, _) = world();
+        deposit(&mut c, USERS[0], 3_000_000);
+        act_as(USERS[0], WITHDRAWN_AT);
+        let _ = c.withdraw(U128(3_000_000));
+        c
+    }
+
+    #[test]
+    fn an_account_cannot_leave_while_a_withdrawal_is_in_flight() {
+        let mut c = leaving_with_a_withdrawal_in_flight();
+        act_as(USERS[0], 5);
+        assert!(refusal(|| {
+            c.storage_unregister(None);
+        })
+        .contains("a withdrawal is still pending"));
+        assert!(c.is_registered(acct(USERS[0])));
+    }
+
+    #[test]
+    fn an_account_can_leave_after_the_withdrawal_is_confirmed() {
+        let mut c = leaving_with_a_withdrawal_in_flight();
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Ok(()));
+        act_as(USERS[0], 6);
+        assert!(c.storage_unregister(None));
+        assert!(!c.is_registered(acct(USERS[0])));
+    }
+
+    #[test]
+    fn a_failed_withdrawal_credits_back_and_the_account_still_leaves_only_empty() {
+        let mut c = leaving_with_a_withdrawal_in_flight();
+        act_as("market.near", 5);
+        c.on_withdraw(U64(1), Err(PromiseError::Failed));
+        act_as(USERS[0], 6);
+        assert!(refusal(|| {
+            c.storage_unregister(None);
+        })
+        .contains("withdraw your balance first"));
+        assert!(refusal(|| {
+            c.storage_unregister(Some(true));
+        })
+        .contains("force is not supported"));
+        let _ = c.withdraw(U128(3_000_000));
+        act_as("market.near", 7);
+        c.on_withdraw(U64(2), Ok(()));
+        act_as(USERS[0], 8);
+        assert!(c.storage_unregister(None));
+    }
+
+    #[test]
+    fn an_account_can_leave_after_the_owner_reconciles_its_withdrawal() {
+        let mut c = leaving_with_a_withdrawal_in_flight();
+        act_as(OWNER, WITHDRAWAL_DECIDABLE_AT);
+        c.reconcile_withdrawal(U64(1), true);
+        act_as(USERS[0], WITHDRAWAL_DECIDABLE_AT + 1);
+        assert!(c.storage_unregister(None));
+        assert!(!c.is_registered(acct(USERS[0])));
+    }
+
+    // ---- owner-set policy values, each inside a hard range ---------------------------------------------------
+
+    const HOUR_NS: u64 = 3_600_000_000_000;
+    const DAY_NS: u64 = 24 * HOUR_NS;
+
+    fn refused(f: impl FnOnce()) -> bool {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err()
+    }
+
+    #[test]
+    fn only_the_owner_sets_the_policy_values() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_operator(acct("ops.near"));
+        let calls: [fn(&mut MarketContract); 5] = [
+            |c| c.set_void_rules(U64(2 * HOUR_NS), U64(2 * DAY_NS)),
+            |c| c.set_sweep_timing(5, 90, 30),
+            |c| c.set_open_price_bounds(U128(20_000), U128(980_000)),
+            |c| c.set_max_positions(30),
+            |c| c.set_fee_limits(400, U128(5_000_000), 1_500, 4_000, U128(50_000_000)),
+        ];
+        for who in ["ops.near", USERS[0]] {
+            for (n, call) in calls.into_iter().enumerate() {
+                act_as(who, 4);
+                let message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(&mut c)))
+                    .err()
+                    .map(|e| {
+                        e.downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                assert!(message.contains("owner only"), "{who} setter {n}: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_config_starts_at_the_built_in_values() {
+        let (c, _) = world();
+        let cfg = c.config();
+        assert_eq!(
+            (
+                cfg["void_price_window_ns"].as_str(),
+                cfg["void_grace_ns"].as_str(),
+                cfg["settle_wait_minutes"].as_u64(),
+                cfg["reconcile_wait_minutes"].as_u64(),
+                cfg["min_sweep_interval_minutes"].as_u64(),
+            ),
+            (
+                Some("86400000000000"),
+                Some("604800000000000"),
+                Some(10),
+                Some(60),
+                Some(60)
+            )
+        );
+        assert_eq!(
+            (
+                cfg["min_open_price"].as_str(),
+                cfg["max_open_price"].as_str(),
+                cfg["max_positions"].as_u64()
+            ),
+            (Some("10000"), Some("990000"), Some(20))
+        );
+        assert_eq!(
+            (
+                cfg["max_fee_rate_bps"].as_u64(),
+                cfg["max_create_fee"].as_str(),
+                cfg["min_revenue_share_bps"].as_u64(),
+                cfg["max_revenue_share_bps"].as_u64(),
+                cfg["max_min_sweep"].as_str(),
+            ),
+            (Some(500), Some("10000000"), Some(1_000), Some(5_000), Some("100000000"))
+        );
+    }
+
+    #[test]
+    fn void_rules_stay_inside_their_ranges() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_void_rules(U64(HOUR_NS), U64(DAY_NS));
+        c.set_void_rules(U64(7 * DAY_NS), U64(60 * DAY_NS));
+        for (window, grace) in [
+            (HOUR_NS - 1, 7 * DAY_NS),
+            (7 * DAY_NS + 1, 7 * DAY_NS),
+            (DAY_NS, DAY_NS - 1),
+            (DAY_NS, 60 * DAY_NS + 1),
+            (0, 0),
+        ] {
+            assert!(
+                refused(|| c.set_void_rules(U64(window), U64(grace))),
+                "{window} {grace}"
+            );
+        }
+        assert_eq!((c.void_price_window_ns, c.void_grace_ns), (7 * DAY_NS, 60 * DAY_NS));
+        assert_eq!(last_event()["event"], "void_rules_set");
+    }
+
+    #[test]
+    fn void_rules_reach_only_markets_created_after_the_change() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_void_rules(U64(2 * HOUR_NS), U64(2 * DAY_NS));
+        let e = last_event();
+        assert_eq!(e["event"], "void_rules_set");
+        assert_eq!(
+            (e["data"]["price_window_ns"].as_str(), e["data"]["grace_ns"].as_str()),
+            (Some("7200000000000"), Some("172800000000000"))
+        );
+        assert_eq!(c.config()["void_price_window_ns"], "7200000000000");
+        assert_eq!(c.config()["void_grace_ns"], "172800000000000");
+        let fresh = create_registered(&mut c, OWNER);
+        assert_eq!(
+            (c.market(0).void_price_window_ns, c.market(0).void_grace_ns),
+            (VOID_PRICE_WINDOW_NS, VOID_GRACE_NS)
+        );
+        assert_eq!(
+            (c.market(fresh).void_price_window_ns, c.market(fresh).void_grace_ns),
+            (2 * HOUR_NS, 2 * DAY_NS)
+        );
+
+        act_as(USERS[2], RESOLVE_BY + 2 * DAY_NS);
+        assert!(
+            refused(|| c.void_if_unresolved(U64(0))),
+            "the old market still waits 7 days"
+        );
+        c.void_if_unresolved(U64(fresh));
+        assert_eq!(c.market(fresh).outcome, Some(Outcome::Void));
+        act_as(USERS[2], RESOLVE_BY + VOID_GRACE_NS);
+        c.void_if_unresolved(U64(0));
+        assert_eq!(c.market(0).outcome, Some(Outcome::Void));
+    }
+
+    #[test]
+    fn a_market_averages_its_void_price_over_its_own_window() {
+        let at = |window_ns: u64| {
+            let mut m = blank();
+            m.close_at = 10 * HOUR_NS;
+            m.void_price_window_ns = window_ns;
+            m.record_price_at(0, 400_000);
+            m.record_price_at(9 * HOUR_NS, 800_000);
+            m.closing_price()
+        };
+        assert_eq!(at(DAY_NS), 440_000);
+        assert_eq!(at(2 * HOUR_NS), 600_000);
+    }
+
+    #[test]
+    fn sweep_timing_stays_inside_its_ranges() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_sweep_timing(1, 10, 1);
+        c.set_sweep_timing(1_440, 10_080, 1_440);
+        assert_eq!(last_event()["event"], "sweep_timing_set");
+        for (settle, reconcile, interval) in [
+            (0, 60, 60),
+            (1_441, 10_080, 60),
+            (10, 9, 60),
+            (10, 10_081, 60),
+            (30, 20, 60),
+            (10, 60, 0),
+            (10, 60, 1_441),
+        ] {
+            assert!(
+                refused(|| c.set_sweep_timing(settle, reconcile, interval)),
+                "{settle} {reconcile} {interval}"
+            );
+        }
+        assert_eq!(
+            (
+                c.settle_wait_minutes,
+                c.reconcile_wait_minutes,
+                c.min_sweep_interval_minutes
+            ),
+            (1_440, 10_080, 1_440)
+        );
+    }
+
+    #[test]
+    fn a_longer_settle_wait_refuses_settling_at_eleven_minutes() {
+        let mut c = lost_report();
+        act_as(OWNER, 6);
+        c.set_sweep_timing(30, 120, 60);
+        let e = last_event();
+        assert_eq!(
+            (
+                e["event"].as_str(),
+                e["data"]["settle_wait_minutes"].as_u64(),
+                e["data"]["reconcile_wait_minutes"].as_u64()
+            ),
+            (Some("sweep_timing_set"), Some(30), Some(120))
+        );
+        assert_eq!(c.config()["settle_wait_minutes"], 30);
+        assert_eq!(c.config()["reconcile_wait_minutes"], 120);
+        assert_eq!(c.config()["min_sweep_interval_minutes"], 60);
+        act_as(USERS[0], SETTLE_AT);
+        assert!(refused(|| {
+            let _ = c.settle_leg(U64(1));
+        }));
+        act_as(USERS[0], 5 + 30 * NS_PER_MINUTE);
+        let _ = c.settle_leg(U64(1));
+    }
+
+    #[test]
+    fn a_longer_reconcile_wait_refuses_reconciling_at_an_hour() {
+        let mut c = lost_report();
+        act_as(OWNER, 6);
+        c.set_sweep_timing(10, 120, 60);
+        act_as(OWNER, RECONCILE_AT);
+        assert!(refused(|| c.reconcile_leg(U64(1), LegKind::Council, false)));
+        act_as(OWNER, 5 + 120 * NS_PER_MINUTE);
+        c.reconcile_leg(U64(1), LegKind::Council, false);
+        assert_eq!((c.revenue_due, c.revenue_unresolved), (250_000, 0));
+    }
+
+    #[test]
+    fn a_five_minute_sweep_interval_allows_a_second_sweep_after_six() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_min_sweep(U128(1));
+        c.set_sweep_timing(10, 60, 5);
+        c.fees = 1_000_000;
+        act_as(USERS[2], 5);
+        assert_eq!(c.sweep_fees(), Some(U64(1)));
+        c.fees = 1_000_000;
+        act_as(USERS[2], 5 + 4 * NS_PER_MINUTE);
+        assert!(refused(|| {
+            c.sweep_fees();
+        }));
+        act_as(USERS[2], 5 + 6 * NS_PER_MINUTE);
+        assert_eq!(c.sweep_fees(), Some(U64(2)));
+    }
+
+    #[test]
+    fn open_price_bounds_stay_inside_their_ranges() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_open_price_bounds(U128(1_000), U128(999_000));
+        assert_eq!(last_event()["event"], "open_price_bounds_set");
+        for (min, max) in [
+            (999, 500_000),
+            (500_000, 999_001),
+            (500_000, 500_000),
+            (600_000, 500_000),
+        ] {
+            assert!(refused(|| c.set_open_price_bounds(U128(min), U128(max))), "{min} {max}");
+        }
+        assert_eq!((c.min_open_price, c.max_open_price), (1_000, 999_000));
+    }
+
+    #[test]
+    fn new_open_price_bounds_decide_which_seeds_are_refused() {
+        let (mut c, _) = world();
+        let id = create_registered(&mut c, OWNER);
+        act_as(OWNER, 7);
+        c.set_open_price_bounds(U128(200_000), U128(800_000));
+        let e = last_event();
+        assert_eq!(
+            (e["data"]["min"].as_str(), e["data"]["max"].as_str()),
+            (Some("200000"), Some("800000"))
+        );
+        assert_eq!(c.config()["min_open_price"], "200000");
+        assert_eq!(c.config()["max_open_price"], "800000");
+        for price in ["100000", "900000"] {
+            assert!(refused(|| seed_with(&mut c, OWNER, id, Some(price))), "{price}");
+        }
+        act_as(OWNER, 8);
+        c.set_open_price_bounds(U128(5_000), U128(995_000));
+        seed_with(&mut c, OWNER, id, Some("5000"));
+        assert!(c.market(id).seeded);
+    }
+
+    #[test]
+    fn max_positions_stays_inside_its_range() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_max_positions(5);
+        c.set_max_positions(30);
+        assert_eq!(last_event()["event"], "max_positions_set");
+        for bad in [0, 4, 31, 100] {
+            assert!(refused(|| c.set_max_positions(bad)), "{bad}");
+        }
+        assert_eq!(c.config()["max_positions"], 30);
+    }
+
+    #[test]
+    fn the_deposit_pays_for_an_account_at_the_hard_position_cap_with_the_longest_id() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        let flush = |c: &mut MarketContract| {
+            c.accounts.flush();
+            c.balances.flush();
+            c.shares.flush();
+            c.position_markets.flush();
+            c.pending_by_account.flush();
+        };
+        flush(&mut c);
+        let who: AccountId = "f".repeat(64).parse().unwrap();
+        let before = env::storage_usage();
+        c.accounts.insert(who.clone(), 0);
+        c.max_positions = HARD_MAX_POSITIONS;
+        c.credit(&who, 1);
+        c.pending_by_account.insert(who.clone(), 1);
+        for id in 0..u64::from(HARD_MAX_POSITIONS) {
+            c.add_shares(&who, 1_000 + id, 0, 1);
+        }
+        flush(&mut c);
+        let used = u128::from(env::storage_usage() - before);
+        let paid = STORAGE_DEPOSIT.as_yoctonear() / env::storage_byte_cost().as_yoctonear();
+        assert!(
+            used <= paid,
+            "{used} bytes at {HARD_MAX_POSITIONS} positions, the deposit pays for {paid}"
+        );
+    }
+
+    #[test]
+    fn a_lower_position_cap_stops_new_positions_and_leaves_held_ones() {
+        let (mut c, _) = world();
+        let mut ids = vec![];
+        for _ in 0..6 {
+            let id = create_registered(&mut c, OWNER);
+            seed_with(&mut c, OWNER, id, None);
+            ids.push(id);
+        }
+        act_as(VERIFIER, 7);
+        for id in &ids[..4] {
+            let _ = receive(&mut c, acct(USERS[0]), U128(1_000_000), format!("buy:{id}:yes:1"));
+        }
+        act_as(OWNER, 8);
+        c.set_max_positions(5);
+        assert_eq!(c.config()["max_positions"], 5);
+        act_as(VERIFIER, 9);
+        let _ = receive(&mut c, acct(USERS[0]), U128(1_000_000), format!("buy:{}:yes:1", ids[4]));
+        let sixth = refused(|| {
+            let _ = receive(&mut c, acct(USERS[0]), U128(1_000_000), format!("buy:{}:yes:1", ids[5]));
+        });
+        assert!(sixth, "the account holds 5 and the cap is 5");
+        assert_eq!(c.accounts.get(&acct(USERS[0])).copied(), Some(5));
+    }
+
+    #[test]
+    fn fee_limits_stay_inside_their_ranges() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_fee_limits(2_000, U128(100_000_000), 500, 9_000, U128(1_000_000_000));
+        assert_eq!(last_event()["event"], "fee_limits_set");
+        c.set_fee_limits(200, U128(1_000_000), 2_400, 2_600, U128(1_000_000));
+        let bad: [(u32, u128, u32, u32, u128); 8] = [
+            (2_001, 10_000_000, 1_000, 5_000, 100_000_000),
+            (500, 100_000_001, 1_000, 5_000, 100_000_000),
+            (500, 10_000_000, 499, 5_000, 100_000_000),
+            (500, 10_000_000, 1_000, 9_001, 100_000_000),
+            (500, 10_000_000, 3_000, 3_000, 100_000_000),
+            (500, 10_000_000, 4_000, 3_000, 100_000_000),
+            (500, 10_000_000, 1_000, 5_000, 0),
+            (500, 10_000_000, 1_000, 5_000, 1_000_000_001),
+        ];
+        for (rate, create, low, high, sweep) in bad {
+            assert!(
+                refused(|| c.set_fee_limits(rate, U128(create), low, high, U128(sweep))),
+                "{rate} {create} {low} {high} {sweep}"
+            );
+        }
+        assert_eq!(
+            (c.max_fee_rate_bps, c.min_revenue_share_bps, c.max_revenue_share_bps),
+            (200, 2_400, 2_600)
+        );
+    }
+
+    #[test]
+    fn a_limit_that_would_leave_a_current_value_outside_it_is_refused() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        // Current values: rate 200, creation fee 1_000_000, share 2_500, minimum sweep 1_000_000.
+        let cases: [(u32, u128, u32, u32, u128); 6] = [
+            (199, 10_000_000, 1_000, 5_000, 100_000_000),
+            (500, 999_999, 1_000, 5_000, 100_000_000),
+            (500, 10_000_000, 2_501, 5_000, 100_000_000),
+            (500, 10_000_000, 1_000, 2_499, 100_000_000),
+            (500, 10_000_000, 1_000, 5_000, 999_999),
+            (0, 0, 1_000, 5_000, 1),
+        ];
+        for (rate, create, low, high, sweep) in cases {
+            assert!(
+                refused(|| c.set_fee_limits(rate, U128(create), low, high, U128(sweep))),
+                "{rate} {create} {low} {high} {sweep}"
+            );
+        }
+        c.set_fee_limits(200, U128(1_000_000), 2_500, 2_501, U128(1_000_000));
+        c.set_fee_rate_bps(100);
+        c.set_fee_limits(100, U128(1_000_000), 1_000, 5_000, U128(1_000_000));
+        assert_eq!(c.max_fee_rate_bps, 100);
+    }
+
+    #[test]
+    fn the_fee_setters_check_the_stored_limits() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_fee_limits(1_000, U128(50_000_000), 1_000, 7_000, U128(400_000_000));
+        let e = last_event();
+        assert_eq!(e["event"], "fee_limits_set");
+        assert_eq!(
+            (
+                e["data"]["max_fee_rate_bps"].as_u64(),
+                e["data"]["max_create_fee"].as_str(),
+                e["data"]["min_revenue_share_bps"].as_u64(),
+                e["data"]["max_revenue_share_bps"].as_u64(),
+                e["data"]["max_min_sweep"].as_str(),
+            ),
+            (
+                Some(1_000),
+                Some("50000000"),
+                Some(1_000),
+                Some(7_000),
+                Some("400000000")
+            )
+        );
+        let cfg = c.config();
+        assert_eq!(
+            (
+                cfg["max_fee_rate_bps"].as_u64(),
+                cfg["max_create_fee"].as_str(),
+                cfg["min_revenue_share_bps"].as_u64(),
+                cfg["max_revenue_share_bps"].as_u64(),
+                cfg["max_min_sweep"].as_str(),
+            ),
+            (
+                Some(1_000),
+                Some("50000000"),
+                Some(1_000),
+                Some(7_000),
+                Some("400000000")
+            )
+        );
+        c.set_fee_rate_bps(1_000);
+        c.set_create_fee(U128(50_000_000));
+        c.set_revenue_share_bps(7_000);
+        c.set_min_sweep(U128(400_000_000));
+        assert!(refused(|| c.set_fee_rate_bps(1_001)));
+        assert!(refused(|| c.set_create_fee(U128(50_000_001))));
+        assert!(refused(|| c.set_revenue_share_bps(7_001)));
+        assert!(refused(|| c.set_min_sweep(U128(400_000_001))));
+    }
+
+    // ---- the account's list of markets ------------------------------------------------------------------
+
+    const HOLDERS: [&str; 4] = [USERS[0], USERS[1], USERS[2], OWNER];
+
+    fn indexed(c: &MarketContract, who: &str) -> Vec<u64> {
+        c.position_markets.get(&acct(who)).cloned().unwrap_or_default()
+    }
+
+    fn held_in(c: &MarketContract, who: &str) -> Vec<u64> {
+        (0..c.next_market_id)
+            .filter(|&id| {
+                let (y, n) = holdings(c, id, who);
+                y + n > 0
+            })
+            .collect()
+    }
+
+    // The list of markets is exactly the markets with a non-empty entry, and get_positions lists exactly those.
+    fn assert_index_matches(c: &MarketContract, who: &str) {
+        let held = held_in(c, who);
+        assert_eq!(
+            indexed(c, who),
+            held,
+            "the index of {who} drifted from its share entries"
+        );
+        let listed: Vec<u64> = c.get_positions(acct(who)).iter().map(|p| p.market_id.0).collect();
+        assert_eq!(listed, held, "get_positions of {who} lists other markets than it holds");
+        assert_eq!(c.get_account(acct(who)).positions as usize, held.len());
+    }
+
+    // The scan get_positions used before the index, kept to compare against.
+    fn scanned_positions(c: &MarketContract, who: &str) -> near_sdk::serde_json::Value {
+        let account_id = acct(who);
+        let mut left = c.accounts.get(&account_id).copied().unwrap_or(0);
+        let mut out = Vec::new();
+        for id in 0..c.next_market_id {
+            if left == 0 {
+                break;
+            }
+            let yes = c.shares.get(&(id, account_id.clone(), 0)).copied().unwrap_or(0);
+            let no = c.shares.get(&(id, account_id.clone(), 1)).copied().unwrap_or(0);
+            left = left.saturating_sub(u32::from(yes > 0) + u32::from(no > 0));
+            let Some(m) = c.markets.get(&id).filter(|_| yes + no > 0) else {
+                continue;
+            };
+            out.push(PositionView {
+                market_id: U64(id),
+                yes: U128(yes),
+                no: U128(no),
+                status: m.status().to_string(),
+                outcome: m.outcome,
+                redeemable: U128(m.outcome.map_or(0, |o| m.payout(o, yes, no))),
+            });
+        }
+        near_sdk::serde_json::to_value(out).unwrap()
+    }
+
+    // Empties one side. A sale rounds in the market's favour, so the quote for the whole holding leaves a share or two
+    // that no sale can reach; those go through take_shares, the one place an entry is removed.
+    fn sell_all(c: &mut MarketContract, who: &str, id: u64, side: &str) {
+        let idx = u8::from(side == "no");
+        let (y, n) = holdings(c, id, who);
+        let held = if idx == 0 { y } else { n };
+        let q = c.quote_sell(U64(id), side.to_string(), U128(held));
+        act_as(who, 3);
+        c.sell(U64(id), side.to_string(), q.collateral_out, U128(held));
+        let (y, n) = holdings(c, id, who);
+        let dust = if idx == 0 { y } else { n };
+        assert!(dust <= 3, "the sale left more than rounding behind: {dust}");
+        if dust > 0 {
+            c.take_shares(&acct(who), id, idx, dust);
+        }
+    }
+
+    #[test]
+    fn yes_and_no_in_one_market_keep_one_index_entry() {
+        let (mut c, mut total_in) = world();
+        step(&mut c, &mut total_in, 0, 0, 0, 5_000_000, 1);
+        step(&mut c, &mut total_in, 1, 0, 0, 5_000_000, 1);
+        let (y, n) = holdings(&c, 0, USERS[0]);
+        assert!(y > 0 && n > 0);
+        assert_eq!(indexed(&c, USERS[0]), vec![0]);
+        assert_eq!(c.accounts.get(&acct(USERS[0])).copied(), Some(2));
+        assert_index_matches(&c, USERS[0]);
+    }
+
+    #[test]
+    fn selling_one_side_keeps_the_market_and_selling_the_other_drops_it() {
+        let (mut c, mut total_in) = world();
+        step(&mut c, &mut total_in, 0, 0, 0, 5_000_000, 1);
+        step(&mut c, &mut total_in, 1, 0, 0, 5_000_000, 1);
+        step(&mut c, &mut total_in, 0, 0, 1, 5_000_000, 1);
+        sell_all(&mut c, USERS[0], 0, "yes");
+        assert_eq!(indexed(&c, USERS[0]), vec![0, 1]);
+        assert_index_matches(&c, USERS[0]);
+        sell_all(&mut c, USERS[0], 0, "no");
+        assert_eq!(indexed(&c, USERS[0]), vec![1]);
+        assert_index_matches(&c, USERS[0]);
+        sell_all(&mut c, USERS[0], 1, "yes");
+        assert!(
+            c.position_markets.get(&acct(USERS[0])).is_none(),
+            "an empty list leaves no record"
+        );
+        assert_index_matches(&c, USERS[0]);
+    }
+
+    #[test]
+    fn redeem_removes_the_market_from_the_index() {
+        let (mut c, mut total_in) = world();
+        step(&mut c, &mut total_in, 0, 1, 0, 5_000_000, 1);
+        step(&mut c, &mut total_in, 1, 1, 0, 5_000_000, 1);
+        step(&mut c, &mut total_in, 0, 1, 1, 5_000_000, 1);
+        act_as(ORACLE, CLOSE + 1);
+        c.set_outcome(U64(0), Outcome::Yes);
+        act_as(USERS[1], CLOSE + 2);
+        c.redeem(U64(0));
+        assert_eq!(indexed(&c, USERS[1]), vec![1]);
+        assert_index_matches(&c, USERS[1]);
+    }
+
+    #[test]
+    fn the_seeder_left_holding_shares_is_indexed() {
+        let (mut c, _) = world();
+        assert_eq!(
+            indexed(&c, OWNER),
+            vec![1],
+            "market 1 opened at 30%, market 0 at one half"
+        );
+        assert_index_matches(&c, OWNER);
+        let id = create_registered(&mut c, OWNER);
+        seed_with(&mut c, OWNER, id, Some("700000"));
+        assert_eq!(indexed(&c, OWNER), vec![1, id]);
+        assert_index_matches(&c, OWNER);
+    }
+
+    #[test]
+    fn the_operator_holds_a_position_in_every_market_past_the_cap() {
+        let (mut c, _) = world();
+        act_as(OWNER, 5);
+        c.set_operator(acct("ops.near"));
+        c.accounts.insert(acct("ops.near"), 0);
+        let count = MAX_POSITIONS as u64 + 15;
+        for _ in 0..count {
+            let id = create_registered(&mut c, "ops.near");
+            seed_with(&mut c, "ops.near", id, Some("300000"));
+        }
+        let ids = indexed(&c, "ops.near");
+        assert_eq!(ids, (2..2 + count).collect::<Vec<u64>>());
+        assert_index_matches(&c, "ops.near");
+        assert_eq!(scanned_positions(&c, "ops.near"), positions_json(&c, "ops.near"));
+    }
+
+    #[test]
+    fn unregistering_leaves_no_index_record() {
+        let (mut c, mut total_in) = world();
+        c.accounts.insert(acct("dan.near"), 0);
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct("dan.near"), U128(5_000_000), "buy:0:yes:1".to_string());
+        total_in += 5_000_000;
+        let _ = total_in;
+        assert_eq!(indexed(&c, "dan.near"), vec![0]);
+        sell_all(&mut c, "dan.near", 0, "yes");
+        c.balances.remove(&acct("dan.near"));
+        act_as("dan.near", 4);
+        assert!(c.storage_unregister(None));
+        assert!(c.position_markets.get(&acct("dan.near")).is_none());
+    }
+
+    #[test]
+    fn get_positions_matches_the_old_scan_for_a_mixed_state() {
+        let mut c = positions_world();
+        let mut total_in = 0;
+        step(&mut c, &mut total_in, 0, 1, 2, 3_000_000, 1);
+        step(&mut c, &mut total_in, 1, 2, 3, 3_000_000, 1);
+        let all_match = |c: &MarketContract| {
+            for who in HOLDERS.iter().chain(["nobody.near"].iter()) {
+                assert_eq!(scanned_positions(c, who), positions_json(c, who), "{who}");
+            }
+        };
+        all_match(&c);
+        resolve_positions_world(&mut c);
+        all_match(&c);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        // After every buy, sell, seed, resolution, redeem and withdrawal, each account's list of markets is exactly the
+        // markets in which it has a non-empty share entry, and get_positions lists exactly those.
+        #[test]
+        fn the_index_always_equals_the_markets_an_account_holds(
+            ops in proptest::collection::vec((0u8..8, 0usize..4, 0u64..4, 1_000_000u128..40_000_000, 1u128..101), 1..80)
+        ) {
+            let (mut c, _) = world();
+            for _ in 0..2 {
+                create_registered(&mut c, OWNER);
+            }
+            for (op, user, id, amount, frac) in ops {
+                let who = HOLDERS[user];
+                let m = c.market(id);
+                let live = m.seeded && m.outcome.is_none();
+                match op {
+                    0 | 1 if live => {
+                        act_as(VERIFIER, 3);
+                        let side = if op == 0 { "yes" } else { "no" };
+                        let _ = receive(&mut c, acct(who), U128(amount), format!("buy:{id}:{side}:1"));
+                    }
+                    2 | 3 if live => {
+                        let (y, n) = holdings(&c, id, who);
+                        let (held, side) = if op == 2 { (y, "yes") } else { (n, "no") };
+                        let q = c.quote_sell(U64(id), side.to_string(), U128(held * frac / 100));
+                        if q.collateral_out.0 > 0 {
+                            act_as(who, 3);
+                            c.sell(U64(id), side.to_string(), q.collateral_out, U128(held));
+                        }
+                    }
+                    4 if !m.seeded => {
+                        let price = [None, Some("300000"), Some("800000")][(amount % 3) as usize];
+                        seed_with(&mut c, OWNER, id, price);
+                    }
+                    5 if m.seeded && m.outcome.is_none() => {
+                        act_as(ORACLE, CLOSE + 1);
+                        c.set_outcome(U64(id), [Outcome::Yes, Outcome::No, Outcome::Void][(amount % 3) as usize]);
+                    }
+                    6 if m.outcome.is_some() => {
+                        let (y, n) = holdings(&c, id, who);
+                        if y + n > 0 {
+                            act_as(who, CLOSE + 3);
+                            c.redeem(U64(id));
+                        }
+                    }
+                    7 => {
+                        let bal = c.get_balance(acct(who)).0;
+                        if bal > 0 {
+                            act_as(who, 4);
+                            let _ = c.withdraw(U128(bal.min(amount)));
+                        }
+                    }
+                    _ => {}
+                }
+                for h in HOLDERS {
+                    assert_index_matches(&c, h);
+                }
+            }
+        }
     }
 }

@@ -260,8 +260,8 @@ async fn revealed_votes_settle_early_and_a_silent_juror_does_not_block() -> anyh
 
 // Nobody draws the first jury before draw_by, so it counts as a jury that did not decide and a second one is called for.
 // Only five accounts hold seats, which is too few for a jury of seven, so the second draw fails too and the case ends
-// with no decision. The challenger's bond is not returned: with no juror having revealed, half goes to the no-decision recipient (the treasury in these tests) and
-// half to the proposer.
+// with no decision. No jury was ever seated, so the system failed and not the challenger: each side gets its own bond back
+// and the no-decision recipient (the treasury in these tests) is paid nothing.
 #[tokio::test]
 async fn a_case_whose_jury_is_never_drawn_is_a_no_decision_twice_and_ends_void() -> anyhow::Result<()> {
     let w = setup().await?;
@@ -288,17 +288,17 @@ async fn a_case_whose_jury_is_never_drawn_is_a_no_decision_twice_and_ends_void()
     skip_until(&w, draw_by + 1).await;
     finalize(&w, id).await?;
     assert_eq!(market_json(&w, id).await["outcome"], "void");
-    assert_eq!(claimable(&w, w.carol.id()).await, 2 * BOND - BOND / 2);
-    assert_eq!(claimable(&w, w.dave.id()).await, 0);
-    assert_eq!(claimable(&w, w.treasury.id()).await, BOND / 2);
+    assert_eq!(claimable(&w, w.carol.id()).await, BOND);
+    assert_eq!(claimable(&w, w.dave.id()).await, BOND);
+    assert_eq!(claimable(&w, w.treasury.id()).await, 0);
     assert_eq!(claimable(&w, w.owner.id()).await, 0, "the owner is not paid");
 
     assert_eq!(oracle_total_owed(&w).await, 2 * BOND);
     assert_oracle_reconciled(&w).await;
-    let before = intents_balance(&w, w.treasury.id()).await;
-    withdraw_bond(&w, &w.treasury).await?;
-    assert_eq!(intents_balance(&w, w.treasury.id()).await - before, BOND / 2);
-    assert_eq!(oracle_total_owed(&w).await, 2 * BOND - BOND / 2);
+    let before = intents_balance(&w, w.dave.id()).await;
+    withdraw_bond(&w, &w.dave).await?;
+    assert_eq!(intents_balance(&w, w.dave.id()).await - before, BOND);
+    assert_eq!(oracle_total_owed(&w).await, BOND);
     assert_oracle_reconciled(&w).await;
     Ok(())
 }

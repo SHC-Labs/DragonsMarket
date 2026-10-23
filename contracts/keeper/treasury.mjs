@@ -18,6 +18,11 @@ const TGAS = 10n ** 12n;
 const MAX_TX_TGAS = 300n;
 const U32_MAX = 2 ** 32 - 1;
 const NS_PER_DAY = 86_400n * 10n ** 9n;
+// The ranges the market accepts for the void rules, in nanoseconds: the window is 1 hour to 7 days, the grace 1 to 60 days.
+const VOID_WINDOW_NS = { min: NS_PER_DAY / 24n, max: 7n * NS_PER_DAY };
+const VOID_GRACE_NS = { min: NS_PER_DAY, max: 60n * NS_PER_DAY };
+// The range the Council and the oracle accept for their reconcile wait: 10 minutes to 7 days.
+const RECONCILE_WAIT_NS = { min: 600n * 10n ** 9n, max: 7n * NS_PER_DAY };
 // The Council's grace period, 1 to 30 days (MIN_CLOSE_GRACE_NS and MAX_CLOSE_GRACE_NS in its source).
 export const CLOSE_GRACE_DAYS = { min: 1n, max: 30n };
 const U64_MAX = 2n ** 64n - 1n;
@@ -44,17 +49,35 @@ export const TARGETS = ["market", "oracle", "council"];
 // one of these differs.
 export const CONTRACT_LIMITS = {
   market: {
-    MAX_FEE_RATE_BPS: 500,
-    MIN_REVENUE_SHARE_BPS: 1_000,
-    MAX_REVENUE_SHARE_BPS: 5_000,
-    MAX_MIN_SWEEP: 100_000_000n,
-    MAX_CREATE_FEE: 10_000_000n,
+    HARD_MAX_FEE_RATE_BPS: 2_000,
+    HARD_MIN_REVENUE_SHARE_BPS: 500,
+    HARD_MAX_REVENUE_SHARE_BPS: 9_000,
+    HARD_MAX_MIN_SWEEP: 1_000_000_000n,
+    HARD_MAX_CREATE_FEE: 100_000_000n,
+    HARD_MIN_OPEN_PRICE: 1_000n,
+    HARD_MAX_OPEN_PRICE: 999_000n,
+    HARD_MIN_POSITIONS: 5,
+    HARD_MAX_POSITIONS: 30,
+    HARD_MAX_SETTLE_WAIT_MINUTES: 1_440,
+    HARD_MIN_RECONCILE_WAIT_MINUTES: 10,
+    HARD_MAX_RECONCILE_WAIT_MINUTES: 10_080,
+    HARD_MAX_SWEEP_INTERVAL_MINUTES: 1_440,
     MAX_TITLE: 200,
     MAX_RULE: 2000,
     MAX_SOURCE: 300,
     MAX_VOID: 500,
   },
-  oracle: { MAX_PANEL: 21, MAX_PUBLISHERS: 10 },
+  oracle: {
+    MAX_PANEL: 21,
+    MIN_MAX_PUBLISHERS: 1,
+    MAX_MAX_PUBLISHERS: 25,
+    MIN_JUROR_SHARE_BPS: 500,
+    MAX_JUROR_SHARE_BPS: 5_000,
+    MIN_NO_DECISION_JUROR_SHARE_BPS: 1_000,
+    MAX_NO_DECISION_JUROR_SHARE_BPS: 10_000,
+    MIN_APPLY_BUFFER_NS: 5_000_000_000n,
+    MAX_APPLY_BUFFER_NS: 300_000_000_000n,
+  },
   council: { MAX_ALLOW_BATCH: 100 },
 };
 const { market: LIMIT_MARKET, oracle: LIMIT_ORACLE, council: LIMIT_COUNCIL } = CONTRACT_LIMITS;
@@ -184,13 +207,42 @@ export const ALLOWED = {
     ...upgradePath,
     set_operator: setOperator,
     set_fee_recipients: call({ revenue_pool: exactly("council"), treasury: exactly("treasury") }),
-    set_revenue_share_bps: call({ revenue_share_bps: integer(LIMIT_MARKET.MAX_REVENUE_SHARE_BPS, LIMIT_MARKET.MIN_REVENUE_SHARE_BPS) }),
-    set_min_sweep: call({ min_sweep: u128(1n, LIMIT_MARKET.MAX_MIN_SWEEP) }),
+    set_revenue_share_bps: call({ revenue_share_bps: integer(LIMIT_MARKET.HARD_MAX_REVENUE_SHARE_BPS, LIMIT_MARKET.HARD_MIN_REVENUE_SHARE_BPS) }),
+    set_min_sweep: call({ min_sweep: u128(1n, LIMIT_MARKET.HARD_MAX_MIN_SWEEP) }),
     set_next_sweep_id: call({ next_sweep_id: u64(1n) }, { needs: "sweep_id_forward" }),
-    set_fee_rate_bps: call({ fee_rate_bps: integer(LIMIT_MARKET.MAX_FEE_RATE_BPS) }),
-    set_create_fee: call({ create_fee: u128(0n, LIMIT_MARKET.MAX_CREATE_FEE) }),
+    set_fee_rate_bps: call({ fee_rate_bps: integer(LIMIT_MARKET.HARD_MAX_FEE_RATE_BPS) }),
+    set_create_fee: call({ create_fee: u128(0n, LIMIT_MARKET.HARD_MAX_CREATE_FEE) }),
     reconcile_leg: call({ sweep_id: u64(1n), leg: oneOf("council", "treasury"), arrived: flag }),
+    reconcile_withdrawal: call({ id: u64(1n), paid: flag }),
     set_paused: call({ paused: flag }),
+    set_sells_paused: call({ sells_paused: flag }),
+    set_void_rules: call({
+      price_window_ns: u64(VOID_WINDOW_NS.min, VOID_WINDOW_NS.max),
+      grace_ns: u64(VOID_GRACE_NS.min, VOID_GRACE_NS.max),
+    }),
+    set_sweep_timing: call(
+      {
+        settle_wait_minutes: integer(LIMIT_MARKET.HARD_MAX_SETTLE_WAIT_MINUTES, 1),
+        reconcile_wait_minutes: integer(LIMIT_MARKET.HARD_MAX_RECONCILE_WAIT_MINUTES, LIMIT_MARKET.HARD_MIN_RECONCILE_WAIT_MINUTES),
+        min_interval_minutes: integer(LIMIT_MARKET.HARD_MAX_SWEEP_INTERVAL_MINUTES, 1),
+      },
+      { check: ordered("settle_wait_minutes", "reconcile_wait_minutes") },
+    ),
+    set_open_price_bounds: call(
+      { min: u128(LIMIT_MARKET.HARD_MIN_OPEN_PRICE, LIMIT_MARKET.HARD_MAX_OPEN_PRICE), max: u128(LIMIT_MARKET.HARD_MIN_OPEN_PRICE, LIMIT_MARKET.HARD_MAX_OPEN_PRICE) },
+      { check: ordered("min", "max") },
+    ),
+    set_max_positions: call({ max_positions: integer(LIMIT_MARKET.HARD_MAX_POSITIONS, LIMIT_MARKET.HARD_MIN_POSITIONS) }),
+    set_fee_limits: call(
+      {
+        max_fee_rate_bps: integer(LIMIT_MARKET.HARD_MAX_FEE_RATE_BPS),
+        max_create_fee: u128(0n, LIMIT_MARKET.HARD_MAX_CREATE_FEE),
+        min_revenue_share_bps: integer(LIMIT_MARKET.HARD_MAX_REVENUE_SHARE_BPS, LIMIT_MARKET.HARD_MIN_REVENUE_SHARE_BPS),
+        max_revenue_share_bps: integer(LIMIT_MARKET.HARD_MAX_REVENUE_SHARE_BPS, LIMIT_MARKET.HARD_MIN_REVENUE_SHARE_BPS),
+        max_min_sweep: u128(1n, LIMIT_MARKET.HARD_MAX_MIN_SWEEP),
+      },
+      { check: ordered("min_revenue_share_bps", "max_revenue_share_bps") },
+    ),
     halt: call({ market_id: u64(), reason: text(REASON_MAX) }),
     resume: call({ market_id: u64() }),
     claim_residual: call({ market_id: u64() }),
@@ -228,10 +280,20 @@ export const ALLOWED = {
     set_draw_window_ms: call({ draw_window_ms: windowMs }),
     set_draw_delay_blocks: call({ draw_delay_blocks: u64() }),
     set_jury_size: call({ jury_size: oddUpTo(LIMIT_ORACLE.MAX_PANEL) }),
+    set_juror_shares: call({
+      decided_bps: integer(LIMIT_ORACLE.MAX_JUROR_SHARE_BPS, LIMIT_ORACLE.MIN_JUROR_SHARE_BPS),
+      no_decision_bps: integer(LIMIT_ORACLE.MAX_NO_DECISION_JUROR_SHARE_BPS, LIMIT_ORACLE.MIN_NO_DECISION_JUROR_SHARE_BPS),
+    }),
+    set_apply_buffer_ms: call({
+      apply_buffer_ms: u64(LIMIT_ORACLE.MIN_APPLY_BUFFER_NS / 1_000_000n, LIMIT_ORACLE.MAX_APPLY_BUFFER_NS / 1_000_000n),
+    }),
+    set_max_publishers: call({ max_publishers: integer(LIMIT_ORACLE.MAX_MAX_PUBLISHERS, LIMIT_ORACLE.MIN_MAX_PUBLISHERS) }),
     set_no_decision_recipient: call({ recipient: exactly("treasury") }),
     add_publisher: call({ key: ed25519 }),
     remove_publisher: call({ key: ed25519 }),
-    set_price_threshold: call({ threshold: integer(LIMIT_ORACLE.MAX_PUBLISHERS, 1) }),
+    set_price_threshold: call({ threshold: integer(LIMIT_ORACLE.MAX_MAX_PUBLISHERS, 1) }),
+    set_reconcile_wait_ns: call({ reconcile_wait_ns: u64(RECONCILE_WAIT_NS.min, RECONCILE_WAIT_NS.max) }),
+    reconcile_bond_payout: call({ id: u64(1n), paid: flag }),
     withdraw_bond: calling({}, ownDeposit),
   },
   council: {
@@ -245,6 +307,8 @@ export const ALLOWED = {
     set_token_range: call({ first: u64(), last: u64() }, { check: ordered("first", "last") }),
     clear_token_range: call({}),
     set_allowlist_enabled: call({ enabled: flag }),
+    set_reconcile_wait_ns: call({ reconcile_wait_ns: u64(RECONCILE_WAIT_NS.min, RECONCILE_WAIT_NS.max) }),
+    reconcile_claim: call({ quarter: integer(U32_MAX), token_id: text(ID_TEXT_MAX), owner: account, paid: flag }),
   },
 };
 

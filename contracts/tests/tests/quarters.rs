@@ -24,6 +24,7 @@ async fn fees_swept_to_the_council(w: &World) -> anyhow::Result<u128> {
     let id = create_seeded_market(w, 600).await?;
     buy(w, &w.alice, id, "yes", 10 * USD).await?;
     let before = council_total_received(w).await;
+    past_sweep_interval(w).await;
     sweep(w, &w.carol).await?;
     Ok(council_total_received(w).await - before)
 }

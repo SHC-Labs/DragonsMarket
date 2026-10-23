@@ -9,6 +9,9 @@ const env = {
   NEXT_PUBLIC_RPC_URL: rpc,
   NEXT_PUBLIC_MARKET_ID: "market.test.near",
   NEXT_PUBLIC_ORACLE_ID: "oracle.test.near",
+  NEXT_PUBLIC_COUNCIL_ID: "council.test.near",
+  NEXT_PUBLIC_VERIFIER_ID: "intents.test.near",
+  NEXT_PUBLIC_COLLATERAL_TOKEN_ID: "nep141:ft.test.near",
   NEXT_PUBLIC_TOKEN_ID: "ft.test.near",
 };
 

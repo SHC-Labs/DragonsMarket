@@ -570,21 +570,8 @@ async fn a_revenue_transfer_the_verifier_refused_is_parked_and_not_paid_a_second
     );
     assert_reconciled(&w).await;
 
-    // Sweeping again retries the treasury share and sends the Council nothing, so the Council is not paid the same money twice.
-    let logs = sweep(&w, &w.carol)
-        .await?
-        .logs()
-        .iter()
-        .map(|l| l.to_string())
-        .collect::<Vec<_>>();
-    assert!(
-        !event_names(&logs).contains(&"fee_transfer_unresolved".to_string()),
-        "{logs:?}"
-    );
-    assert_eq!(revenue_unresolved(&w).await, REVENUE_SHARE);
-    assert_eq!(fees(&w).await, (1, 0, TREASURY_SHARE));
-
     // Only the owner decides by hand, and not before an hour has passed. Anyone asks the Council, and not before ten minutes.
+    // These run before the second sweep, which has to wait an hour and so leaves the first one too old to be refused.
     refused(
         w.carol
             .call(w.market.id(), "reconcile_leg")
@@ -598,11 +585,27 @@ async fn a_revenue_transfer_the_verifier_refused_is_parked_and_not_paid_a_second
         reconcile_leg(&w, 1, "council", false).await,
         "wait 60 minutes after the sweep before reconciling",
     );
-    unlock_account(&w, w.market.id()).await?;
     refused(
         settle_leg(&w, &w.carol, 1).await,
         "wait 10 minutes after the sweep before settling",
     );
+
+    // Sweeping again retries the treasury share and sends the Council nothing, so the Council is not paid the same money twice.
+    past_sweep_interval(&w).await;
+    let logs = sweep(&w, &w.carol)
+        .await?
+        .logs()
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !event_names(&logs).contains(&"fee_transfer_unresolved".to_string()),
+        "{logs:?}"
+    );
+    assert_eq!(revenue_unresolved(&w).await, REVENUE_SHARE);
+    assert_eq!(fees(&w).await, (1, 0, TREASURY_SHARE));
+
+    unlock_account(&w, w.market.id()).await?;
     let swept_at: u64 = sweep_record(&w, 1).await["at"].as_str().unwrap().parse()?;
     skip_until(&w, swept_at + (10 * 60 + 5) * 1_000_000_000).await;
     refused(settle_leg(&w, &w.carol, 2).await, "the leg is not unresolved");
@@ -616,6 +619,7 @@ async fn a_revenue_transfer_the_verifier_refused_is_parked_and_not_paid_a_second
     assert_eq!(sweep_record(&w, 1).await["council"]["status"], "refused");
     refused(settle_leg(&w, &w.carol, 1).await, "the leg is not unresolved");
 
+    past_sweep_interval(&w).await;
     sweep(&w, &w.carol).await?;
     assert_eq!(
         intents_balance(&w, w.council.id()).await - council_before,
@@ -692,6 +696,7 @@ async fn a_council_that_refuses_the_revenue_gets_it_back_as_due_and_is_not_paid_
     };
     for refuser in [wrong_token.id().clone(), stranger.id().clone()] {
         set_pool(refuser.clone()).await?.into_result()?;
+        past_sweep_interval(&w).await;
         let logs = sweep(&w, &w.carol)
             .await?
             .logs()
@@ -718,6 +723,7 @@ async fn a_council_that_refuses_the_revenue_gets_it_back_as_due_and_is_not_paid_
     );
 
     set_pool(w.council.id().clone()).await?.into_result()?;
+    past_sweep_interval(&w).await;
     sweep(&w, &w.carol).await?;
     assert_eq!(intents_balance(&w, w.council.id()).await, REVENUE_SHARE);
     assert_eq!((total_received(&w).await, fees(&w).await), (REVENUE_SHARE, (1, 0, 0)));

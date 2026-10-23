@@ -49,13 +49,24 @@ const GAS_WITHDRAW_FLOOR: Gas =
     Gas::from_gas(GAS_MT_TRANSFER.as_gas() + GAS_CALLBACK.as_gas() + GAS_WITHDRAW_OVERHEAD.as_gas());
 const SETTLE_REASON: &str = "a call that settles a case sends the answer to the market and releases the juries";
 const NS_PER_MS: u64 = 1_000_000;
+const NS_PER_SEC: u64 = 1_000_000_000;
 // The layout of the state below. migrate reads exactly this one and refuses any other.
 const STATE_VERSION: u16 = 1;
 // Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
 const NEP141_PREFIX: &str = "nep141:";
 // Settling a case still takes one more cross-contract hop (apply) to reach the market. This keeps a case that used
-// its full allotted time clear of resolve_by, after which anyone can send the market its deadline answer.
-const APPLY_BUFFER_NS: u64 = 30_000_000_000;
+// its full allotted time clear of resolve_by, after which anyone can send the market its deadline answer. The owner can
+// change it within the range below, for markets registered afterwards. Under 5 seconds the hop could miss the room it
+// is meant to leave, and over 5 minutes every market would need an absurd gap between close_at and resolve_by.
+const DEFAULT_APPLY_BUFFER_NS: u64 = 30_000_000_000;
+const MIN_APPLY_BUFFER_NS: u64 = 5_000_000_000;
+const MAX_APPLY_BUFFER_NS: u64 = 300_000_000_000;
+// How long a payout can sit pending before the owner may decide it by hand, which leaves its callback time to arrive. The
+// owner can move it between the bounds: under 10 minutes the callback may still be on its way, and over 7 days a bond stuck
+// in flight waits too long for its money.
+const DEFAULT_RECONCILE_WAIT_NS: u64 = 3_600_000_000_000;
+const MIN_RECONCILE_WAIT_NS: u64 = 600_000_000_000;
+const MAX_RECONCILE_WAIT_NS: u64 = 604_800_000_000_000;
 // The council keeps one jury per key. A case's first jury is kept under the market id and its second under this bit
 // set on the id, so the two can never be taken for each other.
 const SECOND_ROUND_KEY: u64 = 1 << 63;
@@ -65,15 +76,27 @@ const MAX_REASON: usize = 1000;
 const MAX_PANEL: usize = 21;
 const MAX_SALT: usize = 64;
 // A submission with all 10 signing burned 4.5 TGas in this contract, 9.4 in all, and worked with 30 TGas attached
-// (measured in the sandbox).
-const MAX_PUBLISHERS: usize = 10;
+// (measured in the sandbox). The owner can change the limit within the range below: 25 publishers is the most that
+// keeps a submission inside its gas, and a limit of 1 is the least a price can be signed with.
+const DEFAULT_MAX_PUBLISHERS: u32 = 10;
+const MIN_MAX_PUBLISHERS: u32 = 1;
+const MAX_MAX_PUBLISHERS: u32 = 25;
+// The most market ids list_cases looks at in one call.
+const MAX_LIST_CASES: u32 = 50;
 // Of the loser's bond in a decided dispute, the share the jurors who revealed and sat with the majority split.
-// The rest goes to the winner.
-const JUROR_SHARE_BPS: u128 = 2_500;
+// The rest goes to the winner. The owner can change it for cases proposed afterwards, within the range below: under 5%
+// a juror is paid too little to be worth the stake, and over 50% the winner of a dispute would net less than the
+// loser's bond they were owed.
+const DEFAULT_JUROR_SHARE_BPS: u32 = 2_500;
+const MIN_JUROR_SHARE_BPS: u32 = 500;
+const MAX_JUROR_SHARE_BPS: u32 = 5_000;
 // Of the challenger's bond when neither jury decided, the share the jurors who revealed split. The rest goes to the
 // proposer. With no juror having revealed, this share goes to the no-decision recipient instead, so it always leaves the
-// two parties.
-const NO_DECISION_JUROR_SHARE_BPS: u128 = 5_000;
+// two parties. Changeable like the share above. At least 10% so a jury that reveals is paid something, and at most all of
+// it, which still leaves the proposer their own bond back.
+const DEFAULT_NO_DECISION_JUROR_SHARE_BPS: u32 = 5_000;
+const MIN_NO_DECISION_JUROR_SHARE_BPS: u32 = 1_000;
+const MAX_NO_DECISION_JUROR_SHARE_BPS: u32 = 10_000;
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
@@ -81,6 +104,7 @@ enum Key {
     Markets,
     Cases,
     Claimable,
+    Payouts,
 }
 
 #[near(serializers=[borsh, json])]
@@ -135,6 +159,8 @@ pub struct MarketInfo {
     window_ns: U64,
     panel_deadline_ns: U64,
     draw_window_ns: U64,
+    // The room left for apply() to land, as set when the market was registered.
+    apply_buffer_ns: U64,
 }
 
 impl MarketInfo {
@@ -189,15 +215,60 @@ pub struct Case {
     // The first jury once a second one has been called for. It cannot sit again, and it is still owed or penalised
     // for what it did.
     first_panel: Vec<AccountId>,
+    // True once any round has seated a jury. A case that never seated one was failed by the system, not by the
+    // parties, so it returns each party's own bond.
+    seated: bool,
     commits: Vec<Commit>,
     // Revealed votes only, from both rounds.
     votes: Vec<Vote>,
     final_outcome: Option<Outcome>,
     applied: bool,
     challenged_at: U64,
+    // The shares of the bonds that go to jurors, as set when the answer was proposed. The case pays out on these, so a
+    // new setting touches only new cases. The first is of the loser's bond in a decided dispute, the second of the
+    // challenger's bond when no jury decided.
+    juror_share_bps: u32,
+    no_decision_share_bps: u32,
     // Set when a disputed case settles: the drawn jurors of either round who did not vote. The Council takes the
     // revenue their seats earned while serving. Kept on the case so retry_unlock sends the same list.
     delinquent: Vec<AccountId>,
+}
+
+// One row of list_cases: where a case stands, without the evidence, the panel or the vote text.
+#[near(serializers=[json])]
+#[derive(Clone, Debug)]
+pub struct CaseSummary {
+    market_id: U64,
+    stage: Stage,
+    proposed: Outcome,
+    challenger_answer: Option<Outcome>,
+    round: u8,
+    final_outcome: Option<Outcome>,
+    applied: bool,
+    // Revealed votes only.
+    votes: u32,
+    window_ends_at: U64,
+    draw_by: U64,
+    panel_deadline: U64,
+}
+
+// What bond_totals adds up. total is what total_owed returns.
+#[near(serializers=[json])]
+#[derive(Clone, Copy, Debug)]
+pub struct BondTotals {
+    bonds_held: U128,
+    claimable: U128,
+    pending_payouts: U128,
+    total: U128,
+}
+
+// A payout sent to the verifier whose callback has not run yet. It stays until the callback settles it.
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Debug)]
+pub struct Payout {
+    account: AccountId,
+    amount: U128,
+    at: U64,
 }
 
 // The NEAR Intents verifier. Bonds arrive in this contract's account there, and payouts are sent out of it.
@@ -247,6 +318,13 @@ pub struct OracleContract {
     collateral_token_id: String,
     bond: u128,
     window_ns: u64,
+    // The room left for apply() to land. Copied onto each market when it is registered.
+    apply_buffer_ns: u64,
+    // Copied onto each case when it is proposed, so a change never touches an open case. In basis points of the bond.
+    juror_share_bps: u32,
+    no_decision_share_bps: u32,
+    // The most publishers that can be added. Lowering it removes none; it only stops more being added.
+    max_publishers: u32,
     // How long each jury has once it is seated, the commit phase and then the reveal phase.
     panel_deadline_ns: u64,
     // How long after a challenge, or after the first jury fails, a jury can still be drawn.
@@ -273,6 +351,14 @@ pub struct OracleContract {
     // after a challenge. Kept so total_owed can add them up without walking a map.
     claimable_total: u128,
     bonds_held: u128,
+    // Payouts sent to the verifier and not yet confirmed or refused, by id. The amount left claimable_total when the payout
+    // was sent and sits in pending_payouts_total until its callback settles it, so total_owed still counts it.
+    payouts: LookupMap<u64, Payout>,
+    pending_payouts_total: u128,
+    // How long a payout must be pending before reconcile_bond_payout can decide it.
+    reconcile_wait_ns: u64,
+    // The id the next payout gets. Starts at 1 and only goes up.
+    last_payout_id: u64,
 }
 
 fn emit(event: &str, data: near_sdk::serde_json::Value) {
@@ -347,6 +433,8 @@ enum Ruling {
     Decided,
     // Neither jury reached a majority in time.
     NoDecision,
+    // No jury could be drawn in either round, so nobody was ever asked.
+    NoJury,
 }
 
 impl Ruling {
@@ -355,6 +443,7 @@ impl Ruling {
             Ruling::Unchallenged => "unchallenged",
             Ruling::Decided => "decided",
             Ruling::NoDecision => "no_decision",
+            Ruling::NoJury => "no_jury",
         }
     }
 }
@@ -436,6 +525,10 @@ impl OracleContract {
             collateral_token_id,
             bond: bond.0,
             window_ns: window_ms.0 * NS_PER_MS,
+            apply_buffer_ns: DEFAULT_APPLY_BUFFER_NS,
+            juror_share_bps: DEFAULT_JUROR_SHARE_BPS,
+            no_decision_share_bps: DEFAULT_NO_DECISION_JUROR_SHARE_BPS,
+            max_publishers: DEFAULT_MAX_PUBLISHERS,
             panel_deadline_ns: panel_deadline_ms.0 * NS_PER_MS,
             draw_window_ns: draw_window_ms.0 * NS_PER_MS,
             min_proposal_ns: min_proposal_ms.0 * NS_PER_MS,
@@ -451,6 +544,10 @@ impl OracleContract {
             claimable: LookupMap::new(Key::Claimable),
             claimable_total: 0,
             bonds_held: 0,
+            payouts: LookupMap::new(Key::Payouts),
+            pending_payouts_total: 0,
+            reconcile_wait_ns: DEFAULT_RECONCILE_WAIT_NS,
+            last_payout_id: 0,
         }
     }
 
@@ -544,6 +641,66 @@ impl OracleContract {
         self.draw_delay_blocks = draw_delay_blocks.0;
     }
 
+    // Applies to cases proposed from now on. A case already proposed pays out on the shares it was proposed with. The
+    // first is of the loser's bond in a decided dispute, the second of the challenger's bond when no jury decided.
+    pub fn set_juror_shares(&mut self, decided_bps: u32, no_decision_bps: u32) {
+        self.only_owner();
+        require!(
+            (MIN_JUROR_SHARE_BPS..=MAX_JUROR_SHARE_BPS).contains(&decided_bps),
+            "the decided juror share must be between 500 and 5000 basis points"
+        );
+        require!(
+            (MIN_NO_DECISION_JUROR_SHARE_BPS..=MAX_NO_DECISION_JUROR_SHARE_BPS).contains(&no_decision_bps),
+            "the no decision juror share must be between 1000 and 10000 basis points"
+        );
+        emit(
+            "juror_shares_set",
+            json!({ "decided_bps": decided_bps, "no_decision_bps": no_decision_bps }),
+        );
+        self.juror_share_bps = decided_bps;
+        self.no_decision_share_bps = no_decision_bps;
+    }
+
+    // Applies to markets registered from now on. A registered market keeps the buffer it was registered with.
+    pub fn set_apply_buffer_ms(&mut self, apply_buffer_ms: U64) {
+        self.only_owner();
+        require!(
+            (MIN_APPLY_BUFFER_NS / NS_PER_MS..=MAX_APPLY_BUFFER_NS / NS_PER_MS).contains(&apply_buffer_ms.0),
+            "the apply buffer must be between 5 seconds and 5 minutes"
+        );
+        emit("apply_buffer_set", json!({ "apply_buffer_ms": apply_buffer_ms }));
+        self.apply_buffer_ns = apply_buffer_ms.0 * NS_PER_MS;
+    }
+
+    // How long a payout must be pending before the owner can decide it by hand. It applies to every payout from now on.
+    pub fn set_reconcile_wait_ns(&mut self, reconcile_wait_ns: U64) {
+        self.only_owner();
+        require!(
+            (MIN_RECONCILE_WAIT_NS..=MAX_RECONCILE_WAIT_NS).contains(&reconcile_wait_ns.0),
+            "the reconcile wait must be between 10 minutes and 7 days"
+        );
+        emit(
+            "reconcile_wait_set",
+            json!({ "reconcile_wait_ns": reconcile_wait_ns.0.to_string() }),
+        );
+        self.reconcile_wait_ns = reconcile_wait_ns.0;
+    }
+
+    // Live. It never removes a publisher, and it cannot go below the number that must sign a price.
+    pub fn set_max_publishers(&mut self, max_publishers: u32) {
+        self.only_owner();
+        require!(
+            (MIN_MAX_PUBLISHERS..=MAX_MAX_PUBLISHERS).contains(&max_publishers),
+            "the publisher limit must be between 1 and 25"
+        );
+        require!(
+            max_publishers >= self.price_threshold,
+            "the publisher limit cannot be below the number that must sign"
+        );
+        emit("max_publishers_set", json!({ "max_publishers": max_publishers }));
+        self.max_publishers = max_publishers;
+    }
+
     // Two steps, so a mistyped account cannot lock the owner out: nothing changes until the new owner accepts.
     pub fn propose_owner(&mut self, new_owner: AccountId) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
@@ -584,8 +741,8 @@ impl OracleContract {
         require!(key.curve_type() == CurveType::ED25519, "publishers use ed25519 keys");
         require!(!self.publishers.contains(&key), "already a publisher");
         require!(
-            self.publishers.len() < MAX_PUBLISHERS,
-            "there can be at most 10 publishers"
+            self.publishers.len() < self.max_publishers as usize,
+            &format!("there can be at most {} publishers", self.max_publishers)
         );
         emit("publisher_added", json!({ "key": key }));
         self.publishers.push(key);
@@ -664,6 +821,7 @@ impl OracleContract {
                 window_ns: U64(self.window_ns),
                 panel_deadline_ns: U64(self.panel_deadline_ns),
                 draw_window_ns: U64(self.draw_window_ns),
+                apply_buffer_ns: U64(self.apply_buffer_ns),
             },
         );
         emit("market_registered", json!({ "market_id": market_id.0.to_string() }));
@@ -788,6 +946,7 @@ impl OracleContract {
                 case.commit_ends_at = U64(seated + panel_deadline_ns / 2);
                 case.panel_deadline = U64(seated + panel_deadline_ns);
                 case.panel = jury;
+                case.seated = true;
                 self.cases.insert(market_id.0, case);
             }
             _ => emit(
@@ -969,7 +1128,8 @@ impl OracleContract {
     }
 
     // Pays the caller's whole claimable balance into the caller's own Intents account, out of this contract's. The balance
-    // is zeroed first and given back in the callback if the verifier refuses.
+    // is zeroed first and recorded as a pending payout, which the callback settles: confirmed, or given back if the verifier
+    // refuses. A callback that never reports leaves the amount pending, still owed and never credited back.
     #[payable]
     pub fn withdraw_bond(&mut self) -> Promise {
         upgrade::require_gas(GAS_WITHDRAW_FLOOR, "a withdrawal sends the payout and then settles it");
@@ -979,6 +1139,21 @@ impl OracleContract {
         require!(amount > 0, "nothing to withdraw");
         self.claimable.remove(&who);
         self.claimable_total -= amount;
+        self.last_payout_id += 1;
+        let id = self.last_payout_id;
+        self.payouts.insert(
+            id,
+            Payout {
+                account: who.clone(),
+                amount: U128(amount),
+                at: U64(env::block_timestamp()),
+            },
+        );
+        self.pending_payouts_total += amount;
+        emit(
+            "bond_payout_requested",
+            json!({ "account": who, "amount": amount.to_string(), "id": id.to_string() }),
+        );
         // mt_transfer returns nothing, so an error here means the verifier's receipt failed (paused, locked, out of gas) and
         // nothing moved.
         ext_verifier::ext(self.verifier.clone())
@@ -988,29 +1163,61 @@ impl OracleContract {
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_CALLBACK)
-                    .on_bond_withdrawn(who, U128(amount)),
+                    .on_bond_withdrawn(U64(id)),
             )
     }
 
+    // Settles one pending payout. The account and amount come from the stored record, never from the call. An id with no
+    // record, already settled or never issued, changes nothing.
     #[private]
-    pub fn on_bond_withdrawn(
-        &mut self,
-        account: AccountId,
-        amount: U128,
-        #[callback_result] result: Result<(), PromiseError>,
-    ) {
-        if result.is_err() {
-            self.add_claimable(&account, amount.0);
-            emit(
-                "bond_payout_failed",
-                json!({ "account": account, "amount": amount.0.to_string() }),
-            );
-        } else {
-            emit(
-                "bond_paid",
-                json!({ "account": account, "amount": amount.0.to_string() }),
-            );
+    pub fn on_bond_withdrawn(&mut self, id: U64, #[callback_result] result: Result<(), PromiseError>) {
+        let Some(payout) = self.payouts.get(&id.0).cloned() else {
+            return;
+        };
+        let data = self.close_payout(id.0, payout, result.is_err());
+        emit(
+            if result.is_err() {
+                "bond_payout_failed"
+            } else {
+                "bond_paid"
+            },
+            data,
+        );
+    }
+
+    // Owner only, for a payout whose callback never came, so it stays in the pending total and still counts as owed. It
+    // needs the reconcile wait after the payout, which leaves the callback time to land, and the owner checks the verifier's
+    // events first: `paid` true means the transfer happened and the record is dropped, false means it did not and the amount
+    // is claimable again. A callback that comes later finds no record and changes nothing.
+    pub fn reconcile_bond_payout(&mut self, id: U64, paid: bool) {
+        self.only_owner();
+        let payout = self
+            .payouts
+            .get(&id.0)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("no payout is pending with that id"));
+        require!(
+            env::block_timestamp() >= payout.at.0.saturating_add(self.reconcile_wait_ns),
+            &format!(
+                "wait {} minutes after the payout before reconciling",
+                self.reconcile_wait_ns / (60 * NS_PER_SEC)
+            )
+        );
+        let mut data = self.close_payout(id.0, payout, !paid);
+        data["paid"] = json!(paid);
+        emit("bond_payout_reconciled", data);
+    }
+
+    // Takes a payout out of the pending total and makes the amount claimable again when it failed. Both the payout callback
+    // and reconcile_bond_payout end a payout here, so the two cannot disagree about the books. Returns the event data.
+    fn close_payout(&mut self, id: u64, payout: Payout, failed: bool) -> near_sdk::serde_json::Value {
+        self.payouts.remove(&id);
+        let amount = payout.amount.0;
+        self.pending_payouts_total -= amount;
+        if failed {
+            self.add_claimable(&payout.account, amount);
         }
+        json!({ "account": payout.account, "amount": amount.to_string(), "id": id.to_string() })
     }
 
     // ---- views ----------------------------------------------------------------------------
@@ -1028,10 +1235,45 @@ impl OracleContract {
     }
 
     // Everything this contract owes, in collateral units: the bonds in cases that are not final and everything waiting to be
-    // withdrawn. The keeper compares it with the verifier's mt_balance_of for this account at the same finalized block. More
-    // there than here is surplus nobody is credited for, or a payout that is in flight. Less is an incident.
+    // withdrawn, plus payouts sent to the verifier and not yet confirmed. The keeper compares it with the verifier's
+    // mt_balance_of for this account at the same finalized block. More there than here is surplus nobody is credited for.
+    // Less is an incident, unless the shortfall is within pending_payouts_total: a payout that already left the verifier
+    // is owed here until its callback runs.
     pub fn total_owed(&self) -> U128 {
-        U128(self.bonds_held + self.claimable_total)
+        U128(self.bonds_held + self.claimable_total + self.pending_payouts_total)
+    }
+
+    // Looks at `limit` consecutive market ids from `from_market_id` (at most MAX_LIST_CASES) and returns a summary for each
+    // one that has a case. An id without a case is skipped, so a page can hold fewer than `limit` entries and the caller
+    // advances by `limit`, not by the number returned.
+    pub fn list_cases(&self, from_market_id: U64, limit: u32) -> Vec<CaseSummary> {
+        (from_market_id.0..=u64::MAX)
+            .take(limit.min(MAX_LIST_CASES) as usize)
+            .filter_map(|id| {
+                self.cases.get(&id).map(|case| CaseSummary {
+                    market_id: U64(id),
+                    stage: case.stage,
+                    proposed: case.proposed,
+                    challenger_answer: case.challenger_answer,
+                    round: case.round,
+                    final_outcome: case.final_outcome,
+                    applied: case.applied,
+                    votes: case.votes.len() as u32,
+                    window_ends_at: case.window_ends_at,
+                    draw_by: case.draw_by,
+                    panel_deadline: case.panel_deadline,
+                })
+            })
+            .collect()
+    }
+
+    pub fn bond_totals(&self) -> BondTotals {
+        BondTotals {
+            bonds_held: U128(self.bonds_held),
+            claimable: U128(self.claimable_total),
+            pending_payouts: U128(self.pending_payouts_total),
+            total: self.total_owed(),
+        }
     }
 
     // Whether a wasm with this sha256 is staged here, for the members to check before they vote to deploy it.
@@ -1048,9 +1290,12 @@ impl OracleContract {
                 "draw_window_ns": self.draw_window_ns.to_string(), "council": self.council,
                 "jury_size": self.jury_size, "draw_delay_blocks": self.draw_delay_blocks.to_string(),
                 "min_proposal_ns": self.min_proposal_ns.to_string(),
-                "min_resolve_gap_ns": self.min_resolve_gap_ns().to_string(), "operator": self.operator,
+                "min_resolve_gap_ns": self.min_resolve_gap_ns().to_string(),
+                "apply_buffer_ns": self.apply_buffer_ns.to_string(), "juror_share_bps": self.juror_share_bps,
+                "no_decision_share_bps": self.no_decision_share_bps, "max_publishers": self.max_publishers, "operator": self.operator,
                 "network": self.network, "publishers": self.publishers, "price_threshold": self.price_threshold,
-                "no_decision_recipient": self.no_decision_recipient })
+                "no_decision_recipient": self.no_decision_recipient,
+                "reconcile_wait_ns": self.reconcile_wait_ns.to_string() })
     }
 }
 
@@ -1120,11 +1365,11 @@ impl OracleContract {
     }
 
     // The least a market registered now must leave between close_at and resolve_by: time to propose, then the longest a
-    // case can take, then room for apply() to land (see APPLY_BUFFER_NS).
+    // case can take, then room for apply() to land (see DEFAULT_APPLY_BUFFER_NS).
     fn min_resolve_gap_ns(&self) -> u64 {
         self.min_proposal_ns
             + case_span_ns(self.window_ns, self.draw_window_ns, self.panel_deadline_ns)
-            + APPLY_BUFFER_NS
+            + self.apply_buffer_ns
     }
 
     fn case(&self, id: u64) -> Case {
@@ -1157,7 +1402,7 @@ impl OracleContract {
         // A case must be able to finish, challenge and both juries included, with room left for apply() to land,
         // before the market's deadline answer is due.
         require!(
-            now + info.case_span_ns() + APPLY_BUFFER_NS <= info.resolve_by.0,
+            now + info.case_span_ns() + info.apply_buffer_ns.0 <= info.resolve_by.0,
             "too late to propose, the market will be voided at its deadline"
         );
         require!(!self.cases.contains_key(&id), "an answer was already proposed");
@@ -1181,11 +1426,14 @@ impl OracleContract {
                 panel_deadline: U64(0),
                 panel: vec![],
                 first_panel: vec![],
+                seated: false,
                 commits: vec![],
                 votes: vec![],
                 final_outcome: None,
                 applied: false,
                 challenged_at: U64(0),
+                juror_share_bps: self.juror_share_bps,
+                no_decision_share_bps: self.no_decision_share_bps,
                 delinquent: vec![],
             },
         );
@@ -1232,7 +1480,7 @@ impl OracleContract {
         let info = self.market_info(id);
         let now = env::block_timestamp();
         let round_ns = info.draw_window_ns.0 + info.panel_deadline_ns.0;
-        if case.round == 0 && now + round_ns + APPLY_BUFFER_NS <= info.resolve_by.0 {
+        if case.round == 0 && now + round_ns + info.apply_buffer_ns.0 <= info.resolve_by.0 {
             case.round = 1;
             case.jury_size = (2 * case.jury_size + 1).min(MAX_PANEL as u32);
             case.draw_by = U64(now + info.draw_window_ns.0);
@@ -1251,7 +1499,12 @@ impl OracleContract {
             } else {
                 Outcome::Void
             };
-            self.settle(id, outcome, Ruling::NoDecision);
+            let ruling = if case.seated {
+                Ruling::NoDecision
+            } else {
+                Ruling::NoJury
+            };
+            self.settle(id, outcome, ruling);
         }
     }
 
@@ -1279,6 +1532,8 @@ impl OracleContract {
         let delinquent = case.delinquent.clone();
         let round = case.round;
         let bond = case.bond.0;
+        let juror_share_bps = u128::from(case.juror_share_bps);
+        let no_decision_share_bps = u128::from(case.no_decision_share_bps);
         self.cases.insert(id, case);
         // The bonds that were put into this case are all handed out below, to the accounts that earned them.
         self.bonds_held -= if challenger.is_some() { 2 * bond } else { bond };
@@ -1290,7 +1545,7 @@ impl OracleContract {
                 // The loser's bond: a quarter shared by the majority jurors, the rest to the winner with the winner's own
                 // bond. The division rounds down and the winner keeps the remainder, so the two bonds are paid out exactly.
                 let winner = if outcome == proposed { proposer } else { c };
-                let pool = bond * JUROR_SHARE_BPS / 10_000;
+                let pool = bond * juror_share_bps / 10_000;
                 juror_pay = pool / majority.len() as u128;
                 for juror in &majority {
                     self.add_claimable(juror, juror_pay);
@@ -1303,7 +1558,7 @@ impl OracleContract {
                 // and neither found for them: half of their bond goes to the jurors who revealed, the rest to the
                 // proposer. With no juror having revealed, the no-decision recipient holds that half, so a pair of accounts
                 // that propose and challenge each other loses it whatever the juries do.
-                let pool = bond * NO_DECISION_JUROR_SHARE_BPS / 10_000;
+                let pool = bond * no_decision_share_bps / 10_000;
                 if revealed.is_empty() {
                     let recipient = self.no_decision_recipient.clone();
                     self.add_claimable(&recipient, pool);
@@ -1316,6 +1571,11 @@ impl OracleContract {
                     self.add_claimable(&proposer, 2 * bond - juror_pay * revealed.len() as u128);
                 }
                 paid = revealed;
+            }
+            (Some(c), Ruling::NoJury) => {
+                // The draw failed, which is no fault of either party: each gets their own bond back.
+                self.add_claimable(&proposer, bond);
+                self.add_claimable(&c, bond);
             }
             _ => self.add_claimable(&proposer, bond),
         }
@@ -1374,6 +1634,10 @@ mod tests {
     const COUNCIL: &str = "council.near";
     const RECIPIENT: &str = "biz.near";
     const NETWORK: &str = "testnet";
+    // The settings every test oracle starts with.
+    const APPLY_BUFFER_NS: u64 = DEFAULT_APPLY_BUFFER_NS;
+    const JUROR_SHARE_BPS: u128 = DEFAULT_JUROR_SHARE_BPS as u128;
+    const NO_DECISION_JUROR_SHARE_BPS: u128 = DEFAULT_NO_DECISION_JUROR_SHARE_BPS as u128;
 
     fn acct(name: &str) -> AccountId {
         name.parse().unwrap()
@@ -1466,6 +1730,7 @@ mod tests {
             window_ns: U64(WINDOW),
             panel_deadline_ns: U64(PANEL),
             draw_window_ns: U64(DRAW_WINDOW),
+            apply_buffer_ns: U64(DEFAULT_APPLY_BUFFER_NS),
         }
     }
 
@@ -1535,6 +1800,7 @@ mod tests {
                 panel_deadline: U64(DEADLINE),
                 panel: JURORS.iter().map(|j| acct(j)).collect(),
                 first_panel: vec![],
+                seated: true,
                 commits: commits
                     .iter()
                     .map(|j| Commit {
@@ -1553,6 +1819,8 @@ mod tests {
                 final_outcome: None,
                 applied: false,
                 challenged_at: U64(0),
+                juror_share_bps: DEFAULT_JUROR_SHARE_BPS,
+                no_decision_share_bps: DEFAULT_NO_DECISION_JUROR_SHARE_BPS,
                 delinquent: vec![],
             },
         );
@@ -3705,6 +3973,12 @@ mod tests {
             .collect()
     }
 
+    // Runs the payout callback for `id` as the contract itself, as the verifier's answer would.
+    fn settle(o: &mut OracleContract, id: u64, paid: bool) {
+        act_as(OWNER, 10 * DEADLINE);
+        o.on_bond_withdrawn(U64(id), if paid { Ok(()) } else { Err(PromiseError::Failed) });
+    }
+
     // The verifier call a payout sent: its arguments, the yocto attached and the gas reserved.
     fn mt_transfer_sent() -> (near_sdk::serde_json::Value, u128, u64) {
         let sent = receipts();
@@ -3938,11 +4212,17 @@ mod tests {
         );
 
         let mut left = 2 * BOND;
-        for who in ["dave.near", "j0.near", "j1.near"] {
+        for (n, who) in ["dave.near", "j0.near", "j1.near"].into_iter().enumerate() {
             let due = owed(&o, who);
             assert!(due > 0, "{who} is owed something");
             act_as(who, 10 * DEADLINE);
             let _ = o.withdraw_bond();
+            assert_eq!(
+                o.total_owed().0,
+                left,
+                "{who}'s {due} is still owed while it is in flight"
+            );
+            settle(&mut o, n as u64 + 1, true);
             left -= due;
             assert_eq!(o.total_owed().0, left, "{who} took {due}");
         }
@@ -3962,7 +4242,9 @@ mod tests {
         assert_eq!(args["receiver_id"], "carol.near");
         assert_eq!(args["token_id"], COLLATERAL);
         assert_eq!(args["amount"], BOND.to_string());
-        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, 0));
+        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, BOND));
+        settle(&mut o, 1, true);
+        assert_eq!(o.total_owed().0, 0);
     }
 
     #[test]
@@ -3981,30 +4263,329 @@ mod tests {
         let mut o = unchallenged_and_final();
         act_as("carol.near", 10 * DEADLINE);
         let _ = o.withdraw_bond();
-        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, 0));
+        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, BOND));
 
-        act_as(OWNER, 10 * DEADLINE);
-        o.on_bond_withdrawn(acct("carol.near"), U128(BOND), Err(PromiseError::Failed));
+        settle(&mut o, 1, false);
         assert_eq!(
-            (owed(&o, "carol.near"), o.total_owed().0, o.claimable_total),
-            (BOND, BOND, BOND),
+            (
+                owed(&o, "carol.near"),
+                o.total_owed().0,
+                o.claimable_total,
+                o.pending_payouts_total
+            ),
+            (BOND, BOND, BOND, 0),
             "the balance and the books are back"
         );
         assert_eq!(
             logged("bond_payout_failed"),
-            vec![near_sdk::serde_json::json!({ "account": "carol.near", "amount": BOND.to_string() })]
+            vec![near_sdk::serde_json::json!({ "account": "carol.near", "amount": BOND.to_string(), "id": "1" })]
         );
 
         act_as("carol.near", 10 * DEADLINE);
         let _ = o.withdraw_bond();
-        act_as(OWNER, 10 * DEADLINE);
-        o.on_bond_withdrawn(acct("carol.near"), U128(BOND), Ok(()));
+        settle(&mut o, 2, true);
         assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, 0));
         assert_eq!(
             logged("bond_paid"),
-            vec![near_sdk::serde_json::json!({ "account": "carol.near", "amount": BOND.to_string() })]
+            vec![near_sdk::serde_json::json!({ "account": "carol.near", "amount": BOND.to_string(), "id": "2" })]
         );
         assert!(logged("bond_payout_failed").is_empty());
+    }
+
+    fn payout_json(account: &str, id: u64) -> near_sdk::serde_json::Value {
+        near_sdk::serde_json::json!({ "account": account, "amount": BOND.to_string(), "id": id.to_string() })
+    }
+
+    // ---- reconcile_bond_payout: the owner decides when the callback never came ----------------------------------
+
+    const PAID_OUT_AT: u64 = 10 * DEADLINE;
+    const PAYOUT_DECIDABLE_AT: u64 = PAID_OUT_AT + DEFAULT_RECONCILE_WAIT_NS;
+
+    // Carol's whole bond is in flight as payout 1.
+    fn a_stuck_payout() -> OracleContract {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", PAID_OUT_AT);
+        let _ = o.withdraw_bond();
+        o
+    }
+
+    fn reconcile_at(o: &mut OracleContract, now: u64, paid: bool) {
+        act_unpaid(OWNER, now);
+        o.reconcile_bond_payout(U64(1), paid);
+    }
+
+    #[test]
+    fn only_the_owner_reconciles_a_payout() {
+        let mut o = a_stuck_payout();
+        for who in ["stranger.near", OPERATOR, "carol.near"] {
+            act_unpaid(who, PAYOUT_DECIDABLE_AT);
+            assert!(
+                refusal(|| o.reconcile_bond_payout(U64(1), false)).contains("owner only"),
+                "{who}"
+            );
+        }
+        assert_eq!((o.pending_payouts_total, o.total_owed().0), (BOND, BOND));
+    }
+
+    #[test]
+    fn an_unknown_payout_id_is_refused() {
+        let mut o = a_stuck_payout();
+        act_unpaid(OWNER, PAYOUT_DECIDABLE_AT);
+        for id in [0, 2, u64::MAX] {
+            assert!(refusal(|| o.reconcile_bond_payout(U64(id), true)).contains("no payout is pending with that id"));
+        }
+    }
+
+    #[test]
+    fn a_payout_is_decided_exactly_at_the_wait_and_not_before() {
+        let mut o = a_stuck_payout();
+        act_unpaid(OWNER, PAYOUT_DECIDABLE_AT - 1);
+        assert!(refusal(|| o.reconcile_bond_payout(U64(1), true))
+            .contains("wait 60 minutes after the payout before reconciling"));
+        assert_eq!(o.pending_payouts_total, BOND);
+        reconcile_at(&mut o, PAYOUT_DECIDABLE_AT, true);
+        assert_eq!(o.pending_payouts_total, 0);
+    }
+
+    #[test]
+    fn a_payout_that_was_paid_is_dropped_and_no_longer_owed() {
+        let mut o = a_stuck_payout();
+        reconcile_at(&mut o, PAYOUT_DECIDABLE_AT, true);
+        assert!(o.payouts.get(&1).is_none());
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (0, 0, 0)
+        );
+        assert_eq!(owed(&o, "carol.near"), 0);
+        let mut event = payout_json("carol.near", 1);
+        event["paid"] = near_sdk::serde_json::json!(true);
+        assert_eq!(logged("bond_payout_reconciled"), vec![event]);
+        assert!(logged("bond_paid").is_empty() && logged("bond_payout_failed").is_empty());
+    }
+
+    #[test]
+    fn a_payout_that_never_happened_is_claimable_again() {
+        let mut o = a_stuck_payout();
+        reconcile_at(&mut o, PAYOUT_DECIDABLE_AT, false);
+        assert!(o.payouts.get(&1).is_none());
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (0, BOND, BOND)
+        );
+        assert_eq!(owed(&o, "carol.near"), BOND);
+        let mut event = payout_json("carol.near", 1);
+        event["paid"] = near_sdk::serde_json::json!(false);
+        assert_eq!(logged("bond_payout_reconciled"), vec![event]);
+        act_as("carol.near", PAYOUT_DECIDABLE_AT + 1);
+        let _ = o.withdraw_bond();
+        assert_eq!((o.pending_payouts_total, o.last_payout_id), (BOND, 2));
+    }
+
+    #[test]
+    fn a_payout_cannot_be_reconciled_twice() {
+        let mut o = a_stuck_payout();
+        reconcile_at(&mut o, PAYOUT_DECIDABLE_AT, false);
+        for paid in [false, true] {
+            act_unpaid(OWNER, PAYOUT_DECIDABLE_AT);
+            assert!(refusal(|| o.reconcile_bond_payout(U64(1), paid)).contains("no payout is pending with that id"));
+        }
+        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (BOND, BOND));
+    }
+
+    #[test]
+    fn a_late_callback_after_a_reconcile_changes_nothing() {
+        for (paid, claimable) in [(true, 0), (false, BOND)] {
+            let mut o = a_stuck_payout();
+            reconcile_at(&mut o, PAYOUT_DECIDABLE_AT, paid);
+            for callback_paid in [true, false] {
+                settle(&mut o, 1, callback_paid);
+                assert_eq!(
+                    (
+                        owed(&o, "carol.near"),
+                        o.claimable_total,
+                        o.pending_payouts_total,
+                        o.total_owed().0
+                    ),
+                    (claimable, claimable, 0, claimable)
+                );
+                assert!(logged("bond_paid").is_empty() && logged("bond_payout_failed").is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_withdrawal_records_the_payout_and_announces_it_before_the_callback() {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        let record = o.payouts.get(&1).cloned().unwrap();
+        assert_eq!(
+            (record.account, record.amount.0, record.at.0),
+            (acct("carol.near"), BOND, 10 * DEADLINE)
+        );
+        assert_eq!(
+            (o.last_payout_id, o.pending_payouts_total, o.claimable_total),
+            (1, BOND, 0)
+        );
+        assert_eq!(logged("bond_payout_requested"), vec![payout_json("carol.near", 1)]);
+        assert!(logged("bond_paid").is_empty() && logged("bond_payout_failed").is_empty());
+    }
+
+    #[test]
+    fn a_confirmed_payout_is_removed_and_reported_paid() {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        settle(&mut o, 1, true);
+        assert!(o.payouts.get(&1).is_none());
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (0, 0, 0)
+        );
+        assert_eq!(logged("bond_paid"), vec![payout_json("carol.near", 1)]);
+    }
+
+    #[test]
+    fn a_callback_that_runs_twice_or_names_an_unknown_id_changes_nothing() {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        settle(&mut o, 1, false);
+        let before = (
+            owed(&o, "carol.near"),
+            o.claimable_total,
+            o.pending_payouts_total,
+            o.total_owed().0,
+        );
+        for (id, paid) in [(1, false), (1, true), (2, true), (0, false), (u64::MAX, false)] {
+            settle(&mut o, id, paid);
+            assert_eq!(
+                (
+                    owed(&o, "carol.near"),
+                    o.claimable_total,
+                    o.pending_payouts_total,
+                    o.total_owed().0
+                ),
+                before
+            );
+        }
+        assert!(logged("bond_paid").is_empty());
+        assert!(logged("bond_payout_failed").is_empty());
+    }
+
+    #[test]
+    fn two_payouts_in_flight_settle_independently() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        act_as("anyone.near", DRAW_BY + 1);
+        o.finalize(U64(0));
+        act_as("anyone.near", DRAW_BY + 1 + PANEL + DRAW_WINDOW + PANEL);
+        o.finalize(U64(0));
+        for who in ["carol.near", "dave.near"] {
+            act_as(who, 10 * DEADLINE);
+            let _ = o.withdraw_bond();
+        }
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (2 * BOND, 0, 2 * BOND)
+        );
+        settle(&mut o, 2, false);
+        assert_eq!(logged("bond_payout_failed"), vec![payout_json("dave.near", 2)]);
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (BOND, BOND, 2 * BOND)
+        );
+        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (0, BOND));
+        assert!(o.payouts.get(&1).is_some() && o.payouts.get(&2).is_none());
+        settle(&mut o, 1, true);
+        assert_eq!(
+            (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
+            (0, BOND, BOND)
+        );
+        assert_eq!(logged("bond_paid"), vec![payout_json("carol.near", 1)]);
+    }
+
+    #[test]
+    fn a_payout_whose_callback_never_reports_stays_pending_and_owed() {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        act_as("carol.near", 100 * DEADLINE);
+        assert_eq!(refusal(|| drop(o.withdraw_bond())), "nothing to withdraw");
+        assert_eq!(
+            (owed(&o, "carol.near"), o.pending_payouts_total, o.total_owed().0),
+            (0, BOND, BOND)
+        );
+        assert!(o.payouts.get(&1).is_some());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        // Whatever the verifier answers, or does not, a withdrawal never changes what is owed while it is in flight, and
+        // after each callback every unit is in exactly one place: paid out, claimable, or still pending.
+        #[test]
+        fn withdrawals_with_any_callback_outcome_create_and_lose_nothing(
+            balances in prop::collection::vec(1u128..1_000_000, 5),
+            steps in prop::collection::vec((0usize..5, 0u8..3), 1..40),
+        ) {
+            let mut o = fresh_oracle();
+            for (i, b) in balances.iter().enumerate() {
+                o.add_claimable(&acct(&format!("u{i}.near")), *b);
+            }
+            let start: u128 = balances.iter().sum();
+            let (mut paid, mut stuck) = (0u128, 0u128);
+            for (who, answer) in steps {
+                let name = format!("u{who}.near");
+                let due = owed(&o, &name);
+                if due == 0 {
+                    continue;
+                }
+                let before = o.total_owed().0;
+                act_as(&name, 10 * DEADLINE);
+                let _ = o.withdraw_bond();
+                prop_assert_eq!(o.total_owed().0, before, "in flight, the money is still owed");
+                prop_assert_eq!(o.pending_payouts_total, stuck + due);
+                let id = o.last_payout_id;
+                match answer {
+                    0 => {
+                        settle(&mut o, id, true);
+                        paid += due;
+                    }
+                    1 => settle(&mut o, id, false),
+                    _ => stuck += due,
+                }
+                let claimable: u128 = (0..5).map(|i| owed(&o, &format!("u{i}.near"))).sum();
+                prop_assert_eq!(claimable, o.claimable_total);
+                prop_assert_eq!(o.pending_payouts_total, stuck);
+                prop_assert_eq!(o.total_owed().0 + paid, start, "nothing was created or lost");
+                prop_assert_eq!(o.bond_totals().total, o.total_owed());
+            }
+        }
+    }
+
+    #[test]
+    fn bond_totals_shows_the_payout_in_flight_and_settles_back_into_the_books() {
+        let mut o = unchallenged_and_final();
+        let totals = |o: &OracleContract| near_sdk::serde_json::to_value(o.bond_totals()).unwrap();
+        let json = |held: u128, claimable: u128, pending: u128| {
+            near_sdk::serde_json::json!({
+                "bonds_held": held.to_string(),
+                "claimable": claimable.to_string(),
+                "pending_payouts": pending.to_string(),
+                "total": (held + claimable + pending).to_string()
+            })
+        };
+        assert_eq!(totals(&o), json(0, BOND, 0));
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        assert_eq!(totals(&o), json(0, 0, BOND));
+        assert_eq!(o.bond_totals().total, o.total_owed());
+        settle(&mut o, 1, false);
+        assert_eq!(totals(&o), json(0, BOND, 0));
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        settle(&mut o, 2, true);
+        assert_eq!(totals(&o), json(0, 0, 0));
     }
 
     #[test]
@@ -4015,14 +4596,81 @@ mod tests {
         act_as("anyone.near", DRAW_BY + 1 + PANEL + DRAW_WINDOW + PANEL);
         o.finalize(U64(0));
         let (carol, dave) = (owed(&o, "carol.near"), owed(&o, "dave.near"));
-        assert!(
-            carol > 0 && dave == 0,
-            "the challenger gets nothing back after no decision"
+        assert_eq!(
+            (carol, dave),
+            (BOND, BOND),
+            "no jury was ever seated, so each is owed their own bond"
         );
         act_as("carol.near", 10 * DEADLINE);
         let _ = o.withdraw_bond();
         assert_eq!(mt_transfer_sent().0["receiver_id"], "carol.near");
+        assert_eq!(
+            o.total_owed().0,
+            2 * BOND,
+            "carol's payout is still owed until it is confirmed"
+        );
+        settle(&mut o, 1, true);
         assert_eq!(o.total_owed().0, 2 * BOND - carol);
+    }
+
+    // The draw could never happen. The system failed, so neither party pays for it.
+    #[test]
+    fn when_no_jury_could_be_drawn_in_either_round_each_party_gets_their_own_bond_back() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        act_as("anyone.near", DRAW_BY + 1);
+        o.finalize(U64(0));
+        assert!(!o.case(0).seated);
+        act_as("anyone.near", DRAW_BY + 1 + PANEL + DRAW_WINDOW + PANEL);
+        o.finalize(U64(0));
+        let case = o.case(0);
+        assert_eq!((case.stage, case.final_outcome), (Stage::Final, Some(Outcome::Void)));
+        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (BOND, BOND));
+        assert_eq!((owed(&o, RECIPIENT), owed(&o, OWNER)), (0, 0));
+        assert_eq!(o.total_owed().0, 2 * BOND, "every unit is still owed to someone");
+        assert_eq!(o.bonds_held, 0);
+        assert_eq!(
+            logged("final"),
+            vec![
+                near_sdk::serde_json::json!({ "market_id": "0", "outcome": "void", "ruling": "no_jury",
+                "juror_pay_each": "0", "paid_jurors": [], "delinquent": [] })
+            ]
+        );
+    }
+
+    // A jury that sat and never revealed is a dispute nobody decided, not a failed draw: the old split stays.
+    #[test]
+    fn a_jury_that_was_seated_but_never_revealed_keeps_the_no_decision_split() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        let over = first_round_that_does_nothing(&mut o, &names(3, "j"));
+        assert!(o.case(0).seated);
+        act_as("anyone.near", over);
+        o.finalize(U64(0));
+        assert!(o.case(0).seated, "the flag survives the escalation");
+        act_as("anyone.near", over + DRAW_WINDOW + 1);
+        o.finalize(U64(0));
+        assert_eq!(o.case(0).stage, Stage::Final);
+        assert_eq!(
+            (owed(&o, "carol.near"), owed(&o, "dave.near"), owed(&o, RECIPIENT)),
+            (BOND + BOND / 2, 0, BOND / 2)
+        );
+        assert_eq!(o.total_owed().0, 2 * BOND);
+        assert_eq!(logged("final")[0]["ruling"], "no_decision");
+    }
+
+    // A jury seated only in the second round counts too.
+    #[test]
+    fn a_jury_seated_only_in_the_second_round_keeps_the_no_decision_split() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        act_as("anyone.near", DRAW_BY + 1);
+        o.finalize(U64(0));
+        let seated_at = DRAW_BY + 1 + SECOND;
+        seat(&mut o, seated_at, &names(7, "k"));
+        assert!(o.case(0).seated);
+        act_as("anyone.near", o.case(0).panel_deadline.0 + 1);
+        o.finalize(U64(0));
+        assert_eq!(o.case(0).stage, Stage::Final);
+        assert_eq!(owed(&o, RECIPIENT), BOND / 2);
+        assert_eq!(logged("final")[0]["ruling"], "no_decision");
     }
 
     #[test]
@@ -4040,5 +4688,478 @@ mod tests {
         assert_eq!(config["verifier"], VERIFIER);
         assert_eq!(config["collateral_token_id"], COLLATERAL);
         assert!(config.get("bond_token").is_none());
+    }
+
+    // ---- list_cases and bond_totals ------------------------------------------------------------------------
+
+    fn put_case_at(o: &mut OracleContract, id: u64, mut case: Case) {
+        case.window_ends_at = U64(id);
+        o.cases.insert(id, case);
+    }
+
+    fn summary_json(o: &OracleContract, from: u64, limit: u32) -> near_sdk::serde_json::Value {
+        near_sdk::serde_json::to_value(o.list_cases(U64(from), limit)).unwrap()
+    }
+
+    fn proposed_case() -> Case {
+        let mut o = oracle_with_resolve_by(MARKET_DEADLINE);
+        act_as(VERIFIER, SECOND);
+        deliver(&mut o, "carol.near", 1, "propose:0:yes:https://x");
+        o.case(0)
+    }
+
+    #[test]
+    fn list_cases_shows_proposed_disputed_and_final_cases_with_exact_fields() {
+        let proposed = proposed_case();
+        let mut o = oracle_with_bond(BOND);
+        put_case_at(&mut o, 3, proposed.clone());
+        disputed_case(&mut o, Outcome::Yes, &["j0.near"], &[("j0.near", Outcome::No)]);
+        let mut disputed = o.case(0);
+        disputed.round = 1;
+        put_case_at(&mut o, 4, disputed);
+        let mut done = proposed;
+        done.stage = Stage::Final;
+        done.final_outcome = Some(Outcome::Void);
+        done.applied = true;
+        put_case_at(&mut o, 5, done);
+
+        let rows = summary_json(&o, 3, 3);
+        let window_of = |id: u64| id.to_string();
+        let expected = near_sdk::serde_json::json!([
+            { "market_id": "3", "stage": "proposed", "proposed": "yes", "challenger_answer": null, "round": 0,
+              "final_outcome": null, "applied": false, "votes": 0, "window_ends_at": window_of(3),
+              "draw_by": "0", "panel_deadline": "0" },
+            { "market_id": "4", "stage": "disputed", "proposed": "yes", "challenger_answer": "no", "round": 1,
+              "final_outcome": null, "applied": false, "votes": 1, "window_ends_at": window_of(4),
+              "draw_by": DRAW_WINDOW.to_string(), "panel_deadline": DEADLINE.to_string() },
+            { "market_id": "5", "stage": "final", "proposed": "yes", "challenger_answer": null, "round": 0,
+              "final_outcome": "void", "applied": true, "votes": 0, "window_ends_at": window_of(5),
+              "draw_by": "0", "panel_deadline": "0" },
+        ]);
+        assert_eq!(rows, expected);
+    }
+
+    #[test]
+    fn list_cases_skips_ids_without_a_case_and_starts_at_the_id_asked_for() {
+        let case = proposed_case();
+        let mut o = fresh_oracle();
+        for id in [1, 4, 6] {
+            put_case_at(&mut o, id, case.clone());
+        }
+        let ids = |from, limit| -> Vec<String> {
+            o.list_cases(U64(from), limit)
+                .iter()
+                .map(|c| c.market_id.0.to_string())
+                .collect()
+        };
+        assert_eq!(ids(0, 7), ["1", "4", "6"]);
+        assert_eq!(ids(0, 4), ["1"], "ids 0 to 3 hold one case, so the page is short");
+        assert_eq!(ids(2, 3), ["4"]);
+        assert_eq!(ids(4, 10), ["4", "6"]);
+        assert_eq!(ids(5, 1), Vec::<String>::new());
+    }
+
+    #[test]
+    fn list_cases_clamps_the_limit_and_is_empty_past_the_last_id() {
+        let case = proposed_case();
+        let mut o = fresh_oracle();
+        let last = u64::from(MAX_LIST_CASES) + 9;
+        for id in 0..=last {
+            put_case_at(&mut o, id, case.clone());
+        }
+        assert_eq!(o.list_cases(U64(0), u32::MAX).len(), MAX_LIST_CASES as usize);
+        assert_eq!(
+            o.list_cases(U64(0), MAX_LIST_CASES + 1).last().unwrap().market_id.0,
+            u64::from(MAX_LIST_CASES) - 1
+        );
+        assert_eq!(o.list_cases(U64(0), 0).len(), 0);
+        assert!(o.list_cases(U64(last + 1), 10).is_empty());
+        assert!(o.list_cases(U64(u64::MAX), u32::MAX).is_empty());
+    }
+
+    #[test]
+    fn bond_totals_add_up_to_total_owed_through_a_proposal_a_challenge_a_settlement_and_a_withdrawal() {
+        let mut o = oracle_with_bond(BOND);
+        o.markets.insert(
+            0,
+            MarketInfo {
+                resolve_by: U64(MARKET_DEADLINE),
+                ..base_info()
+            },
+        );
+        let check = |o: &OracleContract, held: u128, claimable: u128, pending: u128| {
+            let totals = near_sdk::serde_json::to_value(o.bond_totals()).unwrap();
+            assert_eq!(
+                totals,
+                near_sdk::serde_json::json!({
+                    "bonds_held": held.to_string(),
+                    "claimable": claimable.to_string(),
+                    "pending_payouts": pending.to_string(),
+                    "total": (held + claimable + pending).to_string()
+                })
+            );
+            assert_eq!(o.bond_totals().total, o.total_owed());
+        };
+        check(&o, 0, 0, 0);
+        act_as(VERIFIER, SECOND);
+        deliver(&mut o, "carol.near", BOND, "propose:0:yes:https://x");
+        check(&o, BOND, 0, 0);
+        act_as(VERIFIER, CHALLENGED_AT);
+        deliver(&mut o, "dave.near", BOND, "challenge:0:no");
+        check(&o, 2 * BOND, 0, 0);
+        act_as("anyone.near", DRAW_BY + 1);
+        o.finalize(U64(0));
+        seat(&mut o, DRAW_BY + 1 + SECOND, &names(7, "k"));
+        act_as("anyone.near", o.case(0).panel_deadline.0 + 1);
+        o.finalize(U64(0));
+        assert_eq!(o.case(0).stage, Stage::Final);
+        check(&o, 0, 2 * BOND, 0);
+        let paid = owed(&o, RECIPIENT);
+        assert!(paid > 0);
+        act_as(RECIPIENT, 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        check(&o, 0, 2 * BOND - paid, paid);
+        settle(&mut o, 1, true);
+        check(&o, 0, 2 * BOND - paid, 0);
+        let carol = owed(&o, "carol.near");
+        assert!(carol > 0);
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        check(&o, 0, 2 * BOND - paid - carol, carol);
+        settle(&mut o, 2, false);
+        check(&o, 0, 2 * BOND - paid, 0);
+    }
+
+    #[test]
+    fn the_list_and_totals_views_change_nothing() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        let case = o.case(0);
+        put_case_at(&mut o, 9, case);
+        let before = (
+            near_sdk::serde_json::to_value(o.get_case(U64(0))).unwrap(),
+            near_sdk::serde_json::to_value(o.get_case(U64(9))).unwrap(),
+            o.config(),
+            o.total_owed(),
+        );
+        for _ in 0..2 {
+            let _ = o.list_cases(U64(0), 50);
+            let _ = o.bond_totals();
+        }
+        let after = (
+            near_sdk::serde_json::to_value(o.get_case(U64(0))).unwrap(),
+            near_sdk::serde_json::to_value(o.get_case(U64(9))).unwrap(),
+            o.config(),
+            o.total_owed(),
+        );
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn the_views_leave_a_payout_in_flight_untouched() {
+        let mut o = unchallenged_and_final();
+        act_as("carol.near", 10 * DEADLINE);
+        let _ = o.withdraw_bond();
+        let state = |o: &OracleContract| {
+            (
+                near_sdk::serde_json::to_value(o.bond_totals()).unwrap(),
+                o.total_owed(),
+                o.claimable_of(acct("carol.near")),
+                o.pending_payouts_total,
+                o.last_payout_id,
+                o.payouts.get(&1).cloned().map(|p| p.amount),
+            )
+        };
+        let before = state(&o);
+        for _ in 0..2 {
+            let _ = o.list_cases(U64(0), 50);
+        }
+        assert_eq!(before, state(&o));
+    }
+
+    // ---- the policy settings the DAO can tune -------------------------------------------------------------------
+
+    #[test]
+    fn the_policy_settings_start_at_the_values_that_used_to_be_fixed() {
+        let c = fresh_oracle().config();
+        assert_eq!(c["apply_buffer_ns"], "30000000000");
+        assert_eq!(c["juror_share_bps"], 2_500);
+        assert_eq!(c["no_decision_share_bps"], 5_000);
+        assert_eq!(c["max_publishers"], 10);
+        assert_eq!(c["min_resolve_gap_ns"], MIN_GAP.to_string());
+    }
+
+    #[test]
+    fn the_policy_settings_refuse_a_stranger_and_the_operator() {
+        let mut o = fresh_oracle();
+        for who in ["stranger.near", OPERATOR] {
+            act_unpaid(who, 5);
+            assert!(
+                refusal(|| o.set_juror_shares(2_500, 5_000)).contains("owner only"),
+                "{who}"
+            );
+            assert!(
+                refusal(|| o.set_apply_buffer_ms(U64(30_000))).contains("owner only"),
+                "{who}"
+            );
+            assert!(refusal(|| o.set_max_publishers(10)).contains("owner only"), "{who}");
+        }
+    }
+
+    #[test]
+    fn the_reconcile_wait_starts_at_an_hour_and_the_owner_moves_it_within_its_bounds() {
+        let mut o = fresh_oracle();
+        assert_eq!(o.config()["reconcile_wait_ns"], DEFAULT_RECONCILE_WAIT_NS.to_string());
+        act_unpaid(OWNER, 5);
+        o.set_reconcile_wait_ns(U64(MIN_RECONCILE_WAIT_NS));
+        assert_eq!(
+            logged("reconcile_wait_set"),
+            vec![near_sdk::serde_json::json!({ "reconcile_wait_ns": MIN_RECONCILE_WAIT_NS.to_string() })]
+        );
+        assert_eq!(o.config()["reconcile_wait_ns"], "600000000000");
+        o.set_reconcile_wait_ns(U64(MAX_RECONCILE_WAIT_NS));
+        assert_eq!(o.config()["reconcile_wait_ns"], "604800000000000");
+        for bad in [0, MIN_RECONCILE_WAIT_NS - 1, MAX_RECONCILE_WAIT_NS + 1] {
+            let message = refusal(|| o.set_reconcile_wait_ns(U64(bad)));
+            assert!(message.contains("between 10 minutes and 7 days"), "{bad}: {message}");
+        }
+    }
+
+    #[test]
+    fn only_the_owner_sets_the_reconcile_wait() {
+        let mut o = fresh_oracle();
+        for who in ["stranger.near", OPERATOR] {
+            act_unpaid(who, 5);
+            assert!(
+                refusal(|| o.set_reconcile_wait_ns(U64(DEFAULT_RECONCILE_WAIT_NS))).contains("owner only"),
+                "{who}"
+            );
+        }
+        assert_eq!(o.config()["reconcile_wait_ns"], DEFAULT_RECONCILE_WAIT_NS.to_string());
+    }
+
+    #[test]
+    fn a_longer_reconcile_wait_refuses_a_reconcile_the_old_wait_would_allow() {
+        let mut o = a_stuck_payout();
+        act_unpaid(OWNER, PAID_OUT_AT);
+        o.set_reconcile_wait_ns(U64(2 * DEFAULT_RECONCILE_WAIT_NS));
+        act_unpaid(OWNER, PAYOUT_DECIDABLE_AT);
+        assert!(refusal(|| o.reconcile_bond_payout(U64(1), true))
+            .contains("wait 120 minutes after the payout before reconciling"));
+        reconcile_at(&mut o, PAID_OUT_AT + 2 * DEFAULT_RECONCILE_WAIT_NS, true);
+        assert_eq!(o.pending_payouts_total, 0);
+    }
+
+    #[test]
+    fn the_juror_shares_refuse_values_outside_their_range_at_both_ends() {
+        let mut o = fresh_oracle();
+        act_unpaid(OWNER, 5);
+        for decided in [499, 5_001] {
+            let message = refusal(|| o.set_juror_shares(decided, 5_000));
+            assert!(
+                message.contains("decided juror share must be between 500 and 5000"),
+                "{decided}: {message}"
+            );
+        }
+        for none in [999, 10_001] {
+            let message = refusal(|| o.set_juror_shares(2_500, none));
+            assert!(
+                message.contains("no decision juror share must be between 1000 and 10000"),
+                "{none}: {message}"
+            );
+        }
+        o.set_juror_shares(500, 1_000);
+        o.set_juror_shares(5_000, 10_000);
+        assert_eq!(o.config()["juror_share_bps"], 5_000);
+    }
+
+    #[test]
+    fn the_juror_shares_show_in_config_and_emit_their_event() {
+        let mut o = fresh_oracle();
+        act_unpaid(OWNER, 5);
+        o.set_juror_shares(1_000, 2_000);
+        let c = o.config();
+        assert_eq!(c["juror_share_bps"], 1_000);
+        assert_eq!(c["no_decision_share_bps"], 2_000);
+        assert_eq!(
+            logged("juror_shares_set"),
+            vec![near_sdk::serde_json::json!({ "decided_bps": 1_000, "no_decision_bps": 2_000 })]
+        );
+    }
+
+    fn open_dispute(o: &mut OracleContract, id: u64) {
+        o.markets.insert(
+            id,
+            MarketInfo {
+                resolve_by: U64(MARKET_DEADLINE),
+                ..base_info()
+            },
+        );
+        act_as(VERIFIER, SECOND);
+        deliver(o, "carol.near", BOND, &format!("propose:{id}:yes:https://x"));
+        act_as(VERIFIER, CHALLENGED_AT);
+        deliver(o, "dave.near", BOND, &format!("challenge:{id}:no"));
+    }
+
+    // All three jurors are seated and revealed, so a ruling of either kind has jurors to pay.
+    fn jurors_revealed(o: &mut OracleContract, id: u64) {
+        let mut case = o.case(id);
+        case.panel = JURORS.iter().map(|j| acct(j)).collect();
+        case.seated = true;
+        case.votes = JURORS
+            .iter()
+            .map(|j| Vote {
+                juror: acct(j),
+                outcome: Outcome::No,
+                reason: "r".into(),
+            })
+            .collect();
+        o.cases.insert(id, case);
+    }
+
+    #[test]
+    fn a_case_pays_the_juror_shares_it_was_proposed_with() {
+        let mut o = oracle_with_bond(BOND);
+        open_dispute(&mut o, 0);
+        open_dispute(&mut o, 1);
+        act_unpaid(OWNER, 3 * SECOND);
+        o.set_juror_shares(1_000, 2_000);
+        open_dispute(&mut o, 2);
+        open_dispute(&mut o, 3);
+        assert_eq!(
+            (o.case(0).juror_share_bps, o.case(0).no_decision_share_bps),
+            (2_500, 5_000)
+        );
+        assert_eq!(
+            (o.case(2).juror_share_bps, o.case(2).no_decision_share_bps),
+            (1_000, 2_000)
+        );
+        for id in 0..4 {
+            jurors_revealed(&mut o, id);
+        }
+        act_as("anyone.near", 100 * SECOND);
+        o.settle(0, Outcome::No, Ruling::Decided);
+        let old = BOND * 2_500 / 10_000 / 3;
+        assert_eq!(owed(&o, "j0.near"), old);
+        o.settle(2, Outcome::No, Ruling::Decided);
+        let new = BOND * 1_000 / 10_000 / 3;
+        assert_eq!(owed(&o, "j0.near"), old + new);
+        o.settle(1, Outcome::Void, Ruling::NoDecision);
+        assert_eq!(owed(&o, "j1.near"), old + new + BOND * 5_000 / 10_000 / 3);
+        o.settle(3, Outcome::Void, Ruling::NoDecision);
+        assert_eq!(
+            owed(&o, "j2.near"),
+            old + new + BOND * 5_000 / 10_000 / 3 + BOND * 2_000 / 10_000 / 3
+        );
+    }
+
+    #[test]
+    fn get_case_shows_the_shares_and_list_cases_does_not() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        let case = near_sdk::serde_json::to_value(o.get_case(U64(0))).unwrap();
+        assert_eq!(case["juror_share_bps"], 2_500);
+        assert_eq!(case["no_decision_share_bps"], 5_000);
+        let row = near_sdk::serde_json::to_value(o.list_cases(U64(0), 1)).unwrap();
+        assert!(row[0].get("juror_share_bps").is_none() && row[0].get("no_decision_share_bps").is_none());
+        act_unpaid(OWNER, 5);
+        o.set_juror_shares(500, 1_000);
+        let case = near_sdk::serde_json::to_value(o.get_case(U64(0))).unwrap();
+        assert_eq!(case["juror_share_bps"], 2_500, "an open case keeps its shares");
+    }
+
+    #[test]
+    fn the_apply_buffer_refuses_values_outside_its_range_at_both_ends() {
+        let mut o = fresh_oracle();
+        act_unpaid(OWNER, 5);
+        for ms in [4_999, 300_001] {
+            let message = refusal(|| o.set_apply_buffer_ms(U64(ms)));
+            assert!(message.contains("between 5 seconds and 5 minutes"), "{ms}: {message}");
+        }
+        o.set_apply_buffer_ms(U64(5_000));
+        assert_eq!(o.config()["apply_buffer_ns"], "5000000000");
+        o.set_apply_buffer_ms(U64(300_000));
+        assert_eq!(o.config()["apply_buffer_ns"], "300000000000");
+        assert_eq!(logged("apply_buffer_set").last().unwrap()["apply_buffer_ms"], "300000");
+    }
+
+    #[test]
+    fn a_market_keeps_the_apply_buffer_it_was_registered_with() {
+        let mut o = fresh_oracle();
+        act_as(MARKET, 0);
+        o.register_market(U64(0), U64(1_000), U64(1_000 + MIN_GAP), "hash".to_string(), None);
+        act_unpaid(OWNER, 1);
+        o.set_apply_buffer_ms(U64(60_000));
+        assert_eq!(
+            o.config()["min_resolve_gap_ns"],
+            (MIN_GAP - APPLY_BUFFER_NS + 60 * SECOND).to_string(),
+            "new markets need the new buffer"
+        );
+        act_as(MARKET, 2);
+        let refused = refusal(|| {
+            o.register_market(U64(1), U64(1_000), U64(1_000 + MIN_GAP), "hash".to_string(), None);
+        });
+        assert!(refused.contains("too soon after close_at"), "{refused}");
+        o.register_market(
+            U64(1),
+            U64(1_000),
+            U64(1_000 + MIN_GAP + 30 * SECOND),
+            "hash".to_string(),
+            None,
+        );
+        assert_eq!(o.market_info(0).apply_buffer_ns.0, APPLY_BUFFER_NS);
+        assert_eq!(o.market_info(1).apply_buffer_ns.0, 60 * SECOND);
+        // The old market still fits a case with its own 30 second buffer.
+        act_as(VERIFIER, 1_000 + PROPOSAL_TIME);
+        deliver(&mut o, "carol.near", 1, "propose:0:yes:https://x");
+        // The new one does not fit the same moment with its 60 second buffer.
+        act_as(VERIFIER, 1_000 + PROPOSAL_TIME + 30 * SECOND + 1);
+        let late = refusal(|| {
+            deliver(&mut o, "carol.near", 1, "propose:1:yes:https://x");
+        });
+        assert!(late.contains("too late to propose"), "{late}");
+    }
+
+    #[test]
+    fn the_publisher_limit_refuses_values_outside_its_range_and_below_the_signers_needed() {
+        let mut o = fresh_oracle();
+        act_unpaid(OWNER, 5);
+        for n in [0, 26] {
+            let message = refusal(|| o.set_max_publishers(n));
+            assert!(message.contains("between 1 and 25"), "{n}: {message}");
+        }
+        let message = refusal(|| o.set_max_publishers(1));
+        assert!(
+            message.contains("cannot be below the number that must sign"),
+            "{message}"
+        );
+        o.set_max_publishers(25);
+        o.set_max_publishers(2);
+        assert_eq!(o.config()["max_publishers"], 2);
+        assert_eq!(logged("max_publishers_set").last().unwrap()["max_publishers"], 2);
+    }
+
+    #[test]
+    fn lowering_the_publisher_limit_blocks_the_next_add_and_keeps_those_there() {
+        let (mut o, _) = price_oracle(true);
+        act_unpaid(OWNER, 5);
+        o.set_max_publishers(2);
+        assert_eq!(o.config()["publishers"].as_array().unwrap().len(), 3);
+        let message = refusal(|| o.add_publisher(public(&signing_key(40))));
+        assert!(message.contains("there can be at most 2 publishers"), "{message}");
+        o.set_max_publishers(4);
+        o.add_publisher(public(&signing_key(40)));
+        assert_eq!(o.config()["publishers"].as_array().unwrap().len(), 4);
+        let message = refusal(|| o.add_publisher(public(&signing_key(41))));
+        assert!(message.contains("there can be at most 4 publishers"), "{message}");
+    }
+
+    #[test]
+    fn a_raised_publisher_limit_lets_more_than_ten_be_added() {
+        let (mut o, _) = price_oracle(true);
+        act_unpaid(OWNER, 5);
+        o.set_max_publishers(25);
+        for seed in 10..32 {
+            o.add_publisher(public(&signing_key(seed)));
+        }
+        assert_eq!(o.config()["publishers"].as_array().unwrap().len(), 25);
     }
 }

@@ -364,7 +364,7 @@ async fn the_deploy_check_reports_whether_the_council_can_seat_a_jury_and_a_seco
     // too few for the second jury of 7 that a failed first round calls for.
     let (out, ok) = keeper(&w, &["check"]).await;
     assert!(
-        !ok && out.contains("5 different seat holders") && out.contains("12 are needed (3 + 7 + 2)"),
+        !ok && out.contains("5 drawable seat holders") && out.contains("12 are needed (3 + 7 + 2)"),
         "{out}"
     );
     assert!(
@@ -403,15 +403,15 @@ async fn the_deploy_check_reports_whether_the_council_can_seat_a_jury_and_a_seco
         .await?
         .into_result()?;
     add_seat_holders(&w, 6).await?;
-    let (out, ok) = check_showing(&w, "11 different seat holders").await;
+    let (out, ok) = check_showing(&w, "11 drawable seat holders").await;
     assert!(
-        !ok && out.contains("11 different seat holders") && out.contains("12 are needed (3 + 7 + 2)"),
+        !ok && out.contains("11 drawable seat holders") && out.contains("12 are needed (3 + 7 + 2)"),
         "{out}"
     );
     add_seat_holders(&w, 1).await?;
-    let (out, ok) = check_showing(&w, "12 different seat holders").await;
+    let (out, ok) = check_showing(&w, "12 drawable seat holders").await;
     assert!(
-        ok && out.contains("12 different seat holders") && out.trim_end().ends_with("ok"),
+        ok && out.contains("12 drawable seat holders") && out.trim_end().ends_with("ok"),
         "{out}"
     );
     Ok(())

@@ -201,8 +201,8 @@ async fn a_keeper_outage_for_the_whole_answer_period_still_ends_with_the_propose
 }
 
 // The same outage with a dispute in it: nobody draws the jury, so no round can finish, and the deadline call ends the
-// case with no decision. An event market goes Void and the bonds are split as the no decision rule says: the proposer
-// keeps its own and takes half the challenger's, and the half meant for jurors goes to the owner because none revealed.
+// case with no decision. An event market goes Void. No jury was ever seated, so each side gets its own bond back and nobody
+// else is paid.
 #[tokio::test]
 async fn a_keeper_outage_through_a_dispute_ends_in_a_void_at_the_deadline_not_in_a_stuck_market() -> anyhow::Result<()>
 {
@@ -241,9 +241,9 @@ async fn a_keeper_outage_through_a_dispute_ends_in_a_void_at_the_deadline_not_in
         (market["outcome"].as_str(), market["status"].as_str()),
         (Some("void"), Some("resolved"))
     );
-    assert_eq!(claimable(&w, w.carol.id()).await, BOND + BOND / 2);
-    assert_eq!(claimable(&w, w.dave.id()).await, 0);
-    assert_eq!(claimable(&w, w.treasury.id()).await, BOND / 2);
+    assert_eq!(claimable(&w, w.carol.id()).await, BOND);
+    assert_eq!(claimable(&w, w.dave.id()).await, BOND);
+    assert_eq!(claimable(&w, w.treasury.id()).await, 0);
     assert_eq!(claimable(&w, w.owner.id()).await, 0);
     assert!(invariant(&w, id).await);
     Ok(())

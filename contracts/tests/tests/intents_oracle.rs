@@ -444,7 +444,11 @@ async fn a_bond_withdrawal_the_verifier_refuses_restores_the_claimable() -> anyh
 
     lock_account(&w, w.oracle.id()).await?;
     let logs = withdraw_bond(&w, &w.carol).await?;
-    assert_eq!(event_names(&logs), vec!["bond_payout_failed"], "{logs:?}");
+    assert_eq!(
+        event_names(&logs),
+        vec!["bond_payout_requested", "bond_payout_failed"],
+        "{logs:?}"
+    );
     assert_eq!(claimable(&w, w.carol.id()).await, BOND, "the claimable is back");
     assert_eq!(intents_balance(&w, w.carol.id()).await, carol_intents);
     assert_eq!(oracle_total_owed(&w).await, BOND);
@@ -453,13 +457,21 @@ async fn a_bond_withdrawal_the_verifier_refuses_restores_the_claimable() -> anyh
 
     pause_transfers(&w).await?;
     let logs = withdraw_bond(&w, &w.carol).await?;
-    assert_eq!(event_names(&logs), vec!["bond_payout_failed"], "{logs:?}");
+    assert_eq!(
+        event_names(&logs),
+        vec!["bond_payout_requested", "bond_payout_failed"],
+        "{logs:?}"
+    );
     assert_eq!(claimable(&w, w.carol.id()).await, BOND);
     assert_oracle_reconciled(&w).await;
     unpause_transfers(&w).await?;
 
     let logs = withdraw_bond(&w, &w.carol).await?;
-    assert_eq!(event_names(&logs), vec!["mt_transfer", "bond_paid"], "{logs:?}");
+    assert_eq!(
+        event_names(&logs),
+        vec!["bond_payout_requested", "mt_transfer", "bond_paid"],
+        "{logs:?}"
+    );
     assert_eq!(claimable(&w, w.carol.id()).await, 0);
     assert_eq!(intents_balance(&w, w.carol.id()).await, carol_intents + BOND);
     assert_eq!(oracle_total_owed(&w).await, 0);
@@ -491,7 +503,11 @@ async fn a_full_dispute_keeps_total_owed_equal_to_the_verifiers_balance() -> any
         assert_eq!(claimable(&w, who.id()).await, due);
         let before = intents_balance(&w, who.id()).await;
         let logs = withdraw_bond(&w, &who).await?;
-        assert_eq!(event_names(&logs), vec!["mt_transfer", "bond_paid"], "{logs:?}");
+        assert_eq!(
+            event_names(&logs),
+            vec!["bond_payout_requested", "mt_transfer", "bond_paid"],
+            "{logs:?}"
+        );
         assert_eq!(intents_balance(&w, who.id()).await - before, due, "paid into Intents");
         assert_eq!(claimable(&w, who.id()).await, 0);
         left -= due;
