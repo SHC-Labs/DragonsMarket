@@ -17,6 +17,7 @@ Release requirements for Intents-backed settlement and Trezu/Sputnik administrat
 3. [Administration and upgrades](#3-administration-and-upgrades)
 4. [Website and operations](#4-website-and-operations)
 5. [Opening the venue](#5-opening-the-venue)
+6. [View cost at scale](#view-cost-at-scale)
 
 ---
 
@@ -125,3 +126,67 @@ are sealed, `keeper.mjs check --expect-sealed` is the release gate.
 Launch only against evidence for [R-01 through R-08](../spec.md#requirements-to-implementation-map),
 with the implemented limitations disclosed. Publishing, deployment and real-money testing need
 explicit authorisation. This document records requirements and does not perform those actions.
+
+## View cost at scale
+
+Measured 2026-10-22, and again after the account index and the `entitlements_of` cap, in the NEAR sandbox with `contracts/tests/tests/scale.rs`. Each view method was
+also sent as an ordinary transaction with 300 TGas attached, and the gas burnt is the figure below.
+It includes a fixed transaction cost of about 1.7 TGas (what `total_owed`, which only reads a
+counter, burns). A public RPC limits a view call to about 200 TGas. The sandbox does not enforce
+that limit on views, so only the gas column shows whether a view fits.
+
+World at N = 300: 50 cases with a proposal each (3 of them challenged), the newest 50 markets
+seeded and traded, the newest 20 holding positions for one account, one market with a full
+120-point price history, and 105 staked Council seats.
+
+| View | N markets | Gas (TGas of 200) | ms |
+| --- | --- | --- | --- |
+| market `total_owed`, `in_flight`, `owed_breakdown`, `list_sweeps` | 300 | 1.7 to 1.8 | 0 to 1 |
+| market `list_markets` (50, bare markets / traded markets) | 300 | 9.3 / 9.7 | 11 / 9 |
+| market `get_history` (120 points) | 300 | 2.6 | 2 |
+| market `get_positions` (20 held) | 300 / 600 / 1,200 | 7.1 / 7.1 / 7.1 | 2 / 3 / 3 |
+| market `get_account` (20 held) | 300 / 600 / 1,200 | 7.1 / 7.1 / 7.1 | 2 / 1 / 1 |
+| market `get_positions` (1 held, newest market) | 300 / 600 / 1,200 | 2.2 / 2.1 / 2.1 | 1 / 1 / 1 |
+| market `get_account` (1 held, newest market) | 300 / 600 / 1,200 | 2.4 / 2.3 / 2.3 | 1 / 1 / 0 |
+| oracle `list_cases` (50, 50 cases) | 300 | 7.3 | 5 |
+| oracle `bond_totals`, `total_owed` | 300 | 1.7 | 1 |
+| council `list_quarters` (50) | 300 | 6.7 | 4 |
+| council `reward_totals` | 300 | 1.7 | 0 |
+| council `entitlements_of` (25 quarters, account with 10 seats) | 300 | 56.9 | 6 |
+| council `entitlements_of` (50 asked, clamped to 25, 10 seats) | 300 | 56.9 | 5 |
+| council `staked_tokens` (105 seats) | 300 | 9.6 | 3 |
+
+Before and after, in TGas:
+
+| View | Before | After |
+| --- | --- | --- |
+| `get_positions` and `get_account`, 20 held | 72.4 at N = 300 | 7.1 at N = 300, 600 and 1,200 |
+| `get_positions`, 1 held in the newest market | 142.0 at N = 600, 282.4 at N = 1,200 | 2.1 at N = 600 and 1,200 |
+| `get_account`, 1 held in the newest market | same as `get_positions` | 2.3 at N = 600 and 1,200 |
+| `entitlements_of`, 10 seats, 50 quarters asked | 111.6 | 56.9 (clamped to 25 quarters) |
+
+The market keeps, for each account, the sorted list of market ids in which it holds shares, updated
+only where a share entry is created or removed. `get_positions` reads that list instead of scanning
+market ids from 0, so its cost follows the number of positions (about 0.27 TGas each) and not the
+number of markets. `get_account` calls it and costs the same. Writing the list costs a trade a
+read and a write of one record of 8 bytes per market the account holds. An ordinary account holds
+at most 20; the operator and the owner, who are not held to that cap, can hold one per market, and
+a record of 1,000 markets is 8 KB. `entitlements_of` walks at most 25 quarters, and each quarter costs a
+lookup for every token the account has ever staked, so its gas also grows with the number of
+seats; only an account with 10 seats was measured.
+
+`create_market` burns 7.3 TGas in all (the oracle registration included), but needs at least 40
+TGas attached (30 ran out of gas; sizes above 40 were not tried, and nothing between 30 and 40). Six calls of 45 TGas fit in one 300 TGas transaction.
+
+Rerun (about 12 minutes):
+
+```
+cd contracts && SCALE_MARKETS=300 cargo test -p tests --test scale -- --ignored --nocapture --test-threads=1
+```
+
+For launch: `get_positions` and `get_account` burned under 8 TGas at 300, 600 and 1,200 markets
+and did not grow with the number of markets. `entitlements_of` burned 56.9 TGas for an account
+with 10 seats and is capped at 25 quarters per call. Every other view measured stays under 10 TGas.
+Not measured: an account with more than 10 seats on `entitlements_of`, an operator holding a position
+in hundreds of markets on `get_positions`, a Council with revenue in many quarters, and views with
+more than 120 history points (the cap).

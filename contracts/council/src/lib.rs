@@ -37,8 +37,11 @@ const MAX_CLOSE_GRACE_NS: u64 = 30 * NS_PER_DAY;
 // Quarters one call moves seat time or a seat's weight across. A longer idle stretch needs advance_quarters or book_seat_time
 // first, in as many calls as it takes.
 const MAX_QUARTER_STEPS: u32 = 8;
-// Quarters or entitlements one view returns.
+// Quarters one list_quarters call returns.
 const MAX_VIEW_QUARTERS: u32 = 50;
+// Quarters one entitlements_of call walks. Each quarter costs a lookup for every token the account has ever staked, so this
+// bounds the gas of the view for an account with many seats.
+const MAX_ENTITLEMENT_QUARTERS: u32 = 25;
 const GAS_NFT_TRANSFER: Gas = Gas::from_tgas(15);
 // The verifier burned 3.8 TGas for a payout from a contract in the sandbox (INTENTS-PROOF.md), so this is a wide margin.
 const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
@@ -1115,13 +1118,13 @@ impl CouncilContract {
         self.entitlement_view(quarter, &token_id, &account_id)
     }
 
-    // The entitlements of every token the account has staked, for `limit` quarters from `from_quarter` (at most 50), oldest
+    // The entitlements of every token the account has staked, for `limit` quarters from `from_quarter` (at most 25), oldest
     // first. A token and quarter with nothing earned is left out.
     pub fn entitlements_of(&self, account_id: AccountId, from_quarter: u32, limit: u32) -> Vec<EntitlementView> {
         let last = quarter_containing(env::block_timestamp());
         let tokens = self.tokens_of.get(&account_id).cloned().unwrap_or_default();
         (from_quarter..=last)
-            .take(limit.min(MAX_VIEW_QUARTERS) as usize)
+            .take(limit.min(MAX_ENTITLEMENT_QUARTERS) as usize)
             .flat_map(|q| tokens.iter().map(move |t| (q, t)))
             .filter_map(|(q, t)| self.entitlement_view(q, t, &account_id))
             .collect()
@@ -2845,6 +2848,23 @@ mod tests {
         );
         assert!(c.get_entitlement(Q4_2026, "9".into(), acct("a.near")).is_none());
         assert!(c.get_entitlement(Q4_2026, "1".into(), acct("b.near")).is_none());
+    }
+
+    #[test]
+    fn entitlements_of_walks_at_most_25_quarters_however_many_are_asked_for() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        for i in 0..30 {
+            set_time(quarter_start(Q4_2026 + i) + DAY);
+            revenue(&mut c, u64::from(i) + 1, 700);
+        }
+        let listed = c.entitlements_of(acct("a.near"), Q4_2026, 1_000);
+        assert_eq!(listed.len(), MAX_ENTITLEMENT_QUARTERS as usize);
+        assert_eq!(
+            listed.last().map(|e| e.quarter),
+            Some(Q4_2026 + MAX_ENTITLEMENT_QUARTERS - 1)
+        );
+        assert_eq!(c.entitlements_of(acct("a.near"), Q4_2026, 5).len(), 5);
     }
 
     #[test]

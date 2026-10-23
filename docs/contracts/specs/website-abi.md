@@ -143,7 +143,7 @@ interface OwedView { balances: U128; locked: U128; fees: U128; revenue_due: U128
 | `config` | `{}` | See below | EXISTING |
 | `check_invariant` | `{market_id: U64}` | `boolean` | EXISTING |
 | `get_account` | `{account_id}` | `AccountView`. `positions` is the length of `get_positions`. An unknown account is `registered: false` with zeros | BUILT |
-| `get_positions` | `{account_id}` | `PositionView[]`, one per market where the account holds shares, by market id. `redeemable` is what `redeem` would credit now, `"0"` until the market resolves | BUILT |
+| `get_positions` | `{account_id}` | `PositionView[]`, one per market where the account holds shares, by market id. `redeemable` is what `redeem` would credit now, `"0"` until the market resolves. Gas does not depend on the number of markets (the contract keeps each account's list of markets) | BUILT |
 | `get_sweep`, `list_sweeps` | `{sweep_id: U64}`, `{from_index: U64, limit: U64}` | `SweepView \| null`, `SweepView[]` | BUILT |
 | `in_flight`, `owed_breakdown` | `{}` | `InFlightView`, `OwedView`. `total` equals `total_owed`, which includes `pending_withdrawals`. `legs` counts fee legs that are `pending` or `unresolved` | BUILT |
 
@@ -314,7 +314,7 @@ interface RewardTotals { total_received: U128; total_paid: U128; pending_claims:
 | `get_quarter`, `list_quarters` | `{quarter: number}`, `{from_quarter: number, limit: number}` | `QuarterView \| null`, `QuarterView[]` | NEW |
 | `quarter_of` | `{at: U64}` | `{quarter: number, label: string, starts_at: U64, ends_at: U64}` | NEW |
 | `get_entitlement` | `{quarter: number, token_id, account_id}` | `EntitlementView \| null` | NEW |
-| `entitlements_of` | `{account_id, from_quarter: number, limit: number}` | `EntitlementView[]` | NEW |
+| `entitlements_of` | `{account_id, from_quarter: number, limit: number}` | `EntitlementView[]`. `limit` is clamped to 25 quarters; page with `from_quarter` | NEW |
 | `received_of` | `{sweep_id: U64}` | `{amount: U128, quarter: number, at: U64} \| null` | NEW |
 | `reward_totals` | `{}` | `RewardTotals` | NEW |
 

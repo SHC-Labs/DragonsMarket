@@ -133,6 +133,7 @@ enum Key {
     Sweeps,
     Withdrawals,
     PendingByAccount,
+    PositionMarkets,
 }
 
 #[near(serializers=[borsh, json])]
@@ -500,6 +501,10 @@ pub struct MarketContract {
     accounts: LookupMap<AccountId, u32>,
     // (market, account, 0 = yes / 1 = no) -> shares
     shares: LookupMap<(u64, AccountId, u8), u128>,
+    // account -> the market ids, sorted and without repeats, in which it holds a non-empty share entry on either side. Kept
+    // only by add_shares and take_shares, and absent when empty. An account that holds one position in every market, as
+    // the operator and the owner can, has one record of 8 bytes a market that a trade rewrites whole.
+    position_markets: LookupMap<AccountId, Vec<u64>>,
     // The Council, which shares its part among staked seats, and the treasury. None until the owner sets them, and a sweep
     // refuses until then, so nothing is sent to an account nobody chose.
     recipients: Option<FeeRecipients>,
@@ -638,6 +643,7 @@ impl MarketContract {
             balances_total: 0,
             accounts: LookupMap::new(Key::Accounts),
             shares: LookupMap::new(Key::Shares),
+            position_markets: LookupMap::new(Key::PositionMarkets),
             recipients: None,
             revenue_share_bps: DEFAULT_REVENUE_SHARE_BPS,
             fees: 0,
@@ -1784,31 +1790,25 @@ impl MarketContract {
         (U128(y), U128(n))
     }
 
-    // Every market in which the account holds shares, by market id, with what redeem would credit for each now.
+    // Every market in which the account holds shares, by market id, with what redeem would credit for each now. It reads
+    // the account's own list of markets, so its cost does not depend on how many markets exist.
     pub fn get_positions(&self, account_id: AccountId) -> Vec<PositionView> {
-        // accounts counts the account's non-empty share entries, so the scan stops once it has found them all.
-        let mut left = self.accounts.get(&account_id).copied().unwrap_or(0);
-        let mut out = Vec::new();
-        for id in 0..self.next_market_id {
-            if left == 0 {
-                break;
-            }
-            let yes = self.shares.get(&(id, account_id.clone(), 0)).copied().unwrap_or(0);
-            let no = self.shares.get(&(id, account_id.clone(), 1)).copied().unwrap_or(0);
-            left = left.saturating_sub(u32::from(yes > 0) + u32::from(no > 0));
-            let Some(m) = self.markets.get(&id).filter(|_| yes + no > 0) else {
-                continue;
-            };
-            out.push(PositionView {
-                market_id: U64(id),
-                yes: U128(yes),
-                no: U128(no),
-                status: m.status().to_string(),
-                outcome: m.outcome,
-                redeemable: U128(m.outcome.map_or(0, |o| m.payout(o, yes, no))),
-            });
-        }
-        out
+        let ids = self.position_markets.get(&account_id).cloned().unwrap_or_default();
+        ids.into_iter()
+            .filter_map(|id| {
+                let yes = self.shares.get(&(id, account_id.clone(), 0)).copied().unwrap_or(0);
+                let no = self.shares.get(&(id, account_id.clone(), 1)).copied().unwrap_or(0);
+                let m = self.markets.get(&id)?;
+                Some(PositionView {
+                    market_id: U64(id),
+                    yes: U128(yes),
+                    no: U128(no),
+                    status: m.status().to_string(),
+                    outcome: m.outcome,
+                    redeemable: U128(m.outcome.map_or(0, |o| m.payout(o, yes, no))),
+                })
+            })
+            .collect()
     }
 
     pub fn get_market(&self, market_id: U64) -> Option<MarketView> {
@@ -1966,6 +1966,7 @@ impl StorageManagement for MarketContract {
             "a withdrawal is still pending"
         );
         self.accounts.remove(&who);
+        self.position_markets.remove(&who);
         self.balances.remove(&who);
         emit("unregistered", json!({ "account": who }));
         let _ = Promise::new(who).transfer(STORAGE_DEPOSIT.saturating_add(ONE_YOCTO));
@@ -2312,6 +2313,11 @@ impl MarketContract {
                 "too many positions, redeem or sell one first"
             );
             self.accounts.insert(who.clone(), n + 1);
+            let mut ids = self.position_markets.get(who).cloned().unwrap_or_default();
+            if let Err(at) = ids.binary_search(&id) {
+                ids.insert(at, id);
+                self.position_markets.insert(who.clone(), ids);
+            }
         }
         self.shares.insert(key, have + amount);
     }
@@ -2326,6 +2332,18 @@ impl MarketContract {
             self.shares.remove(&key);
             let n = self.accounts.get(who).copied().unwrap_or(1);
             self.accounts.insert(who.clone(), n.saturating_sub(1));
+            // The market stays listed while the other side is still held.
+            if !self.shares.contains_key(&(id, who.clone(), 1 - idx)) {
+                let mut ids = self.position_markets.get(who).cloned().unwrap_or_default();
+                if let Ok(at) = ids.binary_search(&id) {
+                    ids.remove(at);
+                }
+                if ids.is_empty() {
+                    self.position_markets.remove(who);
+                } else {
+                    self.position_markets.insert(who.clone(), ids);
+                }
+            }
         } else {
             self.shares.insert(key, left);
         }
@@ -6492,5 +6510,252 @@ mod tests {
         assert!(refused(|| c.set_create_fee(U128(50_000_001))));
         assert!(refused(|| c.set_revenue_share_bps(7_001)));
         assert!(refused(|| c.set_min_sweep(U128(400_000_001))));
+    }
+
+    // ---- the account's list of markets ------------------------------------------------------------------
+
+    const HOLDERS: [&str; 4] = [USERS[0], USERS[1], USERS[2], OWNER];
+
+    fn indexed(c: &MarketContract, who: &str) -> Vec<u64> {
+        c.position_markets.get(&acct(who)).cloned().unwrap_or_default()
+    }
+
+    fn held_in(c: &MarketContract, who: &str) -> Vec<u64> {
+        (0..c.next_market_id)
+            .filter(|&id| {
+                let (y, n) = holdings(c, id, who);
+                y + n > 0
+            })
+            .collect()
+    }
+
+    // The list of markets is exactly the markets with a non-empty entry, and get_positions lists exactly those.
+    fn assert_index_matches(c: &MarketContract, who: &str) {
+        let held = held_in(c, who);
+        assert_eq!(
+            indexed(c, who),
+            held,
+            "the index of {who} drifted from its share entries"
+        );
+        let listed: Vec<u64> = c.get_positions(acct(who)).iter().map(|p| p.market_id.0).collect();
+        assert_eq!(listed, held, "get_positions of {who} lists other markets than it holds");
+        assert_eq!(c.get_account(acct(who)).positions as usize, held.len());
+    }
+
+    // The scan get_positions used before the index, kept to compare against.
+    fn scanned_positions(c: &MarketContract, who: &str) -> near_sdk::serde_json::Value {
+        let account_id = acct(who);
+        let mut left = c.accounts.get(&account_id).copied().unwrap_or(0);
+        let mut out = Vec::new();
+        for id in 0..c.next_market_id {
+            if left == 0 {
+                break;
+            }
+            let yes = c.shares.get(&(id, account_id.clone(), 0)).copied().unwrap_or(0);
+            let no = c.shares.get(&(id, account_id.clone(), 1)).copied().unwrap_or(0);
+            left = left.saturating_sub(u32::from(yes > 0) + u32::from(no > 0));
+            let Some(m) = c.markets.get(&id).filter(|_| yes + no > 0) else {
+                continue;
+            };
+            out.push(PositionView {
+                market_id: U64(id),
+                yes: U128(yes),
+                no: U128(no),
+                status: m.status().to_string(),
+                outcome: m.outcome,
+                redeemable: U128(m.outcome.map_or(0, |o| m.payout(o, yes, no))),
+            });
+        }
+        near_sdk::serde_json::to_value(out).unwrap()
+    }
+
+    // Empties one side. A sale rounds in the market's favour, so the quote for the whole holding leaves a share or two
+    // that no sale can reach; those go through take_shares, the one place an entry is removed.
+    fn sell_all(c: &mut MarketContract, who: &str, id: u64, side: &str) {
+        let idx = u8::from(side == "no");
+        let (y, n) = holdings(c, id, who);
+        let held = if idx == 0 { y } else { n };
+        let q = c.quote_sell(U64(id), side.to_string(), U128(held));
+        act_as(who, 3);
+        c.sell(U64(id), side.to_string(), q.collateral_out, U128(held));
+        let (y, n) = holdings(c, id, who);
+        let dust = if idx == 0 { y } else { n };
+        assert!(dust <= 3, "the sale left more than rounding behind: {dust}");
+        if dust > 0 {
+            c.take_shares(&acct(who), id, idx, dust);
+        }
+    }
+
+    #[test]
+    fn yes_and_no_in_one_market_keep_one_index_entry() {
+        let (mut c, mut total_in) = world();
+        step(&mut c, &mut total_in, 0, 0, 0, 5_000_000, 1);
+        step(&mut c, &mut total_in, 1, 0, 0, 5_000_000, 1);
+        let (y, n) = holdings(&c, 0, USERS[0]);
+        assert!(y > 0 && n > 0);
+        assert_eq!(indexed(&c, USERS[0]), vec![0]);
+        assert_eq!(c.accounts.get(&acct(USERS[0])).copied(), Some(2));
+        assert_index_matches(&c, USERS[0]);
+    }
+
+    #[test]
+    fn selling_one_side_keeps_the_market_and_selling_the_other_drops_it() {
+        let (mut c, mut total_in) = world();
+        step(&mut c, &mut total_in, 0, 0, 0, 5_000_000, 1);
+        step(&mut c, &mut total_in, 1, 0, 0, 5_000_000, 1);
+        step(&mut c, &mut total_in, 0, 0, 1, 5_000_000, 1);
+        sell_all(&mut c, USERS[0], 0, "yes");
+        assert_eq!(indexed(&c, USERS[0]), vec![0, 1]);
+        assert_index_matches(&c, USERS[0]);
+        sell_all(&mut c, USERS[0], 0, "no");
+        assert_eq!(indexed(&c, USERS[0]), vec![1]);
+        assert_index_matches(&c, USERS[0]);
+        sell_all(&mut c, USERS[0], 1, "yes");
+        assert!(
+            c.position_markets.get(&acct(USERS[0])).is_none(),
+            "an empty list leaves no record"
+        );
+        assert_index_matches(&c, USERS[0]);
+    }
+
+    #[test]
+    fn redeem_removes_the_market_from_the_index() {
+        let (mut c, mut total_in) = world();
+        step(&mut c, &mut total_in, 0, 1, 0, 5_000_000, 1);
+        step(&mut c, &mut total_in, 1, 1, 0, 5_000_000, 1);
+        step(&mut c, &mut total_in, 0, 1, 1, 5_000_000, 1);
+        act_as(ORACLE, CLOSE + 1);
+        c.set_outcome(U64(0), Outcome::Yes);
+        act_as(USERS[1], CLOSE + 2);
+        c.redeem(U64(0));
+        assert_eq!(indexed(&c, USERS[1]), vec![1]);
+        assert_index_matches(&c, USERS[1]);
+    }
+
+    #[test]
+    fn the_seeder_left_holding_shares_is_indexed() {
+        let (mut c, _) = world();
+        assert_eq!(
+            indexed(&c, OWNER),
+            vec![1],
+            "market 1 opened at 30%, market 0 at one half"
+        );
+        assert_index_matches(&c, OWNER);
+        let id = create_registered(&mut c, OWNER);
+        seed_with(&mut c, OWNER, id, Some("700000"));
+        assert_eq!(indexed(&c, OWNER), vec![1, id]);
+        assert_index_matches(&c, OWNER);
+    }
+
+    #[test]
+    fn the_operator_holds_a_position_in_every_market_past_the_cap() {
+        let (mut c, _) = world();
+        act_as(OWNER, 5);
+        c.set_operator(acct("ops.near"));
+        c.accounts.insert(acct("ops.near"), 0);
+        let count = MAX_POSITIONS as u64 + 15;
+        for _ in 0..count {
+            let id = create_registered(&mut c, "ops.near");
+            seed_with(&mut c, "ops.near", id, Some("300000"));
+        }
+        let ids = indexed(&c, "ops.near");
+        assert_eq!(ids, (2..2 + count).collect::<Vec<u64>>());
+        assert_index_matches(&c, "ops.near");
+        assert_eq!(scanned_positions(&c, "ops.near"), positions_json(&c, "ops.near"));
+    }
+
+    #[test]
+    fn unregistering_leaves_no_index_record() {
+        let (mut c, mut total_in) = world();
+        c.accounts.insert(acct("dan.near"), 0);
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct("dan.near"), U128(5_000_000), "buy:0:yes:1".to_string());
+        total_in += 5_000_000;
+        let _ = total_in;
+        assert_eq!(indexed(&c, "dan.near"), vec![0]);
+        sell_all(&mut c, "dan.near", 0, "yes");
+        c.balances.remove(&acct("dan.near"));
+        act_as("dan.near", 4);
+        assert!(c.storage_unregister(None));
+        assert!(c.position_markets.get(&acct("dan.near")).is_none());
+    }
+
+    #[test]
+    fn get_positions_matches_the_old_scan_for_a_mixed_state() {
+        let mut c = positions_world();
+        let mut total_in = 0;
+        step(&mut c, &mut total_in, 0, 1, 2, 3_000_000, 1);
+        step(&mut c, &mut total_in, 1, 2, 3, 3_000_000, 1);
+        let all_match = |c: &MarketContract| {
+            for who in HOLDERS.iter().chain(["nobody.near"].iter()) {
+                assert_eq!(scanned_positions(c, who), positions_json(c, who), "{who}");
+            }
+        };
+        all_match(&c);
+        resolve_positions_world(&mut c);
+        all_match(&c);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        // After every buy, sell, seed, resolution, redeem and withdrawal, each account's list of markets is exactly the
+        // markets in which it has a non-empty share entry, and get_positions lists exactly those.
+        #[test]
+        fn the_index_always_equals_the_markets_an_account_holds(
+            ops in proptest::collection::vec((0u8..8, 0usize..4, 0u64..4, 1_000_000u128..40_000_000, 1u128..101), 1..80)
+        ) {
+            let (mut c, _) = world();
+            for _ in 0..2 {
+                create_registered(&mut c, OWNER);
+            }
+            for (op, user, id, amount, frac) in ops {
+                let who = HOLDERS[user];
+                let m = c.market(id);
+                let live = m.seeded && m.outcome.is_none();
+                match op {
+                    0 | 1 if live => {
+                        act_as(VERIFIER, 3);
+                        let side = if op == 0 { "yes" } else { "no" };
+                        let _ = receive(&mut c, acct(who), U128(amount), format!("buy:{id}:{side}:1"));
+                    }
+                    2 | 3 if live => {
+                        let (y, n) = holdings(&c, id, who);
+                        let (held, side) = if op == 2 { (y, "yes") } else { (n, "no") };
+                        let q = c.quote_sell(U64(id), side.to_string(), U128(held * frac / 100));
+                        if q.collateral_out.0 > 0 {
+                            act_as(who, 3);
+                            c.sell(U64(id), side.to_string(), q.collateral_out, U128(held));
+                        }
+                    }
+                    4 if !m.seeded => {
+                        let price = [None, Some("300000"), Some("800000")][(amount % 3) as usize];
+                        seed_with(&mut c, OWNER, id, price);
+                    }
+                    5 if m.seeded && m.outcome.is_none() => {
+                        act_as(ORACLE, CLOSE + 1);
+                        c.set_outcome(U64(id), [Outcome::Yes, Outcome::No, Outcome::Void][(amount % 3) as usize]);
+                    }
+                    6 if m.outcome.is_some() => {
+                        let (y, n) = holdings(&c, id, who);
+                        if y + n > 0 {
+                            act_as(who, CLOSE + 3);
+                            c.redeem(U64(id));
+                        }
+                    }
+                    7 => {
+                        let bal = c.get_balance(acct(who)).0;
+                        if bal > 0 {
+                            act_as(who, 4);
+                            let _ = c.withdraw(U128(bal.min(amount)));
+                        }
+                    }
+                    _ => {}
+                }
+                for h in HOLDERS {
+                    assert_index_matches(&c, h);
+                }
+            }
+        }
     }
 }
