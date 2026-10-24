@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   ALLOWED, CLOSE_GRACE_DAYS, CONTRACT_LIMITS, GUARDED_KINDS, TARGETS, codeHash, prepareAdministrationProposal, prepareStageCode,
-  prepareTreasuryVote, reviewKind,
+  prepareTreasuryVote, reviewKind, storageRunway, prepareStorageTopUp,
 } from "./treasury.mjs";
 import { b58encode } from "./chain.mjs";
 
@@ -19,6 +19,7 @@ const ED_KEY = `ed25519:${b58encode(Buffer.alloc(32, 7))}`;
 const SECP_KEY = `secp256k1:${b58encode(Buffer.alloc(64, 5))}`;
 const CONTRACTS_DIR = path.resolve(import.meta.dirname, "..");
 const NEXT_SWEEP_ID = "5";
+const MARKET_STORAGE_DEPOSIT = "50090000000000000000000";
 
 // A DAO and three contracts that answer only the views the helper is meant to ask.
 function chain({ bond = BOND, proposals = [], staged = true, proven = true } = {}) {
@@ -30,7 +31,7 @@ function chain({ bond = BOND, proposals = [], staged = true, proven = true } = {
       return byId.get(args.id);
     }
     if (Object.values(CONTRACTS).includes(account) && method === "is_staged") return staged;
-    if (Object.values(CONTRACTS).includes(account) && method === "config") return { upgrade_proven: proven, next_sweep_id: NEXT_SWEEP_ID };
+    if (Object.values(CONTRACTS).includes(account) && method === "config") return { upgrade_proven: proven, next_sweep_id: NEXT_SWEEP_ID, market_storage_deposit: MARKET_STORAGE_DEPOSIT };
     throw new Error(`unexpected view ${account}.${method}`);
   };
 }
@@ -63,6 +64,7 @@ const SAMPLES = {
     set_next_sweep_id: { next_sweep_id: "50" },
     set_fee_rate_bps: { fee_rate_bps: 150 },
     set_create_fee: { create_fee: "1000000" },
+    set_storage_policy: { market_storage_deposit: MARKET_STORAGE_DEPOSIT, reserve: "1000000000000000000000000" },
     reconcile_leg: { sweep_id: "3", leg: "council", arrived: true },
     reconcile_withdrawal: { id: "3", paid: false },
     set_paused: { paused: true },
@@ -153,7 +155,7 @@ test("each entry prepares one FunctionCall proposal to the DAO with its own depo
     assert.equal(action.method_name, method, label);
     assert.deepEqual(JSON.parse(Buffer.from(action.args, "base64")), SAMPLES[target][method], label);
     const owns = ["market.withdraw", "oracle.withdraw_bond"].includes(label);
-    assert.equal(action.deposit, owns ? "1" : "0", `${label} deposit`);
+    assert.equal(action.deposit, label === "market.create_market" ? MARKET_STORAGE_DEPOSIT : owns ? "1" : "0", `${label} deposit`);
     assert.equal(action.gas, (BigInt(ALLOWED[target][method].gas.def) * TGAS).toString(), `${label} gas`);
   }
 });
@@ -556,6 +558,7 @@ const OWNER_CHECKS = [
   /== self\.owner\b/,
   /self\.pending_owner\.as_ref\(\) == Some/,
   /upgrade::(stage_code|take_staged|deploy_and_migrate|delete_key|require_state_version)\b/,
+  /env::state_read\(/, // Explicit previous-layout migrations are upgrade paths too.
 ];
 const guardedMethods = (rust) => publicMethods(rust).filter(({ body }) => OWNER_CHECKS.some((check) => check.test(body))).map(({ name }) => name);
 
@@ -646,4 +649,44 @@ test("the limits and the gas floor the helper enforces are the ones in the contr
   assert.equal(Number(upgradeGas[1]), ALLOWED.market.upgrade.gas.min);
   const withdrawFloor = /GAS_WITHDRAW_OVERHEAD: Gas = Gas::from_tgas\((\d+)\)/.exec(source("oracle"));
   assert.ok(Number(withdrawFloor[1]) + 15 + 10 <= ALLOWED.oracle.withdraw_bond.gas.min, "withdraw_bond needs 15 + 10 + its own overhead");
+});
+
+test("market creation pays live storage policy and refuses underfunded stored proposals", async () => {
+  const tx = await propose("market", "create_market", SAMPLES.market.create_market);
+  assert.equal(callOf(tx).deposit, MARKET_STORAGE_DEPOSIT);
+  const kind = functionCall(CONTRACTS.market, "create_market", SAMPLES.market.create_market, { gas: "100000000000000", deposit: "0" });
+  await assert.rejects(vote(stored(9, kind)), /takes a deposit/);
+});
+
+test("storage policy mirrors hard ranges and sweep frequency cannot fall below an hour", async () => {
+  await assert.rejects(propose("market", "set_storage_policy", { market_storage_deposit: "1", reserve: SAMPLES.market.set_storage_policy.reserve }), /market_storage_deposit/);
+  await assert.rejects(propose("market", "set_sweep_timing", { ...SAMPLES.market.set_sweep_timing, min_interval_minutes: 59 }), /min_interval_minutes/);
+});
+
+test("runway accounts for locked storage, reserve and all configured daily growth", () => {
+  const inputs = { amount: "1000000000000000000000000", storageUsage: 1000, reserve: "100000000000000000000000", marketsPerDay: 10, bytesPerMarket: 200, fixedBytesPerDay: 1000, alarmDays: 30 };
+  const report = storageRunway(inputs);
+  assert.equal(report.bytesPerDay, "3000");
+  assert.equal(report.available, "890000000000000000000000");
+  assert.equal(report.days, "29");
+  assert.equal(report.alarm, true);
+  assert.equal(storageRunway({ ...inputs, alarmDays: 29 }).alarm, false);
+  assert.equal(storageRunway({ ...inputs, marketsPerDay: 0, fixedBytesPerDay: 0 }).days, null);
+  assert.equal(storageRunway({ ...inputs, amount: "0", marketsPerDay: 0, fixedBytesPerDay: 0 }).alarm, true);
+  for (const invalid of [{ alarmDays: 0 }, { marketsPerDay: -1 }, { bytesPerMarket: 0.5 }, { fixedBytesPerDay: NaN }, { reserve: "-1" }]) {
+    assert.throws(() => storageRunway({ ...inputs, ...invalid }));
+  }
+});
+
+test("native storage top-ups prepare only a scoped treasury vote, without sending funds", async () => {
+  for (const target of ["oracle", "council"]) {
+    const request = await prepareStorageTopUp({ ...IDS, target, amount: "1000000000000000000000000", description: "Fund contract storage", view: chain() });
+    assert.equal(request.receiverId, DAO);
+    assert.equal(request.actions[0].params.deposit, BOND);
+    assert.deepEqual(proposalOf(request).kind, { Transfer: { token_id: "", receiver_id: CONTRACTS[target], amount: "1000000000000000000000000" } });
+    await assert.rejects(reviewKind(proposalOf(request).kind, { ...IDS, view: chain() }), /acknowledge/);
+  }
+  for (const invalid of [{ target: "market" }, { target: "foreign.near" }, { amount: "0" }, { amount: "1.0" }, { description: "" }]) {
+    await assert.rejects(prepareStorageTopUp({ ...IDS, target: "oracle", amount: "1", description: "Fund storage", view: chain(), ...invalid }));
+  }
 });

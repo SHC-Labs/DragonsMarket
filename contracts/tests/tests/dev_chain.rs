@@ -197,6 +197,7 @@ async fn make(w: &World, index: usize) -> anyhow::Result<u64> {
     let id: String = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
             "title": spec.title,
             "rule_text": format!("Resolves Yes if the answer to \"{}\" is yes according to the source below when the market closes. Resolves No otherwise.", spec.title),

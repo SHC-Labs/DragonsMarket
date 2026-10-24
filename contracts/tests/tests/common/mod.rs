@@ -555,6 +555,7 @@ pub async fn create_market(w: &World, close_in_secs: u64, gap_secs: u64) -> anyh
     let id: String = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
             "title": "Will the test question resolve Yes?",
             "rule_text": "Resolves Yes if the test says so.",
@@ -1258,6 +1259,7 @@ pub async fn bulk_seeded_markets(w: &World, count: u64, yes_price: Option<&str>)
             let id = first + made + i;
             create = create.call(
                 Function::new("create_market")
+                    .deposit(near_workspaces::types::NearToken::from_millinear(60))
                     .args_json(json!({
                         "title": format!("Bulk market number {id}"), "rule_text": "Resolves Yes if the test says so.",
                         "resolution_source": "https://example.com/source", "void_policy": "Void if the test is cancelled.",

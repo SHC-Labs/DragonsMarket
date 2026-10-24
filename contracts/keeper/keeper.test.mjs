@@ -9,7 +9,7 @@ import path from "node:path";
 import {
   accessKeyReport, advanceCursor, councilFloor, daoReport, describeOutcome, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options,
   quarterEnd, quarterOf, readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, verifierProblems,
-  writeCursor, refuseRetiredController, releaseReport,
+  writeCursor, refuseRetiredController, releaseReport, validateActionKeys,
 } from "./keeper.mjs";
 import { b58encode } from "./chain.mjs";
 import { hexToBase58, parseReleaseHashes } from "./release-check.mjs";
@@ -490,4 +490,26 @@ test("--release with a bad list prints the reason and exits 1 before any RPC cal
   const out = spawnSync(process.execPath, [path.join(import.meta.dirname, "keeper.mjs"), "check", "--rpc", "http://127.0.0.1:1", "--market", "market.near", "--oracle", "oracle.near", "--council", "council.near", "--release", file], { encoding: "utf8" });
   assert.equal(out.status, 1);
   assert.match(out.stderr, /release list must start with the line "Release hashes"/);
+});
+
+
+test("a batch validates every key scope before dispatch and caches shared key reads", async t => {
+  const key = "ed25519:" + b58encode(Buffer.alloc(64, 7));
+  const opts = { rpc: "http://rpc.invalid", account: "keeper.near", market: "market.near", oracle: "oracle.near" };
+  const actions = [{contract:"oracle",method:"finalize"},{contract:"market",method:"sweep_fees"}];
+  let calls = 0;
+  let permission = "FullAccess";
+  t.mock.method(globalThis,"fetch",async()=>{ calls++;return {ok:true,json:async()=>({result:{permission}})}; });
+  await assert.rejects(validateActionKeys(opts,{},actions),/no key for oracle/);
+  assert.equal(calls,0);
+  await validateActionKeys(opts,{default:key},actions);
+  assert.equal(calls,1);
+  permission = {FunctionCall:{receiver_id:"market.near",method_names:["sweep_fees"],allowance:"1000"}};
+  await assert.rejects(validateActionKeys(opts,{default:key},actions),/Receiver/);
+  permission = {FunctionCall:{receiver_id:"oracle.near",method_names:["retry_apply"],allowance:"1000"}};
+  await assert.rejects(validateActionKeys(opts,{default:key},actions.slice(0,1)),/does not allow finalize/);
+  permission = {FunctionCall:{receiver_id:"oracle.near",method_names:[],allowance:"0"}};
+  await assert.rejects(validateActionKeys(opts,{default:key},actions.slice(0,1)),/exhausted/);
+  permission.FunctionCall.allowance = null;
+  await validateActionKeys(opts,{default:key},actions.slice(0,1));
 });

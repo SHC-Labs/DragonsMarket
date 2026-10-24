@@ -126,6 +126,7 @@ async fn create_batch(w: &World, fleet: &mut Fleet, count: usize) -> anyhow::Res
     for i in 0..count as u64 {
         batch = batch.call(
             Function::new("create_market")
+                .deposit(near_workspaces::types::NearToken::from_millinear(60))
                 .args_json(json!({
                     "title": format!("Scale market number {}", fleet.next_id + i),
                     "rule_text": "Resolves Yes if the test says so.",
@@ -746,6 +747,7 @@ async fn cost_of_rewriting_one_market_record() -> anyhow::Result<()> {
     let big: String = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
             "title": max_text(200), "rule_text": max_text(2000), "resolution_source": max_text(300), "void_policy": max_text(500),
             "category": "w".repeat(32), "subcategory": "s".repeat(32),

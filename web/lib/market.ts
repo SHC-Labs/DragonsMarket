@@ -33,6 +33,9 @@ export interface MarketView {
   price_yes: string;
   price_no: string;
   locked: string;
+  holders: number | null;
+  seeder: { account_id: string; yes: string; no: string } | null;
+  pruned: boolean;
 }
 
 export interface Vote {
@@ -145,6 +148,11 @@ export interface MarketConfig {
   markets: string;
   min_sweep: string;
   next_sweep_id: string;
+  last_sweep_at: string | null;
+  market_storage_deposit: string;
+  storage_reserve: string;
+  position_page_default: number;
+  position_page_max: number;
   revenue_unresolved: string;
   verifier: string;
   collateral_token_id: string;
@@ -194,7 +202,8 @@ export interface AccountView {
   available: string;
   pending_withdrawals: string;
   // How many markets the account holds shares in
-  positions: number;
+  // Legacy exempt accounts have an unknown total until their old positions are cleared.
+  positions: number | null;
 }
 
 // Money sent and not yet reported: withdrawals waiting on their callback, and fee legs that are pending or unresolved.
@@ -285,7 +294,23 @@ export const getFees = () => view<Fees>(market(), "get_fees");
 export const getSweep = (id: string) => view<Sweep | null>(market(), "get_sweep", { sweep_id: id });
 export const listSweeps = (from: number, limit: number) =>
   view<Sweep[]>(market(), "list_sweeps", { from_index: String(from), limit: String(limit) });
-export const getPositions = (account: string) => view<PositionView[]>(market(), "get_positions", { account_id: account });
+export const getPositions = (account: string, fromMarket?: string, limit?: number) => {
+  if (fromMarket !== undefined && !/^(0|[1-9][0-9]*)$/.test(fromMarket)) throw new Error("Invalid market cursor");
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 100)) throw new Error("Position page must scan 1 to 100 markets");
+  return view<PositionView[]>(market(), "get_positions", {
+    account_id: account,
+    ...(fromMarket === undefined ? {} : { from_market: fromMarket }),
+    ...(limit === undefined ? {} : { limit: String(limit) }),
+  });
+};
+export const positionsArePaged = (account: string) =>
+  view<boolean>(market(), "positions_are_paged", { account_id: account });
+// Operational pages advance by the scanned window, even when no shares matched.
+// Stop when nextMarket reaches config.markets, not when positions is empty.
+export async function getPositionsPage(account: string, fromMarket = "0", limit = 50) {
+  const positions = await getPositions(account, fromMarket, limit);
+  return { positions, nextMarket: (BigInt(fromMarket) + BigInt(limit)).toString() };
+}
 export const getAccount = (account: string) => view<AccountView>(market(), "get_account", { account_id: account });
 export const getInFlight = () => view<InFlightView>(market(), "in_flight");
 export const getOwedBreakdown = () => view<OwedView>(market(), "owed_breakdown");

@@ -12,6 +12,30 @@
 
 **Build status, 2026-10-21.** The new owner methods are in the allow-list of `contracts/keeper/treasury.mjs` with their argument checks: market `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id` (it must not be below the market's `next_sweep_id`), `reconcile_leg` and `reconcile_withdrawal`; oracle `set_reconcile_wait_ns` and `reconcile_bond_payout`; Council `set_close_grace_ns`; oracle and Council `allow_market` and `disallow_market` (the Council's `set_market` is gone). `reconcile_revenue` is removed (see market.md). `set_fee_recipients` now takes `revenue_pool` and `treasury`. The Council reconciliation of section 9.2 uses `reward_totals`: the floor is total received less total paid less the claims in flight. `settle_leg` and `payout_bond` are still not prepared (anyone calls them). The keeper sends `advance_quarters`, `finalize_quarter` and `settle_leg` (section 9.1), and holds back `sweep_fees` for an hour after the last sweep. Tests: `treasury.test.mjs` (`the next sweep id can only move up from where the market is`, `the grace period bounds are the ones in the Council's source`, the sample table, the limits) and `keeper.test.mjs` (`the Council's floor is what it took in less what it paid and less the claims on their way`).
 
+
+### Current operations, 2026-10-23
+
+The keeper now uses `due-queue.mjs`, not the oldest-unfinished cursor. Signing runs require `--state-file`; `--events-file` supplies normalized finalized blocks as documented in [the indexer design](../indexer.md). A run consumes at most 32 blocks or 1 MiB, bootstraps one 50-ID market window and one 50-ID sweep window, then processes at most `--job-batch` jobs (default 50, maximum 500). `--workers` defaults to 2 and accepts 1 to 8. Requests time out after 30 seconds. Keep one queue per RPC and contract tuple; one process holds its lock.
+
+The event cursor and jobs are saved together through an fsynced atomic rename before dispatch. Replay does not double-enqueue; a block hash gap stops ingestion. Each action rechecks contract state; retries use exponential backoff from one second to 15 minutes, persist failures and serialize calls sharing a signing key. A crash can repeat dispatch: contract idempotence and fresh reads protect it, not an exactly-once promise. Restore or reconcile a corrupt/truncated feed before restarting; do not delete payout evidence. With no event feed, bounded bootstrap and rotating reconciliation still run, but discovery latency grows with catalog size. That fallback is not adequate for live deadline guarantees. The local queue is one JSON file rewritten per batch, not per action; measure file I/O and job-selection time at the intended active catalog size. Database-backed scheduling belongs to the separately owned indexer service.
+
+`market.set_storage_policy` is allowlisted with the same hard bounds as the contract. Creation proposals read the current native storage deposit. Fee-sweep timing may not fall below one hour. `prepareStorageTopUp({treasuryId, contracts, target, amount, description, view})` prepares a native Treasury transfer proposal to the configured oracle or Council only; members still review and vote. Generic transfer approvals still require explicit acknowledgment. No funds are automatically sent.
+
+`check --runway-config budget.json` uses explicit planning budgets and current balances. Without that flag, it prints that the runway model is not configured. Example configuration:
+
+```json
+{
+  "marketsPerDay": 100,
+  "alarmDays": 30,
+  "oracle": { "bytesPerMarket": 1000, "fixedBytesPerDay": 10000, "reserve": "1000000000000000000000000" },
+  "council": { "bytesPerMarket": 2000, "fixedBytesPerDay": 20000, "reserve": "1000000000000000000000000" }
+}
+```
+
+These are illustrative budgets, not measured production consumption. Set them from observed creation rate, dispute mix, claims, sweeps and quarter growth before operating. Available NEAR is balance minus locked storage minus reserve. Daily cost is `(marketsPerDay * bytesPerMarket + fixedBytesPerDay) * 10^19` yoctoNEAR. A margin below `alarmDays` of that budget exits with a problem. Zero budgeted growth reports no finite estimate; an exhausted reserve always alarms. Round down reported days. Top up for gas separately.
+
+The queue needs successful market creation/registration/outcome events; oracle proposal/challenge/escalation/draw/final/apply events; market sweep and leg-result events; and Council draw/release/revenue events. They are present in the current contract sources. Unit tests cover replay, gaps, partial lines, receipt scope, backoff, locks and same-key nonce serialization. The sandbox exercises real contract actions without an indexer.
+
 ---
 
 ## Contents
@@ -515,3 +539,28 @@ Status is as of 2026-10-21. The evidence column quotes the code as it was when t
 | R-07 policy | none | A test that builds the section 7 policy and checks the approval counts for 5 members, and again after adding a sixth |
 | Allow-list | `treasury.test.mjs`, 25 tests, listed in 5.4. All 109 mutations of the node code and the contract sources were caught | Run against a real SputnikDAO: the argument format the DAO accepts for `gas` (a string is assumed) and for `deposit`, and a `get_proposal` of a `FunctionCall` as the helper reads it |
 | Keeper | `keeper.test.mjs` (42 tests) and `keeper.rs` (7 tests). The new checks have unit tests for the reconciliation decision, the re-read, the verifier decisions, the access key report, the DAO report and the flags, and sandbox tests for a key registered in the verifier, a locked account, a paused feature, a plain deposit surplus, a deficit and the access key flag | The DAO watch against a real DAO. A sandbox test with `is_auth_by_predecessor_id_enabled` off |
+
+
+## Testnet workload measurements
+
+`node contracts/keeper/load-test.mjs workload.json` validates a plan without reading keys or contacting RPC. `--execute` first checks `status.chain_id == "testnet"`; every actor and application/verifier target must be a distinct configured `.testnet` account. Use dedicated funded testnet accounts and the tested verifier deployment. The runner permits workload methods only, caps attached deposit at 1 NEAR per call, serializes each actor's nonces, and uses 1 to 8 concurrent workers. Repeated calls from one actor do not create concurrent signing capacity.
+
+A minimal plan for a pre-created, registered and seeded market, with the actor already funded in the market balance:
+
+```json
+{
+  "rpc": "https://rpc.testnet.near.org",
+  "workers": 2,
+  "contracts": {"market":"YOUR-MARKET.testnet", "oracle":"YOUR-ORACLE.testnet", "council":"YOUR-COUNCIL.testnet", "verifier":"YOUR-VERIFIER.testnet"},
+  "actors": [{"id":"YOUR-TRADER.testnet", "keyFile":"/absolute/path/to/owner-only-raw-ed25519-key"}],
+  "calls": [{"actor":"YOUR-TRADER.testnet", "target":"market", "method":"buy", "args":{"market_id":"0", "side":"yes", "amount":"1000000", "min_shares":"1"}, "deposit":"1", "gasTgas":100, "expect":{"receiver":"market", "event":"buy", "data":{"market_id":"0"}}}],
+  "caseIds": ["0"],
+  "keeperStateFile": "/absolute/path/to/testnet-keeper.json"
+}
+```
+
+Replace uppercase placeholders with valid accounts; the validator deliberately rejects the example as written. Keys are raw `ed25519:...` strings in files readable by the owner only, not NEAR CLI JSON files. Never put a key in the plan or command line. Add proposal/challenge notifications through verifier `mt_transfer_call` and `commit_vote`/`reveal_vote` calls in separate phases around real deadlines; prepare commitments with the existing contract grammar. Include normal buys, sells and verifier `mt_transfer_call` notifications competing with keeper work. A single phased plan does not manufacture a resolved dispute.
+
+The runner waits for `FINAL` and requires a successful own-contract receipt with the expected event/entity before counting a confirmation. Refunded or failed trades do not count. On an RPC send timeout, it queries the known transaction hash; it never automatically resends an uncertain transfer. Inspect any unconfirmed hash before repeating a plan. Output includes confirmed trade/call rate, p50/p95 confirmation latency, receipt failures, RPC method counts, selected case completion/application/unlock status, and keeper cursor lag if a state file is supplied. [NEAR's transaction RPC documentation](https://docs.near.org/api/rpc/transactions) defines `FINAL` and status lookup.
+
+Record deployment hashes, protocol config, token, provider, signer count, concurrent worker count, workload mix, deposits and balances before and after. Run several sustained windows at increasing rates and record provider throttling, event lag, oldest due-job age, minimum deadline slack and end-to-end dispute completion times. Repeat through keeper restart, delayed callback and provider outage. The script's lag snapshot is not a time series or an API/browser benchmark. Add external monitoring for those measurements. No live capacity claim is supported until these runs are completed; a second market account still shares the verifier and other services.

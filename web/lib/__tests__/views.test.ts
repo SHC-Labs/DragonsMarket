@@ -18,13 +18,25 @@ vi.mock("../rpc", () => ({ view }));
 import { friendlyError } from "../errors";
 import {
   getAccount, getBondTotals, getCase, getFees, getInFlight, getMarketConfig, getMarketInfo, getOracleConfig, getOwedBreakdown,
-  getPositions, listCases,
+  getPositions, getPositionsPage, positionsArePaged, listCases,
 } from "../market";
 import { getCouncilConfig } from "../council";
 
 beforeEach(() => view.mockReset().mockResolvedValue(null));
 
 describe("market views", () => {
+  it("advances an empty operational page by scanned market ids", async () => {
+    view.mockResolvedValue([]);
+    expect(await getPositionsPage("operator.near", "9007199254740993", 100)).toEqual({ positions: [], nextMarket: "9007199254741093" });
+    expect(view).toHaveBeenLastCalledWith("market.near", "get_positions", { account_id: "operator.near", from_market: "9007199254740993", limit: "100" });
+    await positionsArePaged("operator.near");
+    expect(view).toHaveBeenLastCalledWith("market.near", "positions_are_paged", { account_id: "operator.near" });
+  });
+  it("rejects invalid or unbounded position page inputs before RPC", async () => {
+    expect(() => getPositions("operator.near", "-1", 50)).toThrow("cursor");
+    expect(() => getPositions("operator.near", "0", 101)).toThrow("1 to 100");
+    expect(view).not.toHaveBeenCalled();
+  });
   it("reads positions and the account for one account id", async () => {
     await getPositions("alice.near");
     expect(view).toHaveBeenLastCalledWith("market.near", "get_positions", { account_id: "alice.near" });

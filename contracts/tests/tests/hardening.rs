@@ -769,6 +769,7 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
     let id: String = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
             "title": "Will bitcoin close at or above 100.00 USD?", "rule_text": "Yes if the median close is at or above 100.00.",
             "resolution_source": "Three exchanges", "void_policy": "Fewer than two publish a price.",

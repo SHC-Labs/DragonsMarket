@@ -175,6 +175,7 @@ async fn create_single(w: &World, index: u64, close_at: u64, gas_tgas: u64) -> a
     let outcome = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(create_args(index, close_at))
         .gas(Gas::from_tgas(gas_tgas))
         .transact()
@@ -201,6 +202,7 @@ async fn create_many(
         for i in 0..take as u64 {
             batch = batch.call(
                 Function::new("create_market")
+                    .deposit(near_workspaces::types::NearToken::from_millinear(60))
                     .args_json(create_args(first_index + made + i, close_at))
                     .gas(Gas::from_tgas(per_call)),
             );

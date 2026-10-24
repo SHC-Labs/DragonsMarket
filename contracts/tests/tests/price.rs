@@ -62,6 +62,7 @@ async fn price_market(w: &World) -> anyhow::Result<(u64, u64)> {
     let id: String = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
             "title": "Will bitcoin close at or above 100.00 USD?", "rule_text": "Yes if the median of three exchanges' 1 minute closes is at or above 100.00.",
             "resolution_source": "Median of the 1 minute closing prices on three major exchanges", "void_policy": "Fewer than two exchanges publish a price.",

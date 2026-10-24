@@ -11,6 +11,7 @@ async fn market_with_deadline(w: &World, close_in: u64, answer_within: u64) -> a
     let id: String = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
             "title": "Will the safety test pass?", "rule_text": "Resolves Yes if it does.", "resolution_source": "https://example.com",
             "void_policy": "Void if the test is cancelled.", "category": "tech", "subcategory": "ai",
@@ -424,6 +425,7 @@ async fn a_market_that_leaves_too_little_time_to_resolve_never_opens() -> anyhow
     let create = |gap_ns: u64| {
         w.owner
             .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
             .args_json(json!({
                 "title": "Gap test", "rule_text": "Resolves Yes if it does.", "resolution_source": "https://example.com",
                 "void_policy": "Void if cancelled.", "category": "tech", "subcategory": "ai",

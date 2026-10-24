@@ -101,6 +101,7 @@ interface MarketView {                       // market.get_market, market.list_m
   close_at: U64; resolve_by: U64; status: MarketStatus; registered: boolean; seeded: boolean;
   outcome: Outcome | null; void_price_yes: U128 | null;
   price_yes: U128; price_no: U128; locked: U128;
+  holders: number | null; seeder: {account_id: AccountId; yes: U128; no: U128} | null; pruned: boolean;
 }
 interface PricePoint { at: U64; price_yes: number }            // price_yes is a u32 number
 interface BuyQuote  { shares_out: U128; fee: U128 }
@@ -114,7 +115,7 @@ interface PositionView { market_id: U64; yes: U128; no: U128; status: MarketStat
 PROPOSED additions:
 
 ```ts
-interface AccountView  { registered: boolean; available: U128; pending_withdrawals: U128; positions: number }
+interface AccountView  { registered: boolean; available: U128; pending_withdrawals: U128; positions: number | null }
 type LegStatus = "pending" | "settled" | "refused" | "unresolved";
 interface SweepView { id: U64; at: U64; total: U128; carried_council: U128; carried_treasury: U128;
                       council: { to: AccountId; amount: U128; status: LegStatus };
@@ -142,16 +143,22 @@ interface OwedView { balances: U128; locked: U128; fees: U128; revenue_due: U128
 | `total_owed` | `{}` | `U128` | EXISTING |
 | `config` | `{}` | See below | EXISTING |
 | `check_invariant` | `{market_id: U64}` | `boolean` | EXISTING |
-| `get_account` | `{account_id}` | `AccountView`. `positions` is the length of `get_positions`. An unknown account is `registered: false` with zeros | BUILT |
-| `get_positions` | `{account_id}` | `PositionView[]`, one per market where the account holds shares, by market id. `redeemable` is what `redeem` would credit now, `"0"` until the market resolves. Gas does not depend on the number of markets (the contract keeps each account's list of markets) | BUILT |
+| `get_account` | `{account_id}` | `AccountView`. `positions` is the total held-market count, or null for legacy exempt accounts until old holdings are cleared. An unknown account is `registered: false` with zeros | BUILT |
+| `get_positions` | `{account_id, from_market?: U64, limit?: U64}` | `PositionView[]`, one per market where the account holds shares, by market id. `redeemable` is what `redeem` would credit now, `"0"` until the market resolves. Default window 50 IDs, hard maximum 100. Ordinary accounts read their small index. Exempt accounts scan consecutive market IDs; advance by the window even for an empty page, stopping at config.markets. Query positions_are_paged to distinguish them | BUILT |
+| `positions_are_paged` | `{account_id}` | `boolean`, true for an account with permanent operational paging | BUILT |
 | `get_sweep`, `list_sweeps` | `{sweep_id: U64}`, `{from_index: U64, limit: U64}` | `SweepView \| null`, `SweepView[]` | BUILT |
 | `in_flight`, `owed_breakdown` | `{}` | `InFlightView`, `OwedView`. `total` equals `total_owed`, which includes `pending_withdrawals`. `legs` counts fee legs that are `pending` or `unresolved` | BUILT |
 
-`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `create_fee: U128`, `revenue_pool: string \| null`, `treasury: string \| null`, `revenue_share_bps: number`, `treasury_share_bps: number`, `min_sweep: U128`, `next_sweep_id: U64`, `revenue_unresolved: U128`, `void_price_window_ns: U64`, `void_grace_ns: U64`, `settle_wait_minutes: number`, `reconcile_wait_minutes: number`, `min_sweep_interval_minutes: number`, `min_open_price: U128`, `max_open_price: U128`, `max_fee_rate_bps: number`, `max_create_fee: U128`, `min_revenue_share_bps: number`, `max_revenue_share_bps: number`, `max_min_sweep: U128`. `max_positions` is the stored cap.
+`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `create_fee: U128`, `revenue_pool: string \| null`, `treasury: string \| null`, `revenue_share_bps: number`, `treasury_share_bps: number`, `min_sweep: U128`, `next_sweep_id: U64`, `revenue_unresolved: U128`, `void_price_window_ns: U64`, `void_grace_ns: U64`, `settle_wait_minutes: number`, `reconcile_wait_minutes: number`, `min_sweep_interval_minutes: number`, `min_open_price: U128`, `max_open_price: U128`, `max_fee_rate_bps: number`, `max_create_fee: U128`, `min_revenue_share_bps: number`, `max_revenue_share_bps: number`, `max_min_sweep: U128`. `max_positions` is the stored cap. Also returned: `last_sweep_at: U64 | null`, `market_storage_deposit: U128`, `storage_reserve: U128`, `position_page_default: number` (50), `position_page_max: number` (100). Market state version is 4; oracle 2 and Council 3.
 
 ---
 
 ## 5. Market calls and messages
+
+`create_market` now requires the native deposit in `config.market_storage_deposit` (0.05009 NEAR initially, hard range 0.05009 to 0.5). Read it when preparing an operator or Treasury request. It refunds surplus; creation fee in collateral is unchanged. Owner-only `set_storage_policy({market_storage_deposit: U128, reserve: U128})` takes no deposit and 30 TGas; reserve range 0.1 to 100 NEAR, initially 1. `prune_market({market_id: U64})` is permissionless, no deposit, 30 TGas; only resolved markets with no holders or shares can prune. It returns a boolean. Store display metadata off-chain before pruning because text and history become empty. New `MarketView` fields are above.
+
+Sweep interval hard range is now 60 to 1,440 minutes. Migration raises an old shorter interval to 60. New events: `storage_policy_set {market_storage_deposit, reserve}` and `market_pruned {market_id, rule_hash}`. Monetary and payout records survive pruning.
+
 
 ### 5.1 Call builders
 

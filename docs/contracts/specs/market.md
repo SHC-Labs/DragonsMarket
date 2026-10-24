@@ -1,5 +1,8 @@
 # Dragons Market: market contract implementation spec
 
+**Current implementation, 2026-10-23.** Market state version 4 adds native storage funding, reserve policy, exact holder counts for new records, a seeder mirror and bounded exempt-account position windows. See [market contract](../market.md) for the current policy and [website ABI](website-abi.md) for exact JSON fields. The older proposal tables below document previous work; where they differ, the current implementation and ABI take precedence. Migration reads the exact version-3 root, preserves tag-0 market records and writes new records with tag 1. Sweeps and withdrawals retain tag 0. No balance, receipt or payout ledger is discarded.
+
+
 **The complete function set the market contract needs for the accepted end-to-end product, with every existing method checked against the code and every missing method specified.**
 
 | Field | Value |
@@ -136,7 +139,7 @@ All EXISTING (`lib.rs:260-306`) except where marked.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `state_version` | `u16` | First field. `migrate` reads exactly this layout (currently 3). Markets, sweeps and withdrawals are stored behind a one-byte version tag |
+| `state_version` | `u16` | First field. `migrate` reads exactly this layout (currently 4). Markets, sweeps and withdrawals are stored behind a one-byte version tag |
 | `upgrade_proven` | `bool` | Set by `migrate`. `seal` refuses until true |
 | `upgrade_in_flight` | `bool` | Set by `upgrade`, cleared by `migrate` |
 | `owner` | `AccountId` | The DAO |
@@ -382,13 +385,13 @@ PROPOSED. `claim_residual` today credits `balances[business_wallet]` (`lib.rs:65
 
 ### 7.4 Positions and account views (R-08)
 
-PROPOSED. The website calls `get_shares` for every market to find a user's positions (`web/app/portfolio/page.tsx:38-43`). The account holds at most 20 positions, so an on-chain index is cheap.
+BUILT. Ordinary accounts keep a small position index. Operational owner/operator accounts use bounded scans and never extend that index. The website library exposes both forms; page integration and indexed catalog APIs are separate work.
 
 | Item | Specification |
 | --- | --- |
 | `positions` map | Updated in `add_shares` and `take_shares` when an account first holds or fully leaves a market. At most 20 market ids, which fits the flat 0.05 NEAR deposit |
-| `get_positions(account_id: AccountId)` BUILT | `Vec<PositionView>`, each `{market_id: U64, yes: U128, no: U128, status: String, outcome: Option<Outcome>, redeemable: U128}`. `redeemable` is the exact payout when `outcome` is set, otherwise `"0"`. No mark to market value is computed on chain |
-| `get_account(account_id)` NEW | `AccountView` as in 7.1 |
+| `get_positions(account_id: AccountId, from_market: Option<U64>, limit: Option<U64>)` BUILT | `Vec<PositionView>`, each `{market_id: U64, yes: U128, no: U128, status: String, outcome: Option<Outcome>, redeemable: U128}`. `redeemable` is the exact payout when `outcome` is set, otherwise `"0"`. No mark to market value is computed on chain. Exempt accounts scan a consecutive window of 50 IDs by default, at most 100; advance by that window even on empty pages. `positions_are_paged(account_id)` distinguishes them. |
+| `get_account(account_id)` BUILT | `AccountView` as in 7.1; `positions` is nullable for unknown legacy operational totals. It becomes exact after all old shares exit. |
 
 ### 7.5 Reconciliation views (R-08)
 

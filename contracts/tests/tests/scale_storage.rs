@@ -64,6 +64,7 @@ async fn create_measured(w: &World, args: Value) -> anyhow::Result<(u64, i64, i6
     let id: String = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(args)
         .gas(Gas::from_tgas(100))
         .transact()

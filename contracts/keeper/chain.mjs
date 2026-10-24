@@ -2,10 +2,12 @@
 
 export async function rpc(url, method, params) {
   const res = await fetch(url, {
+    signal: AbortSignal.timeout(30_000),
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: "keeper", method, params }),
   });
+  if (!res.ok) throw new Error(`${method}: HTTP ${res.status}`);
   const body = await res.json();
   if (body.error) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
   return body.result;
