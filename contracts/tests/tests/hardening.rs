@@ -42,7 +42,11 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
 
         contract.call("new").args_json(&args).transact().await?.into_result()?;
         let config: serde_json::Value = contract.view("config").await?.json()?;
-        let version = if name == "oracle" { 2 } else { 3 };
+        let version = match name {
+            "market" => 4,
+            "oracle" => 2,
+            _ => 3,
+        };
         assert_eq!(
             config["state_version"], version,
             "{name} initialised by its own account"

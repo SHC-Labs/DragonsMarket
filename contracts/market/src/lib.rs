@@ -3082,7 +3082,7 @@ mod tests {
                 .block_timestamp(now)
                 .attached_deposit(NearToken::from_yoctonear(self.market_storage_deposit))
                 .build());
-            let id = self.create_market(
+            self.create_market(
                 title,
                 rule_text,
                 resolution_source,
@@ -3092,8 +3092,7 @@ mod tests {
                 close_at,
                 resolve_by,
                 price_rule,
-            );
-            id
+            )
         }
     }
 

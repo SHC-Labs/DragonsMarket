@@ -77,7 +77,7 @@ fn sources_of(contract: &str) -> Vec<(PathBuf, String)> {
 // The source without its test module, its comments, and nothing else: strings stay, so a message cannot name what the code
 // must not.
 fn code_only(source: &str) -> String {
-    let production = source.split("\n#[cfg(test)]\n").next().unwrap();
+    let production = source.split("\n#[cfg(test)]\nmod ").next().unwrap();
     let chars: Vec<char> = production.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -131,10 +131,14 @@ fn code_only(source: &str) -> String {
 #[test]
 fn the_stripper_keeps_strings_and_drops_comments_and_test_modules() {
     let code = code_only(
-        "let a = \"has // inside\"; // gone\nlet b = '\"'; /* gone too */ let c = 1;\n#[cfg(test)]\nmod tests { fn hidden() {} }\n",
+        "let a = \"has // inside\"; // gone\nlet b = '\"'; /* gone too */ let c = 1;\n#[cfg(test)]\nconst T: u8 = 0;\nlet d = 2;\n#[cfg(test)]\nmod tests { fn hidden() {} }\n",
     );
     assert!(code.contains("has // inside"));
     assert!(code.contains("let c = 1;"));
+    assert!(
+        code.contains("let d = 2;"),
+        "a test-only item before the test module does not hide the code after it"
+    );
     assert!(!code.contains("gone"));
     assert!(!code.contains("hidden"));
 }
