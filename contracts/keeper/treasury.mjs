@@ -67,6 +67,8 @@ export const CONTRACT_LIMITS = {
     HARD_MAX_MARKET_STORAGE_DEPOSIT: 500_000_000_000_000_000_000_000n,
     HARD_MIN_STORAGE_RESERVE: 100_000_000_000_000_000_000_000n,
     HARD_MAX_STORAGE_RESERVE: 100_000_000_000_000_000_000_000_000n,
+    HARD_MIN_REGISTRATION_FEE: 10_000n,
+    HARD_MAX_REGISTRATION_FEE: 2_000_000n,
     MAX_TITLE: 200,
     MAX_RULE: 2000,
     MAX_SOURCE: 300,
@@ -220,6 +222,9 @@ export const ALLOWED = {
     set_storage_policy: call({
       market_storage_deposit: u128(LIMIT_MARKET.HARD_MIN_MARKET_STORAGE_DEPOSIT, LIMIT_MARKET.HARD_MAX_MARKET_STORAGE_DEPOSIT),
       reserve: u128(LIMIT_MARKET.HARD_MIN_STORAGE_RESERVE, LIMIT_MARKET.HARD_MAX_STORAGE_RESERVE),
+    }),
+    set_registration_fee: call({
+      registration_fee: u128(LIMIT_MARKET.HARD_MIN_REGISTRATION_FEE, LIMIT_MARKET.HARD_MAX_REGISTRATION_FEE),
     }),
     reconcile_leg: call({ sweep_id: u64(1n), leg: oneOf("council", "treasury"), arrived: flag }),
     reconcile_withdrawal: call({ id: u64(1n), paid: flag }),

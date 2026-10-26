@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+use base64::Engine;
+use ed25519_dalek::{Signer, SigningKey};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::{Account, AccountId, Contract, Worker};
@@ -24,6 +26,8 @@ pub const PRICE_THRESHOLD: u32 = 2;
 pub const MAX_SEATS_PER_ACCOUNT: u32 = 10;
 pub const COOLDOWN_SECS: u64 = 60;
 pub const CREATE_FEE: u128 = USD;
+pub const FAR_DEADLINE: &str = "2100-01-01T00:00:00Z";
+const NEP413_PREFIX_TAG: u32 = 2_147_484_061;
 
 pub struct World {
     pub worker: Worker<Sandbox>,
@@ -407,6 +411,36 @@ pub async fn intents_balance(w: &World, who: &AccountId) -> u128 {
         .json()
         .unwrap();
     s.parse().unwrap()
+}
+
+pub fn nep413_signed(key: &SigningKey, message: &str, nonce: [u8; 32], recipient: &str) -> serde_json::Value {
+    let mut bytes = NEP413_PREFIX_TAG.to_le_bytes().to_vec();
+    bytes.extend((message.len() as u32).to_le_bytes());
+    bytes.extend(message.as_bytes());
+    bytes.extend(nonce);
+    bytes.extend((recipient.len() as u32).to_le_bytes());
+    bytes.extend(recipient.as_bytes());
+    bytes.push(0);
+    let digest = Sha256::digest(&bytes);
+    let signature = key.sign(&digest);
+    json!({
+        "standard": "nep413",
+        "payload": {
+            "message": message,
+            "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+            "recipient": recipient,
+        },
+        "public_key": format!("ed25519:{}", bs58::encode(key.verifying_key().as_bytes()).into_string()),
+        "signature": format!("ed25519:{}", bs58::encode(signature.to_bytes()).into_string()),
+    })
+}
+
+pub fn implicit_id(key: &SigningKey) -> String {
+    key.verifying_key()
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 // The verifier's emergency powers, held by w.owner in these tests. A paused feature stops every transfer, and a locked account

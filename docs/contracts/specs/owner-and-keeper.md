@@ -19,7 +19,7 @@ The keeper now uses `due-queue.mjs`, not the oldest-unfinished cursor. Signing r
 
 The event cursor and jobs are saved together through an fsynced atomic rename before dispatch. Replay does not double-enqueue; a block hash gap stops ingestion. Each action rechecks contract state; retries use exponential backoff from one second to 15 minutes, persist failures and serialize calls sharing a signing key. A crash can repeat dispatch: contract idempotence and fresh reads protect it, not an exactly-once promise. Restore or reconcile a corrupt/truncated feed before restarting; do not delete payout evidence. With no event feed, bounded bootstrap and rotating reconciliation still run, but discovery latency grows with catalog size. That fallback is not adequate for live deadline guarantees. The local queue is one JSON file rewritten per batch, not per action; measure file I/O and job-selection time at the intended active catalog size. Database-backed scheduling belongs to the separately owned indexer service.
 
-`market.set_storage_policy` is allowlisted with the same hard bounds as the contract. Creation proposals read the current native storage deposit. Fee-sweep timing may not fall below one hour. `prepareStorageTopUp({treasuryId, contracts, target, amount, description, view})` prepares a native Treasury transfer proposal to the configured oracle or Council only; members still review and vote. Generic transfer approvals still require explicit acknowledgment. No funds are automatically sent.
+`market.set_storage_policy` and `market.set_registration_fee` are allowlisted with the same hard bounds as the contract. Creation proposals read the current native storage deposit. Fee-sweep timing may not fall below one hour. `prepareStorageTopUp({treasuryId, contracts, target, amount, description, view})` prepares a native Treasury transfer proposal to the configured oracle or Council only; members still review and vote. Generic transfer approvals still require explicit acknowledgment. No funds are automatically sent.
 
 `check --runway-config budget.json` uses explicit planning budgets and current balances. Without that flag, it prints that the runway model is not configured. Example configuration:
 
@@ -133,6 +133,7 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `set_sweep_timing` | Owner | `settle_wait_minutes`, `reconcile_wait_minutes`, `min_interval_minutes` (u32) | 0 | 30 TGas | 1 | Settle wait 1 to 1440, reconcile wait 10 to 10080 and not below the settle wait, sweep interval 1 to 1440. Live |
 | `set_open_price_bounds` | Owner | `min: U128`, `max: U128` | 0 | 30 TGas | 1 | Opening price range within 1000 to 999000 millionths, min below max. Live |
 | `set_max_positions` | Owner | `max_positions: u32` | 0 | 30 TGas | 1 | 5 to 30, the most the 0.05 NEAR deposit pays for with a 64-character id. Positions already held stay |
+| `set_registration_fee` | Owner | `registration_fee: U128` | 0 | 30 TGas | 1 | 10,000 to 2,000,000 collateral units (0.01 to 2 of a 6-decimal token). What a `register` transfer pays to register an account with no NEAR, due to the treasury |
 | `set_fee_limits` | Owner | `max_fee_rate_bps`, `max_create_fee`, `min_revenue_share_bps`, `max_revenue_share_bps`, `max_min_sweep` | 0 | 30 TGas | 1 | The ceilings and floors the fee setters check against, each inside a hard range. Refused if it would leave a current value outside |
 | `halt`, `resume` | Operator or owner | `market_id: U64`, `reason: String` | 0 | 30 TGas | 1 | The operator cannot halt in the last 24 hours before close |
 | `create_market`, `retry_register`, `claim_residual` | Operator or owner | as in market.md | 0 | 100 TGas for `create_market` | 1 | Routine. The operator normally calls them |
@@ -281,6 +282,7 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | market | `reconcile_withdrawal` | `id`: decimal string from 1, `paid`: boolean | 0 | 5 to 30 |
 | market | `set_open_price_bounds` | `min`, `max`: decimal strings in range, min not above max | 0 | 5 to 30 |
 | market | `set_max_positions` | integer 5 to 30 | 0 | 5 to 30 |
+| market | `set_registration_fee` | `registration_fee`: decimal string 10000 to 2000000 | 0 | 5 to 30 |
 | market | `set_fee_limits` | five values in range, share floor not above ceiling | 0 | 5 to 30 |
 | market | `halt` | `market_id`: U64, `reason`: non-blank text up to 500 bytes | 0 | 5 to 30 |
 | market | `resume`, `claim_residual` | `market_id`: U64 | 0 | 5 to 30 |

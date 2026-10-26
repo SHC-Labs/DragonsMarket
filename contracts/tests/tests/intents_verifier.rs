@@ -3,19 +3,15 @@
 // The verifier wasm is not committed. Without it at target/intents/defuse.wasm every test here fails with the build recipe, and
 // CI must build it first.
 mod common;
-use base64::Engine;
-use common::{verifier_wasm, wasm, USD};
-use ed25519_dalek::{Signer, SigningKey};
+use common::{implicit_id, nep413_signed, verifier_wasm, wasm, FAR_DEADLINE, USD};
+use ed25519_dalek::SigningKey;
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
-const NEP413_PREFIX_TAG: u32 = 2_147_484_061;
 const STORAGE_PRICE_PER_BYTE: u128 = 10_000_000_000_000_000_000;
-const FAR_DEADLINE: &str = "2100-01-01T00:00:00Z";
 
 struct Env {
     worker: Worker<Sandbox>,
@@ -522,36 +518,6 @@ async fn gas_floors_of_the_verifier_calls() -> anyhow::Result<()> {
     println!("mt_transfer_call floor among the tried values: {floor_call:?} TGas");
     assert!(floor_transfer.is_some() && floor_call.is_some());
     Ok(())
-}
-
-fn nep413_signed(key: &SigningKey, message: &str, nonce: [u8; 32], recipient: &str) -> Value {
-    let mut bytes = NEP413_PREFIX_TAG.to_le_bytes().to_vec();
-    bytes.extend((message.len() as u32).to_le_bytes());
-    bytes.extend(message.as_bytes());
-    bytes.extend(nonce);
-    bytes.extend((recipient.len() as u32).to_le_bytes());
-    bytes.extend(recipient.as_bytes());
-    bytes.push(0);
-    let digest = Sha256::digest(&bytes);
-    let signature = key.sign(&digest);
-    json!({
-        "standard": "nep413",
-        "payload": {
-            "message": message,
-            "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
-            "recipient": recipient,
-        },
-        "public_key": format!("ed25519:{}", bs58::encode(key.verifying_key().as_bytes()).into_string()),
-        "signature": format!("ed25519:{}", bs58::encode(signature.to_bytes()).into_string()),
-    })
-}
-
-fn implicit_id(key: &SigningKey) -> String {
-    key.verifying_key()
-        .as_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 fn signed_transfer(

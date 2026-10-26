@@ -119,9 +119,9 @@ const GAS_SETTLE_FLOOR: Gas =
     Gas::from_gas(GAS_COUNCIL_VIEW.as_gas() + GAS_CALLBACK.as_gas() + GAS_SWEEP_OVERHEAD.as_gas());
 // Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
 const NEP141_PREFIX: &str = "nep141:";
-// Root layout version. Migration reads the exact current or previous root. Version 2 added the sweep ledger and
+// Root layout version. Migration reads the exact current root or the two before. Version 2 added the sweep ledger and
 // optional recipients; version 3 tagged stored records; version 4 adds storage policy and operational position paging.
-const STATE_VERSION: u16 = 4;
+const STATE_VERSION: u16 = 5;
 // Pages bound scanned market ids, including ids without a holding.
 const POSITION_PAGE_DEFAULT: u64 = 50;
 const POSITION_PAGE_MAX: u64 = 100;
@@ -136,6 +136,9 @@ const DEFAULT_STORAGE_RESERVE: u128 = 1_000_000_000_000_000_000_000_000;
 // Reserve is available to exits, not new entries: at least 0.1 NEAR, at most 100 NEAR.
 const HARD_MIN_STORAGE_RESERVE: u128 = 100_000_000_000_000_000_000_000;
 const HARD_MAX_STORAGE_RESERVE: u128 = 100_000_000_000_000_000_000_000_000;
+const DEFAULT_REGISTRATION_FEE: u128 = 250_000;
+const HARD_MIN_REGISTRATION_FEE: u128 = 10_000;
+const HARD_MAX_REGISTRATION_FEE: u128 = 2_000_000;
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
@@ -150,6 +153,7 @@ enum Key {
     PositionMarkets,
     ExemptAccounts,
     PositionCounts,
+    Registrations,
 }
 
 #[near(serializers=[borsh, json])]
@@ -711,6 +715,15 @@ pub struct MarketContract {
     position_counts: LookupMap<AccountId, u32>,
     market_storage_deposit: u128,
     storage_reserve: u128,
+    registration_fee: u128,
+    registrations: LookupMap<AccountId, Registration>,
+}
+
+#[near(serializers=[borsh])]
+#[derive(PartialEq, Eq, Debug)]
+enum Registration {
+    Sponsored { payer: AccountId },
+    Collateral,
 }
 
 // Exact previous root layout; record tags remain readable.
@@ -807,6 +820,195 @@ struct StateV3 {
     pending_by_account: LookupMap<AccountId, u128>,
 }
 
+#[near(serializers=[borsh])]
+struct StateV4 {
+    state_version: u16,
+    upgrade_proven: bool,
+    upgrade_in_flight: bool,
+    owner: AccountId,
+    pending_owner: Option<AccountId>,
+    operator: AccountId,
+    oracle: AccountId,
+    verifier: AccountId,
+    collateral_token_id: String,
+    paused: bool,
+    sells_paused: bool,
+    fee_rate_bps: u128,
+    create_fee: u128,
+    max_fee_rate_bps: u128,
+    max_create_fee: u128,
+    min_revenue_share_bps: u128,
+    max_revenue_share_bps: u128,
+    max_min_sweep: u128,
+    max_positions: u32,
+    min_open_price: u128,
+    max_open_price: u128,
+    void_price_window_ns: u64,
+    void_grace_ns: u64,
+    settle_wait_minutes: u32,
+    reconcile_wait_minutes: u32,
+    min_sweep_interval_minutes: u32,
+    next_market_id: u64,
+    markets: LookupMap<u64, VersionedMarket>,
+    balances: LookupMap<AccountId, u128>,
+    balances_total: u128,
+    accounts: LookupMap<AccountId, u32>,
+    shares: LookupMap<(u64, AccountId, u8), u128>,
+    position_markets: LookupMap<AccountId, Vec<u64>>,
+    recipients: Option<FeeRecipients>,
+    revenue_share_bps: u128,
+    fees: u128,
+    revenue_due: u128,
+    treasury_due: u128,
+    revenue_unresolved: u128,
+    locked_total: u128,
+    min_sweep: u128,
+    next_sweep_id: u64,
+    last_sweep_at: Option<u64>,
+    sweeps: LookupMap<u64, VersionedSweep>,
+    legs_in_flight_total: u128,
+    legs_in_flight_count: u32,
+    next_withdrawal_id: u64,
+    withdrawals: LookupMap<u64, VersionedWithdrawal>,
+    pending_withdrawals_total: u128,
+    pending_withdrawal_count: u32,
+    pending_by_account: LookupMap<AccountId, u128>,
+    exempt_accounts: LookupMap<AccountId, bool>,
+    position_counts: LookupMap<AccountId, u32>,
+    market_storage_deposit: u128,
+    storage_reserve: u128,
+}
+
+impl From<StateV3> for StateV4 {
+    fn from(old: StateV3) -> Self {
+        // No catalog or legacy account-index scan inside migration.
+        let mut exempt_accounts = LookupMap::new(Key::ExemptAccounts);
+        exempt_accounts.insert(old.owner.clone(), true);
+        exempt_accounts.insert(old.operator.clone(), true);
+        Self {
+            state_version: 4,
+            upgrade_proven: old.upgrade_proven,
+            upgrade_in_flight: old.upgrade_in_flight,
+            owner: old.owner,
+            pending_owner: old.pending_owner,
+            operator: old.operator,
+            oracle: old.oracle,
+            verifier: old.verifier,
+            collateral_token_id: old.collateral_token_id,
+            paused: old.paused,
+            sells_paused: old.sells_paused,
+            fee_rate_bps: old.fee_rate_bps,
+            create_fee: old.create_fee,
+            max_fee_rate_bps: old.max_fee_rate_bps,
+            max_create_fee: old.max_create_fee,
+            min_revenue_share_bps: old.min_revenue_share_bps,
+            max_revenue_share_bps: old.max_revenue_share_bps,
+            max_min_sweep: old.max_min_sweep,
+            max_positions: old.max_positions,
+            min_open_price: old.min_open_price,
+            max_open_price: old.max_open_price,
+            void_price_window_ns: old.void_price_window_ns,
+            void_grace_ns: old.void_grace_ns,
+            settle_wait_minutes: old.settle_wait_minutes,
+            reconcile_wait_minutes: old.reconcile_wait_minutes,
+            min_sweep_interval_minutes: old.min_sweep_interval_minutes.max(HARD_MIN_SWEEP_INTERVAL_MINUTES),
+            next_market_id: old.next_market_id,
+            markets: old.markets,
+            balances: old.balances,
+            balances_total: old.balances_total,
+            accounts: old.accounts,
+            shares: old.shares,
+            position_markets: old.position_markets,
+            recipients: old.recipients,
+            revenue_share_bps: old.revenue_share_bps,
+            fees: old.fees,
+            revenue_due: old.revenue_due,
+            treasury_due: old.treasury_due,
+            revenue_unresolved: old.revenue_unresolved,
+            locked_total: old.locked_total,
+            min_sweep: old.min_sweep,
+            next_sweep_id: old.next_sweep_id,
+            last_sweep_at: old.last_sweep_at,
+            sweeps: old.sweeps,
+            legs_in_flight_total: old.legs_in_flight_total,
+            legs_in_flight_count: old.legs_in_flight_count,
+            next_withdrawal_id: old.next_withdrawal_id,
+            withdrawals: old.withdrawals,
+            pending_withdrawals_total: old.pending_withdrawals_total,
+            pending_withdrawal_count: old.pending_withdrawal_count,
+            pending_by_account: old.pending_by_account,
+            exempt_accounts,
+            position_counts: LookupMap::new(Key::PositionCounts),
+            market_storage_deposit: DEFAULT_MARKET_STORAGE_DEPOSIT,
+            storage_reserve: DEFAULT_STORAGE_RESERVE,
+        }
+    }
+}
+
+impl From<StateV4> for MarketContract {
+    fn from(old: StateV4) -> Self {
+        Self {
+            state_version: STATE_VERSION,
+            upgrade_proven: old.upgrade_proven,
+            upgrade_in_flight: old.upgrade_in_flight,
+            owner: old.owner,
+            pending_owner: old.pending_owner,
+            operator: old.operator,
+            oracle: old.oracle,
+            verifier: old.verifier,
+            collateral_token_id: old.collateral_token_id,
+            paused: old.paused,
+            sells_paused: old.sells_paused,
+            fee_rate_bps: old.fee_rate_bps,
+            create_fee: old.create_fee,
+            max_fee_rate_bps: old.max_fee_rate_bps,
+            max_create_fee: old.max_create_fee,
+            min_revenue_share_bps: old.min_revenue_share_bps,
+            max_revenue_share_bps: old.max_revenue_share_bps,
+            max_min_sweep: old.max_min_sweep,
+            max_positions: old.max_positions,
+            min_open_price: old.min_open_price,
+            max_open_price: old.max_open_price,
+            void_price_window_ns: old.void_price_window_ns,
+            void_grace_ns: old.void_grace_ns,
+            settle_wait_minutes: old.settle_wait_minutes,
+            reconcile_wait_minutes: old.reconcile_wait_minutes,
+            min_sweep_interval_minutes: old.min_sweep_interval_minutes,
+            next_market_id: old.next_market_id,
+            markets: old.markets,
+            balances: old.balances,
+            balances_total: old.balances_total,
+            accounts: old.accounts,
+            shares: old.shares,
+            position_markets: old.position_markets,
+            recipients: old.recipients,
+            revenue_share_bps: old.revenue_share_bps,
+            fees: old.fees,
+            revenue_due: old.revenue_due,
+            treasury_due: old.treasury_due,
+            revenue_unresolved: old.revenue_unresolved,
+            locked_total: old.locked_total,
+            min_sweep: old.min_sweep,
+            next_sweep_id: old.next_sweep_id,
+            last_sweep_at: old.last_sweep_at,
+            sweeps: old.sweeps,
+            legs_in_flight_total: old.legs_in_flight_total,
+            legs_in_flight_count: old.legs_in_flight_count,
+            next_withdrawal_id: old.next_withdrawal_id,
+            withdrawals: old.withdrawals,
+            pending_withdrawals_total: old.pending_withdrawals_total,
+            pending_withdrawal_count: old.pending_withdrawal_count,
+            pending_by_account: old.pending_by_account,
+            exempt_accounts: old.exempt_accounts,
+            position_counts: old.position_counts,
+            market_storage_deposit: old.market_storage_deposit,
+            storage_reserve: old.storage_reserve,
+            registration_fee: DEFAULT_REGISTRATION_FEE,
+            registrations: LookupMap::new(Key::Registrations),
+        }
+    }
+}
+
 // A Yes price of one half, in millionths. What a market with no price points before close falls back to.
 const HALF: u128 = 500_000;
 
@@ -858,6 +1060,11 @@ fn side_index(side: &str) -> u8 {
         "no" => 1,
         _ => env::panic_str("side must be yes or no"),
     }
+}
+
+fn parse_part<T: std::str::FromStr>(part: Option<&str>, what: &str) -> T {
+    part.and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| env::panic_str(&format!("bad {what}")))
 }
 
 #[near]
@@ -932,6 +1139,8 @@ impl MarketContract {
             position_counts: LookupMap::new(Key::PositionCounts),
             market_storage_deposit: DEFAULT_MARKET_STORAGE_DEPOSIT,
             storage_reserve: DEFAULT_STORAGE_RESERVE,
+            registration_fee: DEFAULT_REGISTRATION_FEE,
+            registrations: LookupMap::new(Key::Registrations),
         };
         state.make_exempt(&owner_id);
         state.make_exempt(&operator_id);
@@ -975,72 +1184,10 @@ impl MarketContract {
         let version = u16::from_le_bytes([bytes[0], bytes[1]]);
         let mut state: Self = match version {
             STATE_VERSION => env::state_read().unwrap_or_else(|| env::panic_str("invalid current state")),
-            3 => {
-                let old: StateV3 = env::state_read().unwrap_or_else(|| env::panic_str("invalid previous state"));
-                let owner = old.owner.clone();
-                let operator = old.operator.clone();
-                let mut state = Self {
-                    state_version: STATE_VERSION,
-                    upgrade_proven: old.upgrade_proven,
-                    upgrade_in_flight: old.upgrade_in_flight,
-                    owner: old.owner,
-                    pending_owner: old.pending_owner,
-                    operator: old.operator,
-                    oracle: old.oracle,
-                    verifier: old.verifier,
-                    collateral_token_id: old.collateral_token_id,
-                    paused: old.paused,
-                    sells_paused: old.sells_paused,
-                    fee_rate_bps: old.fee_rate_bps,
-                    create_fee: old.create_fee,
-                    max_fee_rate_bps: old.max_fee_rate_bps,
-                    max_create_fee: old.max_create_fee,
-                    min_revenue_share_bps: old.min_revenue_share_bps,
-                    max_revenue_share_bps: old.max_revenue_share_bps,
-                    max_min_sweep: old.max_min_sweep,
-                    max_positions: old.max_positions,
-                    min_open_price: old.min_open_price,
-                    max_open_price: old.max_open_price,
-                    void_price_window_ns: old.void_price_window_ns,
-                    void_grace_ns: old.void_grace_ns,
-                    settle_wait_minutes: old.settle_wait_minutes,
-                    reconcile_wait_minutes: old.reconcile_wait_minutes,
-                    min_sweep_interval_minutes: old.min_sweep_interval_minutes.max(HARD_MIN_SWEEP_INTERVAL_MINUTES),
-                    next_market_id: old.next_market_id,
-                    markets: old.markets,
-                    balances: old.balances,
-                    balances_total: old.balances_total,
-                    accounts: old.accounts,
-                    shares: old.shares,
-                    position_markets: old.position_markets,
-                    recipients: old.recipients,
-                    revenue_share_bps: old.revenue_share_bps,
-                    fees: old.fees,
-                    revenue_due: old.revenue_due,
-                    treasury_due: old.treasury_due,
-                    revenue_unresolved: old.revenue_unresolved,
-                    locked_total: old.locked_total,
-                    min_sweep: old.min_sweep,
-                    next_sweep_id: old.next_sweep_id,
-                    last_sweep_at: old.last_sweep_at,
-                    sweeps: old.sweeps,
-                    legs_in_flight_total: old.legs_in_flight_total,
-                    legs_in_flight_count: old.legs_in_flight_count,
-                    next_withdrawal_id: old.next_withdrawal_id,
-                    withdrawals: old.withdrawals,
-                    pending_withdrawals_total: old.pending_withdrawals_total,
-                    pending_withdrawal_count: old.pending_withdrawal_count,
-                    pending_by_account: old.pending_by_account,
-                    exempt_accounts: LookupMap::new(Key::ExemptAccounts),
-                    position_counts: LookupMap::new(Key::PositionCounts),
-                    market_storage_deposit: DEFAULT_MARKET_STORAGE_DEPOSIT,
-                    storage_reserve: DEFAULT_STORAGE_RESERVE,
-                };
-                // No catalog or legacy account-index scan inside migration.
-                state.exempt_accounts.insert(owner, true);
-                state.exempt_accounts.insert(operator, true);
-                state
-            }
+            4 => Self::from(env::state_read::<StateV4>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
+            3 => Self::from(StateV4::from(
+                env::state_read::<StateV3>().unwrap_or_else(|| env::panic_str("invalid previous state")),
+            )),
             _ => env::panic_str("unsupported state version"),
         };
         require!(state.upgrade_in_flight, "migrate runs only inside an upgrade");
@@ -1522,6 +1669,16 @@ impl MarketContract {
         );
     }
 
+    pub fn set_registration_fee(&mut self, registration_fee: U128) {
+        self.only_owner();
+        require!(
+            (HARD_MIN_REGISTRATION_FEE..=HARD_MAX_REGISTRATION_FEE).contains(&registration_fee.0),
+            "registration fee outside hard range"
+        );
+        self.registration_fee = registration_fee.0;
+        emit("registration_fee_set", json!({ "registration_fee": registration_fee }));
+    }
+
     // Permissionless and idempotent. Monetary fields, rule hash and sweep ledgers survive.
     pub fn prune_market(&mut self, market_id: U64) -> bool {
         let mut m = self.market(market_id.0);
@@ -1662,37 +1819,60 @@ impl MarketContract {
                     json!({ "account": sender_id, "amount": amount.0.to_string() }),
                 );
             }
+            Some("register") => self.register_with_collateral(&sender_id, amount.0),
             // "seed:<market>" opens at one half. "seed:<market>:<Yes price in millionths>" opens at that price.
             Some("seed") => {
                 require!(
                     sender_id == self.owner || sender_id == self.operator,
                     "operator or owner only"
                 );
-                let id: u64 = parts
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| env::panic_str("bad market id"));
-                let yes_price = parts.next().map(|p| {
-                    p.parse::<u128>()
-                        .unwrap_or_else(|_| env::panic_str("bad starting price"))
-                });
+                let id: u64 = parse_part(parts.next(), "market id");
+                let yes_price = parts.next().map(|p| parse_part(Some(p), "starting price"));
                 self.seed(&sender_id, id, amount.0, yes_price);
             }
             Some("buy") => {
-                let id: u64 = parts
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| env::panic_str("bad market id"));
+                let id: u64 = parse_part(parts.next(), "market id");
                 let side = side_index(parts.next().unwrap_or(""));
-                let min_out: u128 = parts
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| env::panic_str("bad min shares"));
+                let min_out: u128 = parse_part(parts.next(), "min shares");
                 self.buy_with(&sender_id, id, side, amount.0, min_out);
             }
             _ => env::panic_str("unknown action"),
         }
         vec![U128(0)]
+    }
+
+    pub fn on_auth(&mut self, signer_id: AccountId, msg: String) -> PromiseOrValue<()> {
+        require!(
+            env::predecessor_account_id() == self.verifier,
+            "only the verifier can act for a signer"
+        );
+        let mut parts = msg.split(':');
+        match parts.next() {
+            Some("buy") => {
+                let id: u64 = parse_part(parts.next(), "market id");
+                let side = side_index(parts.next().unwrap_or(""));
+                let amount: u128 = parse_part(parts.next(), "amount");
+                let min_out: u128 = parse_part(parts.next(), "min shares");
+                self.debit(&signer_id, amount);
+                self.buy_with(&signer_id, id, side, amount, min_out);
+            }
+            Some("sell") => {
+                let id: u64 = parse_part(parts.next(), "market id");
+                let side = parts.next().unwrap_or("");
+                let collateral_out: u128 = parse_part(parts.next(), "collateral out");
+                let max_shares_in: u128 = parse_part(parts.next(), "max shares in");
+                self.sell_for(&signer_id, id, side, collateral_out, max_shares_in);
+            }
+            Some("redeem") => {
+                let _ = self.redeem_for(&signer_id, parse_part(parts.next(), "market id"));
+            }
+            Some("withdraw") => {
+                let amount: u128 = parse_part(parts.next(), "amount");
+                return PromiseOrValue::Promise(self.withdraw_for(signer_id, amount));
+            }
+            _ => env::panic_str("unknown action"),
+        }
+        PromiseOrValue::Value(())
     }
 
     // ---- trading --------------------------------------------------------------------------
@@ -1711,25 +1891,29 @@ impl MarketContract {
     #[payable]
     pub fn sell(&mut self, market_id: U64, side: String, collateral_out: U128, max_shares_in: U128) {
         assert_one_yocto();
-        require!(!self.sells_paused, "sells are paused");
         let who = env::predecessor_account_id();
-        require!(self.accounts.contains_key(&who), "do the storage deposit first");
-        let idx = side_index(&side);
-        let mut m = self.open_market(market_id.0);
+        self.sell_for(&who, market_id.0, &side, collateral_out.0, max_shares_in.0);
+    }
+
+    fn sell_for(&mut self, who: &AccountId, id: u64, side: &str, collateral_out: u128, max_shares_in: u128) {
+        require!(!self.sells_paused, "sells are paused");
+        require!(self.accounts.contains_key(who), "do the storage deposit first");
+        let idx = side_index(side);
+        let mut m = self.open_market(id);
         let (target, other) = if idx == 0 {
             (m.pool_yes, m.pool_no)
         } else {
             (m.pool_no, m.pool_yes)
         };
         let (fee, shares_in, new_target, new_other) =
-            curve::sell_after_fee(target, other, collateral_out.0, self.fee_rate_bps)
+            curve::sell_after_fee(target, other, collateral_out, self.fee_rate_bps)
                 .unwrap_or_else(|| env::panic_str("cannot sell that amount"));
         require!(
-            shares_in <= max_shares_in.0,
+            shares_in <= max_shares_in,
             "price moved, would need more shares than your maximum"
         );
 
-        self.take_shares(&mut m, &who, market_id.0, idx, shares_in);
+        self.take_shares(&mut m, who, id, idx, shares_in);
         if idx == 0 {
             m.pool_yes = new_target;
             m.pool_no = new_other;
@@ -1739,45 +1923,48 @@ impl MarketContract {
             m.pool_yes = new_other;
             m.user_no -= shares_in;
         }
-        m.locked -= collateral_out.0;
-        self.locked_total -= collateral_out.0;
+        m.locked -= collateral_out;
+        self.locked_total -= collateral_out;
         m.record_price();
-        let mut data = json!({ "market_id": market_id.0.to_string(), "account": who, "side": side,
-                    "shares": shares_in.to_string(), "collateral": collateral_out.0.to_string(), "fee": fee.to_string() });
+        let mut data = json!({ "market_id": id.to_string(), "account": who, "side": side,
+                    "shares": shares_in.to_string(), "collateral": collateral_out.to_string(), "fee": fee.to_string() });
         m.add_pools(&mut data);
-        self.store_market(market_id.0, m);
+        self.store_market(id, m);
         self.fees += fee;
-        self.credit(&who, collateral_out.0 - fee);
+        self.credit(who, collateral_out - fee);
         emit("sell", data);
     }
 
     // Pays out after resolution. No deadline.
     pub fn redeem(&mut self, market_id: U64) -> U128 {
-        let who = env::predecessor_account_id();
-        let mut m = self.market(market_id.0);
+        U128(self.redeem_for(&env::predecessor_account_id(), market_id.0))
+    }
+
+    fn redeem_for(&mut self, who: &AccountId, id: u64) -> u128 {
+        let mut m = self.market(id);
         let outcome = m.outcome.unwrap_or_else(|| env::panic_str("not resolved yet"));
-        let yes = self.shares.get(&(market_id.0, who.clone(), 0)).copied().unwrap_or(0);
-        let no = self.shares.get(&(market_id.0, who.clone(), 1)).copied().unwrap_or(0);
+        let yes = self.shares.get(&(id, who.clone(), 0)).copied().unwrap_or(0);
+        let no = self.shares.get(&(id, who.clone(), 1)).copied().unwrap_or(0);
         require!(yes + no > 0, "nothing to redeem");
         let payout = m.payout(outcome, yes, no);
         if yes > 0 {
-            self.take_shares(&mut m, &who, market_id.0, 0, yes);
+            self.take_shares(&mut m, who, id, 0, yes);
         }
         if no > 0 {
-            self.take_shares(&mut m, &who, market_id.0, 1, no);
+            self.take_shares(&mut m, who, id, 1, no);
         }
         m.user_yes -= yes;
         m.user_no -= no;
         m.locked -= payout;
         self.locked_total -= payout;
-        self.store_market(market_id.0, m);
-        self.credit(&who, payout);
+        self.store_market(id, m);
+        self.credit(who, payout);
         emit(
             "redeemed",
-            json!({ "market_id": market_id.0.to_string(), "account": who, "amount": payout.to_string(),
+            json!({ "market_id": id.to_string(), "account": who, "amount": payout.to_string(),
                     "yes_shares": yes.to_string(), "no_shares": no.to_string() }),
         );
-        U128(payout)
+        payout
     }
 
     // ---- money out ------------------------------------------------------------------------
@@ -1785,34 +1972,37 @@ impl MarketContract {
     #[payable]
     pub fn withdraw(&mut self, amount: U128) -> Promise {
         assert_one_yocto();
-        let who = env::predecessor_account_id();
-        require!(amount.0 > 0, "amount must be positive");
+        self.withdraw_for(env::predecessor_account_id(), amount.0)
+    }
+
+    fn withdraw_for(&mut self, who: AccountId, amount: u128) -> Promise {
+        require!(amount > 0, "amount must be positive");
         // Take the balance first and record the withdrawal as owed; the callback confirms it or gives the balance back.
-        self.debit(&who, amount.0);
+        self.debit(&who, amount);
         let id = self.next_withdrawal_id;
         self.next_withdrawal_id += 1;
         self.store_withdrawal(
             id,
             Withdrawal {
                 account: who.clone(),
-                amount,
+                amount: U128(amount),
                 at: U64(env::block_timestamp()),
             },
         );
-        self.pending_withdrawals_total += amount.0;
+        self.pending_withdrawals_total += amount;
         self.pending_withdrawal_count += 1;
         let mine = self.pending_by_account.get(&who).copied().unwrap_or(0);
-        self.pending_by_account.insert(who.clone(), mine + amount.0);
+        self.pending_by_account.insert(who.clone(), mine + amount);
         emit(
             "withdraw",
-            json!({ "account": who, "amount": amount.0.to_string(), "id": id.to_string() }),
+            json!({ "account": who, "amount": amount.to_string(), "id": id.to_string() }),
         );
         // The payout goes to the caller's own Intents account, inside the verifier. mt_transfer returns nothing, so an
         // error here means the verifier's receipt failed (paused, locked, out of gas) and nothing moved.
         ext_verifier::ext(self.verifier.clone())
             .with_attached_deposit(ONE_YOCTO)
             .with_static_gas(GAS_MT_TRANSFER)
-            .mt_transfer(who.clone(), self.collateral_token_id.clone(), amount, None, None)
+            .mt_transfer(who, self.collateral_token_id.clone(), U128(amount), None, None)
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_CALLBACK)
@@ -2133,6 +2323,7 @@ impl MarketContract {
                 "min_revenue_share_bps": self.min_revenue_share_bps as u32, "max_revenue_share_bps": self.max_revenue_share_bps as u32,
                 "max_min_sweep": self.max_min_sweep.to_string(),
                 "market_storage_deposit": self.market_storage_deposit.to_string(), "storage_reserve": self.storage_reserve.to_string(),
+                "registration_fee": self.registration_fee.to_string(),
                 "position_page_default": POSITION_PAGE_DEFAULT, "position_page_max": POSITION_PAGE_MAX })
     }
 
@@ -2378,6 +2569,10 @@ impl StorageManagement for MarketContract {
         } else {
             require!(paid >= STORAGE_DEPOSIT, "attach at least 0.05 NEAR");
             self.accounts.insert(who.clone(), 0);
+            if payer != who && payer != self.verifier {
+                self.registrations
+                    .insert(who.clone(), Registration::Sponsored { payer: payer.clone() });
+            }
             emit("registered", json!({ "account": who, "paid_by": payer }));
             paid.saturating_sub(STORAGE_DEPOSIT)
         };
@@ -2402,7 +2597,7 @@ impl StorageManagement for MarketContract {
         Self::registered_balance()
     }
 
-    // Closes an account that holds no positions and no balance and sends it the deposit back, with the yocto it attached.
+    // Closes an account that holds no positions and no balance and returns the deposit and yocto to whoever paid each.
     // An account that is not registered gets false. Burning what an account still holds is not offered.
     #[payable]
     fn storage_unregister(&mut self, force: Option<bool>) -> bool {
@@ -2428,8 +2623,22 @@ impl StorageManagement for MarketContract {
         self.accounts.remove(&who);
         self.position_markets.remove(&who);
         self.balances.remove(&who);
-        emit("unregistered", json!({ "account": who }));
-        let _ = Promise::new(who).transfer(STORAGE_DEPOSIT.saturating_add(ONE_YOCTO));
+        let deposit_to = match self.registrations.remove(&who) {
+            None => {
+                let _ = Promise::new(who.clone()).transfer(STORAGE_DEPOSIT.saturating_add(ONE_YOCTO));
+                Some(who.clone())
+            }
+            Some(Registration::Sponsored { payer }) => {
+                let _ = Promise::new(payer.clone()).transfer(STORAGE_DEPOSIT);
+                let _ = Promise::new(who.clone()).transfer(ONE_YOCTO);
+                Some(payer)
+            }
+            Some(Registration::Collateral) => {
+                let _ = Promise::new(who.clone()).transfer(ONE_YOCTO);
+                None
+            }
+        };
+        emit("unregistered", json!({ "account": who, "deposit_to": deposit_to }));
         true
     }
 
@@ -2695,6 +2904,27 @@ impl MarketContract {
             .unwrap_or_else(|| env::panic_str("not enough balance"));
         self.balances.insert(who.clone(), left);
         self.balances_total -= amount;
+    }
+
+    fn register_with_collateral(&mut self, who: &AccountId, amount: u128) {
+        require!(!self.paused, "paused");
+        require!(!self.accounts.contains_key(who), "already registered");
+        let fee = self.registration_fee;
+        require!(amount >= fee, "send at least the registration fee");
+        self.accounts.insert(who.clone(), 0);
+        self.registrations.insert(who.clone(), Registration::Collateral);
+        if amount > fee {
+            self.credit(who, amount - fee);
+        }
+        self.accounts.flush();
+        self.registrations.flush();
+        self.balances.flush();
+        self.assert_storage_reserve(0);
+        self.treasury_due += fee;
+        emit(
+            "registered",
+            json!({ "account": who, "paid_by": who, "fee": fee.to_string() }),
+        );
     }
 
     fn owed(m: &Market, outcome: Outcome) -> u128 {
@@ -3204,12 +3434,20 @@ mod tests {
                 }
             }
             // deposit, then buy out of the balance
-            _ => {
+            4 => {
                 act_as(VERIFIER, 3);
                 let _ = receive(c, acct(who), U128(amount), "deposit".to_string());
                 *total_in += amount;
                 act_as(who, 3);
                 c.buy(U64(id), "yes".to_string(), U128(amount / 2 + 1), U128(1));
+            }
+            _ => {
+                let (y, _) = holdings(c, id, who);
+                let q = c.quote_sell(U64(id), "yes".to_string(), U128(y * frac / 100));
+                if q.collateral_out.0 > 0 {
+                    act_as(VERIFIER, 3);
+                    let _ = c.on_auth(acct(who), format!("sell:{id}:yes:{}:{y}", q.collateral_out.0));
+                }
             }
         }
     }
@@ -3221,7 +3459,7 @@ mod tests {
         // resolved and everyone has redeemed, nothing is left locked.
         #[test]
         fn random_trading_never_breaks_the_books(
-            ops in proptest::collection::vec((0u8..5, 0usize..3, 0u64..2, 1_000_000u128..40_000_000, 1u128..101), 1..60),
+            ops in proptest::collection::vec((0u8..6, 0usize..3, 0u64..2, 1_000_000u128..40_000_000, 1u128..101), 1..60),
             outcomes in proptest::collection::vec(0u8..3, 2),
             claim_first in any::<bool>()
         ) {
@@ -6445,6 +6683,104 @@ mod tests {
         assert_eq!(c.get_balance(acct(USERS[0])).0, 0);
     }
 
+    #[test]
+    fn a_signed_action_moves_only_the_signers_money() {
+        let (mut c, mut total_in) = world();
+        let ann = acct(USERS[0]);
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, ann.clone(), U128(20_000_000), "deposit".into());
+        total_in += 20_000_000;
+        let _ = c.on_auth(ann.clone(), "buy:0:yes:10000000:1".into());
+        let (yes, _) = holdings(&c, 0, USERS[0]);
+        assert!(yes > 0);
+        assert_eq!(c.get_balance(ann.clone()).0, 10_000_000);
+        let q = c.quote_sell(U64(0), "yes".into(), U128(yes / 2));
+        let _ = c.on_auth(ann.clone(), format!("sell:0:yes:{}:{yes}", q.collateral_out.0));
+        assert_eq!(c.get_balance(ann.clone()).0, 10_000_000 + q.collateral_out.0 - q.fee.0);
+        assert_conserved(&c, total_in);
+
+        act_as(ORACLE, CLOSE);
+        c.set_outcome(U64(0), Outcome::Yes);
+        act_as(VERIFIER, CLOSE + 1);
+        let _ = c.on_auth(ann.clone(), "redeem:0".into());
+        assert_eq!(holdings(&c, 0, USERS[0]), (0, 0));
+        let all = c.get_balance(ann.clone()).0;
+        let _ = c.on_auth(ann.clone(), format!("withdraw:{all}"));
+        assert_eq!(c.get_balance(ann.clone()).0, 0);
+        assert_eq!(c.pending_by_account.get(&ann).copied(), Some(all));
+        for other in [USERS[1], USERS[2], VERIFIER] {
+            assert_eq!(c.get_balance(acct(other)).0, 0);
+        }
+        assert_conserved(&c, total_in);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the verifier can act for a signer")]
+    fn a_signed_action_comes_only_from_the_verifier() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(5_000_000), "deposit".into());
+        act_as(USERS[1], 3);
+        let _ = c.on_auth(acct(USERS[0]), "withdraw:5000000".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown action")]
+    fn an_unknown_signed_action_is_refused() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = c.on_auth(acct(USERS[0]), "deposit".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "bad amount")]
+    fn a_signed_withdrawal_names_its_amount() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = c.on_auth(acct(USERS[0]), "withdraw:".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "paused")]
+    fn a_signed_buy_is_refused_while_the_market_is_paused() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(5_000_000), "deposit".into());
+        act_as(OWNER, 4);
+        c.set_paused(true);
+        act_as(VERIFIER, 5);
+        let _ = c.on_auth(acct(USERS[0]), "buy:0:yes:5000000:1".into());
+    }
+
+    #[test]
+    fn a_signed_exit_still_works_while_the_market_is_paused() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        act_as(ORACLE, CLOSE);
+        c.set_outcome(U64(0), Outcome::Yes);
+        act_as(OWNER, CLOSE + 1);
+        c.set_paused(true);
+        act_as(VERIFIER, CLOSE + 2);
+        let _ = c.on_auth(acct(USERS[0]), "redeem:0".into());
+        let paid = c.get_balance(acct(USERS[0])).0;
+        assert!(paid > 0);
+        let _ = c.on_auth(acct(USERS[0]), format!("withdraw:{paid}"));
+        assert_eq!(c.get_balance(acct(USERS[0])).0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "sells are paused")]
+    fn a_signed_sell_obeys_the_owners_sell_pause() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        act_as(OWNER, 4);
+        c.set_sells_paused(true);
+        act_as(VERIFIER, 5);
+        let _ = c.on_auth(acct(USERS[0]), "sell:0:yes:1000000:10000000".into());
+    }
+
     // ---- NEP-145 storage management ---------------------------------------------------------------------
 
     const FIFTY_MILLI: NearToken = NearToken::from_millinear(50);
@@ -6716,6 +7052,132 @@ mod tests {
         act_as(USERS[0], WITHDRAWAL_DECIDABLE_AT + 1);
         assert!(c.storage_unregister(None));
         assert!(!c.is_registered(acct(USERS[0])));
+    }
+
+    #[test]
+    fn a_collateral_registration_takes_the_fee_for_the_treasury_and_credits_the_rest() {
+        let (mut c, total_in) = world();
+        let treasury_before = c.treasury_due;
+        let paid = DEFAULT_REGISTRATION_FEE + 5_000_000;
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct("zed.near"), U128(paid), "register".into());
+        assert!(c.is_registered(acct("zed.near")));
+        assert_eq!(c.registrations.get(&acct("zed.near")), Some(&Registration::Collateral));
+        assert_eq!(c.get_balance(acct("zed.near")).0, 5_000_000);
+        assert_eq!(c.treasury_due, treasury_before + DEFAULT_REGISTRATION_FEE);
+        assert_eq!(c.total_owed().0, total_in + paid);
+        let _ = receive(&mut c, acct("zed.near"), U128(10_000_000), "buy:0:yes:1".into());
+        assert!(holdings(&c, 0, "zed.near").0 > 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "send at least the registration fee")]
+    fn a_collateral_registration_below_the_fee_is_refused() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(
+            &mut c,
+            acct("zed.near"),
+            U128(DEFAULT_REGISTRATION_FEE - 1),
+            "register".into(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "already registered")]
+    fn an_account_registers_only_once() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(
+            &mut c,
+            acct(USERS[0]),
+            U128(DEFAULT_REGISTRATION_FEE),
+            "register".into(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "paused")]
+    fn a_collateral_registration_waits_out_a_pause() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_paused(true);
+        act_as(VERIFIER, 4);
+        let _ = receive(
+            &mut c,
+            acct("zed.near"),
+            U128(DEFAULT_REGISTRATION_FEE),
+            "register".into(),
+        );
+    }
+
+    #[test]
+    fn a_sponsor_gets_the_deposit_back_and_the_account_its_yocto() {
+        let mut c = blank_world();
+        act_paying("ann2.near", FIFTY_MILLI);
+        c.storage_deposit(Some(acct("zed.near")), None);
+        assert_eq!(
+            c.registrations.get(&acct("zed.near")),
+            Some(&Registration::Sponsored {
+                payer: acct("ann2.near")
+            })
+        );
+        act_as("zed.near", 5);
+        assert!(c.storage_unregister(None));
+        assert_eq!(
+            refunds(),
+            vec![
+                ("ann2.near".to_string(), FIFTY_MILLI),
+                ("zed.near".to_string(), ONE_YOCTO)
+            ]
+        );
+        assert!(c.registrations.get(&acct("zed.near")).is_none());
+    }
+
+    #[test]
+    fn an_account_registered_with_collateral_leaves_with_only_its_yocto() {
+        let (mut c, _) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(
+            &mut c,
+            acct("zed.near"),
+            U128(DEFAULT_REGISTRATION_FEE),
+            "register".into(),
+        );
+        act_as("zed.near", 4);
+        assert!(c.storage_unregister(None));
+        assert_eq!(refunds(), vec![("zed.near".to_string(), ONE_YOCTO)]);
+        assert!(!c.is_registered(acct("zed.near")));
+        assert!(c.registrations.get(&acct("zed.near")).is_none());
+    }
+
+    #[test]
+    fn a_registration_the_verifier_paid_for_refunds_the_account_itself() {
+        let mut c = blank_world();
+        act_paying(VERIFIER, FIFTY_MILLI);
+        c.storage_deposit(Some(acct("zed.near")), None);
+        assert!(c.registrations.get(&acct("zed.near")).is_none());
+        act_as("zed.near", 5);
+        assert!(c.storage_unregister(None));
+        assert_eq!(
+            refunds(),
+            vec![("zed.near".to_string(), FIFTY_MILLI.saturating_add(ONE_YOCTO))]
+        );
+    }
+
+    #[test]
+    fn the_registration_fee_moves_only_within_its_hard_range_and_only_by_the_owner() {
+        let (mut c, _) = world();
+        act_as(USERS[0], 3);
+        assert!(refused(|| c.set_registration_fee(U128(DEFAULT_REGISTRATION_FEE))));
+        act_as(OWNER, 3);
+        for fee in [HARD_MIN_REGISTRATION_FEE - 1, HARD_MAX_REGISTRATION_FEE + 1] {
+            assert!(refused(|| c.set_registration_fee(U128(fee))));
+        }
+        for fee in [HARD_MIN_REGISTRATION_FEE, HARD_MAX_REGISTRATION_FEE] {
+            c.set_registration_fee(U128(fee));
+            assert_eq!(c.config()["registration_fee"], fee.to_string());
+        }
     }
 
     // ---- owner-set policy values, each inside a hard range ---------------------------------------------------
@@ -7016,11 +7478,18 @@ mod tests {
             c.shares.flush();
             c.position_markets.flush();
             c.pending_by_account.flush();
+            c.registrations.flush();
         };
         flush(&mut c);
         let who: AccountId = "f".repeat(64).parse().unwrap();
         let before = env::storage_usage();
         c.accounts.insert(who.clone(), 0);
+        c.registrations.insert(
+            who.clone(),
+            Registration::Sponsored {
+                payer: "e".repeat(64).parse().unwrap(),
+            },
+        );
         c.max_positions = HARD_MAX_POSITIONS;
         c.credit(&who, 1);
         c.pending_by_account.insert(who.clone(), 1);
@@ -8110,7 +8579,8 @@ mod tests {
         drop(old);
         act_unpaid(SELF, 5);
         let mut upgraded = MarketContract::migrate();
-        assert_eq!(upgraded.state_version, 4);
+        assert_eq!(upgraded.state_version, STATE_VERSION);
+        assert_eq!(upgraded.registration_fee, DEFAULT_REGISTRATION_FEE);
         assert_eq!(upgraded.min_sweep_interval_minutes, 60);
         assert!(upgraded.positions_are_paged(acct(OWNER)));
         assert_eq!(upgraded.get_positions(acct(OWNER), None, None).len(), 1);
@@ -8130,5 +8600,91 @@ mod tests {
         let id = create_registered(&mut upgraded, OWNER);
         seed_with(&mut upgraded, OWNER, id, Some("300000"));
         assert_eq!(upgraded.get_account(acct(OWNER)).positions, Some(1));
+    }
+
+    #[test]
+    fn a_version_four_upgrade_keeps_every_record_and_starts_the_registration_fee() {
+        let (mut c, total_in) = world();
+        act_as(VERIFIER, 3);
+        let _ = receive(&mut c, acct(USERS[0]), U128(10_000_000), "buy:0:yes:1".into());
+        let total = total_in + 10_000_000;
+        let held = holdings(&c, 0, USERS[0]);
+        let old = StateV4 {
+            state_version: 4,
+            upgrade_proven: c.upgrade_proven,
+            upgrade_in_flight: true,
+            owner: c.owner,
+            pending_owner: c.pending_owner,
+            operator: c.operator,
+            oracle: c.oracle,
+            verifier: c.verifier,
+            collateral_token_id: c.collateral_token_id,
+            paused: c.paused,
+            sells_paused: c.sells_paused,
+            fee_rate_bps: c.fee_rate_bps,
+            create_fee: c.create_fee,
+            max_fee_rate_bps: c.max_fee_rate_bps,
+            max_create_fee: c.max_create_fee,
+            min_revenue_share_bps: c.min_revenue_share_bps,
+            max_revenue_share_bps: c.max_revenue_share_bps,
+            max_min_sweep: c.max_min_sweep,
+            max_positions: c.max_positions,
+            min_open_price: c.min_open_price,
+            max_open_price: c.max_open_price,
+            void_price_window_ns: c.void_price_window_ns,
+            void_grace_ns: c.void_grace_ns,
+            settle_wait_minutes: c.settle_wait_minutes,
+            reconcile_wait_minutes: c.reconcile_wait_minutes,
+            min_sweep_interval_minutes: c.min_sweep_interval_minutes,
+            next_market_id: c.next_market_id,
+            markets: c.markets,
+            balances: c.balances,
+            balances_total: c.balances_total,
+            accounts: c.accounts,
+            shares: c.shares,
+            position_markets: c.position_markets,
+            recipients: c.recipients,
+            revenue_share_bps: c.revenue_share_bps,
+            fees: c.fees,
+            revenue_due: c.revenue_due,
+            treasury_due: c.treasury_due,
+            revenue_unresolved: c.revenue_unresolved,
+            locked_total: c.locked_total,
+            min_sweep: c.min_sweep,
+            next_sweep_id: c.next_sweep_id,
+            last_sweep_at: c.last_sweep_at,
+            sweeps: c.sweeps,
+            legs_in_flight_total: c.legs_in_flight_total,
+            legs_in_flight_count: c.legs_in_flight_count,
+            next_withdrawal_id: c.next_withdrawal_id,
+            withdrawals: c.withdrawals,
+            pending_withdrawals_total: c.pending_withdrawals_total,
+            pending_withdrawal_count: c.pending_withdrawal_count,
+            pending_by_account: c.pending_by_account,
+            exempt_accounts: c.exempt_accounts,
+            position_counts: c.position_counts,
+            market_storage_deposit: c.market_storage_deposit,
+            storage_reserve: c.storage_reserve,
+        };
+        env::state_write(&old);
+        drop(old);
+        act_unpaid(SELF, 5);
+        let mut upgraded = MarketContract::migrate();
+        assert_eq!(upgraded.state_version, STATE_VERSION);
+        assert!(upgraded.upgrade_proven && !upgraded.upgrade_in_flight);
+        assert_eq!(upgraded.registration_fee, DEFAULT_REGISTRATION_FEE);
+        assert_eq!(holdings(&upgraded, 0, USERS[0]), held);
+        assert_eq!(upgraded.total_owed().0, total);
+        assert!(upgraded.is_registered(acct(USERS[0])));
+        assert!(upgraded.positions_are_paged(acct(OWNER)));
+        assert!(upgraded.check_invariant(U64(0)));
+        act_as(VERIFIER, 6);
+        let _ = receive(
+            &mut upgraded,
+            acct("zed.near"),
+            U128(DEFAULT_REGISTRATION_FEE),
+            "register".into(),
+        );
+        assert!(upgraded.is_registered(acct("zed.near")));
     }
 }

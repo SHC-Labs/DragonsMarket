@@ -43,7 +43,7 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
         contract.call("new").args_json(&args).transact().await?.into_result()?;
         let config: serde_json::Value = contract.view("config").await?.json()?;
         let version = match name {
-            "market" => 4,
+            "market" => 5,
             "oracle" => 2,
             _ => 3,
         };
@@ -224,6 +224,48 @@ async fn a_user_registers_alone_or_is_registered_by_someone_else_and_leaves_with
     assert_eq!(
         (holdings(&w, w.carol.id()).await, market_balance(&w, w.carol.id()).await),
         (tokens, 0)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sponsor_gets_the_deposit_back_when_the_account_it_registered_leaves() -> anyhow::Result<()> {
+    let w = setup().await?;
+    w.owner
+        .call(w.market.id(), "storage_deposit")
+        .args_json(json!({ "account_id": w.dave.id() }))
+        .deposit(NearToken::from_yoctonear(FLAT_DEPOSIT))
+        .transact()
+        .await?
+        .into_result()?;
+    assert!(is_registered(&w, w.dave.id()).await);
+    w.worker.fast_forward(3).await?;
+
+    let owner_before = native_balance(&w.owner).await;
+    let dave_before = native_balance(&w.dave).await;
+    let left = w
+        .dave
+        .call(w.market.id(), "storage_unregister")
+        .args_json(json!({}))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+    let unregistered = &events_named(
+        &left.logs().iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+        "unregistered",
+    )[0];
+    assert_eq!(unregistered["deposit_to"], json!(w.owner.id()));
+    assert!(left.json::<bool>()? && !is_registered(&w, w.dave.id()).await);
+    assert_eq!(
+        native_balance(&w.owner).await - owner_before,
+        FLAT_DEPOSIT,
+        "the sponsor gets its deposit back"
+    );
+    let dave_after = native_balance(&w.dave).await;
+    assert!(
+        dave_after < dave_before && dave_before - dave_after < 10_000_000_000_000_000_000_000,
+        "the account that leaves pays its gas and keeps nobody's deposit: {dave_before} to {dave_after}"
     );
     Ok(())
 }
