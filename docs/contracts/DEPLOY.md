@@ -38,6 +38,9 @@ example DAO names and sandbox keys are not production configuration.
 ## 2. Settlement and rewards
 
 - [ ] Prove external funding reaches the correct authenticated beneficiary and collateral asset.
+- [ ] Register the market account with the collateral token (`storage_deposit` on the token, once)
+      and send a small token `deposit`. Until then the token refuses `ft_transfer_call` to the market,
+      so only the Intents path can fund it.
 - [ ] Show committed backing remains controlled inside Intents and reconciles with positions.
 - [ ] Verify buy, sell, Yes/No/Void redemption and available-balance withdrawal.
 - [ ] Complete the oracle bond/juror-payment migration to Intents.

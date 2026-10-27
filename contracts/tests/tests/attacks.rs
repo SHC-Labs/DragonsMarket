@@ -165,6 +165,12 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
             "private",
         ),
         (
+            &Contractish::Market,
+            "on_forwarded",
+            json!({ "sender_id": me, "amount": "1", "arrival": "deposit" }),
+            "private",
+        ),
+        (
             &Contractish::Oracle,
             "propose_owner",
             json!({ "new_owner": me }),
@@ -504,7 +510,7 @@ async fn the_token_hooks_cannot_be_called_directly() -> anyhow::Result<()> {
             w.market.id(),
             "ft_on_transfer",
             json!({ "sender_id": w.dave.id(), "amount": "1000000000", "msg": "deposit" }),
-            "MethodNotFound",
+            "only the collateral token can deliver money",
         ),
         (
             w.oracle.id(),

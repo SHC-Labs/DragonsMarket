@@ -107,6 +107,10 @@ const GAS_COUNCIL_RECEIPT: Gas = Gas::from_tgas(20);
 const GAS_MT_TRANSFER_CALL: Gas = Gas::from_gas(GAS_VERIFIER_CALL_OVERHEAD.as_gas() + GAS_COUNCIL_RECEIPT.as_gas());
 const GAS_REGISTER: Gas = Gas::from_tgas(20);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
+const GAS_FT_FORWARD: Gas = Gas::from_tgas(50);
+const GAS_FORWARD_OVERHEAD: Gas = Gas::from_tgas(5);
+const GAS_FORWARD_FLOOR: Gas =
+    Gas::from_gas(GAS_FT_FORWARD.as_gas() + GAS_CALLBACK.as_gas() + GAS_FORWARD_OVERHEAD.as_gas());
 // A sweep sends the Council's part with its callback and the treasury's part with its callback, and burns about 3
 // TGas itself.
 const GAS_SWEEP_OVERHEAD: Gas = Gas::from_tgas(10);
@@ -609,6 +613,24 @@ pub trait Oracle {
 #[ext_contract(ext_council)]
 pub trait Council {
     fn received_of(&self, market: AccountId, sweep_id: U64);
+}
+
+#[ext_contract(ext_token)]
+pub trait Token {
+    fn ft_transfer_call(
+        &mut self,
+        receiver_id: AccountId,
+        amount: U128,
+        memo: Option<String>,
+        msg: String,
+    ) -> PromiseOrValue<U128>;
+}
+
+#[near(serializers=[json])]
+#[serde(rename_all = "lowercase")]
+pub enum Arrival {
+    Deposit,
+    Register { fee: U128 },
 }
 
 #[near(
@@ -1811,13 +1833,8 @@ impl MarketContract {
         let mut parts = msg.split(':');
         match parts.next() {
             Some("deposit") => {
-                require!(!self.paused, "paused");
-                require!(self.accounts.contains_key(&sender_id), "do the storage deposit first");
-                self.credit(&sender_id, amount.0);
-                emit(
-                    "deposit",
-                    json!({ "account": sender_id, "amount": amount.0.to_string() }),
-                );
+                self.assert_can_deposit(&sender_id);
+                self.credit_deposit(&sender_id, amount.0);
             }
             Some("register") => self.register_with_collateral(&sender_id, amount.0),
             // "seed:<market>" opens at one half. "seed:<market>:<Yes price in millionths>" opens at that price.
@@ -1839,6 +1856,74 @@ impl MarketContract {
             _ => env::panic_str("unknown action"),
         }
         vec![U128(0)]
+    }
+
+    pub fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> PromiseOrValue<U128> {
+        let token = env::predecessor_account_id();
+        require!(
+            self.collateral_token_id.strip_prefix(NEP141_PREFIX) == Some(token.as_str()),
+            "only the collateral token can deliver money"
+        );
+        require!(
+            sender_id != self.verifier,
+            "send from your own account, not out of the verifier"
+        );
+        require!(amount.0 > 0, "amount must be positive");
+        upgrade::require_gas(
+            GAS_FORWARD_FLOOR,
+            "the market moves the money into its Intents account before crediting it",
+        );
+        let arrival = match msg.split(':').next() {
+            Some("deposit") => {
+                self.assert_can_deposit(&sender_id);
+                Arrival::Deposit
+            }
+            Some("register") => {
+                self.assert_can_register(&sender_id, amount.0);
+                self.assert_storage_reserve(0);
+                Arrival::Register {
+                    fee: U128(self.registration_fee),
+                }
+            }
+            _ => env::panic_str("unknown action"),
+        };
+        PromiseOrValue::Promise(
+            ext_token::ext(token)
+                .with_attached_deposit(ONE_YOCTO)
+                .with_static_gas(GAS_FT_FORWARD)
+                .ft_transfer_call(
+                    self.verifier.clone(),
+                    amount,
+                    None,
+                    env::current_account_id().to_string(),
+                )
+                .then(
+                    Self::ext(env::current_account_id())
+                        .with_static_gas(GAS_CALLBACK)
+                        .on_forwarded(sender_id, amount, arrival),
+                ),
+        )
+    }
+
+    #[private]
+    pub fn on_forwarded(
+        &mut self,
+        sender_id: AccountId,
+        amount: U128,
+        arrival: Arrival,
+        #[callback_result] used: Result<U128, PromiseError>,
+    ) -> U128 {
+        let taken = used.map_or(0, |used| used.0.min(amount.0));
+        if taken == 0 {
+            return amount;
+        }
+        match arrival {
+            Arrival::Register { fee } if taken >= fee.0 && !self.accounts.contains_key(&sender_id) => {
+                self.enroll(&sender_id, taken, fee.0)
+            }
+            _ => self.credit_deposit(&sender_id, taken),
+        }
+        U128(amount.0 - taken)
     }
 
     pub fn on_auth(&mut self, signer_id: AccountId, msg: String) -> PromiseOrValue<()> {
@@ -2906,20 +2991,37 @@ impl MarketContract {
         self.balances_total -= amount;
     }
 
-    fn register_with_collateral(&mut self, who: &AccountId, amount: u128) {
+    fn assert_can_deposit(&self, who: &AccountId) {
+        require!(!self.paused, "paused");
+        require!(self.accounts.contains_key(who), "do the storage deposit first");
+    }
+
+    fn credit_deposit(&mut self, who: &AccountId, amount: u128) {
+        self.credit(who, amount);
+        emit("deposit", json!({ "account": who, "amount": amount.to_string() }));
+    }
+
+    fn assert_can_register(&self, who: &AccountId, amount: u128) {
         require!(!self.paused, "paused");
         require!(!self.accounts.contains_key(who), "already registered");
-        let fee = self.registration_fee;
-        require!(amount >= fee, "send at least the registration fee");
+        require!(amount >= self.registration_fee, "send at least the registration fee");
+    }
+
+    fn register_with_collateral(&mut self, who: &AccountId, amount: u128) {
+        self.assert_can_register(who, amount);
+        self.enroll(who, amount, self.registration_fee);
+        self.accounts.flush();
+        self.registrations.flush();
+        self.balances.flush();
+        self.assert_storage_reserve(0);
+    }
+
+    fn enroll(&mut self, who: &AccountId, amount: u128, fee: u128) {
         self.accounts.insert(who.clone(), 0);
         self.registrations.insert(who.clone(), Registration::Collateral);
         if amount > fee {
             self.credit(who, amount - fee);
         }
-        self.accounts.flush();
-        self.registrations.flush();
-        self.balances.flush();
-        self.assert_storage_reserve(0);
         self.treasury_due += fee;
         emit(
             "registered",
@@ -3251,6 +3353,7 @@ mod tests {
     const OWNER: &str = "owner.near";
     const ORACLE: &str = "oracle.near";
     const VERIFIER: &str = "intents.near";
+    const TOKEN: &str = "usdc.near";
     const COLLATERAL_ID: &str = "nep141:usdc.near";
     const COUNCIL: &str = "council.near";
     const TREASURY: &str = "treasury.near";
@@ -8686,5 +8789,202 @@ mod tests {
             "register".into(),
         );
         assert!(upgraded.is_registered(acct("zed.near")));
+    }
+
+    fn token_sends(c: &mut MarketContract, from: &str, amount: u128, msg: &str, tgas: u64) {
+        testing_env!(VMContextBuilder::new()
+            .predecessor_account_id(acct(TOKEN))
+            .block_timestamp(3)
+            .prepaid_gas(Gas::from_tgas(tgas))
+            .build());
+        let _ = c.ft_on_transfer(acct(from), U128(amount), msg.into());
+    }
+
+    #[test]
+    fn a_token_deposit_moves_on_to_intents_before_it_is_credited() {
+        let (mut c, total_in) = world();
+        let before = c.get_balance(acct(USERS[0])).0;
+        token_sends(&mut c, USERS[0], 5_000_000, "deposit", 100);
+        let sent = receipts();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].receiver_id, acct(TOKEN));
+        let (method, args, deposit, gas) = call_of(&sent[0]);
+        assert_eq!(method, "ft_transfer_call");
+        assert_eq!((deposit, gas), (1, GAS_FT_FORWARD.as_gas()));
+        assert_eq!(args["receiver_id"], VERIFIER);
+        assert_eq!(args["amount"], "5000000");
+        assert_eq!(args["msg"], SELF, "the verifier credits the market's own account");
+        assert_eq!(sent[1].receiver_id, acct(SELF));
+        let (method, args, _, gas) = call_of(&sent[1]);
+        assert_eq!((method.as_str(), gas), ("on_forwarded", GAS_CALLBACK.as_gas()));
+        assert_eq!(args["sender_id"], USERS[0]);
+        assert_eq!(args["amount"], "5000000");
+        assert_eq!(args["arrival"], "deposit");
+        assert_eq!(c.get_balance(acct(USERS[0])).0, before);
+        assert_eq!(c.total_owed().0, total_in, "nothing is owed for money still on its way");
+    }
+
+    #[test]
+    fn every_token_refusal_comes_before_the_forward() {
+        let (mut c, total_in) = world();
+        let (fee, floor) = (DEFAULT_REGISTRATION_FEE, GAS_FORWARD_FLOOR.as_tgas());
+        let not_the_token = "only the collateral token can deliver money";
+        let cases: [(&str, &str, u128, &str, u64, &str); 10] = [
+            ("evil.near", USERS[0], 5_000_000, "deposit", 100, not_the_token),
+            (VERIFIER, USERS[0], 5_000_000, "deposit", 100, not_the_token),
+            (TOKEN, VERIFIER, 5_000_000, "deposit", 100, "not out of the verifier"),
+            (TOKEN, USERS[0], 0, "deposit", 100, "amount must be positive"),
+            (TOKEN, USERS[0], 5_000_000, "deposit", floor - 1, "attach at least"),
+            (TOKEN, USERS[0], 5_000_000, "buy:0:yes:1", 100, "unknown action"),
+            (TOKEN, USERS[0], 5_000_000, "", 100, "unknown action"),
+            (TOKEN, "zed.near", 5_000_000, "deposit", 100, "storage deposit first"),
+            (TOKEN, USERS[0], fee, "register", 100, "already registered"),
+            (TOKEN, "zed.near", fee - 1, "register", 100, "the registration fee"),
+        ];
+        for (caller, from, amount, msg, tgas, expected) in cases {
+            testing_env!(VMContextBuilder::new()
+                .predecessor_account_id(acct(caller))
+                .block_timestamp(3)
+                .prepaid_gas(Gas::from_tgas(tgas))
+                .build());
+            let reason = refusal(|| {
+                let _ = c.ft_on_transfer(acct(from), U128(amount), msg.into());
+            });
+            assert!(reason.contains(expected), "{caller} {from} {msg}: {reason}");
+            assert!(receipts().is_empty(), "{msg}: nothing was sent");
+        }
+        assert_eq!(c.total_owed().0, total_in);
+    }
+
+    #[test]
+    fn a_pause_refuses_token_deposits_and_registrations() {
+        let (mut c, _) = world();
+        act_as(OWNER, 3);
+        c.set_paused(true);
+        for (from, msg) in [(USERS[0], "deposit"), ("zed.near", "register")] {
+            let reason = refusal(|| token_sends(&mut c, from, DEFAULT_REGISTRATION_FEE, msg, 100));
+            assert!(reason.contains("paused"), "{msg}: {reason}");
+        }
+    }
+
+    #[test]
+    fn what_reached_intents_is_credited_and_nothing_goes_back() {
+        let (mut c, total_in) = world();
+        let before = c.get_balance(acct(USERS[0])).0;
+        act_as(SELF, 4);
+        let back = c.on_forwarded(acct(USERS[0]), U128(5_000_000), Arrival::Deposit, Ok(U128(5_000_000)));
+        assert_eq!(back.0, 0);
+        assert_eq!(c.get_balance(acct(USERS[0])).0, before + 5_000_000);
+        assert_eq!(c.total_owed().0, total_in + 5_000_000);
+        let e = last_event();
+        assert_eq!(
+            (e["event"].as_str(), &e["data"]["amount"]),
+            (Some("deposit"), &json!("5000000"))
+        );
+    }
+
+    #[test]
+    fn a_failed_or_refused_forward_credits_nothing() {
+        let (mut c, total_in) = world();
+        for result in [Err(PromiseError::Failed), Ok(U128(0))] {
+            act_as(SELF, 4);
+            let back = c.on_forwarded(acct("zed.near"), U128(5_000_000), Arrival::Deposit, result);
+            assert_eq!(back.0, 5_000_000);
+        }
+        assert_eq!(c.get_balance(acct("zed.near")).0, 0);
+        assert!(!c.is_registered(acct("zed.near")));
+        assert_eq!(c.total_owed().0, total_in);
+    }
+
+    #[test]
+    fn a_token_registration_pays_the_fee_in_force_when_it_was_sent() {
+        let (mut c, total_in) = world();
+        let treasury_before = c.treasury_due;
+        let paid = DEFAULT_REGISTRATION_FEE + 5_000_000;
+        token_sends(&mut c, "zed.near", paid, "register", 100);
+        let (_, args, _, _) = call_of(&receipts()[1]);
+        assert_eq!(args["arrival"]["register"]["fee"], DEFAULT_REGISTRATION_FEE.to_string());
+        act_as(OWNER, 4);
+        c.set_registration_fee(U128(2 * DEFAULT_REGISTRATION_FEE));
+        act_as(SELF, 5);
+        let arrival = Arrival::Register {
+            fee: U128(DEFAULT_REGISTRATION_FEE),
+        };
+        assert_eq!(
+            c.on_forwarded(acct("zed.near"), U128(paid), arrival, Ok(U128(paid))).0,
+            0
+        );
+        assert_eq!(c.registrations.get(&acct("zed.near")), Some(&Registration::Collateral));
+        assert_eq!(c.get_balance(acct("zed.near")).0, 5_000_000);
+        assert_eq!(c.treasury_due, treasury_before + DEFAULT_REGISTRATION_FEE);
+        assert_eq!(c.total_owed().0, total_in + paid);
+    }
+
+    #[test]
+    fn an_account_registered_in_flight_is_credited_the_whole_amount() {
+        let (mut c, total_in) = world();
+        let treasury_before = c.treasury_due;
+        let paid = DEFAULT_REGISTRATION_FEE + 5_000_000;
+        token_sends(&mut c, "zed.near", paid, "register", 100);
+        act_as(VERIFIER, 4);
+        let _ = receive(&mut c, acct("zed.near"), U128(paid), "register".into());
+        act_as(SELF, 5);
+        let arrival = Arrival::Register {
+            fee: U128(DEFAULT_REGISTRATION_FEE),
+        };
+        assert_eq!(
+            c.on_forwarded(acct("zed.near"), U128(paid), arrival, Ok(U128(paid))).0,
+            0
+        );
+        assert_eq!(c.get_balance(acct("zed.near")).0, 5_000_000 + paid);
+        assert_eq!(c.treasury_due, treasury_before + DEFAULT_REGISTRATION_FEE);
+        assert_eq!(c.total_owed().0, total_in + 2 * paid);
+    }
+
+    #[test]
+    fn an_account_that_leaves_in_flight_keeps_its_money() {
+        let (mut c, total_in) = world();
+        act_paying("zed.near", FIFTY_MILLI);
+        c.storage_deposit(None, None);
+        token_sends(&mut c, "zed.near", 5_000_000, "deposit", 100);
+        act_as("zed.near", 4);
+        assert!(c.storage_unregister(None));
+        act_as(SELF, 5);
+        let _ = c.on_forwarded(acct("zed.near"), U128(5_000_000), Arrival::Deposit, Ok(U128(5_000_000)));
+        assert!(!c.is_registered(acct("zed.near")));
+        assert_eq!(c.get_balance(acct("zed.near")).0, 5_000_000);
+        assert_eq!(c.total_owed().0, total_in + 5_000_000);
+        act_as("zed.near", 6);
+        let _ = c.withdraw(U128(5_000_000));
+        assert_eq!(c.get_balance(acct("zed.near")).0, 0);
+        act_as("zed.near", 7);
+        assert!(!c.storage_unregister(None), "the deposit was handed back once already");
+        assert!(refunds().is_empty());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn the_market_owes_exactly_what_reached_intents(
+            amount in 1u128..1_000_000_000_000,
+            report in proptest::option::of(0u128..2_000_000_000_000),
+            register in any::<bool>(),
+            registered in any::<bool>(),
+        ) {
+            let (mut c, total_in) = world();
+            let who = if registered { USERS[0] } else { "zed.near" };
+            let arrival = if register {
+                Arrival::Register { fee: U128(DEFAULT_REGISTRATION_FEE) }
+            } else {
+                Arrival::Deposit
+            };
+            let result = report.map(U128).ok_or(PromiseError::Failed);
+            let taken = report.map_or(0, |used| used.min(amount));
+            act_as(SELF, 4);
+            let back = c.on_forwarded(acct(who), U128(amount), arrival, result).0;
+            prop_assert_eq!(back, amount - taken);
+            prop_assert_eq!(c.total_owed().0, total_in + taken);
+        }
     }
 }

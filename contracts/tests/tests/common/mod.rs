@@ -189,7 +189,8 @@ async fn build(
         .into_result()?;
 
     // The token needs to know these accounts before they can receive transfers. The market, the oracle and the council are not
-    // among them: the verifier holds their money, and none is ever sent the token itself.
+    // among them: the verifier holds their money. Only the market is ever sent the token itself, and the tests that do so
+    // register it.
     for c in [verifier.id(), treasury.id()] {
         owner
             .call(ft.id(), "storage_deposit")

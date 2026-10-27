@@ -41,10 +41,11 @@ const FORBIDDEN_VERIFIER_CALLS: [&str; 28] = [
 
 // Every cross-contract interface a contract declares, and the methods it declares on each. A new target or a new method
 // fails here until it is added on purpose.
-const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 10] = [
+const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 11] = [
     ("market", "ext_verifier", &["mt_transfer", "mt_transfer_call"]),
     ("market", "ext_oracle", &["register_market"]),
     ("market", "ext_council", &["received_of"]),
+    ("market", "ext_token", &["ft_transfer_call"]),
     ("council", "ext_verifier", &["mt_transfer"]),
     ("oracle", "ext_verifier", &["mt_transfer"]),
     ("oracle", "ext_market", &["set_outcome"]),
@@ -388,6 +389,34 @@ fn the_rounds_contract_pays_out_only_in_a_withdrawal_to_the_account_itself() {
     for nep141 in ["ft_on_transfer", "ft_transfer", "mt_transfer_call", "mt_batch_transfer"] {
         assert!(!code.contains(nep141), "the rounds code names {nep141}");
     }
+}
+
+#[test]
+fn the_market_sends_the_token_only_to_its_own_intents_account() {
+    let sources = sources_of("market");
+    let code: String = sources.iter().map(|(_, code)| code.as_str()).collect();
+    assert_eq!(
+        code.matches(".ft_transfer_call(").count(),
+        1,
+        "the market makes exactly one token call"
+    );
+    assert!(
+        !code.contains(".ft_transfer("),
+        "the market never sends the token itself"
+    );
+    let hook: String = code
+        .split("pub fn ft_on_transfer(")
+        .nth(1)
+        .expect("the market has ft_on_transfer")
+        .split("pub fn on_forwarded(")
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    assert!(
+        hook.contains(".ft_transfer_call(self.verifier.clone(),amount,None,env::current_account_id().to_string(),)"),
+        "the token goes whole to the verifier, into the market's own account"
+    );
 }
 
 // The fee split is expressed in basis points the owner can set. No account id is written in the market's or the Council's code,
