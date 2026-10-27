@@ -33,7 +33,7 @@ if [ -n "${reproducible:-}" ]; then
 fi
 
 log=$(mktemp)
-for c in mock-ft mock-nft mock-mt-receiver council market oracle; do
+for c in mock-ft mock-nft mock-mt-receiver council market oracle rounds; do
   if (cd "$c" && cargo near build non-reproducible-wasm >"$log" 2>&1); then
     echo "built $c"
   else

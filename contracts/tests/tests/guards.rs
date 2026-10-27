@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const CONTRACTS: [&str; 4] = ["market", "oracle", "council", "upgrade"];
+const CONTRACTS: [&str; 6] = ["market", "oracle", "council", "rounds", "price-signatures", "upgrade"];
 
 // The verifier methods that change who may act, what the verifier holds, or how it is run. No contract of ours may call
 // any of them as itself: its balance is moved only by mt_transfer and mt_transfer_call, and only the verifier's own roles
@@ -41,7 +41,7 @@ const FORBIDDEN_VERIFIER_CALLS: [&str; 28] = [
 
 // Every cross-contract interface a contract declares, and the methods it declares on each. A new target or a new method
 // fails here until it is added on purpose.
-const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 8] = [
+const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 10] = [
     ("market", "ext_verifier", &["mt_transfer", "mt_transfer_call"]),
     ("market", "ext_oracle", &["register_market"]),
     ("market", "ext_council", &["received_of"]),
@@ -49,6 +49,8 @@ const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 8] = [
     ("oracle", "ext_verifier", &["mt_transfer"]),
     ("oracle", "ext_market", &["set_outcome"]),
     ("oracle", "ext_council", &["draw", "unlock_case"]),
+    ("rounds", "ext_verifier", &["mt_transfer"]),
+    ("price-signatures", "", &[]),
     ("upgrade", "", &[]),
 ];
 
@@ -361,11 +363,38 @@ fn the_council_pays_reward_money_only_in_a_quarter_claim() {
     }
 }
 
+// Stakes and winnings leave the rounds contract by one path: a withdrawal of an account's own balance to its own Intents
+// account. A claim only moves a payout into that balance.
+#[test]
+fn the_rounds_contract_pays_out_only_in_a_withdrawal_to_the_account_itself() {
+    let sources = sources_of("rounds");
+    let code: String = sources.iter().map(|(_, code)| code.as_str()).collect();
+    assert_eq!(
+        code.matches(".mt_transfer(").count(),
+        1,
+        "the rounds contract makes exactly one verifier payout call"
+    );
+    let withdraw = code
+        .split("fn withdraw_for(")
+        .nth(1)
+        .expect("the rounds contract has withdraw_for")
+        .split("fn close_withdrawal(")
+        .next()
+        .unwrap();
+    assert!(
+        withdraw.contains("self.debit(&who, amount)") && withdraw.contains(".mt_transfer(who,"),
+        "the payout goes to the account whose balance it came out of"
+    );
+    for nep141 in ["ft_on_transfer", "ft_transfer", "mt_transfer_call", "mt_batch_transfer"] {
+        assert!(!code.contains(nep141), "the rounds code names {nep141}");
+    }
+}
+
 // The fee split is expressed in basis points the owner can set. No account id is written in the market's or the Council's code,
 // so nothing the owner has still to choose is hardcoded.
 #[test]
 fn no_contract_names_an_account_the_owner_has_still_to_choose() {
-    for contract in ["market", "council"] {
+    for contract in ["market", "council", "rounds"] {
         for (path, code) in sources_of(contract) {
             for (n, line) in code.lines().enumerate() {
                 for literal in [".near\"", ".testnet\"", "trezu"] {
