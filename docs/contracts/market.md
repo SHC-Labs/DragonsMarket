@@ -1,6 +1,6 @@
 # market
 
-**Token deposits, 2026-10-26.** An account that holds the collateral as a NEAR token and nothing in the verifier can now pay the market with the token's `ft_transfer_call` and the message `deposit` or `register`. The market moves the money into its own Intents account and credits the sender only once it is there (see "Money in by token"). State stays at version 5.
+**Token deposits, 2026-10-26.** An account that holds the collateral as a NEAR token and nothing in the verifier can now pay the market with the token's `ft_transfer_call` and the message `deposit` or `buy`, after registering with `storage_deposit` in NEAR. The market moves the money into its own Intents account and credits the sender only once it is there (see "Money in by token"). A `buy` is then bought in a receipt of its own, so a buy the price outran stays a balance. State stays at version 5.
 
 **Signed actions and collateral registration, 2026-10-26.** Market state is now version 5. `migrate` accepts the exact version-3 root, the exact version-4 root or the current version; oracle stays at 2 and Council at 3. A signed Intents intent can buy, sell, redeem and withdraw for its signer through `on_auth` (see "Signed actions"). An account with no NEAR registers by sending the registration fee in collateral with the message `register` (see "Money in"). A deposit paid by someone else for an account now goes back to that payer when the account leaves.
 
@@ -388,10 +388,12 @@ must fund the market through `mt_transfer_call`, or with the token itself as bel
 
 ### Money in by token: `ft_on_transfer`
 
-An account that holds the collateral as a NEAR token can pay the market directly. It calls
-`ft_transfer_call(receiver_id: <market>, amount, msg)` on the token with 1 yocto and 100 TGas. The token
-moves the amount to the market and calls `ft_on_transfer(sender_id, amount, msg)` here. The market
-keeps none of it as a token: it sends the whole amount on with the token's
+An account that holds the collateral as a NEAR token can pay the market directly. It registers
+first with `storage_deposit` and 0.05 NEAR, paid by itself or by anyone for it, then calls
+`ft_transfer_call(receiver_id: <market>, amount, msg)` on the token with 1 yocto and 100 TGas. The
+token moves the amount to the market and calls `ft_on_transfer(sender_id, amount, msg)` here, the
+standard NEP-141 receiver (`FungibleTokenReceiver` from `near-contract-standards`). The market keeps
+none of it as a token: it sends the whole amount on with the token's
 `ft_transfer_call(receiver_id: <verifier>, amount, msg: <this contract>)`, which credits the market's
 own Intents account, and credits the sender only in the callback `on_forwarded`, once the verifier
 has the money. The books therefore never count money the verifier does not hold. The market's
@@ -401,28 +403,29 @@ then the token refuses the transfer.
 The hook checks, in this order: the caller is the collateral token (`only the collateral token can
 deliver money`); the sender is not the verifier (`send from your own account, not out of the
 verifier`), because an Intents withdrawal with a message arrives from the verifier and does not say
-whose money it is; the amount is above zero; and at least 65 TGas reached the hook (`attach at least
-65 TGas`): 50 for the forward, 10 for the callback and 5 for its own work. Then:
+whose money it is; the amount is above zero; and at least 75 TGas reached the hook (`attach at least
+75 TGas`): 50 for the forward, 20 for the callback, which may start a buy, and 5 for its own work.
+Then:
 
-| `msg`      | Who                | What it does |
-| ---------- | ------------------ | ------------ |
-| `deposit`  | Registered account | Credits the amount to the sender's balance once the verifier has it. Refused if paused or not registered. Extra text after `deposit` is ignored. |
-| `register` | Not yet registered | Registers the sender once the verifier has the money, for the registration fee in force when the token arrived, and credits the rest. Refused if paused, registered already, short of the fee, or when the storage reserve is reached. Extra text after `register` is ignored. |
+| `msg`                              | Who                | What it does |
+| ---------------------------------- | ------------------ | ------------ |
+| `deposit`                          | Registered account | Credits the amount to the sender's balance once the verifier has it. Refused if paused or not registered. Extra text after `deposit` is ignored. |
+| `buy:<market>:<side>:<min shares>` | Registered account | Credits the amount once the verifier has it, then buys `side` with it as `buy` does from a balance. Refused if paused, not registered, the market is not open, the side is not `yes` or `no`, or the minimum is zero. A buy that fails after the credit, because the price moved or the market closed in between, leaves the money in the balance. |
 
-Any other message is refused (`unknown action`), `buy` and `seed` included: buying with a token
-deposit is a `buy` call from the balance after it. Every refusal comes before the forward, so the
-token hands the whole amount back to the sender.
+Any other message is refused (`unknown action`), `register` and `seed` included: an account with no
+NEAR registers through the verifier instead (see "Money in"). Every refusal comes before the
+forward, so the token hands the whole amount back to the sender.
 
 `on_forwarded` reads how much the verifier took from the token's answer. That much is credited and
 the rest goes back to the sender: when the forward failed or the verifier refused it, nothing is
-credited and the token returns everything. An account that registered some other way while its
-money was on its way is credited the whole amount as a deposit, with no second fee. An account that
-unregisters while its money is on its way is credited it all the same and takes it out with
-`withdraw`, which needs no registration; the storage deposit it got back on leaving is not paid
-twice. The callback never refuses, because what it is told about is already in the verifier. The
-events are the ones the verifier path emits, `deposit` and `registered`. A token whose own refund
-step fails can leave a transfer in the verifier with nobody credited; that shows as surplus, never
-as money owed and missing.
+credited and the token returns everything. An account that unregisters while its money is on its
+way is credited it all the same and takes it out with `withdraw`, which needs no registration; the
+storage deposit it got back on leaving is not paid twice. The callback never refuses, because what
+it is told about is already in the verifier. For a `buy` it credits what the verifier took and
+starts `buy_for`, a private method, with that amount and 10 TGas. A `buy_for` that fails reverts
+only itself, so the money stays credited. The events are the ones the verifier path emits:
+`deposit`, then `buy` after a token buy. A token whose own refund step fails can leave a transfer in
+the verifier with nobody credited; that shows as surplus, never as money owed and missing.
 
 ### Signed actions: `on_auth`
 
@@ -861,7 +864,7 @@ All big numbers in event data are strings.
 | `unknown action`                                                                                                                                                 | A message whose first part is not an action the hook takes, in `mt_on_transfer`, `ft_on_transfer` or `on_auth`. |
 | `only the collateral token can deliver money`                                                                                                                    | `ft_on_transfer` called by anything but the collateral token.                                          |
 | `send from your own account, not out of the verifier`                                                                                                            | A token transfer whose sender is the verifier, such as an Intents withdrawal with a message.           |
-| `attach at least 65 TGas: the market moves the money into its Intents account before crediting it`                                                               | A token transfer that left the hook less than the forward and its callback need.                       |
+| `attach at least 75 TGas: the market moves the money into its Intents account before crediting it`                                                               | A token transfer that left the hook less than the forward and its callback need.                       |
 | `bad market id`, `bad amount`, `bad min shares`, `bad collateral out`, `bad max shares in`                                                                       | A message part that is not a number.                                                                   |
 | `already registered`                                                                                                                                             | `register` from an account that is registered already.                                                 |
 | `send at least the registration fee`                                                                                                                             | A `register` transfer smaller than `config.registration_fee`.                                          |
@@ -921,7 +924,7 @@ All big numbers in event data are strings.
 | `migrate expects version 2`                                                                                                                                      | `migrate` found state written by another version.                                                      |
 | `migrate runs only inside an upgrade`                                                                                                                            | `migrate` called without `upgrade` having sent the batch.                                              |
 | `a halt in the last day before close is an owner action`                                                                                                         | The operator tried to halt a market that closes within 24 hours, or has closed.                        |
-| `Method <name> is private`                                                                                                                                       | An internal callback, or `new`, was called by anyone but the contract's own account.                   |
+| `Method <name> is private`                                                                                                                                       | An internal callback, `buy_for`, or `new`, was called by anyone but the contract's own account.        |
 
 ---
 
@@ -931,7 +934,8 @@ All big numbers in event data are strings.
 | --------------------------------------------- | --------------------------------------------------------------------------------------- |
 | Verifier `mt_transfer` (withdraw, treasury fee) | 15 TGas (the verifier burned 3.8 measured) |
 | Verifier `mt_transfer_call` (revenue to the Council) | 42 TGas: 22 for the verifier's own part, 20 for the Council's `mt_on_transfer` |
-| Token `ft_transfer_call` (a token deposit on to the verifier) | 50 TGas. A whole token deposit burned 17.8 TGas measured, 4.9 of it in the market |
+| Token `ft_transfer_call` (a token deposit on to the verifier) | 50 TGas. A whole token deposit burned 17.5 TGas measured, 4.6 of it in the market |
+| `buy_for` (the buy after a token buy)         | 10 TGas, out of the 20 its callback gets. A whole token buy burned 21.1 TGas measured, 8.2 of it in the market |
 | Oracle registration                           | 20 TGas                                                                                 |
 | Each callback                                 | 10 TGas                                                                                 |
 | `sweep_fees` in all                           | 77 TGas reserved: 42 for the Council's part, 15 and 10 for the treasury's, 10 for the Council's callback |
@@ -971,6 +975,7 @@ verifier's balance after a whole journey, a plain deposit is surplus with no cal
 `ft_on_transfer` refuses any caller but the collateral token and a sender that is the verifier, every
 refused token transfer comes back whole, the market sends the token only to the verifier for its own
 account and keeps none of it, it credits exactly what the verifier took whatever the forward reports,
+a token buy credits before it buys so a buy the price outran stays a balance,
 an account that leaves while its token deposit is on its way keeps it and is refunded once, no contract
 source names a governance crate or a verifier admin method or writes an account id, a sweep refuses
 until the recipients are set, the split adds up to the total for every share the owner may set, and a

@@ -67,12 +67,10 @@ async fn credited(market: &Contract, who: &AccountId) -> u128 {
 }
 
 #[tokio::test]
-async fn an_account_with_only_tokens_registers_trades_and_exits() -> anyhow::Result<()> {
+async fn a_token_holder_registers_in_near_deposits_trades_and_exits() -> anyhow::Result<()> {
     let w = setup().await?;
     let id = create_seeded_market(&w, 600).await?;
     register_on_token(&w, w.market.id()).await?;
-    let config: serde_json::Value = w.market.view("config").await?.json()?;
-    let fee: u128 = config["registration_fee"].as_str().unwrap().parse()?;
     let tokens = ft_balance(&w, w.dave.id()).await;
     let held = intents_balance(&w, w.market.id()).await;
     assert_eq!(
@@ -80,22 +78,24 @@ async fn an_account_with_only_tokens_registers_trades_and_exits() -> anyhow::Res
         0,
         "dave holds nothing in the verifier"
     );
+    w.dave
+        .call(w.market.id(), "storage_deposit")
+        .args_json(json!({}))
+        .deposit(NearToken::from_millinear(50))
+        .transact()
+        .await?
+        .into_result()?;
 
-    let r = send(&w, &w.dave, w.market.id(), fee + 5 * USD, "register", SEND_TGAS).await?;
-    assert_clean(&w, "register by token", &r);
-    assert_eq!(credited(&w.market, w.dave.id()).await, 5 * USD);
-    assert_eq!(intents_balance(&w, w.market.id()).await, held + fee + 5 * USD);
+    let r = send(&w, &w.dave, w.market.id(), 15 * USD, "deposit", SEND_TGAS).await?;
+    assert_clean(&w, "deposit by token", &r);
+    assert_eq!(credited(&w.market, w.dave.id()).await, 15 * USD);
+    assert_eq!(ft_balance(&w, w.dave.id()).await, tokens - 15 * USD);
+    assert_eq!(intents_balance(&w, w.market.id()).await, held + 15 * USD);
     assert_eq!(
         ft_balance(&w, w.market.id()).await,
         0,
         "the market keeps no token itself"
     );
-    assert_reconciled(&w).await;
-
-    let r = send(&w, &w.dave, w.market.id(), 10 * USD, "deposit", SEND_TGAS).await?;
-    assert_clean(&w, "deposit by token", &r);
-    assert_eq!(credited(&w.market, w.dave.id()).await, 15 * USD);
-    assert_eq!(ft_balance(&w, w.dave.id()).await, tokens - fee - 15 * USD);
     assert_reconciled(&w).await;
 
     w.dave
@@ -133,9 +133,10 @@ async fn a_refused_transfer_comes_back_whole_and_moves_nothing() -> anyhow::Resu
     let owed_before = owed(&w.market).await;
     for (from, msg, tgas, why) in [
         (&w.dave, "deposit", SEND_TGAS, "do the storage deposit first"),
-        (&w.alice, "buy:0:yes:1", SEND_TGAS, "unknown action"),
-        (&w.alice, "register", SEND_TGAS, "already registered"),
-        (&w.alice, "deposit", 60, "attach at least 65 TGas"),
+        (&w.dave, "register", SEND_TGAS, "unknown action"),
+        (&w.alice, "seed:0", SEND_TGAS, "unknown action"),
+        (&w.alice, "deposit", 80, "attach at least 75 TGas"),
+        (&w.alice, "buy:0:yes:1", SEND_TGAS, "no such market"),
     ] {
         let tokens = ft_balance(&w, from.id()).await;
         let r = send(&w, from, w.market.id(), 4 * USD, msg, tgas).await?;
@@ -156,6 +157,57 @@ async fn a_refused_transfer_comes_back_whole_and_moves_nothing() -> anyhow::Resu
     assert_eq!(owed(&w.market).await, owed_before);
     assert_eq!(credited(&w.market, w.alice.id()).await, 0);
     Ok(())
+}
+
+#[tokio::test]
+async fn a_token_buy_ends_as_shares_or_as_a_balance() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let id = create_seeded_market(&w, 600).await?;
+    register_on_token(&w, w.market.id()).await?;
+    let held = intents_balance(&w, w.market.id()).await;
+
+    let order = format!("buy:{id}:yes:1");
+    let r = send(&w, &w.alice, w.market.id(), 10 * USD, &order, SEND_TGAS).await?;
+    assert_clean(&w, "buy by token", &r);
+    assert!(shares(&w, id, w.alice.id()).await.0 > 0, "the token became shares");
+    assert_eq!(credited(&w.market, w.alice.id()).await, 0);
+    assert_eq!(intents_balance(&w, w.market.id()).await, held + 10 * USD);
+    assert_reconciled(&w).await;
+
+    let greedy = format!("buy:{id}:no:{}", 100 * USD);
+    let r = send(&w, &w.alice, w.market.id(), 4 * USD, &greedy, SEND_TGAS).await?;
+    assert!(
+        format!("{:?}", r.receipt_failures()).contains("price moved"),
+        "{:?}",
+        r.receipt_failures()
+    );
+    assert_eq!(
+        credited(&w.market, w.alice.id()).await,
+        4 * USD,
+        "a buy the price outran stays a balance"
+    );
+    assert_eq!(shares(&w, id, w.alice.id()).await.1, 0);
+    assert_reconciled(&w).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_token_buy_that_just_clears_the_floor_completes() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let id = create_seeded_market(&w, 600).await?;
+    register_on_token(&w, w.market.id()).await?;
+    let order = format!("buy:{id}:yes:1");
+    for tgas in 76..100 {
+        let r = send(&w, &w.alice, w.market.id(), USD, &order, tgas).await?;
+        if format!("{:?}", r.receipt_failures()).contains("attach at least") {
+            continue;
+        }
+        assert_clean(&w, &format!("buy by token at {tgas} TGas"), &r);
+        assert!(shares(&w, id, w.alice.id()).await.0 > 0, "the buy filled");
+        assert_reconciled(&w).await;
+        return Ok(());
+    }
+    panic!("the floor refused every gas amount tried");
 }
 
 #[tokio::test]

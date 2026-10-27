@@ -41,11 +41,10 @@ const FORBIDDEN_VERIFIER_CALLS: [&str; 28] = [
 
 // Every cross-contract interface a contract declares, and the methods it declares on each. A new target or a new method
 // fails here until it is added on purpose.
-const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 11] = [
+const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 10] = [
     ("market", "ext_verifier", &["mt_transfer", "mt_transfer_call"]),
     ("market", "ext_oracle", &["register_market"]),
     ("market", "ext_council", &["received_of"]),
-    ("market", "ext_token", &["ft_transfer_call"]),
     ("council", "ext_verifier", &["mt_transfer"]),
     ("oracle", "ext_verifier", &["mt_transfer"]),
     ("oracle", "ext_market", &["set_outcome"]),
@@ -405,14 +404,18 @@ fn the_market_sends_the_token_only_to_its_own_intents_account() {
         "the market never sends the token itself"
     );
     let hook: String = code
-        .split("pub fn ft_on_transfer(")
+        .split("impl FungibleTokenReceiver for MarketContract {")
         .nth(1)
-        .expect("the market has ft_on_transfer")
-        .split("pub fn on_forwarded(")
+        .expect("the market takes the token through the standard receiver")
+        .split("\n}\n")
         .next()
         .unwrap()
         .split_whitespace()
         .collect();
+    assert!(
+        hook.contains("ext_ft_core::ext(token)"),
+        "the token is called through the standard interface"
+    );
     assert!(
         hook.contains(".ft_transfer_call(self.verifier.clone(),amount,None,env::current_account_id().to_string(),)"),
         "the token goes whole to the verifier, into the market's own account"

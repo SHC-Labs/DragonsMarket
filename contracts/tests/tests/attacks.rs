@@ -171,6 +171,12 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
             "private",
         ),
         (
+            &Contractish::Market,
+            "buy_for",
+            json!({ "who": me, "market_id": "0", "side": 0, "amount": "1", "min_shares": "1" }),
+            "private",
+        ),
+        (
             &Contractish::Oracle,
             "propose_owner",
             json!({ "new_owner": me }),
