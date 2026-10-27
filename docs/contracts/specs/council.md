@@ -11,7 +11,7 @@
 | Revision checked | `council/src/lib.rs` sha256 prefix `cc840f4fdbe5caf9` (2510 lines, unchanged between copies, 267 lines differ from `HEAD`) |
 | Index | [README.md](README.md) |
 
-**Build status, 2026-10-21.** BUILT in `contracts/council/src/lib.rs` (state version 2): sections 4.2, 5, 6, 7.2, 8 and 9, with the changes below. Sections 2, 3, 10 and 11 hold as written.
+**Build status, 2026-10-21.** BUILT in `contracts/council/src/lib.rs` (state version 3; version 3 added the market allow-list, sweeps keyed by market account and version-tagged records, 2026-10-23): sections 4.2, 5, 6, 7.2, 8 and 9, with the changes below. Sections 2, 3, 10 and 11 hold as written.
 
 | Item | Built as | Tests |
 | --- | --- | --- |
@@ -29,7 +29,7 @@ Changes against the text above:
 
 | Item | Spec | Built |
 | --- | --- | --- |
-| `new` | Adds `market_id` and `close_grace_ns`, keeps `nft_contract` | `new` takes none of the three. The collection and the market are `None` until `set_nft_contract` and `set_market`; staking, revenue and claims refuse until then. The grace period starts at 7 days (`set_close_grace_ns`, 1 to 30 days) |
+| `new` | Adds `market_id` and `close_grace_ns`, keeps `nft_contract` | `new` takes none of the three. The collection is `None` and the market allow-list is empty until `set_nft_contract` and `allow_market`; staking, revenue and claims refuse until then. The grace period starts at 7 days (`set_close_grace_ns`, 1 to 30 days) |
 | Revenue receipt | Ticks seat time and refuses more than 8 quarters of backlog | It only books the revenue to the quarter of receipt. Seat time is moved by stakes, unstakes, `finalize_quarter` and `advance_quarters`, so a late sweep is never refused for idle time |
 | First quarter | `first_quarter` and gap-free books | `next_to_finalize` starts at the quarter of `new`; a quarter nobody touched has no entry and reads as empty, so there are no gaps to keep |
 | Forfeit storage | Subtract from `seat_weight` | A separate `forfeits` map, so releasing a case never needs the seat's whole history counted first and cannot fail |
@@ -77,7 +77,7 @@ Section 6 is the concrete proposal. In one paragraph: quarters are UTC calendar 
 
 | Role | Set by | Powers |
 | --- | --- | --- |
-| Owner | `new`, `propose_owner` and `accept_owner`. DECIDED: the DAO | `upgrade`, `seal`, `propose_owner`, `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract` (only with nothing staked), `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`. NEW: `set_close_grace_ns`, `set_market`, `set_reconcile_wait_ns` |
+| Owner | `new`, `propose_owner` and `accept_owner`. DECIDED: the DAO | `upgrade`, `seal`, `propose_owner`, `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract` (only with nothing staked), `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`. NEW: `set_close_grace_ns`, `allow_market`, `disallow_market`, `set_reconcile_wait_ns` |
 | Oracle | `new`, no setter | `draw` and `unlock_case` only |
 | Seat owner | Staking | `request_unstake`, `unstake`, and the claim of their own seats |
 | NFT contract | `new`, `set_nft_contract` | `nft_on_transfer` only |
@@ -131,11 +131,11 @@ EXISTING (`council/src/lib.rs:169-213`).
 
 ### 4.2 Fields after the change (PROPOSED)
 
-`state_version` becomes 2. Nothing is deployed, so no migration is needed.
+`state_version` becomes 2, and 3 with the market allow-list and the version tags. Nothing is deployed, so no migration is needed.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `market` | `AccountId` | NEW. The only revenue sender |
+| `allowed_markets` | `Vec<AccountId>` | BUILT. The accounts that may send revenue. Replaces the single `market`. The last one cannot be removed |
 | `close_grace_ns` | `u64` | NEW. Wait after a quarter ends before it can be finalized. Default 7 days, bounds 1 to 30 days |
 | `reconcile_wait_ns` | `u64` | NEW. How long a claim must be pending before `reconcile_claim`. Default 1 hour, owner range 10 minutes to 7 days |
 | `last_tick` | `u64` | NEW. Nanosecond time up to which seat time has been added to the quarter books |
@@ -143,7 +143,7 @@ EXISTING (`council/src/lib.rs:169-213`).
 | `quarters` | `LookupMap<u32, QuarterBook>` | NEW. One book per quarter from `first_quarter` to the current one, with no gaps |
 | `seat_weight` | `LookupMap<(u32, TokenId, AccountId), u64>` | NEW. Booked nanoseconds of one staking span of one token by one owner inside one quarter |
 | `claims` | `LookupMap<(u32, TokenId, AccountId), Claim>` | NEW. The single-use claim record |
-| `received` | `LookupMap<u64, Received>` | NEW. Revenue by sweep id |
+| `received` | `LookupMap<(AccountId, u64), VersionedReceived>` | BUILT. Revenue by market account and sweep id. Every map record (`Stake`, `QuarterBook`, `Claim`, `Received`) is stored behind a one-byte version tag, 0 today, read through `into_current` and always written current |
 | `seats_by_owner` | `LookupMap<AccountId, Vec<TokenId>>` | NEW. Replaces the bare count, at most `max_seats_per_account` entries |
 | `total_paid` | `u128` | NEW. Sum of confirmed claim payouts |
 | `acc_per_seat`, `stream`, `Stake.reward_debt`, `Stake.serving_since_acc` | | REMOVED |
@@ -167,12 +167,12 @@ Storage grows with seats times quarters touched. Each `seat_weight` entry is abo
 | Message | Sender | Effect |
 | --- | --- | --- |
 | `revenue` | any (today) | Adds the amount to the stream. Accepted from anyone (`:633-660`). CHANGED, see below |
-| `revenue:<sweep_id>` | the market only | NEW. Attributes the amount to the quarter of the receipt, records `received[sweep_id]`, adds to `total_received` |
+| `revenue:<sweep_id>` | the market only | NEW. Attributes the amount to the quarter of the receipt, records `received[(market, sweep_id)]`, adds to `total_received` |
 
 `<sweep_id>` is a `u64` decimal. After the change:
 
 1. The caller must be the verifier, with exactly one token and one amount, and the token id must equal `collateral_token_id` (existing checks).
-2. `sender_id` must equal `market` (`revenue comes from the market only`). A different sender panics and the verifier refunds it in full.
+2. `sender_id` must be on the allow-list (`revenue comes from an allowed market only`). A different sender panics and the verifier refunds it in full.
 3. A `sweep_id` already in `received` panics (`that sweep was already received`) and the verifier refunds it. This makes a repeated send harmless.
 4. Any other text panics (`unknown action`).
 
@@ -392,7 +392,7 @@ Views today: `total_received` (`:665`), `seat_count` (`:669`), `jury_of(case_key
 
 | Method | Caller | Args | Returns | Yocto | Gas | Behaviour and refusals | Events |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `mt_on_transfer` CHANGED | The verifier | as above | `["0"]` | none | 30 TGas estimate | Section 5. Ticks seat time to now, creates quarter books as needed, credits the quarter of the receipt, records `received[sweep_id]`. Refuses another sender, a repeated sweep id, more than 8 quarters of backlog (`call advance_quarters first`) | `revenue` with `sweep_id`, `quarter` |
+| `mt_on_transfer` CHANGED | The verifier | as above | `["0"]` | none | 30 TGas estimate | Section 5. Ticks seat time to now, creates quarter books as needed, credits the quarter of the receipt, records `received[(market, sweep_id)]`. Refuses another sender, a repeated sweep id, more than 8 quarters of backlog (`call advance_quarters first`) | `revenue` with `sweep_id`, `quarter` |
 | `advance_quarters(max_steps: Option<u32>)` NEW | Anyone | steps up to 8 | `u32` quarters advanced | none | 30 TGas | Moves `last_tick` towards now, adding seat time and creating empty books. Does nothing when current | none |
 | `finalize_quarter(quarter: u32)` NEW | Anyone | quarter id | none | none | none | Ticks seat time to the end of the quarter first. Refuses before `ends_at + close_grace_ns`, a quarter that is not `next_to_finalize`, and one already final. Fixes pool and weight, rolls an empty quarter forward | `quarter_finalized` |
 | `claim_quarter(quarter: u32, token_id: TokenId)` NEW | Seat owner | quarter id, token | `Promise` | exactly 1 | 33 TGas floor | Section 6.8 | `claim_requested`, `claim_paid`, `claim_failed` |
@@ -403,7 +403,8 @@ Views today: `total_received` (`:665`), `seat_count` (`:669`), `jury_of(case_key
 | `unlock_case` CHANGED | Oracle | as above | none | none | 15 TGas | Forfeits weight (6.5) | `seat_time_forfeited`, `forfeit_skipped` |
 | `set_close_grace_ns(close_grace_ns: U64)` NEW | Owner | nanoseconds | none | none | none | Between 1 day and 30 days | `close_grace_set` |
 | `set_reconcile_wait_ns(reconcile_wait_ns: U64)` NEW | Owner | nanoseconds | none | none | none | Between 10 minutes and 7 days. Live. `reconcile_claim` reads it | `reconcile_wait_set` |
-| `set_market(market: AccountId)` NEW | Owner | account | none | none | none | Changes the only revenue sender | `market_set` |
+| `allow_market(market: AccountId)` BUILT | Owner | account | none | none | none | Adds a revenue sender. Refused if present | `market_allowed` |
+| `disallow_market(market: AccountId)` BUILT | Owner | account | none | none | none | Removes a revenue sender; what it sent stays. Refused for the last one | `market_disallowed` |
 
 Every owner row is a plain `AccountId` check. No row names or calls a governance contract (guard test `guards.rs:179-191`).
 
@@ -422,7 +423,7 @@ R-08 asks for accrued, claimable and paid amounts, operation states and quarters
 | All of an account's entitlements | `entitlements_of(account_id: AccountId, from_quarter: u32, limit: u32)` | `Vec<EntitlementView>` over the account's seats and past seats, `min(limit, entitlements_page_quarters)` quarters a page |
 | An account's page length | `entitlements_page_quarters(account_id: AccountId)` | `u32`, at most 25, fewer so a page stays within 250 lookups, at least 1 |
 | An account's staked seats | `seats_of(account_id: AccountId)` | `Vec<TokenId>` |
-| Revenue by sweep | `received_of(sweep_id: U64)` | `Option<{amount: U128, quarter: u32, at: U64}>` |
+| Revenue by sweep | `received_of(market: AccountId, sweep_id: U64)` | `Option<{amount: U128, quarter: u32, at: U64}>` |
 | Totals for reconciliation | `reward_totals()` | `{total_received, total_paid, pending_claims, open_pool, final_unclaimed, rolled: U128}` |
 | Stake record | `stake_of(token_id)` EXISTING | `Option<Stake>` with NEW `booked_to` |
 | Case jury | `jury_of(case_key)` EXISTING | `Vec<TokenId>` |
@@ -460,7 +461,7 @@ Envelope: `EVENT_JSON:{"standard":"council","version":"1.0.0","event":"<name>","
 | `unstake_requested` | `token_id`, `owner`, `unlock_at` (string ns) | EXISTING |
 | `unstaked` | `token_id`, `owner` | EXISTING |
 | `unstake_failed` | `token_id`, `owner` | EXISTING |
-| `revenue` | `from`, `amount`, `seats` today. NEW `sweep_id`, `quarter` | EXISTING, CHANGED |
+| `revenue` | `from`, `amount`, `seats` today. NEW `sweep_id`, `quarter`, `market` (the sender) | EXISTING, CHANGED |
 | `revenue_forfeited` | `token_id`, `owner`, `amount`, `case` | EXISTING. Replaced by `seat_time_forfeited` |
 | `revenue_claimed` | `token_id`, `owner`, `amount` | EXISTING. Replaced by `claim_requested` and `claim_paid`. It is emitted before the transfer succeeds today |
 | `claim_failed` | `token_id`, `owner`, `amount` | EXISTING, CHANGED: add `quarter` |
@@ -469,7 +470,12 @@ Envelope: `EVENT_JSON:{"standard":"council","version":"1.0.0","event":"<name>","
 | `quarter_finalized` | `quarter`, `pool`, `weight_ns`, `rolled_to` (null or id) | NEW |
 | `claim_requested` | `quarter`, `token_id`, `owner`, `amount` | NEW |
 | `claim_paid` | `quarter`, `token_id`, `owner`, `amount` | NEW |
-| `close_grace_set`, `market_set`, `nft_contract_set` | the new value | NEW |
+| `close_grace_set`, `nft_contract_set` | the new value | NEW |
+| `market_allowed`, `market_disallowed` | `market` | BUILT |
+| `jury_drawn` | `case_key`, `tokens`, `owners` | BUILT |
+| `jury_released` | `case_key`, `delinquent` | BUILT |
+| `quarters_advanced` | `steps` | BUILT |
+| `seat_time_booked` | `token_id`, `quarters` | BUILT |
 | `reconcile_wait_set` | `reconcile_wait_ns` | NEW |
 | `cooldown_set`, `max_seats_per_account_set`, `tokens_allowed`, `token_range_set`, `token_range_cleared`, `allowlist_set` | the changed value | EXISTING |
 | `owner_proposed`, `owner_changed`, `code_staged`, `upgrade_sent`, `migrated`, `seal_sent` | as the market | EXISTING |
@@ -506,7 +512,7 @@ Exact panic strings as built (checked in source: `council/src/lib.rs`).
 | Draw | `not enough seat holders to draw a jury: {} eligible, {} needed` |
 | Upgrade | `there is no state to migrate`, `migrate runs only inside an upgrade`, `prove the upgrade path before deleting keys` |
 
-Strings added with the quarterly model: `revenue comes from the market only`, `that sweep was already received`, `call advance_quarters first`, `that quarter is not final`, `the quarter cannot be finalized yet`, `finalize the earlier quarter first`, `claim is already pending`, `already claimed`, `book this seat first`, `the grace period must be between 1 and 30 days`, `a jury drawn in this quarter is still open`.
+Strings added with the quarterly model: `revenue comes from an allowed market only`, `already an allowed market`, `not an allowed market`, `keep at least one allowed market`, `a stored record has a newer version than this code can read`, `that sweep was already received`, `call advance_quarters first`, `that quarter is not final`, `the quarter cannot be finalized yet`, `finalize the earlier quarter first`, `claim is already pending`, `already claimed`, `book this seat first`, `the grace period must be between 1 and 30 days`, `a jury drawn in this quarter is still open`.
 
 ---
 

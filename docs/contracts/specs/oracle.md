@@ -54,7 +54,7 @@ The oracle decides outcomes. Someone proposes an answer with a bond. A challenge
 
 | Role | Set by | Powers |
 | --- | --- | --- |
-| Owner | `new`, `propose_owner` and `accept_owner` | `upgrade`, `seal`, `set_bond`, `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms`, `set_draw_delay_blocks`, `set_juror_shares`, `set_apply_buffer_ms`, `set_max_publishers`, `set_jury_size`, `set_operator`, `set_no_decision_recipient`, `add_publisher`, `set_price_threshold`, `propose_owner`. DECIDED: the owner is the DAO |
+| Owner | `new`, `propose_owner` and `accept_owner` | `upgrade`, `seal`, `set_bond`, `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms`, `set_draw_delay_blocks`, `set_juror_shares`, `set_apply_buffer_ms`, `set_max_publishers`, `set_jury_size`, `allow_market`, `disallow_market`, `set_operator`, `set_no_decision_recipient`, `add_publisher`, `set_price_threshold`, `propose_owner`. DECIDED: the owner is the DAO |
 | Operator | `set_operator`, owner only | `remove_publisher` only, so a leaked publisher key can be cut off in one call |
 | Market | `new`, no setter | `register_market` only |
 | Jurors | Drawn per case | `commit_vote`, `reveal_vote` for the case they sit on |
@@ -72,7 +72,7 @@ The oracle needs its own Intents account `O`. It must have no key registered in 
 | Money | Today (NEP-141) | Target (Intents) |
 | --- | --- | --- |
 | Proposer bond arrives | `ft_transfer_call` of the token to the oracle with `msg` | User calls verifier `mt_transfer_call(receiver_id=O, token_id, amount=bond, msg)`. The verifier calls `O.mt_on_transfer` |
-| Challenger bond arrives | Same, `msg = challenge:<id>:<answer>` | Same through the verifier |
+| Challenger bond arrives | Same, `msg = challenge:<market account>:<market id>:<answer>` | Same through the verifier |
 | A case settles | `claimable[account] += amount` in the oracle's own ledger. No token moves | Same. No verifier call. The money stays in `O` |
 | Winner, jurors or recipient collects | `withdraw_bond` calls `ft_transfer` on the token | `withdraw_bond` calls verifier `mt_transfer(receiver_id=caller, token_id, amount, null, null)` with 1 yocto from `O` |
 | A third party pushes a payout | Not possible | `payout_bond(account_id)` pays `claimable[account_id]` to that same account's own Intents account |
@@ -111,6 +111,8 @@ All EXISTING (`oracle/src/lib.rs:212-253`).
 | `max_publishers`                                                      | `u32` | Most publishers that can be added. Default 10, owner range 1 to 25, not below `price_threshold` |
 | `council` | `AccountId` | Draws juries and releases seats |
 | `jury_size` | `u32` | Odd, at most 21 |
+| `allowed_markets` | `Vec<AccountId>` | BUILT. The market accounts that may register markets and take new proposals and challenges. Replaces the single `market`. A disallowed market keeps its open cases. The last one may be removed |
+| `last_case_uid` | `u64` | BUILT. The uid the last case got; the first is 1 and it only goes up |
 | `draw_delay_blocks` | `u64` | Blocks between a challenge and the earliest draw |
 | `network` | `String` | Signed into every price |
 | `publishers`, `price_threshold` | `Vec<PublicKey>`, `u32` | Price signers, at most `max_publishers`, and how many must agree |
@@ -119,7 +121,7 @@ All EXISTING (`oracle/src/lib.rs:212-253`).
 | `cases` | `LookupMap<u64, Case>` | One case per market |
 | `claimable` | `LookupMap<AccountId, u128>` | Bonds waiting to be withdrawn |
 
-`Case` (`:154-192`): `stage`, `proposer`, `proposed`, `bond`, `evidence`, `window_ends_at`, `challenger`, `challenger_answer`, `round`, `jury_size`, `draw_by`, `draw_after_height`, `commit_ends_at`, `panel_deadline`, `panel`, `first_panel`, `commits`, `votes`, `final_outcome`, `applied`, `challenged_at`, `juror_share_bps`, `no_decision_share_bps`, `delinquent`.
+`Case` (`:154-192`): `case_uid`, `stage`, `proposer`, `proposed`, `bond`, `evidence`, `window_ends_at`, `challenger`, `challenger_answer`, `round`, `jury_size`, `draw_by`, `draw_after_height`, `commit_ends_at`, `panel_deadline`, `panel`, `first_panel`, `commits`, `votes`, `final_outcome`, `applied`, `challenged_at`, `juror_share_bps`, `no_decision_share_bps`, `delinquent`.
 
 ### 4.2 Changes (PROPOSED)
 
@@ -129,7 +131,7 @@ All EXISTING (`oracle/src/lib.rs:212-253`).
 | `bonds_held: u128` | NEW. Sum of the bonds of every case that is not final: one bond after a proposal, two after a challenge |
 | `claimable_total: u128` | NEW. Sum of `claimable` |
 | `pending_payouts_total: u128` | BUILT. Amounts zeroed in `claimable` whose transfer has not reported yet. A `payouts` map keyed by a payout id (`last_payout_id`, from 1) holds `{account, amount, at}` for each |
-| `state_version` | Bump to 2. Nothing is deployed, so no migration is needed |
+| `state_version` | Bump to 2. As built, `markets`, `cases` and `payouts` hold version-tagged records (one byte, 0 today, read through `into_current`, always written current), `markets` and `cases` are keyed by (market account, market id). Nothing is deployed, so no migration is needed |
 
 ---
 
@@ -138,20 +140,21 @@ All EXISTING (`oracle/src/lib.rs:212-253`).
 `mt_on_transfer` splits `msg` with `splitn(4, ':')`, so the last part may itself contain colons (Checked in source: `oracle/src/lib.rs:645-678`, same rule today for `ft_on_transfer`).
 
 ```text
-propose:<market_id>:<outcome>:<evidence>
-price:<market_id>:<price>:<signatures>
-challenge:<market_id>:<answer>
+propose:<market_account>:<market_id>:<outcome>:<evidence>
+price:<market_account>:<market_id>:<price>:<signatures>
+challenge:<market_account>:<market_id>:<answer>
 ```
 
 | Part | Type | Rule |
 | --- | --- | --- |
+| `market_account` | A NEAR account id, which holds no colon. Must be on the allow-list | `bad market account`, `that market contract is not allowed` |
 | `market_id` | `u64` decimal | `bad market id` |
 | `outcome`, `answer` | `yes`, `no` or `void` | `outcome must be yes, no or void` |
 | `evidence` | text up to 512 bytes, may contain `:` | `evidence link is too long` |
 | `price` | `u128` decimal scaled by the market's decimals | `bad price` |
 | `signatures` | comma separated entries `<publisher key>.<128 hex characters>` where the key is `ed25519:<base58>` | A malformed entry, a repeated or unknown key, or a signature that does not verify refuses the whole submission |
 
-The amount must equal the bond exactly (`send exactly the bond`). A challenge must equal the bond its case was proposed with. A price market refuses `propose` (`a price market is answered with a signed price`) and an event market refuses `price`. The signed message is `price:v1:<oracle account>:<network>:<market id>:<observation time>:<price>:<decimals>` (`oracle/src/lib.rs:341-346`).
+The amount must equal the bond exactly (`send exactly the bond`). A challenge must equal the bond its case was proposed with. A price market refuses `propose` (`a price market is answered with a signed price`) and an event market refuses `price`. The signed message is `price:v2:<oracle account>:<network>:<market account>:<market id>:<observation time>:<price>:<decimals>` (`oracle/src/lib.rs:341-346`).
 
 After migration the verifier calls `mt_on_transfer(sender_id, previous_owner_ids, token_ids, amounts, msg)`. The checks mirror the market, in this order: caller is the verifier, exactly one token and one amount, the token id equals `collateral_token_id`, `previous_owner_ids == [sender_id]`. The bond is then taken from `amounts[0]`. The answer is `["0"]`, which keeps everything. A panic refunds the sender in full.
 
@@ -206,21 +209,21 @@ Gas floors are enforced with `upgrade::require_gas` (`oracle/src/lib.rs:26-43`).
 | `add_publisher` (`:551`) | Owner | `key: PublicKey` | none | none | none | ed25519 only, no duplicates, at most `max_publishers` | `publisher_added` |
 | `remove_publisher` (`:565`) | Operator or owner | `key: PublicKey` | none | none | none | Refuses a key that is not a publisher and a removal that leaves fewer than the threshold | `publisher_removed` |
 | `set_price_threshold` (`:581`) | Owner | `threshold: u32` | none | none | none | Between 1 and the publisher count | `price_threshold_set` |
-| `register_market` (`:596`) | Market | `market_id: U64`, `close_at: U64`, `resolve_by: U64`, `rule_hash: String`, `price_rule: Option<PriceRule>` | none | none | 20 TGas reserved by the market | Idempotent. Refuses a market with too little time and a price market with too few publishers | `market_registered` |
+| `register_market` (`:596`) | An allowed market account | `market_id: U64`, `close_at: U64`, `resolve_by: U64`, `rule_hash: String`, `price_rule: Option<PriceRule>` | none | none | 20 TGas reserved by the market | Idempotent. Refuses a market with too little time and a price market with too few publishers | `market_registered` |
 | `ft_on_transfer` (`:645`) | The bond token | `sender_id: AccountId`, `amount: U128`, `msg: String` | `PromiseOrValue<U128>`, always 0 | none | token call | Section 5. CHANGED in 8.1 | `proposed`, `challenged` |
-| `resolve_draw` (`:684`) | Anyone | `market_id: U64` | `Promise` | none | 275 TGas floor | Calls the Council's `draw` with 250 TGas | `jury_drawn` or `draw_failed` via `on_drawn` |
-| `on_drawn` (`:710`) | The account itself | `market_id: U64`, `round: u8` | none | none | 15 TGas | Seats the jury only for the round the case is in | `jury_drawn`, `draw_failed` |
-| `commit_vote` (`:747`) | A panel member | `market_id: U64`, `commitment: String` | none | exactly 1 | none | Commitment is `hex(sha256("<juror>:<yes\|no\|void>:<salt>"))`, 64 lowercase hex characters. Once, before `commit_ends_at` | `vote_committed` |
-| `reveal_vote` (`:776`) | A panel member | `market_id: U64`, `outcome: Outcome`, `salt: String`, `reason: String` | none | exactly 1 | 80 TGas floor | Only the proposed or the challenger's answer. Must match the commitment. Reason required, at most 1000 bytes. Salt at most 64 bytes. Settles on a majority | `vote_revealed`, then `final` and `outcome_applied` on settlement |
-| `finalize` (`:835`) | Anyone | `market_id: U64` | none | none | 80 TGas floor | Settles an unchallenged case after its window, or closes a round that is over | `final` or `escalated` |
-| `resolve_by_deadline` (`:857`) | Anyone | `market_id: U64` | none | none | 80 TGas floor | After `resolve_by`. Refuses a case that still has time | `deadline_void`, `final` |
-| `retry_apply` (`:878`) | Anyone | `market_id: U64` | none | none | 30 TGas suggested | Resends the answer to the market | `outcome_applied` via `on_applied` |
-| `retry_unlock` (`:888`) | Anyone | `market_id: U64` | `Promise` | none | 35 TGas floor | Releases the jury seats again. The Council ignores a repeat | none |
-| `on_applied` (`:903`) | The account itself | `market_id: U64` | none | none | 10 TGas | Marks the case applied | `outcome_applied` |
+| `resolve_draw` (`:684`) | Anyone | `market: AccountId`, `market_id: U64` | `Promise` | none | 275 TGas floor | Calls the Council's `draw` with 250 TGas | `jury_drawn` or `draw_failed` via `on_drawn` |
+| `on_drawn` (`:710`) | The account itself | `market: AccountId`, `market_id: U64`, `round: u8` | none | none | 15 TGas | Seats the jury only for the round the case is in | `jury_drawn`, `draw_failed` |
+| `commit_vote` (`:747`) | A panel member | `market: AccountId`, `market_id: U64`, `commitment: String` | none | exactly 1 | none | Commitment is `hex(sha256("<juror>:<yes\|no\|void>:<salt>"))`, 64 lowercase hex characters. Once, before `commit_ends_at` | `vote_committed` |
+| `reveal_vote` (`:776`) | A panel member | `market: AccountId`, `market_id: U64`, `outcome: Outcome`, `salt: String`, `reason: String` | none | exactly 1 | 80 TGas floor | Only the proposed or the challenger's answer. Must match the commitment. Reason required, at most 1000 bytes. Salt at most 64 bytes. Settles on a majority | `vote_revealed`, then `final` and `outcome_applied` on settlement |
+| `finalize` (`:835`) | Anyone | `market: AccountId`, `market_id: U64` | none | none | 80 TGas floor | Settles an unchallenged case after its window, or closes a round that is over | `final` or `escalated` |
+| `resolve_by_deadline` (`:857`) | Anyone | `market: AccountId`, `market_id: U64` | none | none | 80 TGas floor | After `resolve_by`. Refuses a case that still has time | `deadline_void`, `final` |
+| `retry_apply` (`:878`) | Anyone | `market: AccountId`, `market_id: U64` | none | none | 30 TGas suggested | Resends the answer to the market | `outcome_applied` via `on_applied` |
+| `retry_unlock` (`:888`) | Anyone | `market: AccountId`, `market_id: U64` | `Promise` | none | 35 TGas floor | Releases the jury seats again. The Council ignores a repeat | none |
+| `on_applied` (`:903`) | The account itself | `market: AccountId`, `market_id: U64` | none | none | 10 TGas | Marks the case applied | `outcome_applied` |
 | `withdraw_bond` (`:915`) | Anyone with a balance | none | `Promise` | exactly 1 | 25 TGas suggested | Zeroes `claimable[caller]` and pays it with `ft_transfer`. CHANGED in 8.2 | none |
 | `on_bond_withdrawn` (`:934`) | The account itself | `account: AccountId`, `amount: U128` | none | none | 10 TGas | Restores `claimable` on error | none |
 
-Views today: `get_case(market_id) returns Option<Case>` (`:947`), `get_market_info(market_id) returns Option<MarketInfo>` (`:951`), `claimable_of(account_id) returns U128` (`:955`), `is_staged(code_hash)` (`:960`), `config()` (`:964`).
+Views today: `get_case(market: AccountId, market_id: U64) returns Option<Case>` (`:947`), `get_market_info(market: AccountId, market_id: U64) returns Option<MarketInfo>` (`:951`), `claimable_of(account_id) returns U128` (`:955`), `is_staged(code_hash)` (`:960`), `config()` (`:964`).
 
 ---
 
@@ -259,7 +262,7 @@ An error from `mt_transfer` means the verifier receipt failed and nothing moved.
 
 | Item | Specification |
 | --- | --- |
-| `list_cases(from_market_id: U64, limit: u32)` BUILT | At most 50 ids from `from_market_id`. Returns only ids that have a case, each as `CaseSummary {market_id: U64, stage, proposed, challenger_answer: Option<Outcome>, round: u8, final_outcome: Option<Outcome>, applied: bool, votes: u32, window_ends_at: U64, draw_by: U64, panel_deadline: U64}` |
+| `list_cases(market: AccountId, from_market_id: U64, limit: u32)` BUILT | At most 50 ids of one market account from `from_market_id`. Returns only ids that have a case, each as `CaseSummary {market: AccountId, market_id: U64, stage, proposed, challenger_answer: Option<Outcome>, round: u8, final_outcome: Option<Outcome>, applied: bool, votes: u32, window_ends_at: U64, draw_by: U64, panel_deadline: U64}` |
 
 The website's Council page loads every market and then every case one by one (`web/app/council/view.tsx:13-18`). One page of this view replaces that fan-out. The keeper can also use it instead of `get_case` per market (`keeper/keeper.mjs:153-178`).
 
@@ -267,7 +270,7 @@ The website's Council page loads every market and then every case one by one (`w
 
 | Item | Specification |
 | --- | --- |
-| `set_jury_size` event | Emit `jury_size_set {jury_size}`. The audit noted the missing event |
+| `set_jury_size` event | BUILT: emits `jury_size_set {jury_size}` |
 | Floors for `retry_apply` and `withdraw_bond` | Add `require_gas` with 30 and 25 TGas |
 | Owner-only list | Every setter stays owner only. Only `remove_publisher` is shared with the operator |
 
@@ -294,20 +297,22 @@ Envelope: `EVENT_JSON:{"standard":"oracle","version":"1.0.0","event":"<name>","d
 
 | Event | Data | Status |
 | --- | --- | --- |
-| `proposed` | `market_id`, `proposer`, `outcome`, `evidence`, `window_ends_at`, `signers` (array of keys, empty for a plain proposal) | EXISTING |
-| `challenged` | `market_id`, `challenger`, `answer`, `draw_by` | EXISTING |
-| `jury_drawn` | `market_id`, `round` (number), `panel` (array) | EXISTING |
-| `draw_failed` | `market_id`, `round` | EXISTING |
-| `vote_committed` | `market_id`, `juror`, `commitment` | EXISTING |
-| `vote_revealed` | `market_id`, `juror`, `outcome`, `reason` | EXISTING |
-| `escalated` | `market_id`, `jury_size` (number), `draw_by` | EXISTING |
-| `final` | `market_id`, `outcome`, `ruling` (`unchallenged`, `decided`, `no_decision`, `no_jury`), `juror_pay_each`, `paid_jurors`, `delinquent` | EXISTING |
-| `outcome_applied` | `market_id` | EXISTING |
-| `deadline_void` | `market_id` | EXISTING |
-| `market_registered` | `market_id` | EXISTING |
+| `proposed` | `market`, `market_id`, `proposer`, `outcome`, `evidence`, `bond`, `window_ends_at`, `signers` (array of keys, empty for a plain proposal) | EXISTING |
+| `challenged` | `market`, `market_id`, `challenger`, `answer`, `bond`, `draw_by` | EXISTING |
+| `jury_drawn` | `market`, `market_id`, `round` (number), `panel` (array) | EXISTING |
+| `draw_failed` | `market`, `market_id`, `round` | EXISTING |
+| `vote_committed` | `market`, `market_id`, `juror`, `commitment` | EXISTING |
+| `vote_revealed` | `market`, `market_id`, `juror`, `outcome`, `reason` | EXISTING |
+| `escalated` | `market`, `market_id`, `jury_size` (number), `draw_by` | EXISTING |
+| `final` | `market`, `market_id`, `outcome`, `ruling` (`unchallenged`, `decided`, `no_decision`, `no_jury`), `juror_pay_each`, `paid_jurors`, `delinquent` | EXISTING |
+| `outcome_applied` | `market`, `market_id` | EXISTING |
+| `deadline_void` | `market`, `market_id` | EXISTING |
+| `market_registered` | `market`, `market_id` | EXISTING |
 | `bond_set`, `window_set`, `panel_deadline_set`, `min_proposal_set`, `draw_window_set`, `draw_delay_set`, `operator_set`, `no_decision_recipient_set`, `publisher_added`, `publisher_removed`, `price_threshold_set` | the changed value | EXISTING |
 | `owner_proposed`, `owner_changed`, `code_staged`, `upgrade_sent`, `migrated`, `seal_sent` | as the market | EXISTING |
-| `jury_size_set` | `jury_size` | NEW |
+| `jury_size_set` | `jury_size` | BUILT |
+| `apply_failed` | `market`, `market_id` | BUILT. The market did not accept the outcome |
+| `market_allowed`, `market_disallowed` | `market` | BUILT |
 | `bond_received` | `account`, `amount`, `action` (`propose`, `price`, `challenge`), `market_id` | NEW |
 | `bond_payout_requested` | `account`, `amount`, `id` | BUILT |
 | `bond_paid` | `account`, `amount`, `id` | BUILT |
@@ -337,7 +342,7 @@ Exact panic strings (Checked in source: `oracle/src/lib.rs`).
 
 | Group | Strings |
 | --- | --- |
-| Access | `owner only`, `operator or owner only`, `market contract only`, `not the proposed owner`, `wrong token` (becomes `only the verifier can deliver money` after migration) |
+| Access | `owner only`, `operator or owner only`, `that market contract is not allowed`, `already an allowed market`, `not an allowed market`, `a stored record has a newer version than this code can read`, `not the proposed owner`, `wrong token` (becomes `only the verifier can deliver money` after migration) |
 | Bond delivery | `bad market id`, `send exactly the bond`, `unknown action`, `outcome must be yes, no or void`, `bad price`, `a price market is answered with a signed price`, `not a price market` |
 | Case state | `no case for that market`, `an answer was already proposed`, `the market has not closed yet`, `too late to propose, the market will be voided at its deadline`, `evidence link is too long`, `nothing to challenge`, `the challenge window closed`, `you cannot challenge your own answer`, `a challenge must name a different answer than the proposal`, `market is not registered` |
 | Jury | `no open dispute`, `the jury is already drawn`, `too early to draw the jury`, `too late to draw a jury`, `no challenger`, `not on the panel for this case`, `the commit phase is over`, `commitment must be 64 lowercase hex characters`, `already committed`, `no commitment to reveal`, `no challenger answer`, `vote for the proposed answer or the challenger's answer`, `the commit phase is still open`, `the panel deadline passed`, `already revealed`, `the vote does not match the commitment`, `a reason is required`, `reason is too long`, `salt is too long` |

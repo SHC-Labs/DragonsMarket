@@ -47,7 +47,7 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Contracts for wasm
         run: >
-          cargo clippy -p oracle -p council -p market -p upgrade -p mock-ft -p mock-nft
+          cargo clippy -p oracle -p council -p market -p rounds -p price-signatures -p upgrade -p mock-ft -p mock-nft
           --target wasm32-unknown-unknown -- -D warnings
       - name: Everything, tests included
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -67,7 +67,7 @@ jobs:
           restore-keys: unit-${{ runner.os }}-
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo test -p market -p oracle -p council -p upgrade
+      - run: cargo test -p market -p oracle -p council -p rounds -p price-signatures -p upgrade
 
   sandbox:
     runs-on: ubuntu-24.04
@@ -126,4 +126,4 @@ jobs:
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
         with:
           node-version-file: web/.node-version
-      - run: node --test keeper/keeper.test.mjs keeper/treasury.test.mjs
+      - run: node --test verify-build.test.mjs keeper/release-check.test.mjs keeper/keeper.test.mjs keeper/treasury.test.mjs

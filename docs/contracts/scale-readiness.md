@@ -6,7 +6,7 @@
 | --- | --- |
 | Date | 2026-10-22 |
 | Comparable-venue review | 2026-10-23. Section 5 updated; measurements were not rerun |
-| Status | Proposal for review. Implemented so far: the account-to-markets index, the reward page cap and lookup budget, the position cap of 30 and the keeper's sweep timing read from config (section 2) |
+| Status | Historical scale measurements plus the implementation update in section 6. Implemented so far: the account-to-markets index, the reward page cap and lookup budget, the position cap of 30 and the keeper's sweep timing read from config (section 2) |
 | Scope | `contracts/market`, `contracts/oracle`, `contracts/council`, the keeper (`contracts/keeper`) and the website library (`web/lib`) |
 | Target | Hundreds of thousands of markets and users, with trading, fee sweeps, quarterly rewards and disputes running continuously for five years |
 | Measured with | The NEAR sandbox, nearcore 2.13.4, protocol version 86. Gas is read from the outcome of a transaction, since the sandbox does not enforce the public view limit |
@@ -39,7 +39,7 @@ Ordered by how soon each one bites:
 | 2 | The keeper scans every market after the oldest unfinished one | About 100,000 sequential calls per run at the target; misses draw and deadline windows | Drive it from events or a due-queue |
 | 3 | The operator's and owner's own position views | `get_positions` passes 200 TGas at about 750 held markets (measured) | Keep exempt accounts out of the index and page their view |
 | 4 | `entitlements_of` for an account with many tokens | The 250-lookup page budget holds up to 250 tokens; one quarter alone passes 200 TGas at about 767 tokens | Page by token as well, or bound the token history |
-| 5 | Dispute capacity | About 333 disputes can run at once at a jury of 3, since a serving seat cannot be drawn again | Design decision (section 6) |
+| 5 | Dispute capacity | About 333 disputes can run at once at a jury of 3, and about 100 if every case escalates (10 seats each), since a serving seat cannot be drawn again | Design decision (section 6) |
 | 6 | Storage with no payer | About 1,900 to 4,800 NEAR per 100,000 markets, paid from the contract balance | Design decision (section 6) |
 | 7 | One market contract is one hot account | Unknown ceiling; the code cannot run several market instances | Design decision (section 6) |
 
@@ -121,7 +121,7 @@ Fitted lines (three points for seed and redeem, two for the views): seed 2.637 +
 | User with 100 positions, 20-char / 64-char id | 10,019 / 14,551 | n/a | The 0.05 NEAR deposit |
 
 - The deposit buys 5,000 bytes. It covers about 45 positions for a 20-character id and 31 for a 64-character id. The hard maximum for the position cap is now 30, so every account fits inside its deposit. The 100-position row is the measurement that set it; `scale_storage` now measures up to 30.
-- A sweep every hour for five years is 43,800 records, about 143 NEAR across the market and the Council. One an hour is the default; the DAO can lower the interval to one minute, which would multiply this by up to 60.
+- A sweep every hour for five years is 43,800 records, about 143 NEAR across the market and the Council. One an hour is now both the default and the hard minimum (owner decision, 2026-10-23). The DAO can raise it to at most one day.
 
 ### 3.5 Protocol constants
 
@@ -168,7 +168,7 @@ Each quarter does one lookup per token the account has ever staked, and `tokens_
 
 ### Issue 5. Dispute capacity
 
-A jury draw is affordable up to the seat cap (163 TGas at 1,000 seats, extrapolated limit near 1,550). The limit that matters is concurrency. A seat serving on an open case cannot be drawn again, so at most seats divided by jury size disputes can be open at once: about 333 at a jury of 3 and fewer after an escalation to 7 or 21. A draw that cannot find enough free seats fails. If no jury is ever seated, the case returns both bonds and an event market is Void; if the first jury sat and the second cannot be drawn, it ends with no decision and the challenger loses half a bond.
+A jury draw is affordable up to the seat cap (163 TGas at 1,000 seats, extrapolated limit near 1,550). The limit that matters is concurrency. A seat serving on an open case cannot be drawn again, so at most seats divided by seats held per case disputes can be open at once: about 333 at a jury of 3, and about 100 when every case escalates to a second jury of 7 (10 seats per case). A draw that cannot find enough free seats fails. If no jury is ever seated, the case returns both bonds and an event market is Void; if the first jury sat and the second cannot be drawn, it ends with no decision and the challenger loses half a bond.
 
 - The draw reads every seat, whether or not it is serving or leaving, so the cap cannot rise much without changing it.
 - **Options:** (a) keep the cap and accept the concurrency ceiling, and size the collection to the dispute rate we expect; (b) change the draw to sample candidates instead of reading every seat, which lifts the cap; (c) add a queue that holds a case until enough seats are free. Section 6, decision 3.
@@ -192,7 +192,7 @@ Every trade, seed, redeem and withdraw is a receipt on the market account. Each 
 
 - **Record layout.** No record carries a version tag, so a layout change would rewrite every record (250 to 800 transactions at 100,000 markets). Tagging now and migrating on read and write costs a byte per record.
 - **Owner-only reconciliation is one record per call.** A lost callback costs the DAO one proposal each.
-- **Growing records:** sweeps, received-sweep markers, paid claims and per-seat quarter weights are never pruned. Sweeps and their Council markers come to about 143 NEAR over five years at the default of one sweep an hour (section 3.4), and up to 60 times that if the DAO lowers the interval to its one-minute floor. Paid claims and seat weights add to it.
+- **Growing records:** sweeps, received-sweep markers, paid claims and per-seat quarter weights are never pruned. Sweeps and their Council markers come to about 143 NEAR over five years at the default of one sweep an hour (section 3.4), with no permitted interval below one hour. Paid claims and seat weights add to it.
 - **Constant cost, no action:** `total_owed`, `owed_breakdown`, `in_flight`, `bond_totals`, `reward_totals`, `get_history`, `list_markets` (9 to 10 TGas per page of 50), `list_cases`, `list_quarters`, the upgrade and `migrate` path.
 
 ---
@@ -269,6 +269,41 @@ Before setting a production capacity target, measure browser/API latency, RPC vo
 | 6 | Version-tag every stored record now? | Yes |
 | 7 | Page `entitlements_of` by token, or bound `tokens_of`? The tokens-times-quarters budget and a hard position cap of 30 are now in place | Decide before one account can have staked a few hundred tokens |
 
+### Answers received, and the order of work
+
+Answers received on 2026-10-23:
+
+1. **Indexer: yes.** Read finalized blocks for our contract accounts only, save the events and the cursor for each block in one transaction, use replay-safe keys, and run a reconcile job for gaps. Index only receipts that succeeded, and treat withdraw, sweep and claim events as pending until their confirmed or failed event lands.
+2. **Exempt accounts: yes.** Keep their share entries, leave them out of the index, and page their view. Seed from a dedicated operator account, not the DAO.
+3. **Dispute capacity: keep it for launch.** The ceiling is below 333, because an escalated case holds 10 seats (3 plus 7), so concurrent disputes sit between about 100 (all escalated) and 333 (none escalated). Revisit when open disputes approach 100.
+4. **Storage: changed.** Because a withdrawal now writes a record, a market contract that runs out of NEAR stops users withdrawing. So `create_market` pays for its own storage (as `stage_code` does), the oracle and Council get top-ups and an alarm, and resolved markets are pruned, but never received sweep ids, paid claims or unsettled sweeps.
+5. **Key by (market account, id): yes**, with an allow-list of one at launch. The Intents verifier is shared, so load test on testnet before adding any second instance.
+6. **Version tags: yes, as soon as possible.** An earlier change altered stored layouts without a state version bump.
+7. **Done:** the lookup budget and the position cap of 30. Paging by token matters only past a few hundred tokens.
+
+Order: decisions 5 and 6 and the new events in one layout pass with a state version bump before testnet. Then decisions 1, 2 and 4 before mainnet. Decision 3 and the rest of decision 7 after launch.
+
+**Status of that order, 2026-10-23.** The layout pass is built and tested in the contracts, keeper, sandbox tests and website library: records carry a version tag, the oracle and Council keep an allow-list of market accounts and key their records by market account and id, each case has an oracle-assigned id that the Council uses as its jury key, and the events an indexer needs are added. That prerequisite used state versions market 3, oracle 2 and Council 3; the storage follow-up raises market to 4. The signed price message now names the market account (`price:v2`), because a signature over only the market id could be replayed on the same id of another market. The follow-up changes below implement exempt paging, storage funding and the keeper queue. The indexer remains design-only until its owner is named.
+
+### Storage and scheduling implementation, 2026-10-23
+
+| Area | Result |
+| --- | --- |
+| Position reads | Exempt owner/operator accounts no longer extend the flat index. Transaction-measured 50-ID windows returned 50 positions at **15.715 and 15.716 TGas**, then five positions at **3.256 TGas**, across 105 held markets. These are sandbox operation costs, not live throughput. Ordinary indexed behavior stays bounded. |
+| Record funding | Maximum complete market record measured **5,009 bytes**, including maximum text, history and optional fields. Initial creation deposit and hard floor **0.05009 NEAR**; ceiling 0.5 NEAR. Twelve maximum-text new records used **40,044 bytes** against 60,108 bytes of paid capacity. |
+| Reserve and exits | Owner-settable native reserve starts at 1 NEAR, hard range 0.1 to 100. New market/share/sweep records preserve it. Sandbox test lowered funds below the floor: creation refused while an existing 20-token balance withdrew to Intents, with accounting reconciled. This is finite headroom, not an unlimited withdrawal guarantee. |
+| Pruning | Resolved records with exactly zero holders and aggregate shares can drop text and history. Losing positions must also burn. Financial fields, hashes, receipt/claim markers and unsettled sweeps survive. Legacy unknown counts cannot authorize pruning. |
+| Sweep growth | User chose a **one-hour minimum**. Estimated sweep records still lock about 143 NEAR over five years, excluding gas and all other state. |
+| Oracle/Council | Treasury top-up proposals plus configurable creation-rate/balance runway alarm. Explicit budgets must cover disputes, claims, sweeps and quarters; example values are not measurements. No automatic transfer. |
+| Keeper | Persistent event-driven due jobs, bounded bootstrap and workers, rotating reconciliation and retry backoff. No pinned catalog cursor or recent-20-sweep cutoff. Requires a trusted finalized event feed for production deadline discovery. |
+| Migration | Market root 3 to 4, preserving exact old layout and market tag 0; new market tag 1. Oracle remains 2 and Council 3. Legacy owner/operator index bytes remain allocated but are never extended or read for paging. |
+| Release tool | `contracts/release.sh` completed on the clean prerequisite commit `e46f91b` with pinned Docker builds and metadata checks. This does not certify a release of the uncommitted changes. |
+| Brand kit | README already references `BRAND-VOICE.MD`; no branding edit needed. |
+
+Validation on the isolated branch: 252 market unit/property tests; 36 relevant sandbox tests across trading, real Intents transfers, keeper execution, revenue, storage/pruning and upgrades; 106 Node tooling/release-helper tests; 69 web library tests and TypeScript checking on Node 22.23.4. The final rebuilt artifact also passed the ten trading/storage/paging sandbox cases after reserve and migration hardening. Two mutation checks proved that permitting prune with live losing shares or indexing operational holdings breaks the new regressions. No financial assertion was relaxed.
+
+Indexer ownership and live testnet capacity remain open. [Indexer design](indexer.md) specifies the feed boundary. `contracts/keeper/load-test.mjs` prepares a testnet-only workload run; it has not sent transactions. No merge, commit, deployment or second market instance is part of this work.
+
 ---
 
 ## 7. Not measured, and why
@@ -277,9 +312,9 @@ Before setting a production capacity target, measure browser/API latency, RPC vo
 | --- | --- | --- |
 | Shard throughput and congestion control for one account under load | The sandbox is one node with no competing traffic | A testnet run with 10, 50 and 200 parallel signers sending buys, recording included transactions per block and rejections |
 | Real RPC rate limits and the public view gas limit | Provider and node settings | The provider's published limits, or a probe against the production endpoint |
-| Keeper run time against a live provider | Needs a live RPC and 100,000 markets | A dry run against testnet with a pinned cursor and N markets, counting calls and wall time |
+| Keeper run time against a live provider | Needs a live RPC and 100,000 markets | An event-feed run against testnet with N markets, counting calls and wall time |
 | Website load behaviour at 500, 5,000 and 50,000 markets | Needs a browser run against a populated chain | Load home, Council and portfolio and record calls, bytes, first render and loads in flight |
-| Operator reads past 2,500 held markets | The test attached 300 TGas, while the protocol allows 1,000 | Re-run with higher attached gas to confirm the extrapolated lines |
+| Paged operator reads on a live provider | Sandbox windows fit at 105 holdings; not tested against a live RPC or a much larger migrated catalog | Repeat fixed-size windows on testnet and record gas and latency |
 | Two-round disputed case with 11 and 21 jurors, and a Council with revenue in many real quarters | Needs 21 or more staked seats and long time skips; the seat weights in the reward test were written into state | A longer sandbox run, or a testnet |
 
 Two measurements are partial. The operator test ran the 2,500-market step in an earlier version of the final read-back, and was re-run only up to 1,000 held markets after the fix. The operator list's bytes are computed from the encoding, not read from storage, because the sandbox refuses to dump that much state.

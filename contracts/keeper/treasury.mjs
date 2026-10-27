@@ -62,6 +62,13 @@ export const CONTRACT_LIMITS = {
     HARD_MIN_RECONCILE_WAIT_MINUTES: 10,
     HARD_MAX_RECONCILE_WAIT_MINUTES: 10_080,
     HARD_MAX_SWEEP_INTERVAL_MINUTES: 1_440,
+    HARD_MIN_SWEEP_INTERVAL_MINUTES: 60,
+    HARD_MIN_MARKET_STORAGE_DEPOSIT: 50_090_000_000_000_000_000_000n,
+    HARD_MAX_MARKET_STORAGE_DEPOSIT: 500_000_000_000_000_000_000_000n,
+    HARD_MIN_STORAGE_RESERVE: 100_000_000_000_000_000_000_000n,
+    HARD_MAX_STORAGE_RESERVE: 100_000_000_000_000_000_000_000_000n,
+    HARD_MIN_REGISTRATION_FEE: 10_000n,
+    HARD_MAX_REGISTRATION_FEE: 2_000_000n,
     MAX_TITLE: 200,
     MAX_RULE: 2000,
     MAX_SOURCE: 300,
@@ -212,6 +219,13 @@ export const ALLOWED = {
     set_next_sweep_id: call({ next_sweep_id: u64(1n) }, { needs: "sweep_id_forward" }),
     set_fee_rate_bps: call({ fee_rate_bps: integer(LIMIT_MARKET.HARD_MAX_FEE_RATE_BPS) }),
     set_create_fee: call({ create_fee: u128(0n, LIMIT_MARKET.HARD_MAX_CREATE_FEE) }),
+    set_storage_policy: call({
+      market_storage_deposit: u128(LIMIT_MARKET.HARD_MIN_MARKET_STORAGE_DEPOSIT, LIMIT_MARKET.HARD_MAX_MARKET_STORAGE_DEPOSIT),
+      reserve: u128(LIMIT_MARKET.HARD_MIN_STORAGE_RESERVE, LIMIT_MARKET.HARD_MAX_STORAGE_RESERVE),
+    }),
+    set_registration_fee: call({
+      registration_fee: u128(LIMIT_MARKET.HARD_MIN_REGISTRATION_FEE, LIMIT_MARKET.HARD_MAX_REGISTRATION_FEE),
+    }),
     reconcile_leg: call({ sweep_id: u64(1n), leg: oneOf("council", "treasury"), arrived: flag }),
     reconcile_withdrawal: call({ id: u64(1n), paid: flag }),
     set_paused: call({ paused: flag }),
@@ -224,7 +238,7 @@ export const ALLOWED = {
       {
         settle_wait_minutes: integer(LIMIT_MARKET.HARD_MAX_SETTLE_WAIT_MINUTES, 1),
         reconcile_wait_minutes: integer(LIMIT_MARKET.HARD_MAX_RECONCILE_WAIT_MINUTES, LIMIT_MARKET.HARD_MIN_RECONCILE_WAIT_MINUTES),
-        min_interval_minutes: integer(LIMIT_MARKET.HARD_MAX_SWEEP_INTERVAL_MINUTES, 1),
+        min_interval_minutes: integer(LIMIT_MARKET.HARD_MAX_SWEEP_INTERVAL_MINUTES, LIMIT_MARKET.HARD_MIN_SWEEP_INTERVAL_MINUTES),
       },
       { check: ordered("settle_wait_minutes", "reconcile_wait_minutes") },
     ),
@@ -260,6 +274,7 @@ export const ALLOWED = {
         price_rule: optional(priceRule),
       },
       {
+        depositPolicy: "market_storage",
         check: ({ close_at, resolve_by, price_rule }) => {
           if (BigInt(resolve_by) <= BigInt(close_at)) reject("resolve_by must be after close_at");
           if (price_rule && (BigInt(price_rule.observation_time) < BigInt(close_at) || BigInt(price_rule.observation_time) >= BigInt(resolve_by))) {
@@ -273,6 +288,8 @@ export const ALLOWED = {
   oracle: {
     ...upgradePath,
     set_operator: setOperator,
+    allow_market: call({ market: account }),
+    disallow_market: call({ market: account }),
     set_bond: call({ bond: u128(1n) }),
     set_window_ms: call({ window_ms: windowMs }),
     set_panel_deadline_ms: call({ panel_deadline_ms: windowMs }),
@@ -300,7 +317,8 @@ export const ALLOWED = {
     ...upgradePath,
     set_cooldown_ns: call({ cooldown_ns: u64(1n) }),
     set_close_grace_ns: call({ close_grace_ns: u64(CLOSE_GRACE_DAYS.min * NS_PER_DAY, CLOSE_GRACE_DAYS.max * NS_PER_DAY) }),
-    set_market: call({ market: exactly("market") }),
+    allow_market: call({ market: account }),
+    disallow_market: call({ market: account }),
     set_max_seats_per_account: call({ max_seats_per_account: integer(U32_MAX, 1) }),
     set_nft_contract: call({ nft_contract: account }),
     allow_tokens: call({ token_ids: list(text(ID_TEXT_MAX), LIMIT_COUNCIL.MAX_ALLOW_BATCH) }),
@@ -395,6 +413,14 @@ function decodeArgs(encoded) {
 
 const exactKeys = (value, keys) => isRecord(value) && Object.keys(value).length === keys.length && keys.every((k) => Object.hasOwn(value, k));
 
+async function callDeposit(entry, receiver, view) {
+  if (entry.depositPolicy !== "market_storage") return entry.deposit;
+  const config = await view(receiver, "config", {});
+  const deposit = config.market_storage_deposit;
+  decimal(LIMIT_MARKET.HARD_MAX_MARKET_STORAGE_DEPOSIT, LIMIT_MARKET.HARD_MIN_MARKET_STORAGE_DEPOSIT)(deposit);
+  return deposit;
+}
+
 async function reviewCall(functionCall, ids, view) {
   if (!exactKeys(functionCall, ["receiver_id", "actions"])) reject("a function call proposal has a receiver_id and a list of actions");
   const target = TARGETS.find((name) => ids[name] === functionCall.receiver_id);
@@ -406,7 +432,8 @@ async function reviewCall(functionCall, ids, view) {
   const entry = typeof method === "string" && Object.hasOwn(ALLOWED[target], method) ? ALLOWED[target][method] : null;
   if (!entry) reject(`${target}.${method} is not on the allow-list`);
   const args = checkArgs(entry, decodeArgs(action.args), ids);
-  if (action.deposit !== entry.deposit) reject(`${target}.${method} takes a deposit of ${entry.deposit}, not ${action.deposit}`);
+  const deposit = await callDeposit(entry, functionCall.receiver_id, view);
+  if (action.deposit !== deposit) reject(target + "." + method + " takes a deposit of " + deposit + ", not " + action.deposit);
   if (!DECIMAL.test(String(action.gas))) reject("the action gas is not a whole number");
   const gas = BigInt(action.gas);
   if (gas < BigInt(entry.gas.min) * TGAS || gas > BigInt(entry.gas.max) * TGAS) {
@@ -462,7 +489,7 @@ export async function prepareAdministrationProposal({ treasuryId, contracts, tar
       actions: [{
         method_name: methodName,
         args: Buffer.from(JSON.stringify(checkArgs(entry, args, ids))).toString("base64"),
-        deposit: entry.deposit,
+        deposit: await callDeposit(entry, ids[target], view),
         gas: (BigInt(gas) * TGAS).toString(),
       }],
     },
@@ -509,4 +536,36 @@ export function prepareStageCode({ contracts, target, wasm }) {
   if (!(wasm instanceof Uint8Array) || !Buffer.from(wasm.subarray(0, WASM_MAGIC.length)).equals(WASM_MAGIC)) reject("The code must be a wasm binary");
   const cost = BigInt(wasm.length + STAGE_KEY_BYTES + STAGE_RECORD_BYTES) * YOCTO_PER_BYTE;
   return { ...walletCall(receiver, "stage_code", Buffer.from(wasm), MAX_TX_TGAS, (cost + STAGE_DEPOSIT_MARGIN).toString()), codeHash: codeHash(wasm) };
+}
+
+// Estimates storage runway from an explicit workload budget. These are planning inputs, not a throughput measurement.
+// fixedBytesPerDay must include sweeps, claims and quarter/case growth not represented by new market registrations.
+export function storageRunway({ amount, storageUsage, marketsPerDay, bytesPerMarket, fixedBytesPerDay, reserve, alarmDays }) {
+  for (const [name, value] of Object.entries({ marketsPerDay, bytesPerMarket, fixedBytesPerDay, alarmDays })) {
+    if (!Number.isSafeInteger(value) || value < 0 || (name === "alarmDays" && value === 0)) reject(name + " must be a non-negative safe integer (alarmDays must be positive)");
+  }
+  const balance = BigInt(decimal(U128_MAX)(amount));
+  const retained = BigInt(decimal(U128_MAX)(reserve));
+  const usage = BigInt(decimal(U64_MAX)(String(storageUsage)));
+  const available = balance - usage * YOCTO_PER_BYTE - retained;
+  const bytesPerDay = BigInt(marketsPerDay) * BigInt(bytesPerMarket) + BigInt(fixedBytesPerDay);
+  const dailyCost = bytesPerDay * YOCTO_PER_BYTE;
+  const days = available <= 0n ? 0n : dailyCost === 0n ? null : available / dailyCost;
+  return {
+    available: available.toString(), bytesPerDay: bytesPerDay.toString(), dailyCost: dailyCost.toString(),
+    days: days === null ? null : days.toString(),
+    alarm: available <= 0n || (dailyCost > 0n && available < dailyCost * BigInt(alarmDays)),
+  };
+}
+
+// Prepares a native transfer for a vote. It never signs, submits or changes a contract's owner.
+export async function prepareStorageTopUp({ treasuryId, contracts, target, amount, description, view }) {
+  const ids = daoIds(treasuryId, contracts, view);
+  if (!["oracle", "council"].includes(target)) reject("Storage top-ups target only the configured oracle or council");
+  decimal(U128_MAX, 1n)(amount);
+  if (typeof description !== "string" || !description.trim()) reject("A proposal description is required");
+  const bond = (await view(ids.treasury, "get_policy", {})).proposal_bond;
+  decimal(U128_MAX)(bond);
+  const kind = { Transfer: { token_id: "", receiver_id: ids[target], amount } };
+  return walletCall(ids.treasury, "add_proposal", { proposal: { description, kind } }, MAX_TX_TGAS, bond);
 }

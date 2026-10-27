@@ -24,8 +24,9 @@ fn hex(bytes: &[u8]) -> String {
 // What a publisher signs: the contract, the network, the market, its observation time, the price and its decimals.
 fn message(w: &World, network: &str, market: u64, observation_time: u64, price: u128) -> String {
     format!(
-        "price:v1:{}:{network}:{market}:{observation_time}:{price}:{DECIMALS}",
-        w.oracle.id()
+        "price:v2:{}:{network}:{}:{market}:{observation_time}:{price}:{DECIMALS}",
+        w.oracle.id(),
+        w.market.id()
     )
 }
 
@@ -61,6 +62,7 @@ async fn price_market(w: &World) -> anyhow::Result<(u64, u64)> {
     let id: String = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
             "title": "Will bitcoin close at or above 100.00 USD?", "rule_text": "Yes if the median of three exchanges' 1 minute closes is at or above 100.00.",
             "resolution_source": "Median of the 1 minute closing prices on three major exchanges", "void_policy": "Fewer than two exchanges publish a price.",
@@ -86,7 +88,7 @@ async fn answer_price(w: &World, id: u64, price: u128, entries: &[String]) -> an
         &w.carol,
         w.oracle.id(),
         BOND,
-        &format!("price:{id}:{price}:{}", entries.join(",")),
+        &format!("price:{}:{id}:{price}:{}", w.market.id(), entries.join(",")),
     )
     .await
 }
@@ -204,7 +206,7 @@ async fn a_submission_the_oracle_refuses_gives_the_bond_back_and_opens_no_case()
         &w.carol,
         w.oracle.id(),
         BOND,
-        &format!("propose:{id}:yes:https://example.com"),
+        &format!("propose:{}:{id}:yes:https://example.com", w.market.id()),
     )
     .await;
     assert!(case_json(&w, id).await.is_null());

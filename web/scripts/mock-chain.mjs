@@ -85,6 +85,8 @@ const cases = {
     votes: [{ juror: jurors[0], outcome: "no", reason: "The hurricane centre's advisory still lists it as a tropical storm." }, { juror: jurors[1], outcome: "no", reason: "No hurricane advisory was issued before the deadline." }] }),
   5: () => ({ ...base, stage: "final", proposed: "yes", evidence: "Gemini 4 general availability post on blog.google.", window_ends_at: ago(200), final_outcome: "yes", applied: true }),
 };
+// Unique across markets: derived from the market id, starting at 1.
+const caseOf = (id) => (cases[id] ? { case_uid: String(id + 1), ...cases[id]() } : null);
 Object.assign(markets[3], { status: "resolved", outcome: "no" });
 Object.assign(markets[5], { status: "resolved", outcome: "yes" });
 
@@ -153,21 +155,21 @@ const views = {
     },
   },
   [ORACLE]: {
-    get_case: ({ market_id }) => cases[Number(market_id)]?.() ?? null,
-    list_cases: ({ from_market_id, limit }) => Object.keys(cases).map(Number)
+    get_case: ({ market, market_id }) => (market === MARKET ? caseOf(Number(market_id)) : null),
+    list_cases: ({ market, from_market_id, limit }) => (market !== MARKET ? [] : Object.keys(cases).map(Number)
       .filter((id) => id >= Number(from_market_id) && id < Number(from_market_id) + Math.min(Number(limit), 50))
       .map((id) => {
-        const c = cases[id]();
+        const c = caseOf(id);
         return {
-          market_id: String(id), stage: c.stage, proposed: c.proposed, challenger_answer: c.challenger_answer, round: c.round,
+          market: MARKET, market_id: String(id), stage: c.stage, proposed: c.proposed, challenger_answer: c.challenger_answer, round: c.round,
           final_outcome: c.final_outcome, applied: c.applied, votes: c.votes.length, window_ends_at: c.window_ends_at,
           draw_by: c.draw_by, panel_deadline: c.panel_deadline,
         };
-      }),
+      })),
     // The bonds held are those of the two cases that are not final.
     bond_totals: () => ({ bonds_held: String(2n * 50n * USD), claimable: "0", pending_payouts: "0", total: String(2n * 50n * USD) }),
-    get_market_info: ({ market_id }) => {
-      const m = markets[Number(market_id)];
+    get_market_info: ({ market, market_id }) => {
+      const m = market === MARKET ? markets[Number(market_id)] : null;
       if (!m) return null;
       return {
         close_at: m.close_at, resolve_by: m.resolve_by, rule_hash: m.rule_hash, price_rule: null,
@@ -175,7 +177,7 @@ const views = {
       };
     },
     config: () => ({
-      bond: String(50n * USD), window_ns: String(600n * SEC), panel_deadline_ns: String(1800n * SEC), council: "council.test.near", jury_size: 3, draw_delay_blocks: "5",
+      markets: [MARKET], bond: String(50n * USD), window_ns: String(600n * SEC), panel_deadline_ns: String(1800n * SEC), council: "council.test.near", jury_size: 3, draw_delay_blocks: "5",
       apply_buffer_ns: String(600n * SEC), juror_share_bps: 5000, no_decision_share_bps: 5000, max_publishers: 10, reconcile_wait_ns: String(DAY),
     }),
     claimable_of: () => "0",

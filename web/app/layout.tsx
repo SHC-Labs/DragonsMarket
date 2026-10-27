@@ -12,9 +12,9 @@ const funnel = Funnel_Display({ variable: "--font-funnel", subsets: ["latin"], w
 const plexMono = IBM_Plex_Mono({ variable: "--font-plex-mono", subsets: ["latin"], weight: ["400", "500"] });
 
 export const metadata: Metadata = {
-  title: "Dragons Market | Prediction Markets",
+  title: "Dragons Market | Prediction markets",
   icons: { icon: "/brand/dragon-favicon.svg" },
-  description: "Prediction markets on NEAR with published rules and public dispute decisions.",
+  description: "The world moves and every outcome has a market. Dragons Market is building prediction markets on NEAR with published rules and a Council for disputes.",
 };
 
 export const viewport: Viewport = {

@@ -2,14 +2,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import {
   accessKeyReport, advanceCursor, councilFloor, daoReport, describeOutcome, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options,
   quarterEnd, quarterOf, readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, verifierProblems,
-  writeCursor, refuseRetiredController,
+  writeCursor, refuseRetiredController, releaseReport, validateActionKeys,
 } from "./keeper.mjs";
 import { b58encode } from "./chain.mjs";
+import { hexToBase58, parseReleaseHashes } from "./release-check.mjs";
 
 const NOW = 1_000_000n;
 
@@ -18,7 +21,7 @@ test("retired controller flags are rejected before any RPC call", () => {
   assert.doesNotThrow(() => refuseRetiredController({ treasury: "example.sputnik-dao.near" }));
 });
 const base = {
-  now: NOW, height: 100n, markets: [{ id: "0", outcome: null, resolve_by: "9000000" }], locked: {}, feesDue: 0n, minSweep: 1_000n,
+  market: "market.near", now: NOW, height: 100n, markets: [{ id: "0", outcome: null, resolve_by: "9000000" }], locked: {}, feesDue: 0n, minSweep: 1_000n,
   sweepIntervalNs: 3_600n * 10n ** 9n, settleWaitNs: 600n * 10n ** 9n,
 };
 const proposed = { stage: "proposed", window_ends_at: "1000000", panel: [], challenger: null, applied: false };
@@ -73,9 +76,9 @@ test("a market nobody answered is sent to the oracle's deadline answer, but neve
   assert.deepEqual(names({ ...unanswered, cases: { 0: { ...proposed, stage: "final", applied: false } } }), ["oracle.retry_apply"], "apply the real answer, do not void over it");
 });
 
-test("each call carries the market id and enough gas to settle", () => {
+test("each oracle call carries the market account, the market id and enough gas to settle", () => {
   const [a] = dueActions(world(disputed));
-  assert.deepEqual(a.args, { market_id: "0" });
+  assert.deepEqual(a.args, { market: "market.near", market_id: "0" });
   assert.equal(a.gas, 300n * 10n ** 12n);
 });
 
@@ -440,4 +443,73 @@ test("the sweep gap and the settle wait follow the market's settings once the ow
   assert.deepEqual(due(at + 30n * MINUTE).map((a) => a.method), ["settle_leg"]);
   assert.deepEqual(due(at + HOUR).map((a) => a.method), ["settle_leg"], "an hour is not enough once the gap is two");
   assert.deepEqual(due(at + 2n * HOUR).map((a) => a.method), ["settle_leg", "sweep_fees"]);
+});
+
+// ---- --release ---------------------------------------------------------------------------------------------------
+
+const HASHES = { market: "11".repeat(32), oracle: "22".repeat(32), council: "33".repeat(32) };
+const RELEASE_LIST = ["Release hashes", "", ...Object.entries(HASHES).map(([n, h]) => `${n} sha256:${h}`), `commit ${"a".repeat(40)}`, "toolchain 1.86.0"].join("\n");
+
+async function fakeRpc(codeHashes, run) {
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", () => {
+      const account = JSON.parse(body).params.account_id;
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: "dontcare", result: { code_hash: codeHashes[account] } }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    return await run(`http://127.0.0.1:${server.address().port}`);
+  } finally {
+    server.close();
+  }
+}
+
+const liveFor = (hexes) => ({ "market.near": hexToBase58(hexes.market), "oracle.near": hexToBase58(hexes.oracle), "council.near": hexToBase58(hexes.council) });
+const release = (url) => releaseReport({ rpc: url, market: "market.near", oracle: "oracle.near", council: "council.near" }, parseReleaseHashes(RELEASE_LIST));
+
+test("--release passes with one line when the live code matches the list", async () => {
+  const report = await fakeRpc(liveFor(HASHES), release);
+  assert.deepEqual(report, { lines: ["release: live code matches the release hash list"], differs: false });
+});
+
+test("--release fails and names the contract whose live code differs", async () => {
+  const report = await fakeRpc(liveFor({ ...HASHES, oracle: "44".repeat(32) }), release);
+  assert.equal(report.differs, true);
+  assert.equal(report.lines[0], "release: 1 contract(s) differ from the release hash list");
+  assert.match(report.lines[1], /^release: oracle: live code hash /);
+  assert.equal(report.lines.length, 2);
+});
+
+test("--release with a bad list prints the reason and exits 1 before any RPC call", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "keeper-release-"));
+  const file = path.join(dir, "list.txt");
+  fs.writeFileSync(file, "not a hash list\n");
+  const out = spawnSync(process.execPath, [path.join(import.meta.dirname, "keeper.mjs"), "check", "--rpc", "http://127.0.0.1:1", "--market", "market.near", "--oracle", "oracle.near", "--council", "council.near", "--release", file], { encoding: "utf8" });
+  assert.equal(out.status, 1);
+  assert.match(out.stderr, /release list must start with the line "Release hashes"/);
+});
+
+
+test("a batch validates every key scope before dispatch and caches shared key reads", async t => {
+  const key = "ed25519:" + b58encode(Buffer.alloc(64, 7));
+  const opts = { rpc: "http://rpc.invalid", account: "keeper.near", market: "market.near", oracle: "oracle.near" };
+  const actions = [{contract:"oracle",method:"finalize"},{contract:"market",method:"sweep_fees"}];
+  let calls = 0;
+  let permission = "FullAccess";
+  t.mock.method(globalThis,"fetch",async()=>{ calls++;return {ok:true,json:async()=>({result:{permission}})}; });
+  await assert.rejects(validateActionKeys(opts,{},actions),/no key for oracle/);
+  assert.equal(calls,0);
+  await validateActionKeys(opts,{default:key},actions);
+  assert.equal(calls,1);
+  permission = {FunctionCall:{receiver_id:"market.near",method_names:["sweep_fees"],allowance:"1000"}};
+  await assert.rejects(validateActionKeys(opts,{default:key},actions),/Receiver/);
+  permission = {FunctionCall:{receiver_id:"oracle.near",method_names:["retry_apply"],allowance:"1000"}};
+  await assert.rejects(validateActionKeys(opts,{default:key},actions.slice(0,1)),/does not allow finalize/);
+  permission = {FunctionCall:{receiver_id:"oracle.near",method_names:[],allowance:"0"}};
+  await assert.rejects(validateActionKeys(opts,{default:key},actions.slice(0,1)),/exhausted/);
+  permission.FunctionCall.allowance = null;
+  await validateActionKeys(opts,{default:key},actions.slice(0,1));
 });

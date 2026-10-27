@@ -8,6 +8,7 @@
 
 use near_contract_standards::non_fungible_token::core::{ext_nft_core, NonFungibleTokenReceiver};
 use near_contract_standards::non_fungible_token::TokenId;
+use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::json_types::{Base58CryptoHash, U128, U64};
 use near_sdk::serde_json::json;
 use near_sdk::store::{LookupMap, LookupSet, Vector};
@@ -54,7 +55,8 @@ const GAS_OWN_WORK: Gas = Gas::from_tgas(8);
 const GAS_UNSTAKE_FLOOR: Gas = Gas::from_gas(GAS_NFT_TRANSFER.as_gas() + GAS_CALLBACK.as_gas() + GAS_OWN_WORK.as_gas());
 const GAS_CLAIM_FLOOR: Gas = Gas::from_gas(GAS_MT_TRANSFER.as_gas() + GAS_CALLBACK.as_gas() + GAS_OWN_WORK.as_gas());
 // The layout of the state below. migrate reads exactly this one and refuses any other. Version 2 is the quarterly books.
-const STATE_VERSION: u16 = 2;
+// Version 3 keys received sweeps by market account and stores every map record behind a version tag.
+const STATE_VERSION: u16 = 3;
 // Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
 const NEP141_PREFIX: &str = "nep141:";
 const REVENUE_PREFIX: &str = "revenue:";
@@ -70,6 +72,69 @@ pub trait Verifier {
         approval: Option<(AccountId, u64)>,
         memo: Option<String>,
     );
+}
+
+// Every record in a map is stored behind a one-byte version tag, so a later layout can be read next to this one. The
+// wrapper is what the maps hold: it reads any stored version up to the current layout (the stored enum's into_current is
+// where an upgrade from an older version goes) and always writes the current one.
+macro_rules! versioned {
+    ($name:ident, $stored:ident, $ty:ty) => {
+        enum $stored {
+            V1($ty),
+        }
+
+        impl $stored {
+            fn into_current(self) -> $ty {
+                match self {
+                    Self::V1(value) => value,
+                }
+            }
+        }
+
+        #[derive(Clone)]
+        struct $name($ty);
+
+        impl $name {
+            fn current(value: $ty) -> Self {
+                Self(value)
+            }
+
+            fn into_inner(self) -> $ty {
+                self.0
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = $ty;
+
+            fn deref(&self) -> &$ty {
+                &self.0
+            }
+        }
+
+        impl std::ops::DerefMut for $name {
+            fn deref_mut(&mut self) -> &mut $ty {
+                &mut self.0
+            }
+        }
+
+        impl BorshSerialize for $name {
+            fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+                0u8.serialize(writer)?;
+                self.0.serialize(writer)
+            }
+        }
+
+        impl BorshDeserialize for $name {
+            fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+                let stored = match u8::deserialize_reader(reader)? {
+                    0 => $stored::V1(<$ty>::deserialize_reader(reader)?),
+                    _ => env::panic_str("a stored record has a newer version than this code can read"),
+                };
+                Ok(Self(stored.into_current()))
+            }
+        }
+    };
 }
 
 #[near(serializers=[borsh])]
@@ -107,6 +172,8 @@ pub struct Stake {
     index: u32,
 }
 
+versioned!(VersionedStake, StoredStake, Stake);
+
 // What one quarter holds. `seat_ns` is the sum over the quarter of the number of seats still earning (staked and not asking to leave), in seat nanoseconds. It only
 // moves when the seat count changes or when advance_quarters is called, so every method that changes the count moves it to
 // the present first.
@@ -127,6 +194,8 @@ struct QuarterBook {
     pending: u128,
 }
 
+versioned!(VersionedQuarterBook, StoredQuarterBook, QuarterBook);
+
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -146,6 +215,8 @@ struct Claim {
     paid_at: Option<u64>,
 }
 
+versioned!(VersionedClaim, StoredClaim, Claim);
+
 #[near(serializers=[borsh])]
 #[derive(Clone)]
 struct Received {
@@ -153,6 +224,8 @@ struct Received {
     quarter: u32,
     at: u64,
 }
+
+versioned!(VersionedReceived, StoredReceived, Received);
 
 #[near(serializers=[json])]
 pub struct ReceivedView {
@@ -321,10 +394,11 @@ pub struct CouncilContract {
     // Set by propose_owner. Ownership moves only when this account calls accept_owner.
     pending_owner: Option<AccountId>,
     oracle: AccountId,
-    // The collection whose tokens stake here, and the only account whose sweeps count as revenue. Both are None until the
-    // owner sets them, and staking and revenue refuse until then.
+    // The collection whose tokens stake here, which is None until the owner sets it, and the market accounts whose sweeps
+    // count as revenue, which is empty until the owner allows one. Staking, claims and revenue refuse until then. A market
+    // taken off the list can no longer send revenue; what it already sent stays.
     nft_contract: Option<AccountId>,
-    market: Option<AccountId>,
+    allowed_markets: Vec<AccountId>,
     // The Intents verifier that holds the revenue, and the exact id of the collateral in it, "nep141:<token>".
     verifier: AccountId,
     collateral_token_id: String,
@@ -344,7 +418,7 @@ pub struct CouncilContract {
     allowed_range: Option<(AccountId, u64, u64)>,
     // Every staked token, in a stable order for the draw.
     staked: Vector<TokenId>,
-    stakes: LookupMap<TokenId, Stake>,
+    stakes: LookupMap<TokenId, VersionedStake>,
     seats_of: LookupMap<AccountId, u32>,
     // Every token an account has ever staked, so its entitlements can be listed after the seat is gone.
     tokens_of: LookupMap<AccountId, Vec<TokenId>>,
@@ -363,13 +437,14 @@ pub struct CouncilContract {
     last_tick: u64,
     next_to_finalize: u32,
     // A quarter nobody touched has no entry, which reads as an empty book.
-    quarters: LookupMap<u32, QuarterBook>,
+    quarters: LookupMap<u32, VersionedQuarterBook>,
     // Staked nanoseconds inside one quarter by one token for one owner, and the part of it a silent juror lost.
     seat_weight: LookupMap<(u32, TokenId, AccountId), u64>,
     forfeits: LookupMap<(u32, TokenId, AccountId), u64>,
-    claims: LookupMap<(u32, TokenId, AccountId), Claim>,
-    // Revenue by the market's sweep id, so a repeated send is refused and the market can ask what arrived.
-    received: LookupMap<u64, Received>,
+    claims: LookupMap<(u32, TokenId, AccountId), VersionedClaim>,
+    // Revenue by the market account and its sweep id, so a repeated send is refused, two markets can use the same sweep id,
+    // and a market can ask what arrived.
+    received: LookupMap<(AccountId, u64), VersionedReceived>,
     // Every token received as revenue, and every one paid out. Their difference less the claims in flight is what the
     // Intents account must hold. The rest of the books below split the difference: money in quarters still open, money in
     // finalized quarters, and money moved on from a quarter that had no seat time.
@@ -419,8 +494,8 @@ fn pick(mut candidates: Vec<(TokenId, AccountId)>, seed: &[u8], case_key: u64, n
 
 #[near]
 impl CouncilContract {
-    // Only this account can run it, so a deploy and init batch signed by it is the one way in. The collection and the market
-    // are not arguments: the owner sets them with set_nft_contract and set_market once they are known and verified.
+    // Only this account can run it, so a deploy and init batch signed by it is the one way in. The collection and the markets
+    // are not arguments: the owner sets them with set_nft_contract and allow_market once they are known and verified.
     #[private]
     #[init]
     pub fn new(
@@ -450,7 +525,7 @@ impl CouncilContract {
             pending_owner: None,
             oracle: oracle_id,
             nft_contract: None,
-            market: None,
+            allowed_markets: vec![],
             verifier: verifier_id,
             collateral_token_id,
             cooldown_ns: cooldown_ns.0,
@@ -597,11 +672,26 @@ impl CouncilContract {
         self.reconcile_wait_ns = reconcile_wait_ns.0;
     }
 
-    // The only account whose sweeps count as revenue. Revenue refuses until this is set.
-    pub fn set_market(&mut self, market: AccountId) {
+    // A market account whose sweeps count as revenue. Revenue and claims refuse until one is allowed.
+    pub fn allow_market(&mut self, market: AccountId) {
         self.only_owner();
-        emit("market_set", json!({ "market": market }));
-        self.market = Some(market);
+        require!(!self.allowed_markets.contains(&market), "already an allowed market");
+        emit("market_allowed", json!({ "market": market }));
+        self.allowed_markets.push(market);
+    }
+
+    // Stops revenue from that market account. Sweeps it already sent stay in the books. The last one cannot be removed,
+    // because claims need a configured Council and a stranded quarter could then never be paid out.
+    pub fn disallow_market(&mut self, market: AccountId) {
+        self.only_owner();
+        let at = self
+            .allowed_markets
+            .iter()
+            .position(|m| *m == market)
+            .unwrap_or_else(|| env::panic_str("not an allowed market"));
+        require!(self.allowed_markets.len() > 1, "keep at least one allowed market");
+        emit("market_disallowed", json!({ "market": market }));
+        self.allowed_markets.remove(at);
     }
 
     // Stakes are keyed by token id alone, so the collection can only change while nothing is staked. The allowlist stays
@@ -686,9 +776,13 @@ impl CouncilContract {
         if !jury.is_empty() {
             *self.open_juries.entry(now).or_insert(0) += 1;
         }
-        self.juries
-            .insert(case_key.0, jury.iter().map(|(t, _)| t.clone()).collect());
-        jury.into_iter().map(|(_, a)| a).collect()
+        let (tokens, owners): (Vec<TokenId>, Vec<AccountId>) = jury.into_iter().unzip();
+        emit(
+            "jury_drawn",
+            json!({ "case_key": case_key.0.to_string(), "tokens": tokens, "owners": owners }),
+        );
+        self.juries.insert(case_key.0, tokens);
+        owners
     }
 
     // Called by the oracle once a case is final, with the jurors who never voted. A juror on that list loses the seat time
@@ -698,7 +792,14 @@ impl CouncilContract {
     pub fn unlock_case(&mut self, case_key: U64, delinquent: Vec<AccountId>) {
         require!(env::predecessor_account_id() == self.oracle, "oracle only");
         let now = env::block_timestamp();
-        let jury = self.juries.remove(&case_key.0).unwrap_or_default();
+        let released = self.juries.remove(&case_key.0);
+        if released.is_some() {
+            emit(
+                "jury_released",
+                json!({ "case_key": case_key.0.to_string(), "delinquent": delinquent }),
+            );
+        }
+        let jury = released.unwrap_or_default();
         if let Some(drawn_at) = jury.first().and_then(|t| self.stakes.get(t)).map(|s| s.serving_from) {
             self.close_open_jury(drawn_at);
         }
@@ -769,7 +870,9 @@ impl CouncilContract {
     // unstake after a long idle stretch does not have to. Returns the quarters it moved across.
     pub fn advance_quarters(&mut self, max_steps: Option<u32>) -> u32 {
         let steps = max_steps.unwrap_or(MAX_QUARTER_STEPS).min(MAX_QUARTER_STEPS);
-        self.advance_seat_time(env::block_timestamp(), steps)
+        let moved = self.advance_seat_time(env::block_timestamp(), steps);
+        emit("quarters_advanced", json!({ "steps": moved }));
+        moved
     }
 
     // Counts the staked time of a seat from where it was last counted up to now, across at most `max_quarters` quarters. It is
@@ -777,7 +880,12 @@ impl CouncilContract {
     pub fn book_seat_time(&mut self, token_id: TokenId, max_quarters: Option<u32>) -> u32 {
         require!(self.stakes.contains_key(&token_id), "not staked");
         let steps = max_quarters.unwrap_or(MAX_QUARTER_STEPS).min(MAX_QUARTER_STEPS);
-        self.book_stake(&token_id, env::block_timestamp(), steps)
+        let quarters = self.book_stake(&token_id, env::block_timestamp(), steps);
+        emit(
+            "seat_time_booked",
+            json!({ "token_id": token_id, "quarters": quarters }),
+        );
+        quarters
     }
 
     // Fixes a quarter's pool and total seat time once the grace period after its end has passed, so claims can open. Quarters
@@ -806,14 +914,14 @@ impl CouncilContract {
         if weight_total == 0 {
             let mut next = self.book(quarter + 1);
             next.carry_in += pool;
-            self.quarters.insert(quarter + 1, next);
+            self.put_book(quarter + 1, next);
             book.rolled_to = Some(quarter + 1);
             self.open_pool += pool;
             self.rolled_total += pool;
         } else {
             self.final_pool += pool;
         }
-        self.quarters.insert(quarter, book);
+        self.put_book(quarter, book);
         self.next_to_finalize += 1;
         emit(
             "quarter_finalized",
@@ -835,7 +943,7 @@ impl CouncilContract {
             .quarters
             .get(&quarter)
             .filter(|b| b.finalized)
-            .cloned()
+            .map(|b| b.clone().into_inner())
             .unwrap_or_else(|| env::panic_str("that quarter is not final"));
         let key = (quarter, token_id.clone(), who.clone());
         if let Some(claim) = self.claims.get(&key) {
@@ -860,16 +968,16 @@ impl CouncilContract {
         let now = env::block_timestamp();
         self.claims.insert(
             key,
-            Claim {
+            VersionedClaim::current(Claim {
                 amount,
                 status: ClaimStatus::Pending,
                 requested_at: now,
                 paid_at: None,
-            },
+            }),
         );
         book.pending += amount;
         self.pending_total += amount;
-        self.quarters.insert(quarter, book);
+        self.put_book(quarter, book);
         emit(
             "claim_requested",
             json!({ "quarter": quarter, "token_id": token_id, "owner": who, "amount": amount.to_string() }),
@@ -893,7 +1001,7 @@ impl CouncilContract {
         #[callback_result] result: Result<(), PromiseError>,
     ) {
         let key = (quarter, token_id.clone(), owner.clone());
-        let Some(claim) = self.claims.get(&key).cloned() else {
+        let Some(claim) = self.claims.get(&key).map(|c| c.clone().into_inner()) else {
             return;
         };
         if claim.status != ClaimStatus::Pending || claim.requested_at != requested_at.0 {
@@ -915,7 +1023,7 @@ impl CouncilContract {
             .claims
             .get(&key)
             .filter(|c| c.status == ClaimStatus::Pending)
-            .cloned()
+            .map(|c| c.clone().into_inner())
             .unwrap_or_else(|| env::panic_str("no claim is pending for that seat"));
         require!(
             env::block_timestamp() >= claim.requested_at.saturating_add(self.reconcile_wait_ns),
@@ -950,22 +1058,22 @@ impl CouncilContract {
             self.total_paid += claim.amount;
             self.claims.insert(
                 key,
-                Claim {
+                VersionedClaim::current(Claim {
                     status: ClaimStatus::Paid,
                     paid_at: Some(env::block_timestamp()),
                     ..claim
-                },
+                }),
             );
         } else {
             self.claims.remove(&key);
         }
-        self.quarters.insert(quarter, book);
+        self.put_book(quarter, book);
         data
     }
 
     // Called by the verifier after an mt_transfer_call, once the money is already in this contract's Intents account. The
-    // message is "revenue:<sweep id>" and only the market may send it. The money belongs to the quarter it arrives in, and a
-    // sweep id is taken once, so a repeated send is refused and the verifier gives it back. The answer is the amounts to hand
+    // message is "revenue:<sweep id>" and only an allowed market may send it. The money belongs to the quarter it arrives in,
+    // and a sweep id is taken once per market, so a repeated send is refused and the verifier gives it back. The answer is the amounts to hand
     // back, so 0 keeps everything. Panicking makes the verifier refund the sender in full. A plain deposit never reaches
     // here: it sits in the account as surplus and is never counted.
     pub fn mt_on_transfer(
@@ -992,11 +1100,12 @@ impl CouncilContract {
             .and_then(|id| id.parse().ok())
             .unwrap_or_else(|| env::panic_str("unknown action"));
         require!(
-            self.market.as_ref() == Some(&sender_id),
-            "revenue comes from the market only"
+            self.allowed_markets.contains(&sender_id),
+            "revenue comes from an allowed market only"
         );
+        let received_key = (sender_id.clone(), sweep_id);
         require!(
-            !self.received.contains_key(&sweep_id),
+            !self.received.contains_key(&received_key),
             "that sweep was already received"
         );
         let amount = amounts[0].0;
@@ -1004,13 +1113,16 @@ impl CouncilContract {
         let quarter = quarter_containing(at);
         let mut book = self.book(quarter);
         book.revenue_in += amount;
-        self.quarters.insert(quarter, book);
-        self.received.insert(sweep_id, Received { amount, quarter, at });
+        self.put_book(quarter, book);
+        self.received.insert(
+            received_key,
+            VersionedReceived::current(Received { amount, quarter, at }),
+        );
         self.total_received += amount;
         self.open_pool += amount;
         emit(
             "revenue",
-            json!({ "from": sender_id, "amount": amount.to_string(), "sweep_id": sweep_id.to_string(),
+            json!({ "from": sender_id, "market": sender_id, "amount": amount.to_string(), "sweep_id": sweep_id.to_string(),
                     "quarter": quarter, "seats": self.staked.len() }),
         );
         vec![U128(0)]
@@ -1023,14 +1135,17 @@ impl CouncilContract {
         U128(self.total_received)
     }
 
-    // What the market sent under a sweep id, or null if this registry never took that sweep in. The market reads it to settle a
-    // transfer whose result it lost.
-    pub fn received_of(&self, sweep_id: U64) -> Option<ReceivedView> {
-        self.received.get(&sweep_id.0).map(|r| ReceivedView {
-            amount: U128(r.amount),
-            quarter: r.quarter,
-            at: U64(r.at),
-        })
+    // What a market sent under a sweep id, or null if this registry never took that sweep in. The market reads it with its own
+    // account id to settle a transfer whose result it lost.
+    pub fn received_of(&self, market: AccountId, sweep_id: U64) -> Option<ReceivedView> {
+        self.received
+            .get(&(market, sweep_id.0))
+            .map(|r| r.clone().into_inner())
+            .map(|r| ReceivedView {
+                amount: U128(r.amount),
+                quarter: r.quarter,
+                at: U64(r.at),
+            })
     }
 
     // total_received less total_paid less the claims in flight is the least this contract's Intents account must hold. The
@@ -1086,7 +1201,7 @@ impl CouncilContract {
     }
 
     pub fn stake_of(&self, token_id: TokenId) -> Option<Stake> {
-        self.stakes.get(&token_id).cloned()
+        self.stakes.get(&token_id).map(|s| s.clone().into_inner())
     }
 
     pub fn current_quarter(&self) -> QuarterView {
@@ -1145,11 +1260,11 @@ impl CouncilContract {
         upgrade::is_staged(code_hash)
     }
 
-    // nft_contract and market are null until the owner sets them.
+    // nft_contract is null until the owner sets it, and markets is empty until the owner allows one.
     pub fn config(&self) -> near_sdk::serde_json::Value {
         json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
                 "owner": self.owner, "pending_owner": self.pending_owner, "oracle": self.oracle, "nft_contract": self.nft_contract,
-                "market": self.market, "verifier": self.verifier, "collateral_token_id": self.collateral_token_id,
+                "markets": self.allowed_markets, "verifier": self.verifier, "collateral_token_id": self.collateral_token_id,
                 "cooldown_ns": self.cooldown_ns.to_string(), "close_grace_ns": self.close_grace_ns.to_string(),
                 "reconcile_wait_ns": self.reconcile_wait_ns.to_string(),
                 "max_seats_per_account": self.max_seats_per_account, "allowlist_enabled": self.allowlist_enabled,
@@ -1221,11 +1336,11 @@ impl CouncilContract {
             .unwrap_or_else(|| env::panic_str("the NFT collection is not set, the owner must call set_nft_contract"))
     }
 
-    // Claims and revenue refuse until the owner has said which account sends the revenue.
+    // Claims and revenue refuse until the owner has said which accounts send the revenue.
     fn require_configured(&self) {
         require!(
-            self.market.is_some(),
-            "the Council is not configured, the owner must call set_market"
+            !self.allowed_markets.is_empty(),
+            "the Council is not configured, the owner must call allow_market"
         );
     }
 
@@ -1267,7 +1382,7 @@ impl CouncilContract {
             history.push(token_id.clone());
         }
         self.staked.push(token_id.clone());
-        self.stakes.insert(token_id, stake);
+        self.stakes.insert(token_id, VersionedStake::current(stake));
     }
 
     // The seat was not counted while it was out, so the time it was out is not booked. It keeps its request, so it does not
@@ -1301,7 +1416,7 @@ impl CouncilContract {
     }
 
     fn remove_stake(&mut self, token_id: &TokenId) -> Stake {
-        let stake = self.stakes.remove(token_id).unwrap();
+        let stake = self.stakes.remove(token_id).unwrap().into_inner();
         self.staked.swap_remove(stake.index);
         if let Some(moved) = self.staked.get(stake.index).cloned() {
             self.stakes.get_mut(&moved).unwrap().index = stake.index;
@@ -1316,7 +1431,13 @@ impl CouncilContract {
     }
 
     fn book(&self, quarter: u32) -> QuarterBook {
-        self.quarters.get(&quarter).cloned().unwrap_or_default()
+        self.quarters
+            .get(&quarter)
+            .map_or_else(QuarterBook::default, |b| b.clone().into_inner())
+    }
+
+    fn put_book(&mut self, quarter: u32, book: QuarterBook) {
+        self.quarters.insert(quarter, VersionedQuarterBook::current(book));
     }
 
     // Adds the seat time of the staked seats from `last_tick` towards `to`, one quarter at a time, at most `max_steps`
@@ -1330,7 +1451,7 @@ impl CouncilContract {
             if seats > 0 {
                 let mut book = self.book(quarter);
                 book.seat_ns += seats * u128::from(until - self.last_tick);
-                self.quarters.insert(quarter, book);
+                self.put_book(quarter, book);
             }
             self.last_tick = until;
             steps += 1;
@@ -1382,7 +1503,7 @@ impl CouncilContract {
                 let lost = self.forfeits.get(&key).copied().unwrap_or(0);
                 self.forfeits.insert(key, lost + span);
                 book.forfeit_ns += u128::from(span);
-                self.quarters.insert(quarter, book);
+                self.put_book(quarter, book);
                 emit(
                     "seat_time_forfeited",
                     json!({ "token_id": token_id, "owner": owner, "case": case.to_string(), "quarter": quarter,
@@ -1569,7 +1690,7 @@ mod tests {
         let mut c = unconfigured_council(allowlist_enabled);
         act_as(OWNER);
         c.set_nft_contract(acct(NFT));
-        c.set_market(acct(MARKET));
+        c.allow_market(acct(MARKET));
         c
     }
 
@@ -2006,7 +2127,7 @@ mod tests {
         set_time(quarter_start(Q1_2027) + 2 * DAY);
         revenue(&mut c, 3, 400_000);
         assert_eq!(
-            c.received_of(U64(3)).map(|r| (r.amount.0, r.quarter)),
+            c.received_of(acct(MARKET), U64(3)).map(|r| (r.amount.0, r.quarter)),
             Some((400_000, Q1_2027))
         );
         assert_eq!(c.book(Q4_2026).revenue_in, 1_600_000);
@@ -2124,7 +2245,7 @@ mod tests {
                     .to_string()
             })
             .collect();
-        assert_eq!(events, vec!["forfeit_skipped", "seat_time_forfeited"]);
+        assert_eq!(events, vec!["jury_released", "forfeit_skipped", "seat_time_forfeited"]);
         assert_eq!(c.book(Q4_2026).forfeit_ns, 0);
         assert_eq!(
             c.book(Q1_2027).forfeit_ns,
@@ -2497,15 +2618,15 @@ mod tests {
         act_paid("a.near");
         assert_eq!(
             refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
-            "the Council is not configured, the owner must call set_market"
+            "the Council is not configured, the owner must call allow_market"
         );
         act_as(VERIFIER);
         assert_eq!(
             refusal(|| drop(deliver(&mut c, MARKET, vec![COLLATERAL_ID], vec![5], "revenue:1"))),
-            "the Council is not configured, the owner must call set_market"
+            "the Council is not configured, the owner must call allow_market"
         );
         act_as(OWNER);
-        c.set_market(acct(MARKET));
+        c.allow_market(acct(MARKET));
         revenue(&mut c, 1, 5);
         assert_eq!(c.total_received().0, 5);
     }
@@ -2524,7 +2645,7 @@ mod tests {
             "the NFT collection is not set, the owner must call set_nft_contract"
         );
         assert_eq!(c.config()["nft_contract"], near_sdk::serde_json::Value::Null);
-        assert_eq!(c.config()["market"], near_sdk::serde_json::Value::Null);
+        assert_eq!(c.config()["markets"], near_sdk::serde_json::json!([]));
     }
 
     // ---- revenue: who may send it, once ------------------------------------------------------------------------
@@ -2575,7 +2696,7 @@ mod tests {
         act_as(VERIFIER);
         assert_eq!(
             refusal(|| drop(deliver(&mut c, "a.near", vec![COLLATERAL_ID], vec![900], "revenue:1"))),
-            "revenue comes from the market only"
+            "revenue comes from an allowed market only"
         );
         assert_eq!(c.total_received().0, 0);
     }
@@ -2637,12 +2758,12 @@ mod tests {
         let mut c = council();
         set_time(quarter_start(Q1_2027) + 5);
         revenue(&mut c, 12, 321);
-        let r = c.received_of(U64(12)).unwrap();
+        let r = c.received_of(acct(MARKET), U64(12)).unwrap();
         assert_eq!(
             (r.amount.0, r.quarter, r.at.0),
             (321, Q1_2027, quarter_start(Q1_2027) + 5)
         );
-        assert!(c.received_of(U64(13)).is_none());
+        assert!(c.received_of(acct(MARKET), U64(13)).is_none());
     }
 
     // ---- seats: staking mid-quarter, leaving, restaking ----------------------------------------------------------
@@ -3000,10 +3121,10 @@ mod tests {
         for field in ["stream_ns", "stream_remaining", "stream_ends_at"] {
             assert!(config.get(field).is_none(), "{field}");
         }
-        assert_eq!(config["market"], MARKET);
+        assert_eq!(config["markets"], near_sdk::serde_json::json!([MARKET]));
         assert_eq!(config["nft_contract"], NFT);
         assert_eq!(config["close_grace_ns"], DEFAULT_CLOSE_GRACE_NS.to_string());
-        assert_eq!(config["state_version"], 2);
+        assert_eq!(config["state_version"], 3);
         assert_eq!(config["next_to_finalize"], Q4_2026);
         assert_eq!(config["last_tick"], START.to_string());
     }
@@ -3104,11 +3225,12 @@ mod tests {
     }
 
     #[test]
-    fn only_the_owner_sets_the_market_and_the_grace_period() {
+    fn only_the_owner_changes_the_markets_and_the_grace_period() {
         let mut c = council();
         for who in ["a.near", ORACLE, MARKET] {
             act_as(who);
-            assert_eq!(refusal(|| c.set_market(acct("other.near"))), "owner only", "{who}");
+            assert_eq!(refusal(|| c.allow_market(acct("other.near"))), "owner only", "{who}");
+            assert_eq!(refusal(|| c.disallow_market(acct(MARKET))), "owner only", "{who}");
             assert_eq!(
                 refusal(|| c.set_close_grace_ns(U64(MIN_CLOSE_GRACE_NS))),
                 "owner only",
@@ -3116,13 +3238,15 @@ mod tests {
             );
         }
         act_as(OWNER);
-        c.set_market(acct("new-market.near"));
-        assert_eq!(last_event()["event"], "market_set");
-        assert_eq!(c.config()["market"], "new-market.near");
+        c.allow_market(acct("new-market.near"));
+        assert_eq!(last_event()["event"], "market_allowed");
+        c.disallow_market(acct(MARKET));
+        assert_eq!(last_event()["event"], "market_disallowed");
+        assert_eq!(c.config()["markets"], near_sdk::serde_json::json!(["new-market.near"]));
         act_as(VERIFIER);
         assert_eq!(
             refusal(|| drop(deliver(&mut c, MARKET, vec![COLLATERAL_ID], vec![900], "revenue:1"))),
-            "revenue comes from the market only",
+            "revenue comes from an allowed market only",
             "the old market no longer counts"
         );
     }
@@ -4191,13 +4315,315 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "migrate expects version 2")]
+    #[should_panic(expected = "migrate expects version 3")]
     fn migrate_refuses_state_written_by_another_version() {
         let mut c = council();
-        c.state_version = STATE_VERSION + 1;
+        c.state_version = STATE_VERSION - 1;
         env::state_write(&c);
         drop(c);
         testing_env!(context("alice.near").build());
         CouncilContract::migrate();
+    }
+
+    // ---- two market accounts and the allow-list ------------------------------------------------------------------
+
+    const MARKET2: &str = "market2.near";
+
+    fn send_revenue(c: &mut CouncilContract, market: &str, sweep_id: u64, amount: u128) {
+        act_as(VERIFIER);
+        let _ = deliver(
+            c,
+            market,
+            vec![COLLATERAL_ID],
+            vec![amount],
+            &format!("{REVENUE_PREFIX}{sweep_id}"),
+        );
+    }
+
+    fn two_markets() -> CouncilContract {
+        let mut c = council();
+        act_as(OWNER);
+        c.allow_market(acct(MARKET2));
+        c
+    }
+
+    fn events_named(name: &str) -> Vec<near_sdk::serde_json::Value> {
+        near_sdk::test_utils::get_logs()
+            .iter()
+            .filter_map(|l| l.strip_prefix("EVENT_JSON:"))
+            .map(|j| near_sdk::serde_json::from_str::<near_sdk::serde_json::Value>(j).unwrap())
+            .filter(|e| e["event"] == name)
+            .map(|e| e["data"].clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_same_sweep_id_from_two_markets_is_two_sweeps() {
+        let mut c = two_markets();
+        send_revenue(&mut c, MARKET, 1, 100);
+        send_revenue(&mut c, MARKET2, 1, 250);
+        assert_eq!(c.total_received().0, 350);
+        assert_eq!(c.received_of(acct(MARKET), U64(1)).unwrap().amount.0, 100);
+        assert_eq!(c.received_of(acct(MARKET2), U64(1)).unwrap().amount.0, 250);
+        assert!(c.received_of(acct("market3.near"), U64(1)).is_none());
+        assert_eq!(
+            refusal(|| send_revenue(&mut c, MARKET2, 1, 5)),
+            "that sweep was already received"
+        );
+        assert_eq!(c.total_received().0, 350);
+    }
+
+    #[test]
+    fn revenue_names_the_market_account() {
+        let mut c = two_markets();
+        send_revenue(&mut c, MARKET2, 4, 77);
+        let event = &events_named("revenue")[0];
+        assert_eq!(
+            (event["market"].as_str(), event["from"].as_str()),
+            (Some(MARKET2), Some(MARKET2))
+        );
+        assert_eq!(event["sweep_id"], "4");
+    }
+
+    #[test]
+    fn revenue_from_an_account_that_is_not_allowed_is_refused() {
+        let mut c = two_markets();
+        assert_eq!(
+            refusal(|| send_revenue(&mut c, "rogue.near", 1, 5)),
+            "revenue comes from an allowed market only"
+        );
+        assert_eq!(c.total_received().0, 0);
+    }
+
+    #[test]
+    fn a_disallowed_market_sends_no_more_revenue_but_what_it_sent_stays() {
+        let mut c = two_markets();
+        send_revenue(&mut c, MARKET2, 1, 40);
+        act_as(OWNER);
+        c.disallow_market(acct(MARKET2));
+        assert_eq!(
+            events_named("market_disallowed"),
+            [near_sdk::serde_json::json!({ "market": MARKET2 })]
+        );
+        assert_eq!(
+            refusal(|| send_revenue(&mut c, MARKET2, 2, 40)),
+            "revenue comes from an allowed market only"
+        );
+        assert_eq!(c.received_of(acct(MARKET2), U64(1)).unwrap().amount.0, 40);
+        assert_eq!(c.total_received().0, 40);
+        send_revenue(&mut c, MARKET, 2, 10);
+        assert_eq!(c.total_received().0, 50);
+    }
+
+    #[test]
+    fn the_last_allowed_market_stays_so_claims_keep_working() {
+        let mut c = council();
+        act_as(OWNER);
+        assert_eq!(
+            refusal(|| c.disallow_market(acct(MARKET))),
+            "keep at least one allowed market"
+        );
+        assert_eq!(c.config()["markets"], near_sdk::serde_json::json!([MARKET]));
+        assert_eq!(refusal(|| c.allow_market(acct(MARKET))), "already an allowed market");
+        assert_eq!(
+            refusal(|| c.disallow_market(acct("nobody.near"))),
+            "not an allowed market"
+        );
+        c.allow_market(acct(MARKET2));
+        assert_eq!(
+            events_named("market_allowed"),
+            [near_sdk::serde_json::json!({ "market": MARKET2 })]
+        );
+        c.disallow_market(acct(MARKET));
+        assert_eq!(c.config()["markets"], near_sdk::serde_json::json!([MARKET2]));
+    }
+
+    #[test]
+    fn juries_for_different_case_keys_do_not_collide() {
+        let mut c = council();
+        for i in 0..12 {
+            stake(&mut c, &i.to_string(), &format!("seat{i}.near"));
+        }
+        act_with_seed(ORACLE, 1);
+        let keys = [1, 2, 1 | (1 << 63)];
+        let juries: Vec<Vec<AccountId>> = keys.iter().map(|k| c.draw(U64(*k), 3, vec![])).collect();
+        let seated: BTreeSet<_> = juries.iter().flatten().collect();
+        assert_eq!(seated.len(), 9, "no seat is on two juries at once");
+        for (key, jury) in keys.iter().zip(&juries) {
+            assert_eq!(c.jury_of(U64(*key)).len(), jury.len());
+        }
+        c.unlock_case(U64(2), vec![]);
+        assert!(c.jury_of(U64(2)).is_empty());
+        assert_eq!(c.jury_of(U64(1)).len(), 3);
+        assert_eq!(c.jury_of(U64(1 | (1 << 63))).len(), 3);
+    }
+
+    // ---- new events ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_draw_logs_the_case_key_the_tokens_and_the_owners_but_a_repeat_draw_logs_nothing() {
+        let mut c = council();
+        for i in 0..6 {
+            stake(&mut c, &i.to_string(), &format!("seat{i}.near"));
+        }
+        act_with_seed(ORACLE, 1);
+        let owners = c.draw(U64(7), 3, vec![]);
+        let drawn = events_named("jury_drawn");
+        assert_eq!(drawn.len(), 1);
+        assert_eq!(drawn[0]["case_key"], "7");
+        assert_eq!(drawn[0]["owners"], near_sdk::serde_json::json!(owners));
+        assert_eq!(drawn[0]["tokens"], near_sdk::serde_json::json!(c.jury_of(U64(7))));
+        act_with_seed(ORACLE, 2);
+        let _ = c.draw(U64(7), 3, vec![]);
+        assert!(events_named("jury_drawn").is_empty(), "a repeat draw is not a new jury");
+    }
+
+    #[test]
+    fn releasing_a_case_logs_who_was_delinquent_once() {
+        let mut c = council();
+        for i in 0..6 {
+            stake(&mut c, &i.to_string(), &format!("seat{i}.near"));
+        }
+        act_with_seed(ORACLE, 1);
+        let owners = c.draw(U64(7), 3, vec![]);
+        act_as(ORACLE);
+        c.unlock_case(U64(7), vec![owners[0].clone()]);
+        let released = events_named("jury_released");
+        assert_eq!(
+            released,
+            [near_sdk::serde_json::json!({ "case_key": "7", "delinquent": [owners[0].clone()] })]
+        );
+        act_as(ORACLE);
+        c.unlock_case(U64(7), vec![]);
+        assert!(
+            events_named("jury_released").is_empty(),
+            "a second release does nothing"
+        );
+    }
+
+    #[test]
+    fn advancing_quarters_and_booking_seat_time_log_how_far_they_went() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        set_time(quarter_start(Q1_2027) + DAY);
+        act_as("anyone.near");
+        let moved = c.advance_quarters(None);
+        assert_eq!(
+            events_named("quarters_advanced"),
+            [near_sdk::serde_json::json!({ "steps": moved })]
+        );
+        assert!(moved > 0);
+        let booked = c.book_seat_time("1".into(), None);
+        assert_eq!(
+            events_named("seat_time_booked"),
+            [near_sdk::serde_json::json!({ "token_id": "1", "quarters": booked })]
+        );
+    }
+
+    // ---- version tags -------------------------------------------------------------------------------------------
+
+    fn bytes_of<T: BorshSerialize>(value: &T) -> Vec<u8> {
+        near_sdk::borsh::to_vec(value).unwrap()
+    }
+
+    fn sample_stake() -> Stake {
+        Stake {
+            owner: acct("a.near"),
+            staked_at: U64(5),
+            unlock_requested_at: Some(U64(9)),
+            serving: Some(U64(3)),
+            booked_to: U64(6),
+            serving_from: 4,
+            index: 2,
+        }
+    }
+
+    fn sample_claim() -> Claim {
+        Claim {
+            amount: 5,
+            status: ClaimStatus::Paid,
+            requested_at: 1,
+            paid_at: Some(2),
+        }
+    }
+
+    fn sample_received() -> Received {
+        Received {
+            amount: 9,
+            quarter: Q1_2027,
+            at: 3,
+        }
+    }
+
+    fn sample_book() -> QuarterBook {
+        QuarterBook {
+            revenue_in: 1,
+            carry_in: 2,
+            seat_ns: 3,
+            forfeit_ns: 4,
+            finalized: true,
+            pool: 5,
+            weight_total: 6,
+            rolled_to: Some(7),
+            paid: 8,
+            pending: 9,
+        }
+    }
+
+    macro_rules! tagged_round_trip {
+        ($wrapper:ident, $value:expr) => {{
+            let value = $value;
+            let bytes = bytes_of(&$wrapper::current(value.clone()));
+            assert_eq!(bytes[0], 0, stringify!($wrapper));
+            assert_eq!(&bytes[1..], bytes_of(&value).as_slice(), stringify!($wrapper));
+            assert_eq!(bytes_of(&$wrapper::try_from_slice(&bytes).unwrap()), bytes);
+            let mut newer = bytes;
+            newer[0] = 1;
+            let message = refusal(|| {
+                let _ = $wrapper::try_from_slice(&newer);
+            });
+            assert!(message.contains("newer version than this code can read"), "{message}");
+        }};
+    }
+
+    #[test]
+    fn every_stored_record_starts_with_version_byte_zero_round_trips_and_refuses_a_newer_one() {
+        tagged_round_trip!(VersionedStake, sample_stake());
+        tagged_round_trip!(VersionedQuarterBook, sample_book());
+        tagged_round_trip!(VersionedClaim, sample_claim());
+        tagged_round_trip!(VersionedReceived, sample_received());
+    }
+
+    #[test]
+    fn what_the_maps_store_carries_the_version_byte() {
+        let mut c = two_markets();
+        stake(&mut c, "1", "a.near");
+        send_revenue(&mut c, MARKET2, 1, 100);
+        c.stakes.flush();
+        c.quarters.flush();
+        c.received.flush();
+        let stored = near_sdk::mock::with_mocked_blockchain(|b| b.take_storage());
+        let want = [
+            bytes_of(&VersionedStake::current(c.stake_of("1".into()).unwrap())),
+            bytes_of(&VersionedQuarterBook::current(c.book(quarter_containing(START)))),
+            bytes_of(&VersionedReceived::current(Received {
+                amount: 100,
+                quarter: quarter_containing(START),
+                at: START,
+            })),
+        ];
+        for bytes in want {
+            assert_eq!(bytes[0], 0);
+            assert!(
+                stored.values().any(|v| *v == bytes),
+                "a record is stored as the tagged bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_council_starts_at_the_current_state_version() {
+        assert_eq!(council().state_version, STATE_VERSION);
+        assert_eq!(STATE_VERSION, 3);
     }
 }

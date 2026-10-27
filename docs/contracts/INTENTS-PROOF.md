@@ -200,7 +200,8 @@ roles:
   hex string, which sandbox cannot deploy to without a key. The id parser treats the part after
   `nep141:` as an account id, so the shape is the same, but the literal id was not run.
 - Circle's blocklist and pause behaviour on NEAR (the review's open question 2).
-- `auth_call` and `on_auth` (not part of this phase's scope).
+- `auth_call` and `on_auth` in this phase. `contracts/tests/tests/intents_auth.rs` has since proved
+  them (see "Signed actions" in [market.md](market.md)).
 - That the contract's payouts stop working if predecessor authentication is switched off, and that
   `add_public_key` called by a contract registers a key. Both are read from the source only.
 - The 1Click routes. They are not part of the verifier.

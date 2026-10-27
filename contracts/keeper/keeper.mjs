@@ -8,9 +8,9 @@
 //
 //   node keeper.mjs run   --rpc URL --market ID --oracle ID --council ID --account ID [--dry-run]
 //                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH] [--council-key-file PATH]
-//                         [--state-file PATH] [--min-sweep UNITS]
-//   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID [--treasury ID] [--min-margin NEAR]
-//                         [--expect-sealed] [--watch-dao]
+//                         --state-file PATH [--events-file PATH] [--workers 2] [--job-batch 50] [--min-sweep UNITS]
+//   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID [--treasury ID] [--min-margin NEAR] [--release FILE|-]
+//                         [--expect-sealed] [--watch-dao] [--runway-config PATH]
 //
 // `run` needs an account with a little NEAR for gas. The calls it makes move no money of the keeper's own, and none
 // of them attach a deposit, so a function call access key is enough. `check` reads only. It reports whether the
@@ -42,7 +42,8 @@
 //     --receiver-account-id COUNCIL.near --method-names 'advance_quarters,finalize_quarter' \
 //     autogenerate-new-keypair print-to-terminal network-config mainnet sign-with-keychain send
 //
-// Each run reads every market and case unless --state-file is given. The file holds the highest market id N such that
+// Legacy cursor helpers below are kept for inspecting old state files. Runtime uses the due-queue.
+// Each old run read every market and case unless --state-file was given. The file holds the highest market id N such that
 // every market up to N is finished (resolved, its answer applied, its jury released), and later runs start after N.
 // It advances only over an unbroken run of finished markets, so one stuck market is looked at again every run.
 // No dependencies: Node 22 built-ins only.
@@ -50,7 +51,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { b58decode, b58encode, rpc, view, viewer } from "./chain.mjs";
-import { reviewKind } from "./treasury.mjs";
+import { compareCodeHashes, describeRelease, liveCodeHashes, parseReleaseHashes } from "./release-check.mjs";
+import { reviewKind, storageRunway } from "./treasury.mjs";
+import { readQueue, writeQueue, withQueueLock, touch, finish, retry, selectJobs, bounded, serializeByKey, ingestFile } from "./due-queue.mjs";
 
 const TGAS = 10n ** 12n;
 const PAGE = 50;
@@ -71,8 +74,7 @@ const SWEEP_GAS_TGAS = 100;
 const NS_PER_MINUTE = 60n * 10n ** 9n;
 // settle_leg needs 30 TGas; the measured cost is 6 in all.
 const SETTLE_GAS_TGAS = 50;
-// How many of the newest sweeps are looked at for a leg that needs settling.
-const RECENT_SWEEPS = 20;
+
 // One book write and no transfer: 2 TGas in all, measured, with 30 attached. advance_quarters writes up to eight books.
 const FINALIZE_GAS_TGAS = 50;
 const ADVANCE_GAS_TGAS = 50;
@@ -106,7 +108,7 @@ export function quarterEnd(quarter) {
   return BigInt(Date.UTC(Math.floor(next / 4), (next % 4) * 3, 1)) * 1_000_000n;
 }
 
-// snapshot: { now, height, markets: [{ id, outcome, resolve_by }], cases: { [id]: case | null }, locked: { [id]: bool },
+// snapshot: { market (the market account the oracle calls name), now, height, markets: [{ id, outcome, resolve_by }], cases: { [id]: case | null }, locked: { [id]: bool },
 // feesDue, minSweep, council: { lastTick, nextToFinalize, closeGraceNs }, sweeps: [{ id, at, council: { status } }] oldest
 // first, lastSweepAt, sweepIntervalNs, settleWaitNs }. feesDue is what a sweep would send now, in token units. lastSweepAt
 // is null before the first sweep.
@@ -117,7 +119,7 @@ export function quarterEnd(quarter) {
 export function dueActions(snapshot) {
   const actions = [];
   const call = (contract, method, id, tgas) =>
-    actions.push({ contract, method, args: { market_id: String(id) }, gas: BigInt(tgas) * TGAS });
+    actions.push({ contract, method, args: { market: snapshot.market, market_id: String(id) }, gas: BigInt(tgas) * TGAS });
   for (const market of snapshot.markets) {
     const id = market.id;
     const c = snapshot.cases[id];
@@ -206,41 +208,154 @@ export function writeCursor(path, doneThrough) {
 
 // ---- reading the chain -------------------------------------------------------------------------------------------
 
-async function snapshot(opts, firstMarket) {
-  const block = await rpc(opts.rpc, "block", { finality: "final" });
-  const markets = [];
-  for (let from = Number(firstMarket); ; from += PAGE) {
-    const page = await view(opts.rpc, opts.market, "list_markets", { from_index: String(from), limit: String(PAGE) });
-    markets.push(...page.map((m) => ({ id: m.id, outcome: m.outcome ?? null, resolve_by: m.resolve_by })));
-    if (page.length < PAGE) break;
+export function nextMarketAt(market, c, locked, now, height) {
+  if (isFinished(market,c,locked)) return null;
+  if (!c) return BigInt(market.resolve_by);
+  if (c.stage === "proposed") return BigInt(c.window_ends_at);
+  if (c.stage === "disputed") {
+    if (!c.panel.length) {
+      if (now > BigInt(c.draw_by)) return now;
+      return height >= BigInt(c.draw_after_height) ? now : now + 1_000_000_000n;
+    }
+    return BigInt(c.panel_deadline) + 1n;
   }
-  const cases = {};
-  const locked = {};
-  for (const m of markets) {
-    cases[m.id] = await view(opts.rpc, opts.oracle, "get_case", { market_id: m.id });
-    const settledDispute = cases[m.id] && cases[m.id].stage === "final" && cases[m.id].challenger;
-    const secondKey = String(BigInt(m.id) | SECOND_ROUND_KEY);
-    locked[m.id] = settledDispute
-      ? (await view(opts.rpc, opts.council, "jury_of", { case_key: m.id })).length > 0 ||
-        (await view(opts.rpc, opts.council, "jury_of", { case_key: secondKey })).length > 0
-      : false;
+  return now;
+}
+
+async function queuedRun(opts, keys) {
+  if (!opts["state-file"] && !opts["dry-run"]) throw new Error("run needs --state-file for its durable due-queue");
+  const scope = { rpc:opts.rpc, market:opts.market, oracle:opts.oracle, council:opts.council };
+  const state = readQueue(opts["state-file"],scope);
+  const workers = Number(opts.workers ?? 2);
+  const batch = Number(opts["job-batch"] ?? 50);
+  if (!Number.isInteger(batch)||batch<1||batch>500) throw new Error("Job batch must be 1 to 500");
+  const block = await rpc(opts.rpc,"block",{finality:"final"});
+  const at = block.header.height, now = BigInt(block.header.timestamp_nanosec), height = BigInt(at);
+  const read = (account,method,args={})=>view(opts.rpc,account,method,args,at);
+  const [marketConfig,council,fees] = await Promise.all([
+    read(opts.market,"config"), read(opts.council,"config"), read(opts.market,"get_fees")
+  ]);
+  ingestFile(state,opts["events-file"],at);
+  if (!opts["events-file"]) console.log("no event feed: using bounded bootstrap and rotating reconciliation; live deadlines need --events-file");
+  // One page of markets and sweeps per run. Neither recovery cursor can be pinned by an open market.
+  const marketFrom = BigInt(state.marketCursor);
+  const marketEnd = BigInt(marketConfig.markets);
+  if (marketFrom < marketEnd) {
+    const [page,cases] = await Promise.all([
+      read(opts.market,"list_markets",{from_index:String(marketFrom),limit:String(PAGE)}),
+      read(opts.oracle,"list_cases",{market:opts.market,from_market_id:String(marketFrom),limit:PAGE})
+    ]);
+    const summaries = new Map(cases.map(c=>[c.market_id,c]));
+    for(const m of page) {
+      const job = state.jobs["market:"+m.id] ?? touch(state,"market",m.id,now);
+      const c = summaries.get(m.id);
+      if(c?.stage === "proposed")job.nextAt=c.window_ends_at;
+      else if(!c && m.outcome===null)job.nextAt=m.resolve_by;
+    }
+    state.marketCursor=String(marketFrom+BigInt(PAGE)<marketEnd?marketFrom+BigInt(PAGE):marketEnd);
   }
-  const council = await view(opts.rpc, opts.council, "config");
-  const marketConfig = await view(opts.rpc, opts.market, "config");
-  const nextSweep = BigInt(marketConfig.next_sweep_id);
-  const firstRecent = nextSweep > BigInt(RECENT_SWEEPS) ? nextSweep - BigInt(RECENT_SWEEPS) : 0n;
-  const sweeps = await view(opts.rpc, opts.market, "list_sweeps", { from_index: String(firstRecent), limit: String(RECENT_SWEEPS) });
-  const lastSweepAt = sweeps.length ? BigInt(sweeps.at(-1).at) : null;
-  const fees = await view(opts.rpc, opts.market, "get_fees");
-  const feesDue = BigInt(fees.collected) + BigInt(fees.revenue_due) + BigInt(fees.treasury_due);
-  const minSweep = opts["min-sweep"] === undefined ? DEFAULT_MIN_SWEEP : BigInt(opts["min-sweep"]);
-  return {
-    now: BigInt(block.header.timestamp_nanosec), height: BigInt(block.header.height), markets, cases, locked, feesDue, minSweep,
-    council: { lastTick: BigInt(council.last_tick), nextToFinalize: council.next_to_finalize, closeGraceNs: BigInt(council.close_grace_ns) },
-    sweeps, lastSweepAt,
-    sweepIntervalNs: BigInt(marketConfig.min_sweep_interval_minutes) * NS_PER_MINUTE,
-    settleWaitNs: BigInt(marketConfig.settle_wait_minutes) * NS_PER_MINUTE,
+  const sweepFrom = BigInt(state.sweepCursor), sweepEnd = BigInt(marketConfig.next_sweep_id);
+  if(sweepFrom<sweepEnd){
+    const page=await read(opts.market,"list_sweeps",{from_index:String(sweepFrom),limit:String(PAGE)});
+    for(const sweep of page)if(["pending","unresolved"].includes(sweep.council.status)||["pending","unresolved"].includes(sweep.treasury.status))touch(state,"sweep",sweep.id,now);
+    state.sweepCursor=String(sweepFrom+BigInt(PAGE)<sweepEnd?sweepFrom+BigInt(PAGE):sweepEnd);
+  }
+  const jobs=selectJobs(state,now,batch);
+  const markets=[],cases={},locked={},sweeps=[],readErrors=new Set();
+  await bounded(jobs,workers,async job=>{
+    try{
+      if(job.kind==="sweep"){
+        const sweep=await read(opts.market,"get_sweep",{sweep_id:job.id});
+        if(!sweep || (!["pending","unresolved"].includes(sweep.council.status)&&!["pending","unresolved"].includes(sweep.treasury.status)))finish(state,job);
+        else sweeps.push(sweep);
+        return;
+      }
+      const [m,c]=await Promise.all([
+        read(opts.market,"get_market",{market_id:job.id}),
+        read(opts.oracle,"get_case",{market:opts.market,market_id:job.id})
+      ]);
+      if(!m){finish(state,job);return;}
+      cases[job.id]=c;
+      if(c?.case_uid){job.caseUid=c.case_uid;state.caseMarkets[c.case_uid]=job.id;}
+      const keys = c?.stage==="final"&&c.challenger ? [c.case_uid,String(BigInt(c.case_uid)|SECOND_ROUND_KEY)] : [];
+      const juries=await Promise.all(keys.map(key=>read(opts.council,"jury_of",{case_key:key})));
+      locked[job.id]=juries.some(j=>j.length>0);
+      markets.push(m);
+      if(isFinished(m,c,locked[job.id]))finish(state,job);
+    }catch(error){readErrors.add(job.kind+":"+job.id);retry(job,now,error.message);console.log("read failed "+job.kind+"("+job.id+"): "+error.message);}
+  });
+  markets.sort((a,b)=>BigInt(a.id)<BigInt(b.id)?-1:1);
+  const configuredMin=BigInt(marketConfig.min_sweep), requestedMin=opts["min-sweep"]===undefined?DEFAULT_MIN_SWEEP:BigInt(opts["min-sweep"]);
+  const snap = {
+    market:opts.market,now,height,markets,cases,locked,sweeps,
+    feesDue:BigInt(fees.collected)+BigInt(fees.revenue_due)+BigInt(fees.treasury_due),
+    minSweep:configuredMin>requestedMin?configuredMin:requestedMin,
+    lastSweepAt:marketConfig.last_sweep_at??null,
+    sweepIntervalNs:BigInt(marketConfig.min_sweep_interval_minutes)*NS_PER_MINUTE,
+    settleWaitNs:BigInt(marketConfig.settle_wait_minutes)*NS_PER_MINUTE,
+    council:{lastTick:BigInt(council.last_tick),nextToFinalize:council.next_to_finalize,closeGraceNs:BigInt(council.close_grace_ns)}
   };
+  state.globalRetry ??= {};
+  const jobKey=a=>a.args.market_id!==undefined?"market:"+a.args.market_id:a.args.sweep_id!==undefined?"sweep:"+a.args.sweep_id:null;
+  const dedupe = new Map();
+  for(const action of dueActions(snap)){
+    const key=jobKey(action),j=key?state.jobs[key]:state.globalRetry[action.method];
+    if(j?.failures && BigInt(j.nextAt)>now)continue;
+    dedupe.set(action.contract+":"+action.method+":"+JSON.stringify(action.args),action);
+  }
+  const actions=[...dedupe.values()];
+  if (!opts["dry-run"]) await validateActionKeys(opts, keys, actions);
+  const save=()=>{if(opts["state-file"]&&!opts["dry-run"])writeQueue(opts["state-file"],state);};
+  // Persist a batch once before dispatch, rather than rewriting a large queue for every action.
+  // After a crash, fresh contract views decide whether an unacknowledged attempt needs retrying.
+  for (const action of actions) {
+    const key = jobKey(action);
+    const j = key ? state.jobs[key] : (state.globalRetry[action.method] ??= { nextAt: "0", failures: 0 });
+    if (j) { j.attempting = true; j.lastAction = action.method; }
+  }
+  save();
+  const failed=new Set(), acted=new Set(), serial=serializeByKey();
+  let actionFailures = 0;
+  if(!actions.length)console.log("nothing due");
+  await bounded(actions,workers,async action=>{
+    const key=jobKey(action),j=key?state.jobs[key]:(state.globalRetry[action.method]??={nextAt:"0",failures:0});
+    if(opts["dry-run"]){console.log("due "+label(action));return;}
+    try{
+      // One nonce stream per actual key, even when several receivers share the default key.
+      const identity=crypto.createHash("sha256").update(keyFor(keys,action.contract)).digest("hex");
+      const outcome=await serial(identity,()=>send(opts,keys,action));
+      console.log(label(action)+": "+describeOutcome(action,outcome));
+      if(outcome.startsWith("FAILED") && !outcome.includes(JURY_OPEN_REFUSAL))throw new Error(outcome);
+      if(j){j.failures=0;delete j.error;j.attempting=false;}
+      if(key)acted.add(key);
+    }catch(error){
+      actionFailures++;
+      if(j){j.attempting=false;retry(j,now,error.message);}
+      if(key)failed.add(key);
+      console.log("retry scheduled "+label(action)+": "+error.message);
+    }
+  });
+  if(!opts["dry-run"]){
+    for(const job of jobs){
+      const key=job.kind+":"+job.id;
+      if(!state.jobs[key]||failed.has(key)||readErrors.has(key))continue;
+      if(acted.has(key)){job.nextAt=String(now+1_000_000_000n);continue;}
+      if(job.failures&&BigInt(job.nextAt)>now)continue;
+      if(job.kind==="market"){
+        const m=markets.find(m=>m.id===job.id);if(!m)continue;
+        const next=nextMarketAt(m,cases[job.id],locked[job.id],now,height);
+        if(next===null)finish(state,job);else job.nextAt=String(next>now?next:now+1_000_000_000n);
+      }else{
+        const sweep=sweeps.find(s=>s.id===job.id);
+        const settle=sweep?BigInt(sweep.at)+snap.settleWaitNs:now;
+        job.nextAt=String(settle>now?settle:now+60_000_000_000n);
+      }
+    }
+    save();
+    console.log("queue "+Object.keys(state.jobs).length+" jobs; bootstrap markets "+state.marketCursor+", sweeps "+state.sweepCursor);
+  }
+  if (actionFailures || readErrors.size) throw new Error(`Keeper scheduled retries: ${actionFailures} failed actions, ${readErrors.size} failed reads`);
+  return {actions,state};
 }
 
 // ---- keys --------------------------------------------------------------------------------------------------------
@@ -290,8 +405,8 @@ const u128 = (n) => Buffer.concat([u64(BigInt(n) & ((1n << 64n) - 1n)), u64(BigI
 const str = (s) => { const b = Buffer.from(s); return Buffer.concat([u32(b.length), b]); };
 
 // A signed transaction with one function call, borsh encoded as NEAR expects, base64 for the RPC.
-function signedFunctionCall({ signer, seed, publicKey, nonce, receiver, blockHash, method, args, gas }) {
-  const action = Buffer.concat([Buffer.from([2]), str(method), u32(args.length), args, u64(gas), u128(0)]);
+export function signedFunctionCall({ signer, seed, publicKey, nonce, receiver, blockHash, method, args, gas, deposit = 0n }) {
+  const action = Buffer.concat([Buffer.from([2]), str(method), u32(args.length), args, u64(gas), u128(deposit)]);
   const tx = Buffer.concat([
     str(signer), Buffer.from([0]), publicKey, u64(nonce), str(receiver), blockHash, u32(1), action,
   ]);
@@ -299,6 +414,26 @@ function signedFunctionCall({ signer, seed, publicKey, nonce, receiver, blockHas
   const key = crypto.createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
   const signature = crypto.sign(null, crypto.createHash("sha256").update(tx).digest(), key);
   return Buffer.concat([tx, Buffer.from([0]), signature]).toString("base64");
+}
+
+// Refuse missing or mis-scoped keys before any action in a batch can send.
+export async function validateActionKeys(opts, keys, actions) {
+  const permissions = new Map();
+  for (const action of actions) {
+    const encoded = keyFor(keys, action.contract);
+    const raw = b58decode(encoded.replace(/^ed25519:/, ""));
+    if (raw.length !== 64) throw new Error("Expected an ed25519 secret key for " + action.contract);
+    const publicKey = "ed25519:" + b58encode(raw.subarray(32));
+    if (!permissions.has(publicKey)) permissions.set(publicKey, await rpc(opts.rpc, "query", {
+      request_type: "view_access_key", finality: "optimistic", account_id: opts.account, public_key: publicKey,
+    }));
+    const permission = permissions.get(publicKey).permission;
+    if (permission === "FullAccess") continue;
+    const limited = permission?.FunctionCall;
+    if (!limited || limited.receiver_id !== opts[action.contract]) throw new Error("Receiver permission does not allow " + action.contract);
+    if (limited.method_names.length && !limited.method_names.includes(action.method)) throw new Error("Access key does not allow " + action.method);
+    if (limited.allowance !== null && BigInt(limited.allowance) === 0n) throw new Error("Access key allowance is exhausted for " + action.contract);
+  }
 }
 
 async function send(opts, keys, action) {
@@ -518,14 +653,31 @@ async function openProposals(opts, read, now) {
   return open.sort((a, b) => a.id - b.id);
 }
 
+// The release hash list from a file, or from stdin when the flag is "-".
+function readReleaseList(source) {
+  return fs.readFileSync(source === "-" ? 0 : source, "utf8");
+}
+
+// The live code hashes of the three contracts against a parsed release list: the lines to print, and whether any differ.
+export async function releaseReport(opts, expected) {
+  const live = await liveCodeHashes(opts.rpc, { market: opts.market, oracle: opts.oracle, council: opts.council });
+  const problems = compareCodeHashes({ expected, live });
+  return { lines: describeRelease(problems), differs: problems.length > 0 };
+}
+
 async function check(opts) {
   const minMargin = nearToYocto(opts["min-margin"] ?? DEFAULT_MIN_MARGIN_NEAR);
   if (opts["watch-dao"] && !opts.treasury) throw new Error("--watch-dao needs --treasury, the DAO whose proposals to list");
+  const expectedRelease = opts.release === undefined ? null : parseReleaseHashes(readReleaseList(opts.release));
   const block = await rpc(opts.rpc, "block", { finality: "final" });
   const at = block.header.height;
   const configs = {};
   for (const name of CONTRACTS) configs[name] = await view(opts.rpc, opts[name], "config", {}, at);
   const oracle = configs.oracle;
+  const problems = [];
+  for (const name of ["oracle", "council"]) {
+    if (!configs[name].markets.includes(opts.market)) problems.push(`${opts.market} is not in the ${name}'s market allow-list (${configs[name].markets.join(", ") || "empty"}): it will refuse this market`);
+  }
 
   const books = {};
   let owners;
@@ -542,7 +694,7 @@ async function check(opts) {
     books[name] = reconciliation({ name, ...(await reconcile(read, () => waitForBlocks(opts.rpc, RECHECK_BLOCKS))), exact: name !== "council" });
   }
 
-  const problems = juryProblems({ jurySize: oracle.jury_size, holders: owners.size });
+  problems.push(...juryProblems({ jurySize: oracle.jury_size, holders: owners.size }));
   if (oracle.publishers.length < oracle.price_threshold) problems.push(`${oracle.publishers.length} price publishers but ${oracle.price_threshold} must sign: no price market can open`);
   console.log(`jury size ${oracle.jury_size} then ${secondJurySize(oracle.jury_size)}, ${owners.size} drawable seat holders, ${oracle.publishers.length} publishers (${oracle.price_threshold} must sign)`);
   for (const name of CONTRACTS) {
@@ -586,6 +738,16 @@ async function check(opts) {
   const margins = marginReport(accounts, minMargin);
   for (const line of margins.lines) console.log(line);
   problems.push(...margins.problems);
+  if (opts["runway-config"]) {
+    const budget = JSON.parse(fs.readFileSync(opts["runway-config"], "utf8"));
+    for (const name of ["oracle", "council"]) {
+      const account = accounts.find((entry) => entry.name === name);
+      if (!budget[name]) throw new Error("runway-config needs oracle and council budgets");
+      const report = storageRunway({ ...budget[name], marketsPerDay: budget.marketsPerDay, alarmDays: budget.alarmDays, amount: account.amount, storageUsage: account.storage_usage });
+      console.log(name + " storage runway: " + (report.days ?? "unbounded at zero budgeted growth") + " days, " + report.bytesPerDay + " budgeted bytes/day after reserve");
+      if (report.alarm) problems.push(name + " storage runway is below " + budget.alarmDays + " days; prepare a Treasury native top-up");
+    }
+  } else console.log("Storage runway not configured; --runway-config is required before operating a live deployment");
 
   if (opts["watch-dao"]) {
     const read = viewer(opts.rpc, at);
@@ -600,9 +762,16 @@ async function check(opts) {
     problems.push(...dao.problems);
   }
 
+  let releaseDiffers = false;
+  if (expectedRelease) {
+    const release = await releaseReport(opts, expectedRelease);
+    for (const line of release.lines) console.log(line);
+    releaseDiffers = release.differs;
+  }
+
   for (const p of problems) console.log(`PROBLEM: ${p}`);
-  if (!problems.length) console.log("ok");
-  return problems.length ? 1 : 0;
+  if (!problems.length && !releaseDiffers) console.log("ok");
+  return problems.length || releaseDiffers ? 1 : 0;
 }
 
 // ---- command line ------------------------------------------------------------------------------------------------
@@ -645,18 +814,8 @@ async function main() {
   }
   refuseKeyFlags(opts);
   const keys = opts["dry-run"] ? {} : resolveKeys(opts, process.env);
-  const finishedThrough = readCursor(opts["state-file"]);
-  const snap = await snapshot(opts, finishedThrough + 1n);
-  const actions = dueActions(snap);
-  if (!actions.length) console.log("nothing due");
-  for (const action of actions) {
-    console.log(opts["dry-run"] ? `due ${label(action)}` : `${label(action)}: ${describeOutcome(action, await send(opts, keys, action))}`);
-  }
-  if (opts["state-file"] && !opts["dry-run"]) {
-    const advanced = advanceCursor(snap, finishedThrough);
-    if (advanced !== finishedThrough) writeCursor(opts["state-file"], advanced);
-    if (advanced >= 0n) console.log(`markets finished through id ${advanced}`);
-  }
+  const work=()=>queuedRun(opts,keys);
+  await (opts["dry-run"] ? work() : withQueueLock(opts["state-file"],work));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

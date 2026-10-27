@@ -175,6 +175,7 @@ async fn create_single(w: &World, index: u64, close_at: u64, gas_tgas: u64) -> a
     let outcome = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(create_args(index, close_at))
         .gas(Gas::from_tgas(gas_tgas))
         .transact()
@@ -201,6 +202,7 @@ async fn create_many(
         for i in 0..take as u64 {
             batch = batch.call(
                 Function::new("create_market")
+                    .deposit(near_workspaces::types::NearToken::from_millinear(60))
                     .args_json(create_args(first_index + made + i, close_at))
                     .gas(Gas::from_tgas(per_call)),
             );
@@ -448,7 +450,7 @@ async fn views_keep_working_as_markets_pile_up() -> anyhow::Result<()> {
         n,
         &w.oracle,
         "list_cases",
-        json!({ "from_market_id": "0", "limit": PAGE }),
+        json!({ "market": w.market.id(), "from_market_id": "0", "limit": PAGE }),
         len_is(cases as usize),
     )
     .await;
@@ -460,7 +462,7 @@ async fn views_keep_working_as_markets_pile_up() -> anyhow::Result<()> {
             &w,
             &w.oracle,
             "list_cases",
-            &json!({ "from_market_id": from.to_string(), "limit": PAGE }),
+            &json!({ "market": w.market.id(), "from_market_id": from.to_string(), "limit": PAGE }),
         )
         .await
         {

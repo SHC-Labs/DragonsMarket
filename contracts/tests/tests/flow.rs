@@ -154,6 +154,7 @@ async fn bad_requests_are_refused_and_money_comes_back() -> anyhow::Result<()> {
     let r = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({ "title": "t", "rule_text": "r", "resolution_source": "s", "void_policy": "  ", "category": "world", "subcategory": "science",
             "close_at": (t + 1_000_000_000_000u64).to_string(), "resolve_by": (t + 2_000_000_000_000u64).to_string() }))
         .transact()
@@ -164,6 +165,7 @@ async fn bad_requests_are_refused_and_money_comes_back() -> anyhow::Result<()> {
     let r = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({ "title": "t", "rule_text": "r", "resolution_source": "s", "void_policy": "v", "category": "Sports!", "subcategory": "nfl",
             "close_at": (t + 1_000_000_000_000u64).to_string(), "resolve_by": (t + 2_000_000_000_000u64).to_string() }))
         .transact()
@@ -198,7 +200,7 @@ async fn unchallenged_answer_becomes_final_and_pays_out_with_no_deadline() -> an
     let r = w
         .oracle
         .call("finalize")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .transact()
         .await?;
     assert!(r.is_failure());
@@ -206,7 +208,7 @@ async fn unchallenged_answer_becomes_final_and_pays_out_with_no_deadline() -> an
     skip_secs(&w.worker, 70).await; // past the 60 s window
     w.oracle
         .call("finalize")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .gas(Gas::from_tgas(100))
         .transact()
         .await?
@@ -440,6 +442,7 @@ async fn a_market_seeded_at_a_chosen_price_opens_there_and_settles_cleanly() -> 
     let id: String = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
             "title": "Will it happen?", "rule_text": "Resolves Yes if it does.", "resolution_source": "https://example.com",
             "void_policy": "Void if cancelled.", "category": "world", "subcategory": "science",

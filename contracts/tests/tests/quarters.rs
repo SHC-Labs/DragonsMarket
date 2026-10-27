@@ -188,7 +188,7 @@ async fn a_sweep_id_is_taken_once_and_only_the_market_sends_revenue_and_the_veri
     let received: serde_json::Value = w
         .council
         .view("received_of")
-        .args_json(json!({ "sweep_id": "77" }))
+        .args_json(json!({ "market": w.owner.id(), "sweep_id": "77" }))
         .await?
         .json()?;
     assert_eq!(u(&received["amount"]), 10 * USD);

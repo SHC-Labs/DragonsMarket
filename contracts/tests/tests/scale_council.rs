@@ -352,7 +352,7 @@ async fn jury_draw_gas_by_seat_count() -> anyhow::Result<()> {
     let r = w
         .bob
         .call(w.oracle.id(), "resolve_draw")
-        .args_json(json!({ "market_id": id.to_string() }))
+        .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
         .gas(Gas::from_tgas(300))
         .transact()
         .await?;

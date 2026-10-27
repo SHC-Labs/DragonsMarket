@@ -42,8 +42,11 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
 
         contract.call("new").args_json(&args).transact().await?.into_result()?;
         let config: serde_json::Value = contract.view("config").await?.json()?;
-        // The oracle's layout is still version 1: only the market and the Council changed.
-        let version = if name == "oracle" { 1 } else { 2 };
+        let version = match name {
+            "market" => 5,
+            "oracle" => 2,
+            _ => 3,
+        };
         assert_eq!(
             config["state_version"], version,
             "{name} initialised by its own account"
@@ -221,6 +224,48 @@ async fn a_user_registers_alone_or_is_registered_by_someone_else_and_leaves_with
     assert_eq!(
         (holdings(&w, w.carol.id()).await, market_balance(&w, w.carol.id()).await),
         (tokens, 0)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sponsor_gets_the_deposit_back_when_the_account_it_registered_leaves() -> anyhow::Result<()> {
+    let w = setup().await?;
+    w.owner
+        .call(w.market.id(), "storage_deposit")
+        .args_json(json!({ "account_id": w.dave.id() }))
+        .deposit(NearToken::from_yoctonear(FLAT_DEPOSIT))
+        .transact()
+        .await?
+        .into_result()?;
+    assert!(is_registered(&w, w.dave.id()).await);
+    w.worker.fast_forward(3).await?;
+
+    let owner_before = native_balance(&w.owner).await;
+    let dave_before = native_balance(&w.dave).await;
+    let left = w
+        .dave
+        .call(w.market.id(), "storage_unregister")
+        .args_json(json!({}))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+    let unregistered = &events_named(
+        &left.logs().iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+        "unregistered",
+    )[0];
+    assert_eq!(unregistered["deposit_to"], json!(w.owner.id()));
+    assert!(left.json::<bool>()? && !is_registered(&w, w.dave.id()).await);
+    assert_eq!(
+        native_balance(&w.owner).await - owner_before,
+        FLAT_DEPOSIT,
+        "the sponsor gets its deposit back"
+    );
+    let dave_after = native_balance(&w.dave).await;
+    assert!(
+        dave_after < dave_before && dave_before - dave_after < 10_000_000_000_000_000_000_000,
+        "the account that leaves pays its gas and keeps nobody's deposit: {dave_before} to {dave_after}"
     );
     Ok(())
 }
@@ -770,6 +815,7 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
     let id: String = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
             "title": "Will bitcoin close at or above 100.00 USD?", "rule_text": "Yes if the median close is at or above 100.00.",
             "resolution_source": "Three exchanges", "void_policy": "Fewer than two publish a price.",
@@ -784,7 +830,11 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
         .json()?;
     skip_secs(&w.worker, 130).await;
 
-    let message = format!("price:v1:{}:{NETWORK}:{id}:{close_at}:10500:2", w.oracle.id());
+    let message = format!(
+        "price:v2:{}:{NETWORK}:{}:{id}:{close_at}:10500:2",
+        w.oracle.id(),
+        w.market.id()
+    );
     let entries = [signed_entry(&keys[2], &message), signed_entry(&keys[0], &message)];
     deposit_to_intents(&w, &w.carol, w.carol.id(), BOND).await?;
     let r = intents_call(
@@ -792,7 +842,7 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
         &w.carol,
         w.oracle.id(),
         BOND,
-        &format!("price:{id}:10500:{}", entries.join(",")),
+        &format!("price:{}:{id}:10500:{}", w.market.id(), entries.join(",")),
     )
     .await?
     .into_result()?;

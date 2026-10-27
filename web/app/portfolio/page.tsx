@@ -104,7 +104,7 @@ export default function Portfolio() {
           </div>
           <dl className="portfolio-balances">
             <Balance label="In your wallet" value={data.inWallet} tone="wallet" />
-            <Balance label="Available to withdraw" value={data.inMarket} tone="market">
+            <Balance label="Market balance" value={data.inMarket} tone="market">
               <Button variant="secondary" size="sm" disabled aria-describedby="portfolio-integration"><Lock size={15} />Withdrawals coming soon</Button>
             </Balance>
           </dl>
@@ -135,7 +135,7 @@ export default function Portfolio() {
                         {!resolved
                           ? p.market.status === "closed" ? "Waiting for the answer" : "Open"
                           : p.market.outcome === "void" ? pay === null ? "Void: settlement price has not been published." : `Void: estimated payout ${formatMoney(pay)} ${config.tokenSymbol}`
-                          : pay !== null && pay > 0n ? `You won ${formatMoney(pay)} ${config.tokenSymbol}`
+                          : pay !== null && pay > 0n ? `Estimated payout: ${formatMoney(pay)} ${config.tokenSymbol}`
                           : `Resolved ${p.market.outcome === "yes" ? "Yes" : "No"}. Nothing to redeem.`}
                       </span>
                     </div>

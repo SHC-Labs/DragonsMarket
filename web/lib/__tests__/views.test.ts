@@ -17,14 +17,26 @@ vi.mock("../rpc", () => ({ view }));
 
 import { friendlyError } from "../errors";
 import {
-  getAccount, getBondTotals, getFees, getInFlight, getMarketConfig, getMarketInfo, getOracleConfig, getOwedBreakdown,
-  getPositions, listCases,
+  getAccount, getBondTotals, getCase, getFees, getInFlight, getMarketConfig, getMarketInfo, getOracleConfig, getOwedBreakdown,
+  getPositions, getPositionsPage, positionsArePaged, listCases,
 } from "../market";
 import { getCouncilConfig } from "../council";
 
 beforeEach(() => view.mockReset().mockResolvedValue(null));
 
 describe("market views", () => {
+  it("advances an empty operational page by scanned market ids", async () => {
+    view.mockResolvedValue([]);
+    expect(await getPositionsPage("operator.near", "9007199254740993", 100)).toEqual({ positions: [], nextMarket: "9007199254741093" });
+    expect(view).toHaveBeenLastCalledWith("market.near", "get_positions", { account_id: "operator.near", from_market: "9007199254740993", limit: "100" });
+    await positionsArePaged("operator.near");
+    expect(view).toHaveBeenLastCalledWith("market.near", "positions_are_paged", { account_id: "operator.near" });
+  });
+  it("rejects invalid or unbounded position page inputs before RPC", async () => {
+    expect(() => getPositions("operator.near", "-1", 50)).toThrow("cursor");
+    expect(() => getPositions("operator.near", "0", 101)).toThrow("1 to 100");
+    expect(view).not.toHaveBeenCalled();
+  });
   it("reads positions and the account for one account id", async () => {
     await getPositions("alice.near");
     expect(view).toHaveBeenLastCalledWith("market.near", "get_positions", { account_id: "alice.near" });
@@ -48,13 +60,17 @@ describe("market views", () => {
 describe("oracle views", () => {
   it("lists cases with the start id as a decimal string and the limit as a number", async () => {
     await listCases(40, 25);
-    expect(view).toHaveBeenLastCalledWith("oracle.near", "list_cases", { from_market_id: "40", limit: 25 });
+    expect(view).toHaveBeenLastCalledWith("oracle.near", "list_cases", { market: "market.near", from_market_id: "40", limit: 25 });
+  });
+  it("reads one case with the market account first", async () => {
+    await getCase("7");
+    expect(view).toHaveBeenLastCalledWith("oracle.near", "get_case", { market: "market.near", market_id: "7" });
   });
   it("reads bond totals, market info and config", async () => {
     await getBondTotals();
     expect(view).toHaveBeenLastCalledWith("oracle.near", "bond_totals");
     await getMarketInfo("7");
-    expect(view).toHaveBeenLastCalledWith("oracle.near", "get_market_info", { market_id: "7" });
+    expect(view).toHaveBeenLastCalledWith("oracle.near", "get_market_info", { market: "market.near", market_id: "7" });
     await getOracleConfig();
     expect(view).toHaveBeenLastCalledWith("oracle.near", "config");
   });
@@ -75,7 +91,7 @@ describe("new refusal copy", () => {
     expect(sells).not.toBe(friendlyError("paused", "r"));
   });
   it("explains a pending withdrawal", () => {
-    expect(friendlyError("a withdrawal is still pending", "r")).toContain("withdrawal is still on its way");
+    expect(friendlyError("a withdrawal is still pending", "r")).toContain("withdrawal is pending");
   });
   it("explains a fee sweep inside the waiting time, for both wordings of the refusal", () => {
     const copy = "Fees were swept a moment ago. Try again after the waiting time has passed.";
@@ -90,6 +106,6 @@ describe("new refusal copy", () => {
 describe("first release wallet rule", () => {
   it("states NEAR wallets only", async () => {
     const { WALLET_RULE_V1 } = await vi.importActual<typeof import("../config")>("../config");
-    expect(WALLET_RULE_V1).toBe("Version 1 works with NEAR wallets only. Wallets from other chains arrive in version 2.");
+    expect(WALLET_RULE_V1).toBe("This version connects NEAR wallets. Support for wallets on other chains is planned.");
   });
 });

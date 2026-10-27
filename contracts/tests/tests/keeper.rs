@@ -27,6 +27,9 @@ async fn run_keeper(w: &World, args: &[&str], env: &[(&str, String)]) -> (String
         "--account",
         w.dave.id().as_str(),
     ]);
+    if args.first() == Some(&"run") && !args.contains(&"--state-file") {
+        command.args(["--state-file", scratch(w, "default-queue.json").to_str().unwrap()]);
+    }
     command
         .env_remove("KEEPER_KEY")
         .env_remove("KEEPER_ORACLE_KEY")
@@ -76,6 +79,7 @@ async fn market_with_gap(w: &World, gap_secs: u64) -> anyhow::Result<u64> {
     let id: String = w
         .owner
         .call(w.market.id(), "create_market")
+        .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
             "title": "Will nobody answer?", "rule_text": "Resolves Yes if it does.", "resolution_source": "https://example.com",
             "void_policy": "Void if cancelled.", "category": "tech", "subcategory": "ai",
@@ -149,7 +153,7 @@ async fn one_run_of_the_keeper_unsticks_everything_that_is_due_and_a_second_find
     assert!(market_json(&w, unanswered).await["outcome"].is_null());
     assert!(!stake_of(&w, &token).await["serving"].is_null());
 
-    // A dry run says what is due and sends nothing, and keeps no cursor.
+    // A dry run says what is due, sends nothing and writes no queue.
     let (dry, ok) = keeper(&w, &["run", "--dry-run", "--state-file", state_arg]).await;
     assert!(ok, "{dry}");
     for due in [
@@ -177,10 +181,7 @@ async fn one_run_of_the_keeper_unsticks_everything_that_is_due_and_a_second_find
     ] {
         assert!(run.contains(&line), "{line} missing from:\n{run}");
     }
-    assert!(
-        !state.exists(),
-        "nothing was finished when this run began, so the cursor did not move"
-    );
+    assert!(state.exists(), "the queue persists work before dispatch");
 
     assert_eq!(market_json(&w, unfinalized).await["outcome"], "yes");
     assert_eq!(case_json(&w, undrawn).await["panel"].as_array().unwrap().len(), 3);
@@ -190,17 +191,19 @@ async fn one_run_of_the_keeper_unsticks_everything_that_is_due_and_a_second_find
         "the seat is free again"
     );
 
-    // Everything due was sent, so a second run finds nothing. Market 0 is finished, and market 1 still has a jury at
-    // work, so the cursor stops after market 0 although markets 2 and 3 are finished too.
+    // Everything due was sent. Completed work leaves the queue while the active jury stays scheduled.
     let (again, ok) = keeper(&w, &["run", "--state-file", state_arg]).await;
     assert!(ok, "{again}");
-    assert!(
-        again.contains("nothing due") && again.contains("finished through id 0"),
-        "{again}"
-    );
-    assert_eq!(std::fs::read_to_string(&state)?.trim(), r#"{"finished_through":"0"}"#);
+    assert!(again.contains("nothing due") && again.contains("queue"), "{again}");
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&state)?)?;
+    assert_eq!(saved["version"], 1);
+    assert!(!saved["jobs"].as_object().unwrap().contains_key("market:0"));
+    assert!(saved["jobs"]
+        .as_object()
+        .unwrap()
+        .contains_key(&format!("market:{undrawn}")));
 
-    // The jury decides. The next run starts after market 0, and the cursor moves over all the rest.
+    // The jury decides. Bounded reconciliation removes the remaining completed job.
     let jury = panel(&w, undrawn).await;
     for j in &jury[..2] {
         commit(&w, j, undrawn, "no", "s").await?;
@@ -212,14 +215,9 @@ async fn one_run_of_the_keeper_unsticks_everything_that_is_due_and_a_second_find
     assert_eq!(case_json(&w, undrawn).await["stage"], "final");
     let (last, ok) = keeper(&w, &["run", "--state-file", state_arg]).await;
     assert!(ok, "{last}");
-    assert!(
-        last.contains("nothing due") && last.contains(&format!("finished through id {unanswered}")),
-        "{last}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&state)?.trim(),
-        format!(r#"{{"finished_through":"{unanswered}"}}"#)
-    );
+    assert!(last.contains("nothing due") && last.contains("queue"), "{last}");
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&state)?)?;
+    assert!(saved["jobs"].as_object().unwrap().is_empty());
     std::fs::remove_file(&state)?;
     Ok(())
 }

@@ -3,7 +3,7 @@ import { Search, ArrowUpDown, Trophy } from "./icons";
 
 export const GUIDE_STEPS = [
   { title: "Choose a market", text: "Choose a question you know or want to follow. Check its rules, closing time and result source before taking a position." },
-  { title: "Buy Yes or No", text: "Choose Yes if you think the event will happen, or No if you don’t. A Yes share priced at 40¢ reflects a 40% chance." },
+  { title: "Buy Yes or No", text: "When trading opens, choose Yes if you think the event will happen, or No if you don’t. A Yes price of 40¢ implies a 40% chance in that market." },
   { title: "Follow the result", text: `After the result is final, winning shares pay 1 ${config.tokenSymbol} each. Losing shares pay nothing. Each market’s rules explain what happens if it is cancelled.` },
 ];
 const STEP_ICONS = [Search, ArrowUpDown, Trophy];

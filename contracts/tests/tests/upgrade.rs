@@ -7,6 +7,7 @@ use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::{Account, AccountId, Contract};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 
 const STAGE_DEPOSIT: NearToken = NearToken::from_near(5);
 // The gas the configured owner attaches to an upgrade. The contract itself asks for at least 100.
@@ -127,12 +128,14 @@ fn governed_contracts(w: &World) -> Vec<(&'static str, &'static str, &Contract)>
     ]
 }
 
-// The market and the Council are at layout 2 (fee ledger, quarterly books). The oracle is still at 1.
+// Market layout 5, Council layout 3 and oracle layout 2.
 fn state_version_of(label: &str) -> u32 {
     if label == "oracle" {
-        1
-    } else {
         2
+    } else if label == "market" {
+        5
+    } else {
+        3
     }
 }
 
@@ -314,6 +317,141 @@ async fn a_balance_can_be_withdrawn_while_the_market_is_paused_and_after_it_is_u
         .into_result()?;
     assert_eq!(holdings(&w, w.alice.id()).await - before, 20 * USD);
     assert_eq!(market_balance(&w, w.alice.id()).await, 0);
+    Ok(())
+}
+
+fn version_four_market() -> Vec<u8> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/near-v4/market.wasm");
+    std::fs::read(&p).unwrap_or_else(|_| {
+        panic!(
+            "{p:?} is missing. Build the market at ff34312, the last version-4 layout, and copy it there:\n  \
+             git worktree add $SCRATCH/v4 ff34312\n  \
+             (cd $SCRATCH/v4/contracts/market && cargo near build non-reproducible-wasm)\n  \
+             mkdir -p contracts/target/near-v4\n  \
+             cp <that build's target dir>/near/market/market.wasm contracts/target/near-v4/market.wasm"
+        )
+    })
+}
+
+async fn version_four_world(base: &World) -> anyhow::Result<World> {
+    let market = base.worker.dev_deploy(&version_four_market()).await?;
+    market
+        .call("new")
+        .args_json(json!({
+            "owner_id": base.owner.id(), "operator_id": base.owner.id(), "oracle_id": base.oracle.id(),
+            "verifier_id": base.verifier.id(), "collateral_token_id": token_id(base)
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    base.owner
+        .call(base.oracle.id(), "allow_market")
+        .args_json(json!({ "market": market.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+    base.alice
+        .call(market.id(), "storage_deposit")
+        .args_json(json!({}))
+        .deposit(NearToken::from_millinear(50))
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(World {
+        worker: base.worker.clone(),
+        verifier: base.verifier.clone(),
+        ft: base.ft.clone(),
+        market,
+        oracle: base.oracle.clone(),
+        council: base.council.clone(),
+        nft: base.nft.clone(),
+        owner: base.owner.clone(),
+        alice: base.alice.clone(),
+        bob: base.bob.clone(),
+        carol: base.carol.clone(),
+        dave: base.dave.clone(),
+        treasury: base.treasury.clone(),
+        jurors: base.jurors.clone(),
+    })
+}
+
+async fn market_records(w: &World, id: u64) -> serde_json::Value {
+    let (yes, no) = shares(w, id, w.alice.id()).await;
+    let owed: String = w.market.view("total_owed").await.unwrap().json().unwrap();
+    let mut registered = vec![];
+    for who in [w.alice.id(), w.dave.id()] {
+        registered.push(
+            w.market
+                .view("is_registered")
+                .args_json(json!({ "account_id": who }))
+                .await
+                .unwrap()
+                .json::<bool>()
+                .unwrap(),
+        );
+    }
+    json!({
+        "market": market_json(w, id).await, "alice": [yes.to_string(), no.to_string()],
+        "balance": market_balance(w, w.alice.id()).await.to_string(), "owed": owed, "registered": registered,
+    })
+}
+
+#[tokio::test]
+#[ignore]
+async fn the_version_four_build_upgrades_to_this_one_and_keeps_every_record_and_balance() -> anyhow::Result<()> {
+    let base = setup().await?;
+    let w = version_four_world(&base).await?;
+    assert_eq!(config(&w.market).await["state_version"], 4);
+    w.owner
+        .call(w.market.id(), "storage_deposit")
+        .args_json(json!({ "account_id": w.dave.id() }))
+        .deposit(NearToken::from_millinear(50))
+        .transact()
+        .await?
+        .into_result()?;
+    let id = create_seeded_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    ft_call(&w, &w.alice, w.market.id(), 5 * USD, "deposit").await?;
+    let before = market_records(&w, id).await;
+    assert_reconciled(&w).await;
+
+    let hash = stage(&w.bob, w.market.id(), &wasm("market")).await?;
+    w.owner
+        .call(w.market.id(), "upgrade")
+        .args_json(json!({ "code_hash": hash }))
+        .gas(Gas::from_tgas(UPGRADE_CALL_TGAS))
+        .transact()
+        .await?
+        .into_result()?;
+    let c = config(&w.market).await;
+    assert_eq!(
+        (&c["state_version"], &c["upgrade_proven"], &c["registration_fee"]),
+        (&json!(5), &json!(true), &json!("250000"))
+    );
+    assert_eq!(
+        market_records(&w, id).await,
+        before,
+        "every record and balance reads back the same"
+    );
+    assert_reconciled(&w).await;
+
+    let dave_before = w.dave.view_account().await?.balance.as_yoctonear();
+    w.dave
+        .call(w.market.id(), "storage_unregister")
+        .args_json(json!({}))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+    let gained = w.dave.view_account().await?.balance.as_yoctonear() as i128 - dave_before as i128;
+    assert!(
+        gained > 40_000_000_000_000_000_000_000,
+        "a deposit paid before version 5 has no payer on record and comes back to the account: {gained}"
+    );
+
+    ft_call(&w, &w.carol, w.market.id(), USD, "register").await?;
+    assert_eq!(market_balance(&w, w.carol.id()).await, USD - u(&c["registration_fee"]));
+    assert_reconciled(&w).await;
     Ok(())
 }
 

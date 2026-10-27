@@ -109,6 +109,7 @@ const SAMPLE_MARKET: MarketView = {
   outcome: null,
   price_yes: "710000",
   price_no: "290000",
+  holders: 0, seeder: null, pruned: false,
   locked: "1240000000",
 };
 

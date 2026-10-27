@@ -1,17 +1,20 @@
 # Dragons Market: market contract implementation spec
 
+**Current implementation, 2026-10-23.** Market state version 4 adds native storage funding, reserve policy, exact holder counts for new records, a seeder mirror and bounded exempt-account position windows. See [market contract](../market.md) for the current policy and [website ABI](website-abi.md) for exact JSON fields. The older proposal tables below document previous work; where they differ, the current implementation and ABI take precedence. Migration reads the exact version-3 root, preserves tag-0 market records and writes new records with tag 1. Sweeps and withdrawals retain tag 0. No balance, receipt or payout ledger is discarded.
+
+
 **The complete function set the market contract needs for the accepted end-to-end product, with every existing method checked against the code and every missing method specified.**
 
 | Field | Value |
 | --- | --- |
 | Date | 2026-10-21 |
-| Status | Draft. Existing rows are checked in source. Rows marked NEW or CHANGED are PROPOSED |
+| Status | Draft design spec, kept for the design history. Existing rows were checked in source on 2026-10-21 and rows marked NEW or CHANGED were proposed. Later work (in-flight withdrawal tracking, settable settings, the positions index, version-tagged records and the newer events) is described in the market manual [market.md](../market.md), which is authoritative where the two differ |
 | Scope | `contracts/market/src/lib.rs` and `contracts/market/src/curve.rs` |
 | Source | Working tree on top of commit `6cad02e`, read 2026-10-21 09:06 to 09:38 |
 | Revision checked | `market/src/lib.rs` sha256 prefix `6bed015aa459a237` (4122 lines, copied at 09:22 and compared again at 09:38). Phase I2 is editing this file, see [README section 2](README.md#2-how-to-read-these-specs) |
 | Index | [README.md](README.md) |
 
-**Build status, 2026-10-21.** BUILT in `contracts/market/src/lib.rs` (state version 2): sections 7.2, 7.3, 7.5's `locked_total`, and 7.6. Everything else in this file is unchanged and still PROPOSED. The owner's instruction that nothing the owner still has to choose may be written in the code changed three things against this text, noted where they apply.
+**Build status, 2026-10-21.** BUILT in `contracts/market/src/lib.rs` (state version 3): sections 7.2, 7.3, 7.5's `locked_total`, and 7.6. Everything else in this file is unchanged and still PROPOSED. The owner's instruction that nothing the owner still has to choose may be written in the code changed three things against this text, noted where they apply.
 
 | Item | Built as | Tests |
 | --- | --- | --- |
@@ -136,7 +139,7 @@ All EXISTING (`lib.rs:260-306`) except where marked.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `state_version` | `u16` | First field. `migrate` reads exactly this layout (currently 1) |
+| `state_version` | `u16` | First field. `migrate` reads exactly this layout (currently 4). Markets, sweeps and withdrawals are stored behind a one-byte version tag |
 | `upgrade_proven` | `bool` | Set by `migrate`. `seal` refuses until true |
 | `upgrade_in_flight` | `bool` | Set by `upgrade`, cleared by `migrate` |
 | `owner` | `AccountId` | The DAO |
@@ -359,7 +362,7 @@ Alternative considered: give the carry to the treasury leg so `fees` always empt
 | `sweep_fees()` CHANGED | Returns `Option<U64>`. When `fees + revenue_due + treasury_due` is below `min_sweep` it returns `None` and changes nothing. Otherwise it takes `id = next_sweep_id`, splits `fees` as above, adds each part to its due bucket, stores `Sweep {id, at, total, council, treasury}` with both legs `pending`, zeroes each due bucket and sends. The Council leg uses `msg = "revenue:<id>"`. Emits `fees_swept {id, total, revenue_pool, council, treasury_account, treasury}`. The gas floor stays 87 TGas |
 | `on_revenue_sent(id, amount)` CHANGED | Same report rules as today. `[kept]` equal to the amount sets the leg `settled`. A partial or zero report sets it `refused` and returns the rest to `revenue_due`. An error or a malformed list sets it `unresolved` and parks the amount in `revenue_unresolved` |
 | `on_treasury_sent(id, amount)` CHANGED | Replaces `on_business_sent`. An error sets the leg `refused` and restores `treasury_due`. Otherwise `settled` |
-| `settle_leg(sweep_id: U64)` NEW | Anyone. Refuses unless the Council leg is `unresolved` and `now >= sweep.at + 10 minutes`. Sends the Council a call to `received_of(sweep_id)`. The callback reads the answer: a record with the same amount sets the leg `settled` and removes the amount from `revenue_unresolved`. No record sets it `refused` and returns the amount to `revenue_due`. Gas 30 TGas |
+| `settle_leg(sweep_id: U64)` NEW | Anyone. Refuses unless the Council leg is `unresolved` and `now >= sweep.at + 10 minutes`. Sends the Council a call to `received_of(market, sweep_id)` with its own account as `market`. The callback reads the answer: a record with the same amount sets the leg `settled` and removes the amount from `revenue_unresolved`. No record sets it `refused` and returns the amount to `revenue_due`. Gas 30 TGas |
 | `reconcile_revenue(amount, arrived)` | Stays as the owner fallback for amounts that predate sweep ids. After this change no new amount can enter `revenue_unresolved` that `settle_leg` cannot settle |
 | `get_sweep(sweep_id: U64)` NEW | `Option<SweepView>` |
 | `list_sweeps(from_index: U64, limit: U64)` NEW | At most 50, oldest first |
@@ -382,13 +385,13 @@ PROPOSED. `claim_residual` today credits `balances[business_wallet]` (`lib.rs:65
 
 ### 7.4 Positions and account views (R-08)
 
-PROPOSED. The website calls `get_shares` for every market to find a user's positions (`web/app/portfolio/page.tsx:38-43`). The account holds at most 20 positions, so an on-chain index is cheap.
+BUILT. Ordinary accounts keep a small position index. Operational owner/operator accounts use bounded scans and never extend that index. The website library exposes both forms; page integration and indexed catalog APIs are separate work.
 
 | Item | Specification |
 | --- | --- |
 | `positions` map | Updated in `add_shares` and `take_shares` when an account first holds or fully leaves a market. At most 20 market ids, which fits the flat 0.05 NEAR deposit |
-| `get_positions(account_id: AccountId)` BUILT | `Vec<PositionView>`, each `{market_id: U64, yes: U128, no: U128, status: String, outcome: Option<Outcome>, redeemable: U128}`. `redeemable` is the exact payout when `outcome` is set, otherwise `"0"`. No mark to market value is computed on chain |
-| `get_account(account_id)` NEW | `AccountView` as in 7.1 |
+| `get_positions(account_id: AccountId, from_market: Option<U64>, limit: Option<U64>)` BUILT | `Vec<PositionView>`, each `{market_id: U64, yes: U128, no: U128, status: String, outcome: Option<Outcome>, redeemable: U128}`. `redeemable` is the exact payout when `outcome` is set, otherwise `"0"`. No mark to market value is computed on chain. Exempt accounts scan a consecutive window of 50 IDs by default, at most 100; advance by that window even on empty pages. `positions_are_paged(account_id)` distinguishes them. |
+| `get_account(account_id)` BUILT | `AccountView` as in 7.1; `positions` is nullable for unknown legacy operational totals. It becomes exact after all old shares exit. |
 
 ### 7.5 Reconciliation views (R-08)
 
@@ -450,8 +453,10 @@ Envelope: `EVENT_JSON:{"standard":"market","version":"1.0.0","event":"<name>","d
 | `owner_proposed` | `owner`, `proposed` | EXISTING |
 | `owner_changed` | `from`, `to` | EXISTING |
 | `operator_set` | `operator` | EXISTING |
-| `market_created` | `market_id`, `rule_hash` | EXISTING |
+| `market_created` | `market_id`, `rule_hash`, `title`, `category`, `subcategory`, `close_at`, `resolve_by` | EXISTING |
 | `market_registered` | `market_id` | EXISTING |
+| `market_registration_failed` | `market_id` | NEW |
+| `market_registration_retried` | `market_id` | NEW |
 | `market_halted` | `market_id`, `reason` | EXISTING |
 | `market_resumed` | `market_id` | EXISTING |
 | `paused` | `paused` (boolean) | EXISTING |
@@ -460,20 +465,20 @@ Envelope: `EVENT_JSON:{"standard":"market","version":"1.0.0","event":"<name>","d
 | `create_fee_set` | `create_fee` | EXISTING |
 | `min_sweep_set` | `min_sweep` | NEW |
 | `residual_claimed` | `market_id`, `amount`, `to` | EXISTING |
-| `outcome_set` | `market_id`, `outcome`, optional `by` | EXISTING |
+| `outcome_set` | `market_id`, `outcome`, optional `by`, `void_price_yes` (null unless void) | EXISTING |
 | `deposit` | `account`, `amount` | EXISTING |
-| `buy` | `market_id`, `account`, `side`, `shares`, `collateral`, `fee` | EXISTING |
-| `sell` | `market_id`, `account`, `side`, `shares`, `collateral`, `fee` | EXISTING |
-| `redeemed` | `market_id`, `account`, `amount` | EXISTING |
+| `buy` | `market_id`, `account`, `side`, `shares`, `collateral`, `fee`, `price_yes`, `price_no`, `pool_yes`, `pool_no` (after the trade) | EXISTING |
+| `sell` | `market_id`, `account`, `side`, `shares`, `collateral`, `fee`, `price_yes`, `price_no`, `pool_yes`, `pool_no` (after the trade) | EXISTING |
+| `redeemed` | `market_id`, `account`, `amount`, `yes_shares`, `no_shares` | EXISTING |
 | `withdraw` | `account`, `amount`, NEW `id` | EXISTING, CHANGED. Emitted before the transfer, so it means requested |
 | `withdraw_confirmed` | `account`, `amount`, `id` | NEW |
 | `withdraw_failed` | `account`, `amount`, NEW `id` | EXISTING, CHANGED |
 | `fees_swept` | `revenue_pool`, `revenue`, `business_wallet`, `business` today. NEW: `id`, `total`, `council`, `treasury`, `treasury_account` | EXISTING, CHANGED |
 | `fee_transfer_failed` | `to`, `amount`, NEW `id`, `leg` | EXISTING, CHANGED |
-| `fee_transfer_unresolved` | `to`, `amount`, NEW `id` | EXISTING, CHANGED |
-| `fee_leg_settled` | `id`, `leg`, `amount` | NEW |
+| `fee_transfer_unresolved` | `to`, `amount`, NEW `id`, `leg` | EXISTING, CHANGED |
+| `fee_leg_settled` | `id`, `leg`, `to`, `amount` | NEW |
 | `revenue_reconciled` | `amount`, `arrived` (boolean), `unresolved` | EXISTING |
-| `market_seeded` | `market_id`, `amount`, `fee`, `yes_price`, `seeder` | EXISTING |
+| `market_seeded` | `market_id`, `amount`, `fee`, `yes_price`, `seeder`, `price_yes`, `price_no`, `pool_yes`, `pool_no` | EXISTING |
 | `registered` | `account`, `paid_by` | EXISTING |
 | `unregistered` | `account` | EXISTING |
 

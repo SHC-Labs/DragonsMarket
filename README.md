@@ -81,7 +81,7 @@ Start with [docs/spec.md](docs/spec.md) for decisions and current gaps.
 [NEAR-RESEARCH.md](NEAR-RESEARCH.md) is a reusable ecosystem reference, not a product roadmap.
 
 Contract manuals and the historical audit record are in `docs/contracts/`. The launch campaign is in
-[marketing/launch-campaign-10-days/CAMPAIGN.md](marketing/launch-campaign-10-days/CAMPAIGN.md).
+[marketing/launch-campaign-21-days/CAMPAIGN.md](marketing/launch-campaign-21-days/CAMPAIGN.md).
 
 ## Dependencies
 

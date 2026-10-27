@@ -15,7 +15,7 @@ vi.mock("../config", () => ({
 
 import { friendlyError, requiredGasTgas } from "../errors";
 import {
-  buyCall, buyFromBalanceCall, challengeCall, commitVoteCall, commitmentFor, depositCall, newSalt, proposeCall,
+  buyCall, buyFromBalanceCall, challengeCall, commitVoteCall, commitmentFor, depositCall, finalizeCall, newSalt, proposeCall, retryApplyCall,
   redeemCall, resolveDrawCall, revealVoteCall, sellCall, storageDepositCall, withdrawCall,
 } from "../market";
 import { claimQuarterCall, requestUnstakeCall, stakeCall, unstakeCall } from "../council";
@@ -36,11 +36,11 @@ describe("money moves through the verifier", () => {
   });
   it("proposes and challenges through the oracle, and a challenge names its answer", () => {
     expect(proposeCall("7", "no", "see the source", 5_000_000n).args).toMatchObject({
-      receiver_id: "oracle.near", amount: "5000000", msg: "propose:7:no:see the source",
+      receiver_id: "oracle.near", amount: "5000000", msg: "propose:market.near:7:no:see the source",
     });
     expect(challengeCall("7", "yes", 5_000_000n)).toMatchObject({
       ...VERIFIER_FIELDS,
-      args: { receiver_id: "oracle.near", amount: "5000000", msg: "challenge:7:yes" },
+      args: { receiver_id: "oracle.near", amount: "5000000", msg: "challenge:market.near:7:yes" },
     });
   });
 });
@@ -66,9 +66,19 @@ describe("jury calls", () => {
   it("commit and reveal carry one yocto, a draw gets 300 TGas", () => {
     expect(commitVoteCall("7", "ab")).toMatchObject({ receiverId: "oracle.near", methodName: "commit_vote", deposit: "1" });
     expect(revealVoteCall("7", "no", "salt", "because")).toMatchObject({
-      methodName: "reveal_vote", deposit: "1", args: { market_id: "7", outcome: "no", salt: "salt", reason: "because" },
+      methodName: "reveal_vote", deposit: "1", args: { market: "market.near", market_id: "7", outcome: "no", salt: "salt", reason: "because" },
     });
     expect(resolveDrawCall("7")).toMatchObject({ methodName: "resolve_draw", deposit: "0", gas: "300000000000000" });
+  });
+  it("every oracle call names the market account before the market id", () => {
+    expect(commitVoteCall("7", "ab").args).toEqual({ market: "market.near", market_id: "7", commitment: "ab" });
+    expect(resolveDrawCall("7").args).toEqual({ market: "market.near", market_id: "7" });
+    expect(finalizeCall("7")).toMatchObject({ receiverId: "oracle.near", methodName: "finalize", args: { market: "market.near", market_id: "7" } });
+    expect(retryApplyCall("7")).toMatchObject({ receiverId: "oracle.near", methodName: "retry_apply", args: { market: "market.near", market_id: "7" } });
+  });
+  it("verifier messages carry the market account first", () => {
+    expect(proposeCall("7", "yes", "e", 1n).args.msg).toMatch(/^propose:market\.near:7:yes:/);
+    expect(challengeCall("7", "void", 1n).args.msg).toMatch(/^challenge:market\.near:7:void$/);
   });
   it("hashes a commitment the way the oracle does", async () => {
     const expected = createHash("sha256").update("juror.near:no:a-long-random-salt").digest("hex");
@@ -99,6 +109,8 @@ describe("council calls", () => {
 
 describe("contract refusals", () => {
   it("explains the new strings", () => {
+    expect(friendlyError("that market contract is not allowed", "r")).toBe("This market is not served by the oracle.");
+    expect(friendlyError("bad market account", "r")).toContain("could not read this request");
     expect(friendlyError("send exactly the bond", "r")).toBe("Send exactly the bond amount.");
     expect(friendlyError("the panel deadline passed", "r")).toBe("The jury deadline has passed.");
     expect(friendlyError("that quarter is not final", "r")).toContain("still open");

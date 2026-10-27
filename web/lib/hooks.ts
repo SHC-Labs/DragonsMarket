@@ -69,7 +69,7 @@ export function useTx(send: (call: FunctionCall) => Promise<string>, account: st
       try {
         hash = await send(call);
       } catch {
-        setState({ phase: "failed", message: "The wallet did not send it. Nothing was taken." });
+        setState({ phase: "failed", message: "We could not confirm that the wallet sent your request. Check your wallet history before trying again." });
         return false;
       }
       const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
