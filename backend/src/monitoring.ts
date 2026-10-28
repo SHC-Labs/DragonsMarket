@@ -17,6 +17,15 @@ export async function backendStatus(pool: pg.Pool, config: Config) {
     ? ((await pool.query('SELECT ok,checked_at FROM chain_integrity_reports WHERE deployment_id=$1 ORDER BY checked_at DESC LIMIT 1', [config.deployment.id]))
         .rows[0] ?? null)
     : null;
+  // True only while a publisher has signed a price in the last hour, so the status cannot claim signing is off when it is running.
+  const priceSigning = config.deployment
+    ? (
+        await pool.query(
+          "SELECT 1 FROM signing_decisions WHERE deployment_id=$1 AND signature IS NOT NULL AND created_at > now() - interval '1 hour' LIMIT 1",
+          [config.deployment.id],
+        )
+      ).rowCount === 1
+    : false;
   const reconciliation = config.deployment
     ? ((
         await pool.query('SELECT solvent,checked_at,block_hash FROM reconciliation_reports WHERE deployment_id=$1 ORDER BY checked_at DESC LIMIT 1', [
@@ -31,7 +40,7 @@ export async function backendStatus(pool: pg.Pool, config: Config) {
     indexing,
     jobs,
     operations,
-    execution: { trading: false, funding: false, priceSigning: false, reason: 'contracts_not_finalized_or_deployed' },
+    execution: { trading: false, funding: false, priceSigning, reason: 'contracts_not_finalized_or_deployed' },
     alerts: [
       ...(integrity && !integrity.ok ? ['chain_integrity_failed'] : []),
       ...(config.deployment && (!integrity || Date.now() - new Date(integrity.checked_at).getTime() > MAX_INTEGRITY_AGE_MS) ? ['chain_integrity_stale'] : []),

@@ -12,7 +12,7 @@
     "start": "node --env-file-if-exists=.env dist/src/main.js",
     "dev": "npm run build && node --watch --env-file-if-exists=.env dist/src/main.js",
     "migrate": "node --env-file-if-exists=.env dist/src/migrate.js",
-    "test": "npm run build && node --test dist/test/foundation.test.js dist/test/providers.test.js dist/test/ingestion.test.js dist/test/local-source.test.js dist/test/neardata.test.js dist/test/prices.test.js dist/test/api-security.test.js dist/test/reconcile.test.js",
+    "test": "npm run build && node --test dist/test/foundation.test.js dist/test/providers.test.js dist/test/ingestion.test.js dist/test/local-source.test.js dist/test/neardata.test.js dist/test/prices.test.js dist/test/api-security.test.js dist/test/reconcile.test.js dist/test/round-publisher.test.js",
     "test:database": "npm run build && node --env-file-if-exists=.env --test dist/test/database.test.js dist/test/ingestion-database.test.js dist/test/read-api.test.js dist/test/capture-database.test.js dist/test/live-indexer.test.js dist/test/feed.test.js dist/test/auth.test.js dist/test/roles.test.js",
     "up": "docker compose up --build -d --wait",
     "down": "docker compose down",
@@ -29,7 +29,7 @@
     "indexer": "npm run build && node --env-file-if-exists=.env dist/src/ingestion/cli.js",
     "build:local-contract": "node scripts/build-local-contract.mjs",
     "test:mainnet-capture": "npm run build && node --env-file-if-exists=.env --test dist/test/mainnet-capture.test.js",
-    "test:local-chain": "npm run build:local-contract && npm run build && node --env-file-if-exists=.env --test dist/test/local-chain.test.js"
+    "test:local-chain": "npm run build:local-contract && npm run build && node --env-file-if-exists=.env --test dist/test/local-chain.test.js dist/test/rounds-price.test.js"
   },
   "dependencies": {
     "pg": "8.23.1"

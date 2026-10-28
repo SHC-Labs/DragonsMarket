@@ -9,6 +9,7 @@ import { accessKeyChecker } from './access-key.js';
 import { ingestionStatus } from './ingestion/store.js';
 
 const READ_POOL_SIZE = 4;
+const STATUS_POOL_SIZE = 2;
 const HOUSEKEEPING_INTERVAL_MS = 10 * 60 * 1000;
 
 try {
@@ -16,19 +17,21 @@ try {
   const pool = createPool(config.databaseUrl);
   // Evidence reads get their own connections, so a burst of slow queries cannot starve login, health checks or housekeeping.
   const readPool = createPool(config.databaseUrl, READ_POOL_SIZE);
+  // Public status routes also get their own, so a flood on them cannot take the connections login needs.
+  const statusPool = createPool(config.databaseUrl, STATUS_POOL_SIZE);
   const evidence = createReadApi(readPool, config);
   const server = createApp(
     config,
-    () => verifyDatabase(pool, config),
+    () => verifyDatabase(statusPool, config),
     async () => {
-      await verifyDatabase(pool, config);
-      return ingestionStatus(pool, config);
+      await verifyDatabase(statusPool, config);
+      return ingestionStatus(statusPool, config);
     },
     async url => {
       if (url.pathname === '/v1/health/services') {
         if (url.search) throw new ReadError(400, 'invalid_query');
-        await verifyDatabase(pool, config);
-        return backendStatus(pool, config);
+        await verifyDatabase(statusPool, config);
+        return backendStatus(statusPool, config);
       }
       return evidence(url);
     },
@@ -45,6 +48,7 @@ try {
     console.error('API failed to listen');
     void pool.end();
     void readPool.end();
+    void statusPool.end();
     process.exitCode = 1;
   });
   server.listen(config.port, config.host, () => console.log(`Dragons Market backend listening on port ${config.port}`));
@@ -60,7 +64,7 @@ try {
     const timeout = setTimeout(() => process.exit(1), 10000);
     timeout.unref();
     server.close(() => {
-      void Promise.all([pool.end(), readPool.end()]).then(() => clearTimeout(timeout));
+      void Promise.all([pool.end(), readPool.end(), statusPool.end()]).then(() => clearTimeout(timeout));
     });
   };
   process.on('SIGTERM', stop);

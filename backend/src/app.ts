@@ -24,6 +24,11 @@ function withinLimit(counters: Counters, client: string, max: number, now: numbe
 }
 
 // An IPv6 client usually holds a whole /64, so each address in it would otherwise get a fresh budget.
+// Challenges are limited per /48 as well, because a single IPv6 allocation holds thousands of /64s to rotate through.
+export function challengeKey(key: string): string {
+  return key.endsWith('::/64') ? key.split(':').slice(0, 3).join(':') + '::/48' : key;
+}
+
 export function limitKey(address: string): string {
   const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
   if (mapped) return mapped[1]!;
@@ -32,7 +37,12 @@ export function limitKey(address: string): string {
   const first = head ? head.split(':') : [];
   const last = address.includes('::') && tail ? tail.split(':') : [];
   const groups = address.includes('::') ? [...first, ...Array<string>(8 - first.length - last.length).fill('0'), ...last] : first;
-  return groups.slice(0, 4).map(group => group.toLowerCase().padStart(4, '0')).join(':') + '::/64';
+  return (
+    groups
+      .slice(0, 4)
+      .map(group => group.toLowerCase().padStart(4, '0'))
+      .join(':') + '::/64'
+  );
 }
 
 export function trustedProxyList(entries: string[]): BlockList {
@@ -40,7 +50,8 @@ export function trustedProxyList(entries: string[]): BlockList {
   for (const entry of entries) {
     const [address = '', prefix] = entry.split('/');
     const family = isIP(address) === 6 ? 'ipv6' : 'ipv4';
-    if (prefix === undefined) list.addAddress(address, family); else list.addSubnet(address, Number(prefix), family);
+    if (prefix === undefined) list.addAddress(address, family);
+    else list.addSubnet(address, Number(prefix), family);
   }
   return list;
 }
@@ -52,7 +63,10 @@ function clientAddress(req: IncomingMessage, hops: number, proxies: BlockList): 
   const bare = peer.replace(/^::ffff:/i, '');
   const family = isIP(bare) === 6 ? 'ipv6' : 'ipv4';
   if (hops > 0 && isIP(bare) && proxies.check(bare, family)) {
-    const forwarded = String(req.headers['x-forwarded-for'] ?? '').split(',').map(part => part.trim()).filter(Boolean);
+    const forwarded = String(req.headers['x-forwarded-for'] ?? '')
+      .split(',')
+      .map(part => part.trim())
+      .filter(Boolean);
     const candidate = forwarded[forwarded.length - hops];
     if (candidate && isIP(candidate)) return limitKey(candidate);
   }
@@ -63,8 +77,15 @@ function logFailure(requestId: string, where: string, error: unknown) {
   console.error(JSON.stringify({ service: 'api', requestId, where, error: error instanceof Error ? error.message.slice(0, 200) : 'unknown' }));
 }
 
-export function createApp(config: Config, ready: () => Promise<void>, indexerStatus: () => Promise<unknown> = async () => ({ state: 'not_configured', live: false }), read?: ReadHandler, privateRead?: PrivateHandler) {
-  const limits: Counters = new Map(), challengeLimits: Counters = new Map();
+export function createApp(
+  config: Config,
+  ready: () => Promise<void>,
+  indexerStatus: () => Promise<unknown> = async () => ({ state: 'not_configured', live: false }),
+  read?: ReadHandler,
+  privateRead?: PrivateHandler,
+) {
+  const limits: Counters = new Map(),
+    challengeLimits: Counters = new Map();
   const proxies = trustedProxyList(config.trustedProxyAddresses);
   const server = createServer(async (req, res) => {
     const requestId = randomUUID();
@@ -73,44 +94,102 @@ export function createApp(config: Config, ready: () => Promise<void>, indexerSta
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Request-Id', requestId);
     res.setHeader('Vary', 'Origin');
-    if (req.headers.origin === config.webOrigin) { res.setHeader('Access-Control-Allow-Origin', config.webOrigin); res.setHeader('Access-Control-Allow-Credentials','true'); }
-    const reply = (status: number, body: unknown) => { res.writeHead(status); res.end(JSON.stringify(body)); };
-    const client=clientAddress(req,config.trustedProxyHops,proxies);
-    const now=Date.now();
-    if(!withinLimit(limits,client,REQUESTS_PER_WINDOW,now)){res.setHeader('Retry-After','60');reply(429,{error:{code:'rate_limited',requestId}});return;}
-    if((req.url?.length??0)>8192){reply(400,{error:{code:'invalid_url',requestId}});return;}
-    let privatePath: string;
-    try { privatePath = new URL(req.url ?? '/', 'http://localhost').pathname; }
-    catch { reply(400, { error: { code: 'invalid_url', requestId } }); return; }
-    if(privatePath==='/v1/auth/challenge'&&!withinLimit(challengeLimits,client,CHALLENGES_PER_WINDOW,now)){reply(429,{error:{code:'challenge_rate_limited',requestId}});return;}
-    if(req.method==='OPTIONS'&&isPrivateRoute(privatePath)){
-      if(req.headers.origin!==config.webOrigin){reply(403,{error:{code:'origin_required',requestId}});return;}
-      res.setHeader('Access-Control-Allow-Methods','GET, HEAD, POST, PUT, DELETE');res.setHeader('Access-Control-Allow-Headers','Content-Type');reply(204,null);return;
+    if (req.headers.origin === config.webOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', config.webOrigin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
     }
-    if(isPrivateRoute(privatePath)&&privateRead){
-      try{const url=new URL(req.url!,'http://localhost');reply(200,await privateRead(req,res,url));}
-      catch(e){if(!(e instanceof ReadError)||e.status>=500)logFailure(requestId,'private',e);reply(e instanceof ReadError?e.status:503,{error:{code:e instanceof ReadError?e.code:'private_service_unavailable',requestId}});}return;
+    const reply = (status: number, body: unknown) => {
+      res.writeHead(status);
+      res.end(JSON.stringify(body));
+    };
+    const client = clientAddress(req, config.trustedProxyHops, proxies);
+    const now = Date.now();
+    if (!withinLimit(limits, client, REQUESTS_PER_WINDOW, now)) {
+      res.setHeader('Retry-After', '60');
+      reply(429, { error: { code: 'rate_limited', requestId } });
+      return;
+    }
+    if ((req.url?.length ?? 0) > 8192) {
+      reply(400, { error: { code: 'invalid_url', requestId } });
+      return;
+    }
+    let privatePath: string;
+    try {
+      privatePath = new URL(req.url ?? '/', 'http://localhost').pathname;
+    } catch {
+      reply(400, { error: { code: 'invalid_url', requestId } });
+      return;
+    }
+    if (privatePath === '/v1/auth/challenge' && !withinLimit(challengeLimits, challengeKey(client), CHALLENGES_PER_WINDOW, now)) {
+      reply(429, { error: { code: 'challenge_rate_limited', requestId } });
+      return;
+    }
+    if (req.method === 'OPTIONS' && isPrivateRoute(privatePath)) {
+      if (req.headers.origin !== config.webOrigin) {
+        reply(403, { error: { code: 'origin_required', requestId } });
+        return;
+      }
+      res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, DELETE');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      reply(204, null);
+      return;
+    }
+    if (isPrivateRoute(privatePath) && privateRead) {
+      try {
+        const url = new URL(req.url!, 'http://localhost');
+        reply(200, await privateRead(req, res, url));
+      } catch (e) {
+        if (!(e instanceof ReadError) || e.status >= 500) logFailure(requestId, 'private', e);
+        reply(e instanceof ReadError ? e.status : 503, { error: { code: e instanceof ReadError ? e.code : 'private_service_unavailable', requestId } });
+      }
+      return;
     }
     if (!['GET', 'HEAD'].includes(req.method ?? '')) {
       res.setHeader('Allow', 'GET, HEAD');
-      reply(405, { error: { code: 'method_not_allowed', requestId } }); return;
+      reply(405, { error: { code: 'method_not_allowed', requestId } });
+      return;
     }
     let path: string;
     let url: URL;
-    try { if ((req.url?.length ?? 0) > 8192) throw new Error(); url = new URL(req.url ?? '/', 'http://localhost'); path = url.pathname; }
-    catch { reply(400, { error: { code: 'invalid_url', requestId } }); return; }
-    if (path === '/health/live') { reply(200, { status: 'ok' }); return; }
-    if (path === '/v1/config') { reply(200, publicConfig(config)); return; }
+    try {
+      if ((req.url?.length ?? 0) > 8192) throw new Error();
+      url = new URL(req.url ?? '/', 'http://localhost');
+      path = url.pathname;
+    } catch {
+      reply(400, { error: { code: 'invalid_url', requestId } });
+      return;
+    }
+    if (path === '/health/live') {
+      reply(200, { status: 'ok' });
+      return;
+    }
+    if (path === '/v1/config') {
+      reply(200, publicConfig(config));
+      return;
+    }
     if (path === '/v1/indexer/status') {
-      try { reply(200, await indexerStatus()); }
-      catch (error) { logFailure(requestId, 'indexer_status', error); reply(503, { error: { code: 'indexer_status_unavailable', requestId } }); }
+      try {
+        reply(200, await indexerStatus());
+      } catch (error) {
+        logFailure(requestId, 'indexer_status', error);
+        reply(503, { error: { code: 'indexer_status_unavailable', requestId } });
+      }
       return;
     }
     if (path === '/health/ready') {
       try {
         await ready();
-        reply(200, { status: 'ready', checks: { database: 'ok', schema: 'current' }, deploymentConfigured: config.deployment !== null, scope: 'foundation', indexing: config.deployment ? 'see_indexer_status' : 'deployment_not_configured' });
-      } catch (error) { logFailure(requestId, 'ready', error); reply(503, { status: 'not_ready', error: { code: 'database_or_configuration_unavailable', requestId } }); }
+        reply(200, {
+          status: 'ready',
+          checks: { database: 'ok', schema: 'current' },
+          deploymentConfigured: config.deployment !== null,
+          scope: 'foundation',
+          indexing: config.deployment ? 'see_indexer_status' : 'deployment_not_configured',
+        });
+      } catch (error) {
+        logFailure(requestId, 'ready', error);
+        reply(503, { status: 'not_ready', error: { code: 'database_or_configuration_unavailable', requestId } });
+      }
       return;
     }
     if (isReadRoute(path)) {
@@ -119,7 +198,9 @@ export function createApp(config: Config, ready: () => Promise<void>, indexerSta
         reply(200, await read(url));
       } catch (error) {
         if (!(error instanceof ReadError) || error.status >= 500) logFailure(requestId, 'read', error);
-        reply(error instanceof ReadError ? error.status : 503, { error: { code: error instanceof ReadError ? error.code : 'read_api_unavailable', requestId } });
+        reply(error instanceof ReadError ? error.status : 503, {
+          error: { code: error instanceof ReadError ? error.code : 'read_api_unavailable', requestId },
+        });
       }
       return;
     }

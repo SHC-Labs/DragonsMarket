@@ -3,7 +3,7 @@ import type { Network } from "./config";
 // Bump the relevant version whenever the published document changes materially.
 export const LEGAL_DOCUMENTS = {
   terms: { version: "2026-10-19.3", href: "/terms", label: "Terms of Use" },
-  privacy: { version: "2026-10-19.3", href: "/privacy", label: "Privacy Policy" },
+  privacy: { version: "2026-10-29.1", href: "/privacy", label: "Privacy Policy" },
 } as const;
 
 export interface LegalAcceptance {

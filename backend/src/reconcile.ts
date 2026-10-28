@@ -17,7 +17,14 @@ async function pendingOut(view: View, role: 'market' | 'rounds' | 'oracle', rece
     role === 'market' ? ['in_flight', 'withdrawals'] : role === 'rounds' ? ['owed_breakdown', 'pending_withdrawals'] : ['bond_totals', 'pending_payouts'];
   const result = await view(receiver, method!, {});
   if (!object(result)) throw new Error('invalid_in_flight');
-  return amount(result[field!]);
+  let out = amount(result[field!]);
+  if (role === 'market') {
+    // A fee leg whose result was lost stays in total_owed, but the Council may already hold the money.
+    const owed = await view(receiver, 'owed_breakdown', {});
+    if (!object(owed)) throw new Error('invalid_in_flight');
+    out += amount(owed.unresolved);
+  }
+  return out;
 }
 export async function reconcile(config: Config, rpc: Pick<ReadRpcClient, 'call'>) {
   if (!config.deployment) throw new Error('deployment_not_configured');

@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Funnel_Display, IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 import "./globals.css";
 import { WalletProvider } from "@/components/WalletProvider";
+import { WatchlistProvider } from "@/components/WatchlistProvider";
 import { color } from "@/lib/tokens";
 import { Header } from "@/components/Header";
 import { SmoothScroll } from "@/components/SmoothScroll";
@@ -30,12 +31,14 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body>
         <a href="#main-content" className="skip-link">Skip to content</a>
         <WalletProvider>
-          <SmoothScroll />
-          <div className="app-frame">
-            <Header />
-            <main id="main-content" tabIndex={-1} className="app-main">{children}</main>
-            <Footer />
-          </div>
+          <WatchlistProvider>
+            <SmoothScroll />
+            <div className="app-frame">
+              <Header />
+              <main id="main-content" tabIndex={-1} className="app-main">{children}</main>
+              <Footer />
+            </div>
+          </WatchlistProvider>
         </WalletProvider>
       </body>
     </html>

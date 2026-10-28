@@ -124,7 +124,7 @@ export function ingestBlock(state, block) {
   state.cursor={height:String(h.height),hash:h.hash};return true;
 }
 // Read bounded complete JSONL records. A partial trailing line is retried next run.
-export function ingestFile(state, file, finalHeight, maxBytes=1_048_576, maxBlocks=32) {
+export function ingestFile(state, file, finalHeight, maxBytes=8_388_608, maxBlocks=32) {
   if(!file)return 0;
   const fd=fs.openSync(file,'r');let count=0;
   try{

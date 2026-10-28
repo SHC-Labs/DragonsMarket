@@ -202,6 +202,14 @@ Source normalization is in `src/ingestion/neardata.ts`; verification persistence
 
 Contracts are **not deployed** and their trading interfaces are still being finalized. Keep deployment fields empty. The following commands provide tested infrastructure; they do not enable financial execution.
 
+### Round price publisher
+
+`src/round-publisher.ts` (a `publisher` Compose service in the `publishing` profile) signs the start price of each round of every rounds series it can price: assets named `btc-usd`, `eth-usd` or `near-usd`, with the first start and interval on five-minute boundaries. For a round whose moment has settled (20 seconds after the boundary, up to 30 seconds before its price window closes) it reads the closed one-minute USD candle ending at the boundary from Coinbase, Kraken and Bitstamp, keeps every response as evidence, takes the median at the series' decimals only if all three answer and agree within the spread, so that every publisher signs the same price, and signs `round-price:v1:<rounds>:<network>:<asset>:<moment ns>:<price>:<decimals>`. It records the decision before signing, so a second, different price for a signed round is refused even after a restart. An unsigned reservation (a crash between the two steps) is replaced.
+
+It refuses to start unless `PUBLISH_ROUND_PRICES=approved` and `PRICE_MAX_DEVIATION_BPS` are set (the source rules are the owner's decision, so there is no default spread), the key file is readable only by its owner, and its key is a publisher on the rounds contract. `GET /v1/price-signatures?seriesId=N&round=R` serves the signatures it holds, each with the message it signed. Signed decisions are write-once in the database (migration 010), and the publisher has a login of its own (`dm_publisher_login`) that no other service shares.
+
+Recording is open to anyone: `node contracts/keeper/round-prices.mjs run --rpc URL --rounds ID --account ID --publishers URL,URL --key-file PATH` fetches the entries from each publisher's backend, keeps only signatures from keys the contract lists over one agreed price, and calls `record_price` when at least `price_threshold` agree (`--dry-run` only reports). A test deploys the unchanged rounds WASM in a sandbox and shows it accepts a price signed by this publisher key and rejects the same signature over another price.
+
 ### Running against mainnet
 
 Nothing runs until the contracts are deployed. When they are:

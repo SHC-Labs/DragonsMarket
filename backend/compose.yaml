@@ -34,6 +34,7 @@ services:
       API_DB_PASSWORD: ${API_DB_PASSWORD:-dragons_api_local_only}
       INDEXER_DB_PASSWORD: ${INDEXER_DB_PASSWORD:-dragons_indexer_local_only}
       WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:-dragons_worker_local_only}
+      PUBLISHER_DB_PASSWORD: ${PUBLISHER_DB_PASSWORD:-dragons_publisher_local_only}
     volumes:
       - ./ops/roles.sql:/roles.sql:ro
       - ./ops/login-roles.sh:/login-roles.sh:ro
@@ -130,6 +131,24 @@ services:
       <<: *backend_environment
       DATABASE_URL: postgresql://dm_worker_login:${WORKER_DB_PASSWORD:-dragons_worker_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
     command: [node, dist/src/verify-chain.js, --follow]
+    depends_on:
+      roles:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  publisher:
+    build: .
+    profiles: [publishing]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    environment:
+      <<: *backend_environment
+      DATABASE_URL: postgresql://dm_publisher_login:${PUBLISHER_DB_PASSWORD:-dragons_publisher_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
+      PUBLISHER_KEY_FILE: /run/secrets/publisher_key
+      PUBLISH_ROUND_PRICES: ${PUBLISH_ROUND_PRICES:-}
+      PRICE_MAX_DEVIATION_BPS: ${PRICE_MAX_DEVIATION_BPS:-}
+    command: [node, dist/src/round-publisher.js]
+    volumes:
+      - ./.local/publisher.key:/run/secrets/publisher_key:ro
     depends_on:
       roles:
         condition: service_completed_successfully

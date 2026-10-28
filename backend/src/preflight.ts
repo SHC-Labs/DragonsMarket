@@ -22,6 +22,7 @@ const MAX_SOURCE_LAG_BLOCKS = 100n;
 // What the follower manages against live mainnet (about 2.5 blocks a second); only used to warn about a long catch-up.
 const CATCH_UP_BLOCKS_PER_SECOND = 2.5;
 const LONG_CATCH_UP_HOURS = 24;
+const FIVE_MINUTES_NS = 300n * 10n ** 9n;
 const EMPTY_CODE_HASH = '11111111111111111111111111111111';
 const ROLES: readonly ContractRole[] = ['market', 'rounds', 'oracle', 'council', 'verifier'];
 
@@ -84,8 +85,53 @@ async function checkLinks(config: Config, view: View): Promise<Check[]> {
     if (object(council) && c.market && !(Array.isArray(council.markets) && council.markets.includes(c.market)))
       checks.push(fail('link:council-allowlist', `council does not allow market ${c.market}`));
   }
+  if (c.market && c.council) {
+    const market = await view(c.market, 'config', {});
+    if (object(market) && market.revenue_pool !== c.council)
+      checks.push(fail('link:fee-destination', `market sends the Council's share of fees to ${String(market.revenue_pool)}, configured Council ${c.council}`));
+  }
+  if (c.council) {
+    const council = await view(c.council, 'config', {});
+    if (object(council) && !council.nft_contract) checks.push(fail('link:council-nft', 'the Council has no NFT contract set, so nobody can stake a seat'));
+  }
   if (!c.market && !c.council) return [warn('links', 'not checked: no market or Council configured')];
   return checks.length ? checks : [ok('links', 'oracle, Council and market name each other')];
+}
+
+// What the price publisher needs from the rounds contract: enough publishers for the threshold, a threshold that no two
+// quorums can both reach, and at least one series it can price.
+async function checkRounds(view: View, account: string, network: Config['network']): Promise<Check[]> {
+  const settings = await view(account, 'config', {});
+  if (!object(settings) || !Array.isArray(settings.publishers) || typeof settings.price_threshold !== 'number' || !Number.isInteger(settings.series))
+    return [fail('rounds', 'config view did not return publishers, a threshold and a series count')];
+  const checks: Check[] = [];
+  const publishers = settings.publishers.length;
+  if (publishers < settings.price_threshold)
+    checks.push(fail('rounds:publishers', `${publishers} publishers is fewer than the threshold ${settings.price_threshold}`));
+  else if (2 * settings.price_threshold <= publishers)
+    checks.push(
+      warn('rounds:threshold', `threshold ${settings.price_threshold} of ${publishers} lets two different prices both reach quorum; it should be a majority`),
+    );
+  if (network === 'mainnet' && settings.network !== 'mainnet')
+    checks.push(fail('rounds:network', `the contract signs for network "${String(settings.network)}", not mainnet`));
+  let priceable = 0;
+  for (let id = 0; id < (settings.series as number); id++) {
+    const series = await view(account, 'get_series', { series_id: id });
+    if (
+      object(series) &&
+      typeof series.asset === 'string' &&
+      /^(btc|eth|near)-usd$/.test(series.asset) &&
+      BigInt(String(series.first_start)) % FIVE_MINUTES_NS === 0n &&
+      BigInt(String(series.interval)) % FIVE_MINUTES_NS === 0n
+    )
+      priceable++;
+  }
+  checks.push(
+    priceable > 0
+      ? ok('rounds:series', `${priceable} of ${String(settings.series)} series can be priced`)
+      : warn('rounds:series', 'no series the publisher can price (btc-usd, eth-usd or near-usd on five-minute boundaries)'),
+  );
+  return checks.length ? checks : [ok('rounds', `${publishers} publishers, threshold ${settings.price_threshold}`)];
 }
 
 /** Everything a real run depends on, read from the live chain, the source and the database. Nothing is written. */
@@ -136,6 +182,11 @@ export async function runPreflight(config: Config, rpc: Rpc, pool: pg.Pool, sour
     })),
   );
 
+  if (d.contracts.rounds) {
+    const roundsAccount = d.contracts.rounds;
+    checks.push(...(await attempt('rounds', () => checkRounds(view, roundsAccount, config.network))));
+  }
+
   checks.push(
     ...(await attempt('database', async () => {
       await verifyDatabase(pool, config);
@@ -147,6 +198,19 @@ export async function runPreflight(config: Config, rpc: Rpc, pool: pg.Pool, sour
     })),
   );
 
+  if (source) {
+    checks.push(
+      ...(await attempt('start-block-readable', async () => {
+        const block = await source.document(`/v0/block/${d.startBlock}`);
+        return block === null
+          ? fail(
+              'start-block-readable',
+              `block ${d.startBlock} was skipped by the chain; the follower cannot start on a skipped height, pick the next produced block`,
+            )
+          : ok('start-block-readable', `block ${d.startBlock} can be read from NEAR Data`);
+      })),
+    );
+  }
   const startGap = BigInt(finalized.height) - BigInt(d.startBlock);
   if (startGap < 0n) checks.push(fail('start-block', `start block ${d.startBlock} is ahead of the head ${finalized.height}`));
   else {

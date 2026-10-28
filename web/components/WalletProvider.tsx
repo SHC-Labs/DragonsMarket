@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { NearConnector } from "@hot-labs/near-connect";
 import { usePathname } from "next/navigation";
 import { config } from "@/lib/config";
+import { backendEnabled, currentSession, signIn, signOut } from "@/lib/backend";
 import type { FunctionCall } from "@/lib/market";
 import { createLegalAcceptance, legalAcceptanceKey, parseLegalAcceptance, readLegalAcceptance, saveLegalAcceptance } from "@/lib/legal";
 import { TermsAcceptanceDialog } from "./TermsAcceptanceDialog";
@@ -15,6 +16,9 @@ interface WalletState {
   walletAvailable: boolean;
   openConnect: () => void;
   disconnect: () => void;
+  // The account the backend knows this browser as, or null. Signing in asks the wallet to sign one message and moves no money.
+  backendAccount: string | null;
+  signInToBackend: () => Promise<void>;
   send: (call: FunctionCall) => Promise<string>;
 }
 
@@ -23,6 +27,8 @@ const Ctx = createContext<WalletState>({
   walletAvailable: false,
   openConnect: () => {},
   disconnect: () => {},
+  backendAccount: null,
+  signInToBackend: () => Promise.reject(new Error("wallet not ready")),
   send: () => Promise.reject(new Error("wallet not ready")),
 });
 
@@ -56,6 +62,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const readingPolicy = /^\/(privacy|terms)(\/|$)/.test(pathname);
   const connector = useRef<NearConnector | null>(null);
   const [walletAccount, setAccount] = useState<string | null>(null);
+  const [sessionFor, setSessionFor] = useState<string | null>(null);
   const walletAvailable = config.network !== "sandbox";
   const devAccount = useSyncExternalStore(noSubscription, walletAvailable ? nobody : readDevAccount, nobody);
   const acceptanceRaw = useSyncExternalStore(subscribeToLegalAcceptance, () => {
@@ -64,19 +71,26 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, nobody);
   const accepted = walletAccount ? parseLegalAcceptance(acceptanceRaw, walletAccount, config.network) !== null : false;
   const account = walletAvailable ? (accepted ? walletAccount : null) : devAccount;
+  // A session only counts for the account that is connected right now.
+  const backendAccount = account !== null && sessionFor === account ? account : null;
 
   useEffect(() => {
     if (!walletAvailable) return;
     let live = true;
     let c: NearConnector | null = null;
     const onIn = (p: { accounts: { accountId: string }[] }) => live && setAccount(p.accounts[0]?.accountId ?? null);
-    const onOut = () => live && setAccount(null);
+    const onOut = () => {
+      if (!live) return;
+      setAccount(null);
+      setSessionFor(null);
+      void signOut();
+    };
 
     import("@hot-labs/near-connect").then(async ({ NearConnector }) => {
       if (!live) return;
       c = new NearConnector({
         network: config.network === "mainnet" ? "mainnet" : "testnet",
-        features: { signAndSendTransaction: true },
+        features: { signAndSendTransaction: true, ...(backendEnabled() ? { signMessage: true } : {}) },
       });
       connector.current = c;
       c.on("wallet:signIn", onIn);
@@ -96,6 +110,14 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     };
   }, [walletAvailable]);
 
+  // A session left from an earlier visit counts only if it belongs to the account that is connected now.
+  useEffect(() => {
+    let live = true;
+    if (!backendEnabled() || !walletAvailable || !account) return;
+    currentSession().then(session => live && setSessionFor(session)).catch(() => live && setSessionFor(null));
+    return () => { live = false; };
+  }, [account, walletAvailable]);
+
   const openConnect = useCallback(() => {
     connector.current?.connect().catch(() => {
       // the person closed the wallet dialog
@@ -104,6 +126,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   const disconnect = useCallback(() => {
     setAccount(null);
+    setSessionFor(null);
+    void signOut();
     connector.current?.disconnect().catch(() => {});
   }, []);
 
@@ -112,6 +136,15 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     saveLegalAcceptance(window.localStorage, createLegalAcceptance(walletAccount, config.network));
     window.dispatchEvent(new Event("legal-acceptance-change"));
   };
+
+  const signInToBackend = useCallback(async () => {
+    const c = connector.current;
+    if (!c || !account) throw new Error("Connect a wallet first.");
+    const wallet = await c.wallet();
+    await signIn(account, ({ message, recipient, nonce }) =>
+      wallet.signMessage({ message, recipient, nonce, signerId: account, network: config.network === "mainnet" ? "mainnet" : "testnet" }));
+    setSessionFor(account);
+  }, [account]);
 
   const send = useCallback(async (call: FunctionCall) => {
     const c = connector.current;
@@ -134,8 +167,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, [walletAccount]);
 
   const value = useMemo(
-    () => ({ account, walletAvailable, openConnect, disconnect, send }),
-    [account, walletAvailable, openConnect, disconnect, send],
+    () => ({ account, walletAvailable, openConnect, disconnect, backendAccount, signInToBackend, send }),
+    [account, walletAvailable, openConnect, disconnect, backendAccount, signInToBackend, send],
   );
   return <Ctx.Provider value={value}>{children}{!readingPolicy && walletAvailable && walletAccount && !accepted && <TermsAcceptanceDialog key={walletAccount} account={walletAccount} onAccept={acceptPolicies} onDismiss={disconnect} />}</Ctx.Provider>;
 }

@@ -2,28 +2,17 @@ import { createHash, randomBytes, randomUUID, createPublicKey, verify } from 'no
 import type pg from 'pg';
 import type { Config } from './config.js';
 import { isAccount as account } from './validate.js';
+import { base58Decode } from './base58.js';
 // Challenges live five minutes, so this bounds the table however many addresses a client rotates through.
-const MAX_PENDING_CHALLENGES = 20000;
+const MAX_PENDING_CHALLENGES = 100000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const isUuid = (s: string) => UUID.test(s);
 export const tokenHash = (s: string) => createHash('sha256').update(s).digest('hex');
-const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 export function decodeKey(s: string) {
   if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s)) throw new Error('invalid_public_key');
-  let value = 0n;
-  const encoded = s.slice(8);
-  for (const c of encoded) value = value * 58n + BigInt(alphabet.indexOf(c));
-  const bytes: number[] = [];
-  while (value) {
-    bytes.unshift(Number(value & 255n));
-    value >>= 8n;
-  }
-  for (const c of encoded) {
-    if (c !== '1') break;
-    bytes.unshift(0);
-  }
+  const bytes = base58Decode(s.slice(8));
   if (bytes.length !== 32) throw new Error('invalid_public_key');
-  return Buffer.from(bytes);
+  return bytes;
 }
 export function messageHash(message: string, nonce: string, recipient: string, callbackUrl?: string) {
   const str = (s: string) => {
@@ -69,7 +58,10 @@ export async function login(pool: pg.Pool, config: Config, id: string, publicKey
   if (!row || row.origin !== config.webOrigin || row.network !== config.network || row.browser_hash !== tokenHash(browser)) throw new Error('invalid_login');
   const key = createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), decodeKey(publicKey)]), format: 'der', type: 'spki' });
   // A definitive rejection spends the challenge, so one challenge cannot be replayed against the RPC. A failing RPC is not a rejection and leaves it usable.
-  const signed = verify(null, messageHash(row.message, row.nonce, row.origin, row.origin), key, Buffer.from(signature, 'base64'));
+  // NEP-413 lets the payload carry a callback URL or not, and some wallet connectors cannot add one. Both forms bind the same
+  // message (account, origin, challenge id, expiry), so a signature over either one proves the same thing.
+  const bytes = Buffer.from(signature, 'base64');
+  const signed = [row.origin, undefined].some(callbackUrl => verify(null, messageHash(row.message, row.nonce, row.origin, callbackUrl), key, bytes));
   if (!signed || !(await checkKey(row.account_id, publicKey))) {
     await pool.query('UPDATE wallet_challenges SET consumed_at=now() WHERE id=$1 AND consumed_at IS NULL', [id]);
     throw new Error('invalid_login');
