@@ -95,9 +95,9 @@ test('unchanged rounds WASM -> actual finalized success/failure receipts -> Post
     assert.equal(state.fee_bps, 700);
     assert.equal(state.paused, true);
     assert.deepEqual(rows.filter(r => r.event === 'fee_set').map(r => r.payload.fee_bps).sort((a, b) => a - b), [450, 700]);
-    const status = await ingestionStatus(pool, config) as any;
-    assert.equal(status.checkpoint.height, capture.endBlock);
-    assert.equal(status.source.mode, 'local_capture');
+    const status = await ingestionStatus(pool, config);
+    assert.equal(status.checkpoint?.height, capture.endBlock);
+    assert.equal(status.source?.mode, 'local_capture');
     assert.equal(status.live, false);
     assert.equal(Number(status.blocksCommitted), capture.blocks);
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM indexed_blocks')).rows[0].n, capture.blocks);

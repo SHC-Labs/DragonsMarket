@@ -24,7 +24,7 @@ test('role template limits API/indexer authority; provisioning test roles roll b
   await client.query(`SET LOCAL ROLE ${names[0]}`);
   await client.query('SELECT * FROM raw_events');
   await client.query('SAVEPOINT denied_api');
-  await assert.rejects(client.query("INSERT INTO signing_decisions(deployment_id,publisher_key,boundary_key,payload,payload_hash) VALUES('roles','key','boundary','payload','hash')"),(e:unknown)=>(e as {code:string}).code==='42501');
+  await assert.rejects(client.query("INSERT INTO reconciliation_reports(deployment_id,block_hash,report,solvent) VALUES('roles','hash','{}',true)"),(e:unknown)=>(e as {code:string}).code==='42501');
   await client.query('ROLLBACK TO SAVEPOINT denied_api');await client.query('RESET ROLE');
   await client.query('ROLLBACK');
   assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_roles WHERE rolname=ANY($1)',[names])).rows[0].n,0);

@@ -9,6 +9,7 @@ import { NeardataReader, normalizeNeardata } from './neardata.js';
 import { LiveNeardataSource } from './live-source.js';
 import { ingest } from './engine.js';
 import { ReadRpcClient } from '../providers.js';
+import { LOCK } from '../locks.js';
 
 // Outages that end by themselves. A database restart or a slow source must not end the follower; everything else needs a person.
 const RETRYABLE_CODES = ['neardata_unavailable', 'neardata_rate_limited', 'neardata_request_budget', 'source_or_database_unavailable', 'database_or_worker_error', 'database_connection_lost'];
@@ -35,7 +36,7 @@ export async function follow(pool: pg.Pool, config: Config, signal: AbortSignal)
   let acquired = false, lost=false;
   const disconnected=()=>{lost=true;};lock.on('error',disconnected);
   try {
-    acquired = (await lock.query('SELECT pg_try_advisory_lock(704346943,hashtext($1)) AS ok',[config.deployment.id])).rows[0].ok;
+    acquired = (await lock.query(`SELECT pg_try_advisory_lock(${LOCK.follow},hashtext($1)) AS ok`,[config.deployment.id])).rows[0].ok;
     if (!acquired) throw new IngestionError('follower_already_running');
     const rpc = new ReadRpcClient(config.rpc.primaryUrl, config.rpc, config.rpc.primaryBearerToken);
     const status = await rpc.call('status', {}) as { chain_id?: string };
@@ -61,7 +62,7 @@ export async function follow(pool: pg.Pool, config: Config, signal: AbortSignal)
       await sleep(Math.min(60000, failures ? 1000*2**Math.min(failures,6) : 200), undefined, { signal }).catch(() => {});
     }
   } finally {
-    if (acquired) await lock.query('SELECT pg_advisory_unlock(704346943,hashtext($1))',[config.deployment.id]).catch(() => {});
+    if (acquired) await lock.query(`SELECT pg_advisory_unlock(${LOCK.follow},hashtext($1))`,[config.deployment.id]).catch(() => {});
     lock.removeListener('error',disconnected);lock.release(lost);
   }
 }

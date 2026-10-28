@@ -11,6 +11,7 @@ import { verifyDatabase } from '../src/database.js';
 import { registerDeployment, ingestionStatus } from '../src/ingestion/store.js';
 import { ingest } from '../src/ingestion/engine.js';
 import { FixtureSource, type BlockSource } from '../src/ingestion/source.js';
+import { checkChain } from '../src/verify-chain.js';
 
 async function setup(work: (pool: pg.Pool, root: string, read: ReturnType<typeof createReadApi>) => Promise<void>) {
   const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -123,7 +124,7 @@ test('invalid input is rejected, SQL failures are sanitized and unconfigured dep
   }
   const config = readConfig({ DATABASE_URL: process.env.TEST_DATABASE_URL! });
   const unconfigured = createReadApi(pool, config);
-  assert.deepEqual((await unconfigured(new URL('http://localhost/v1/deployments')) as any).data, []);
+  assert.deepEqual((await unconfigured(new URL('http://localhost/v1/deployments')) as { data: unknown[] }).data, []);
   await assert.rejects(unconfigured(new URL('http://localhost/v1/events')), /deployment_not_configured/);
   await pool.query('ALTER TABLE raw_events RENAME TO private_secret_table');
   const response = await fetch(root + '/v1/events');
@@ -139,11 +140,45 @@ test('receipt migration backfills existing journals without changing block check
   await pool.query('DROP TRIGGER deployments_immutable ON deployments');
   await pool.query('DROP FUNCTION refuse_deployment_change()');
   await pool.query('DROP TABLE indexed_receipts');
-  await pool.query('DROP TABLE source_heads,feed_exports,backend_jobs,user_operations,price_evidence,signing_decisions,reconciliation_reports,wallet_challenges,wallet_sessions,wallet_watchlist,policy_acknowledgements');
+  await pool.query('DROP TABLE chain_integrity_reports,source_heads,feed_exports,backend_jobs,user_operations,price_evidence,signing_decisions,reconciliation_reports,wallet_challenges,wallet_sessions,wallet_watchlist,policy_acknowledgements');
   await pool.query('DROP INDEX raw_events_read_page');
   await pool.query("DELETE FROM schema_migrations WHERE version >= '004_receipt_reads.sql'");
-  assert.equal(await migrate(pool), 5);
+  assert.equal(await migrate(pool), 6);
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM indexed_receipts')).rows[0].n, 3);
   assert.deepEqual((await pool.query('SELECT * FROM indexer_checkpoints')).rows, before);
-  assert.equal((await migrationFiles()).length, 8);
+  assert.equal((await migrationFiles()).length, 9);
+}));
+
+test('pending settlements: requests stay listed until their own terminal event lands', async () => setup(async (pool, root) => {
+  let n = 0;
+  const add = (standard: string, event: string, block: number, payload: object, receiver = `${standard}.fixture.near`) => pool.query(
+    `INSERT INTO raw_events (network, receipt_id, log_index, data_index, deployment_id, receiver_id, block_height, block_hash, block_timestamp_ns, standard, version, event, raw_log, payload)
+     VALUES ('sandbox', $1, 0, 0, 'reads', $2, $3, 'h', $3, $4, '1.0.0', $5, 'EVENT_JSON:{}', $6)`, [`r${++n}`.padEnd(32, 'x'), receiver, block, standard, event, JSON.stringify(payload)]);
+  await add('market', 'withdraw', 101, { id: '1', account: 'a.near', amount: '5' });
+  await add('market', 'withdraw', 101, { id: '2', account: 'b.near', amount: '7' });
+  await add('market', 'withdraw_confirmed', 102, { id: '1', account: 'a.near', amount: '5' });
+  const claim = { quarter: 3, token_id: '9', owner: 'c.near', amount: '4' };
+  await add('council', 'claim_requested', 101, claim);
+  await add('council', 'claim_failed', 102, claim);
+  await add('council', 'claim_requested', 103, claim);
+  const pending = await get(root, '/v1/settlements/pending');
+  assert.deepEqual(pending.data.map((r: any) => [r.kind, r.event, r.payload.id ?? r.payload.token_id]), [['withdrawal', 'withdraw', '2'], ['claim', 'claim_requested', '9']]);
+  assert.equal(pending.data[1].block_height, '103', 'a retried claim is pending again after an earlier failure');
+  assert.equal(pending.truncated, false);
+  const events = await get(root, '/v1/events?standard=market');
+  assert.deepEqual(events.data.map((e: any) => e.settlement), [{ kind: 'withdrawal', phase: 'request' }, { kind: 'withdrawal', phase: 'request' }, { kind: 'withdrawal', phase: 'terminal' }]);
+  assert.match(events.note, /not settlement/);
+  assert.equal((await fetch(root + '/v1/settlements/pending?cursor=x')).status, 400);
+}));
+
+test('chain integrity check passes on a clean history and names what tampering broke', async () => setup(async (pool) => {
+  const config = readConfig({ DATABASE_URL: process.env.TEST_DATABASE_URL, DEPLOYMENT_ID: 'reads', DEPLOYMENT_START_BLOCK: '100', ROUNDS_CONTRACT_ID: 'rounds.fixture.near', VERIFIER_CONTRACT_ID: 'verifier.fixture.near', COLLATERAL_TOKEN_ID: 'nep141:usdc.fixture.near' });
+  const clean = await checkChain(pool, config);
+  assert.equal(clean.ok, true, JSON.stringify(clean));
+  assert.equal(clean.lastHeight, '103');
+  await pool.query("UPDATE indexed_blocks SET prev_hash = 'tampered' WHERE block_height = 101");
+  await pool.query('DELETE FROM raw_events WHERE ctid IN (SELECT ctid FROM raw_events LIMIT 1)');
+  const broken = await checkChain(pool, config);
+  assert.equal(broken.ok, false);
+  assert.deepEqual(broken.problems.sort(), ['broken_parent_links', 'event_count_mismatch']);
 }));

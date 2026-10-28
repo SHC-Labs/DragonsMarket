@@ -220,14 +220,6 @@ All configured receivers, including the verifier, retain receipt outcomes and av
 
 The feed exporter writes committed JSONL under `backend/.local/feeds`, syncing bytes before acknowledging their offset in PostgreSQL. On restart it compares unacknowledged bytes against the committed journal, completing a matching partial line or acknowledging an already-complete append without duplicating it. Truncation, changed content and missing checkpoint evidence fail visibly. It checks the last acknowledged line; archive integrity still belongs in backup verification. Symlink destinations are refused. A stable relative-path lock coordinates host/container exporters sharing the same database and feed mount. Do not edit feed files manually or share a destination across unrelated databases. The existing contract-team keeper consumes this file through its `--events-file` option. Starting its signing process and giving it restricted operational keys is a separate deployment step.
 
-### Jobs, operations and publishers
-
-`src/services.ts` implements idempotent jobs, deadline checks, transactional leases, ownership tokens and bounded retries. Expired leases or unknown send outcomes enter reconciliation rather than being automatically resent. An old worker cannot finish an expired/reassigned lease. The queue has no activated financial handlers. `boundaries()` computes the independent UTC interval from its immutable origin and period.
-
-Operation records preserve account/deployment ownership, request hashes and transitions from preparation through signature/submission/confirmation or uncertainty. A confirmation needs evidence. This module is internal; the public API cannot submit arbitrary actions or mark a payment complete. It still needs the actual Intents/contract callbacks to establish what a terminal result means.
-
-`src/publisher.ts` creates the current documented `round-price:v1` payload and raw Ed25519 signature entry. It reserves one payload per publisher/contract/network/asset/boundary before signing, persists the signature, and refuses equivocation across retries. It requires explicit approval and a matching deployment. There is no enabled key-loading or price-submission worker. The serialization is checked against current contract source; an actual contract submission remains a release gate once the interface and source policy are approved.
-
 ### BTC, ETH and NEAR observations
 
 ```sh
@@ -246,14 +238,6 @@ The keyed adapter returned all three assets successfully on 2026-10-27. The keyl
 Raw evidence, response hash, source/retrieval time, quote, boundary and quality reason are persisted. Large decimal prices stay exact strings and scale with BigInt, with explicit refusal when required rounding is unspecified. The collector stores source observations; it does not write a price to a contract. In follow mode it runs at five-minute boundaries and shuts down on SIGTERM/SIGINT.
 
 USD, USDC and USDT are not interchangeable. USDT is not requested. Multiple Binance hosts are one provider. Current Binance-USDC boundary data plus CoinGecko/CoinMarketCap-USD latest data cannot form an exact independent quorum; the candidate validator rejects it. Approval of semantics, additional sources or another explicit policy, quorum/deviation/precision and missing-data handling is still required. [Binance docs](https://developers.binance.com/en/docs/products/spot/rest-api), [CoinGecko docs](https://docs.coingecko.com/reference/simple-price).
-
-### NEAR and native-USDC funding preparation
-
-`src/funding.ts` contains an internal unsigned deposit planner for NEAR wallets. It pins `wrap.near` and Circle's native NEAR USDC contract, verifies token metadata and Intents token-storage registration, checks USDC balance, and adds sender storage registration/wrapping when required for NEAR. All read checks can be pinned to one finalized mainnet block through `fundingViews()`.
-
-The beneficiary is always the authenticated account supplied by the server; the planner has no arbitrary recipient input. Its simple `ft_transfer_call` deposits into that user's own Intents ledger balance. This does not fund a Dragons Market contract or create a prediction position. Plans are unsigned and carry `executionEnabled: false`; there is no public execution/relayer endpoint. Successful wrapping alone is not a completed deposit. Wallet signing, actual transfer/refund/credit evidence and funded tests remain pending.
-
-Addresses and action structure were checked against [Intents deposits](https://docs.near-intents.org/integration/verifier-contract/deposits-and-withdrawals/deposits), [NEAR wrapping](https://docs.near-intents.org/integration/verifier-contract/deposits-and-withdrawals/near-token) and [Circle's native-USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses). The optional 1Click token registry returned HTTP 403 from this environment, so no claim is made that its routes were verified. The direct planner uses the documented native token identities and still verifies on-chain metadata before use. A read-only mainnet check confirmed wNEAR (24 decimals), native USDC (6 decimals), and Intents registration for both at finalized block hash `7SwtUi4ZZR99SkaYqnNZZiDErzC4hEm9QDXuER6qP1Gt`; no transaction was prepared or sent.
 
 ### NEAR wallet sessions and private records
 
@@ -291,6 +275,12 @@ Reconciliation reads current contract liabilities and verifier holdings at one f
 Reconciliation subtracts what a contract has already sent out but not yet booked (market `in_flight().withdrawals`, rounds `owed_breakdown().pending_withdrawals`, oracle `bond_totals().pending_payouts`) before it compares with what the verifier holds, so a pending withdrawal is not a shortfall. The report carries `inFlight` per contract.
 
 `GET /v1/health/services` raises `indexer_lagging` when the follower is more than 1,000 blocks behind the source head and `reconciliation_stale` when no solvency report is newer than 15 minutes.
+
+`GET /v1/events` rows carry `settlement` (`{kind, phase: request|terminal}`) for market withdrawals and Council claims, the pairs whose events are final, and `GET /v1/settlements/pending` lists requests with no later terminal event for the same key. A request event is never settlement; other flows are not classified until their events are final.
+
+`npm run verify:chain` (a `verify-chain` Compose service, every 6 hours) checks the stored history against itself: each block names the previous stored block as its parent, the checkpoint is the last block, and the events kept equal the events the blocks declare. Results go to `chain_integrity_reports`; `/v1/health/services` raises `chain_integrity_failed` or `chain_integrity_stale`. Entity-level gap repair waits for the financial read model.
+
+Compose gives each service its own database login (`dm_api_login`, `dm_indexer_login`, `dm_worker_login`) with only the rights in `ops/roles.sql`. A `roles` service applies the file after migrations and sets the passwords from `API_DB_PASSWORD`, `INDEXER_DB_PASSWORD` and `WORKER_DB_PASSWORD`; running it again rotates them. Migrations and deployment registration still use the database owner.
 
 Behind a reverse proxy set `TRUSTED_PROXY_HOPS` to the number of proxies and `TRUSTED_PROXY_ADDRESSES` to the addresses (or CIDR ranges) they connect from. `X-Forwarded-For` is read only from those addresses, and only the entry the nearest proxy appended. Without both, every client is limited by its socket address, which behind a proxy means one shared limit. IPv6 clients are limited per /64.
 

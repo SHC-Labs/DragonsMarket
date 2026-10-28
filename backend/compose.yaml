@@ -24,12 +24,29 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+  roles:
+    image: postgres:17-alpine
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-dragons}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-dragons_local_only}
+      PGDATABASE: ${POSTGRES_DB:-dragons_market}
+      API_DB_PASSWORD: ${API_DB_PASSWORD:-dragons_api_local_only}
+      INDEXER_DB_PASSWORD: ${INDEXER_DB_PASSWORD:-dragons_indexer_local_only}
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:-dragons_worker_local_only}
+    volumes:
+      - ./ops/roles.sql:/roles.sql:ro
+      - ./ops/login-roles.sh:/login-roles.sh:ro
+    command: ["sh", "/login-roles.sh"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
   api:
     build: .
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
     environment: &backend_environment
-      DATABASE_URL: postgresql://${POSTGRES_USER:-dragons}:${POSTGRES_PASSWORD:-dragons_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
+      DATABASE_URL: postgresql://dm_api_login:${API_DB_PASSWORD:-dragons_api_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
       HOST: 0.0.0.0
       PORT: 3500
       NETWORK: ${NETWORK:-mainnet}
@@ -55,7 +72,7 @@ services:
     ports:
       - "127.0.0.1:${PORT:-3500}:3500"
     depends_on:
-      migrate:
+      roles:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3500/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -68,10 +85,12 @@ services:
     profiles: [indexing]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
-    environment: *backend_environment
+    environment:
+      <<: *backend_environment
+      DATABASE_URL: postgresql://dm_indexer_login:${INDEXER_DB_PASSWORD:-dragons_indexer_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
     command: [node, dist/src/ingestion/follow.js]
     depends_on:
-      migrate:
+      roles:
         condition: service_completed_successfully
     restart: unless-stopped
   feed:
@@ -79,12 +98,14 @@ services:
     profiles: [indexing]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
-    environment: *backend_environment
+    environment:
+      <<: *backend_environment
+      DATABASE_URL: postgresql://dm_worker_login:${WORKER_DB_PASSWORD:-dragons_worker_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
     command: [node, dist/src/ingestion/feed.js, --follow]
     volumes:
       - ./.local/feeds:/app/.local/feeds
     depends_on:
-      migrate:
+      roles:
         condition: service_completed_successfully
     restart: unless-stopped
   reconcile:
@@ -92,10 +113,25 @@ services:
     profiles: [indexing]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
-    environment: *backend_environment
+    environment:
+      <<: *backend_environment
+      DATABASE_URL: postgresql://dm_worker_login:${WORKER_DB_PASSWORD:-dragons_worker_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
     command: [node, dist/src/reconcile.js, --follow]
     depends_on:
-      migrate:
+      roles:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  verify-chain:
+    build: .
+    profiles: [indexing]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    environment:
+      <<: *backend_environment
+      DATABASE_URL: postgresql://dm_worker_login:${WORKER_DB_PASSWORD:-dragons_worker_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
+    command: [node, dist/src/verify-chain.js, --follow]
+    depends_on:
+      roles:
         condition: service_completed_successfully
     restart: unless-stopped
   prices:
@@ -105,12 +141,13 @@ services:
     cap_drop: [ALL]
     environment:
       <<: *backend_environment
+      DATABASE_URL: postgresql://dm_worker_login:${WORKER_DB_PASSWORD:-dragons_worker_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
       COINGECKO_DEMO_API_KEY: ${COINGECKO_DEMO_API_KEY:-}
       COINMARKETCAP_MODE: ${COINMARKETCAP_MODE:-keyless}
       COINMARKETCAP_API_KEY: ${COINMARKETCAP_API_KEY:-}
     command: [node, dist/src/prices.js, --follow]
     depends_on:
-      migrate:
+      roles:
         condition: service_completed_successfully
     restart: unless-stopped
 volumes:

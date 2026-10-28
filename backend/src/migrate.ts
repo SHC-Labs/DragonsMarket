@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import type pg from 'pg';
 import { createPool } from './database.js';
 import { readConfig } from './config.js';
+import { LOCK } from './locks.js';
 
 const MIGRATION_STATEMENT_TIMEOUT = '30min';
 
@@ -24,7 +25,7 @@ export async function migrate(pool: pg.Pool, directory?: string) {
     await client.query('BEGIN');
     // The pool's 3 second limit is for API queries. An index build on a large table needs far longer.
     await client.query(`SET LOCAL statement_timeout = '${MIGRATION_STATEMENT_TIMEOUT}'`);
-    await client.query("SELECT pg_advisory_xact_lock(704346941)");
+    await client.query(`SELECT pg_advisory_xact_lock(${LOCK.migrate})`);
     await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())');
     const { rows } = await client.query('SELECT version, checksum FROM schema_migrations ORDER BY version');
     if (rows.length > files.length || rows.some((row, i) => row.version !== files[i]?.name || row.checksum !== files[i]?.checksum)) throw new Error('Applied migration changed or is missing; restore it and add a new migration');

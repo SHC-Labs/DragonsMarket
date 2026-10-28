@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { canonical, IngestionError, object, type Header } from './block.js';
+import { isAccount as account, isHash as hash } from '../validate.js';
 
 export interface ObservedReceipt {
   receiptId: string;
@@ -16,8 +17,6 @@ export interface ObservedBlock {
   shardIds: string[];
   receipts: ObservedReceipt[];
 }
-const hash = (v: unknown): v is string => typeof v === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v);
-export const account = (v: unknown): v is string => typeof v === 'string' && v.length >= 2 && v.length <= 64 && /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(v);
 function integer(v: unknown): string {
   const s = typeof v === 'number' && Number.isSafeInteger(v) ? String(v) : v;
   if (typeof s !== 'string' || !/^(0|[1-9][0-9]{0,19})$/.test(s) || BigInt(s) > 18446744073709551615n) throw new IngestionError('invalid_neardata_integer');

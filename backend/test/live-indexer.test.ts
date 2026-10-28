@@ -23,14 +23,14 @@ test('app live source commits provenance, resumes across skipped heights and exp
   assert.equal((await followCycle(pool,config,reader)).committed,1);
   head=102;assert.equal((await followCycle(pool,config,reader)).committed,1);
   assert.equal((await followCycle(pool,config,reader)).committed,0);
-  const status=await ingestionStatus(pool,config) as any;assert.equal(status.live,true);assert.equal(status.lagBlocks,'0');
+  const status=await ingestionStatus(pool,config);assert.equal(status.live,true);assert.equal(status.lagBlocks,'0');
   const read=createReadApi(pool,config);
-  const data=await read(new URL(`http://localhost/v1/transactions/${'T'.repeat(32)}/receipts?limit=1`)) as any;
+  const data=await read(new URL(`http://localhost/v1/transactions/${'T'.repeat(32)}/receipts?limit=1`)) as { data: { transaction_hash: string; child_receipt_ids: string[]; block_height: string }[]; nextCursor: string | null; transactionCompletion: string };
   assert.equal(data.data.length,1);assert.ok(data.nextCursor);assert.equal(data.transactionCompletion,'not_inferred');
-  assert.equal(data.data[0].transaction_hash,'T'.repeat(32));assert.deepEqual(data.data[0].child_receipt_ids,['D'.repeat(32)]);
-  const second=await read(new URL(`http://localhost/v1/transactions/${'T'.repeat(32)}/receipts?limit=1&cursor=${data.nextCursor}`)) as any;
-  assert.equal(second.data[0].block_height,'102');assert.equal(second.nextCursor,null);
+  assert.equal(data.data[0]!.transaction_hash,'T'.repeat(32));assert.deepEqual(data.data[0]!.child_receipt_ids,['D'.repeat(32)]);
+  const second=await read(new URL(`http://localhost/v1/transactions/${'T'.repeat(32)}/receipts?limit=1&cursor=${data.nextCursor}`)) as { data: { transaction_hash: string; child_receipt_ids: string[]; block_height: string }[]; nextCursor: string | null; transactionCompletion: string };
+  assert.equal(second.data[0]!.block_height,'102');assert.equal(second.nextCursor,null);
   await pool.query("UPDATE source_heads SET heartbeat_at=now()-interval '2 minutes'");
-  assert.equal((await ingestionStatus(pool,config) as any).live,false);
+  assert.equal((await ingestionStatus(pool,config)).live,false);
  }finally{await pool.end();await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);await admin.end();}
 });

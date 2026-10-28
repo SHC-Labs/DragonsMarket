@@ -13,7 +13,7 @@ function raw(height = 100, parent = 99) {
 }
 
 test('NEAR Data normalization retains exact integers, transaction provenance and failure outcomes', () => {
-  const large = parseNeardata('{"timestamp":1793138919331894540,"amount":"9007199254740993"}') as any;
+  const large = parseNeardata('{"timestamp":1793138919331894540,"amount":"9007199254740993"}') as { timestamp: string; amount: string };
   assert.equal(large.timestamp, '1793138919331894540');
   assert.equal(large.amount, '9007199254740993');
   assert.throws(() => parseNeardata('{"n":1e999}'), /invalid_neardata_json/);
@@ -25,7 +25,7 @@ test('NEAR Data normalization retains exact integers, transaction provenance and
   const selected = scopeCapture(block, 'intents.near');
   assert.equal(selected.receipts.length, 2);
   assert.equal(selected.events.length, 1, 'Failed receipt logs must not become events');
-  assert.equal((selected.events[0]!.envelope as any).data[0].amount, '9007199254740993');
+  assert.equal((selected.events[0]!.envelope as { data: { amount: string }[] }).data[0]!.amount, '9007199254740993');
   assert.equal(scopeCapture(block, 'another.near').receipts.length, 0);
   const malformed = structuredClone(block);
   malformed.receipts[0]!.logs = ['EVENT_JSON:broken'];

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Network } from './config.js';
+import { isHash } from './validate.js';
 
 export interface RpcSettings {
   primaryUrl: string;
@@ -118,7 +119,7 @@ export async function checkProvider(client: ReadRpcClient, network: Network, rol
     report.networkVerified = true;
     const block = await client.call('block', { finality: 'final' });
     const header = isObject(block) && isObject(block.header) ? block.header : null;
-    if (!header || typeof header.hash !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(header.hash)) throw new RpcError('invalid_header');
+    if (!header || typeof header.hash !== 'string' || !isHash(header.hash)) throw new RpcError('invalid_header');
     const height = header.height;
     if (!(typeof height === 'number' && Number.isSafeInteger(height) && height >= 0) && !(typeof height === 'string' && /^(0|[1-9]\d*)$/.test(height))) throw new RpcError('invalid_height');
     if (BigInt(height as string | number) > 18446744073709551615n) throw new RpcError('invalid_height');

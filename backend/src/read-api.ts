@@ -3,16 +3,15 @@ import type pg from 'pg';
 import type { Config } from './config.js';
 import { ingestionStatus } from './ingestion/store.js';
 import { verifyDatabase } from './database.js';
+import { isAccount as account, isHash as hash, isUint as uint } from './validate.js';
+import { pendingSettlements, settlementOf, SETTLEMENT_NOTE } from './settlement.js';
 
 export class ReadError extends Error {
   constructor(public readonly status: number, public readonly code: string) { super(code); }
 }
 export type ReadHandler = (url: URL) => Promise<unknown>;
-const routes = new Set(['/v1/deployments', '/v1/blocks', '/v1/events', '/v1/receipts', '/v1/health/services']);
+const routes = new Set(['/v1/deployments', '/v1/blocks', '/v1/events', '/v1/receipts', '/v1/health/services', '/v1/settlements/pending']);
 export function isReadRoute(path: string) { return routes.has(path) || path.startsWith('/v1/receipts/') || /^\/v1\/transactions\/[^/]+\/receipts$/.test(path); }
-const uint = (s: string) => typeof s === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(s) && BigInt(s) <= 18446744073709551615n;
-const hash = (s: string) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
-const account = (s: string) => s.length >= 2 && s.length <= 64 && /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(s);
 type Anchor = { height: string; hash: string; timestampNs: string };
 type Cursor = { v: 1; scope: string; anchor: Anchor; key: (string | number)[] };
 function invalid(): never { throw new ReadError(400, 'invalid_query'); }
@@ -27,7 +26,7 @@ export function createReadApi(pool: pg.Pool, config: Config): ReadHandler {
     const kind = detail || transactionHash ? '/v1/receipts' : url.pathname;
     const allowed = new Set(kind === '/v1/events'
       ? ['limit', 'cursor', 'receiver', 'event', 'standard', 'receiptId', 'fromBlock', 'toBlock']
-      : kind === '/v1/deployments' || detail ? [] : ['limit', 'cursor', 'receiver', 'fromBlock', 'toBlock']);
+      : kind === '/v1/deployments' || detail ? [] : kind === '/v1/settlements/pending' ? ['limit'] : ['limit', 'cursor', 'receiver', 'fromBlock', 'toBlock']);
     if (kind === '/v1/blocks') allowed.delete('receiver');
     for (const name of url.searchParams.keys()) {
       if (!allowed.has(name) || url.searchParams.getAll(name).length !== 1) invalid();
@@ -88,6 +87,11 @@ export function createReadApi(pool: pg.Pool, config: Config): ReadHandler {
         await client.query('COMMIT');
         return { ...metadata, data: deploymentRows, nextCursor: null };
       }
+      if (kind === '/v1/settlements/pending') {
+        const pending = anchor ? await pendingSettlements(client, id!, anchor.height, limit) : { data: [], truncated: false };
+        await client.query('COMMIT');
+        return { ...metadata, note: SETTLEMENT_NOTE, ...pending };
+      }
       const params: unknown[] = [id, anchor?.height ?? '0'];
       const where = ['deployment_id=$1', 'block_height <= $2'];
       const bind = (value: unknown) => { params.push(value); return `$${params.length}`; };
@@ -119,7 +123,7 @@ export function createReadApi(pool: pg.Pool, config: Config): ReadHandler {
         nextCursor = Buffer.from(JSON.stringify({ v: 1, scope, anchor, key })).toString('base64url');
       }
       await client.query('COMMIT');
-      return { ...metadata, ...(transactionHash ? { transactionHash, coverage: 'configured_contract_receipts_only', transactionCompletion: 'not_inferred' } : {}), data: detail ? data[0] : data, ...(detail ? {} : { nextCursor }) };
+      return { ...metadata, ...(transactionHash ? { transactionHash, coverage: 'configured_contract_receipts_only', transactionCompletion: 'not_inferred' } : {}), data: detail ? data[0] : kind === '/v1/events' ? data.map(row => ({ ...row, settlement: settlementOf(row.standard, row.event) })) : data, ...(kind === '/v1/events' ? { note: SETTLEMENT_NOTE } : {}), ...(detail ? {} : { nextCursor }) };
     } catch (error) { await client.query('ROLLBACK'); throw error; }
     finally { client.release(); }
   };

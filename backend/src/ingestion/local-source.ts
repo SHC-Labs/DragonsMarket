@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { IngestionError, object, canonical, type FinalizedBlock, type Header, type Receipt } from './block.js';
 import type { BlockSource } from './source.js';
+import { isHash, isUint } from '../validate.js';
 
 export interface TransactionReference { hash: string; sender: string }
-const isHash = (v: unknown): v is string => typeof v === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v);
-const isUint = (v: unknown): v is string => typeof v === 'string' && /^(0|[1-9]\d*)$/.test(v) && v.length <= 20 && BigInt(v) <= 18446744073709551615n;
 
 // Restricted to loopback and read methods. Never reads a wallet key or sends a transaction.
 export class LocalSandboxReader {

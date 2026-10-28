@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Config, ContractRole } from '../config.js';
+import { isAccount as account, isHash as hash, isUint as uint } from '../validate.js';
 
 export const MAX_BLOCK_BYTES = 8 * 1024 * 1024;
 // Receipts are counted before the filter keeps only ours, so a busy mainnet block must not trip this. The stored block is bounded by MAX_BLOCK_BYTES.
@@ -30,11 +31,6 @@ export function parseJson(text: string): unknown {
     });
   } catch { throw new IngestionError('invalid_json_or_unsafe_number'); }
 }
-function uint(value: unknown): value is string {
-  return typeof value === 'string' && /^(0|[1-9]\d*)$/.test(value) && value.length <= 20 && BigInt(value) <= 18446744073709551615n;
-}
-function hash(value: unknown): value is string { return typeof value === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value); }
-function account(value: unknown): value is string { return typeof value === 'string' && value.length >= 2 && value.length <= 64 && /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(value); }
 function successful(status: Record<string, unknown>) { return Object.hasOwn(status, 'SuccessValue') || Object.hasOwn(status, 'SuccessReceiptId'); }
 
 export function prepareBlock(input: unknown, config: Config): PreparedBlock {

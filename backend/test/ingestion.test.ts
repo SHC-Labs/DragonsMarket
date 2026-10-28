@@ -11,7 +11,7 @@ test('fixture parses actual envelope shapes, scopes receivers, ignores failed lo
   const prepared = prepareBlock(await first(), config);
   assert.equal(prepared.events.length, 3);
   assert.deepEqual(prepared.events.map(e => [e.logIndex, e.dataIndex]), [[1, 0], [2, 0], [2, 1]]);
-  assert.equal((prepared.events[0]?.payload as any).amount, '9007199254740993');
+  assert.equal((prepared.events[0]?.payload as { amount: string }).amount, '9007199254740993');
   assert.equal(prepared.block.receipts.length, 2);
   assert.equal(prepared.block.header.timestamp_nanosec, '1700000100000000000');
 });

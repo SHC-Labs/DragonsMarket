@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { NeardataReader, account, scopeCapture } from '../src/ingestion/neardata.js';
+import { NeardataReader, scopeCapture } from '../src/ingestion/neardata.js';
 import { initializeCapture, commitCapture } from '../src/ingestion/capture-store.js';
 import { ReadRpcClient } from '../src/providers.js';
 import { object } from '../src/ingestion/block.js';
+import { isAccount as account } from '../src/validate.js';
 
 // Explicit command only. Uses public mainnet reads and local temporary database tables, never keys.
 test('actual finalized mainnet blocks -> contract-scoped evidence -> Postgres -> reconnect and duplicate-free replay', { timeout: 180000 }, async t => {

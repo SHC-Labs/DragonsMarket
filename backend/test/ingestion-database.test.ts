@@ -49,7 +49,7 @@ test('deployment registration is immutable and replays are idempotent, including
   assert.equal(await cursor(pool), '103');
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM raw_events')).rows[0].n, 4);
   assert.equal((await pool.query('SELECT event_count FROM indexed_blocks WHERE block_height=101')).rows[0].event_count, 0);
-  const status = await ingestionStatus(pool, config) as any;
+  const status = await ingestionStatus(pool, config);
   assert.equal(status.state, 'replay_complete');
   assert.equal(status.live, false);
   assert.equal(status.blocksCommitted, '3');
@@ -72,10 +72,10 @@ test('missing ancestry, changed historical content and unsupported versions reta
   unsupported.receipts = [{ ...a.receipts[0], receipt_id: 'E'.repeat(32), logs: ['EVENT_JSON:{"standard":"rounds","version":"2.0.0","event":"new"}'] }];
   await assert.rejects(ingest(pool, config, source([unsupported])), /unsupported_event_version/);
   assert.equal(await cursor(pool), '100');
-  assert.equal((await ingestionStatus(pool, config) as any).lastError.code, 'unsupported_event_version');
+  assert.equal((await ingestionStatus(pool, config)).lastError?.code, 'unsupported_event_version');
   await ingest(pool, config, fixture());
   assert.equal(await cursor(pool), '103');
-  assert.equal((await ingestionStatus(pool, config) as any).lastError, null);
+  assert.equal((await ingestionStatus(pool, config)).lastError, null);
 }));
 
 test('SQL failure after a partial block insert rolls back events, block journal, counters and checkpoint', async () => withDatabase(async (pool, config) => {
@@ -89,7 +89,7 @@ test('SQL failure after a partial block insert rolls back events, block journal,
   assert.equal(await cursor(pool), '100');
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM raw_events')).rows[0].n, 3);
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM indexed_blocks')).rows[0].n, 1);
-  assert.equal((await ingestionStatus(pool, config) as any).blocksCommitted, '1');
+  assert.equal((await ingestionStatus(pool, config)).blocksCommitted, '1');
   await ingest(pool, config, fixture());
   assert.equal(await cursor(pool), '103');
 }));
@@ -102,7 +102,7 @@ test('a source failure after commit resumes from durable history and accepts rep
   await reconnect();
   assert.equal(await cursor(pool), '100');
   assert.deepEqual(await ingest(pool, config, fixture()), { committed: 2, replayed: 1, mode: 'fixture', live: false });
-  assert.equal((await ingestionStatus(pool, config) as any).eventsCommitted, '4');
+  assert.equal((await ingestionStatus(pool, config)).eventsCommitted, '4');
 }));
 
 test('one writer owns a deployment and a rejected competitor cannot overwrite its status', async () => withDatabase(async (pool, config) => {
@@ -117,16 +117,16 @@ test('one writer owns a deployment and a rejected competitor cannot overwrite it
   try {
     await entered;
     await assert.rejects(ingest(pool, config, fixture()), /indexer_already_running/);
-    assert.equal((await ingestionStatus(pool, config) as any).state, 'running');
+    assert.equal((await ingestionStatus(pool, config)).state, 'running');
   } finally { release(); await running; }
-  assert.equal((await ingestionStatus(pool, config) as any).state, 'replay_complete');
+  assert.equal((await ingestionStatus(pool, config)).state, 'replay_complete');
 }));
 
 test('fixtures cannot enter public networks, and no live source is silently accepted', async () => withDatabase(async (pool, config) => {
   await registerDeployment(pool, config);
   await assert.rejects(ingest(pool, { ...config, network: 'testnet' }, fixture()), /fixture_requires_sandbox/);
   await assert.rejects(ingest(pool, config, { ...source([]), mode: 'live' }), /live_source_not_configured/);
-  assert.equal((await ingestionStatus(pool, config) as any).state, 'not_started');
+  assert.equal((await ingestionStatus(pool, config)).state, 'not_started');
   assert.equal(await cursor(pool), undefined);
 }));
 
