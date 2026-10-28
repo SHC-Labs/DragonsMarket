@@ -14,7 +14,7 @@ Implemented: immutable deployment registration; bounded sandbox JSONL source; ex
 
 Fixture replay and bounded local transaction capture are sandbox-only. The source interface is replaceable, but no public-network live connector is enabled. The finalized flag is trusted input, not a finality proof. Status distinguishes fixture/local capture from mainnet live mode. Fixture/local-capture runs retain `live: false` and unknown lag; live mode uses an expiring source-head heartbeat. A last-reported running state can survive an abrupt worker termination, so supervision is still required.
 
-The engine accepts existing contract event envelopes without applying trading or payout projections. This allows ingestion work to continue while the team decides the replacement for pooled rounds. Verifier transfer indexing requires its own reviewed event mapping and is not included yet.
+The engine accepts existing contract event envelopes without applying trading or payout projections. This allows ingestion work to continue while the owner confirms the rounds payout model. Verifier transfer indexing requires its own reviewed event mapping and is not included yet.
 
 Implemented since source validation: bounded mainnet following/backfill with retries, app transaction provenance, expiring head/heartbeat metadata, durable JSONL export and a read-only finalized-block liability checker. Still pending: activation on the real deployment, typed financial/product projections, actual scheduling/Intents handlers, final source policy and operational ownership. Committed `indexed_blocks.keeper_payload` entries retain the feed-shaped data, and a file exporter is available once a real deployment is configured.
 

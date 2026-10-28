@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 // A closed market with a proposal by Carol challenged by Dave.
 async fn disputed(w: &World) -> anyhow::Result<u64> {
-    let id = create_seeded_market(w, 120).await?;
+    let id = new_market(w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(w, &w.carol, id, "yes").await?;
     challenge(w, &w.dave, id).await?;

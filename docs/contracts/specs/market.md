@@ -1,5 +1,7 @@
 # Dragons Market: market contract implementation spec
 
+**Dynamic parimutuel pricing, 2026-10-27.** Market state version 6 replaces the constant-product pool with a dynamic parimutuel cost function (`dpm/src/lib.rs`). Superseded below, with [market.md](../market.md) authoritative: everything about seeding, `seed:` messages, the creation fee and opening prices; the pool fields `pool_yes`, `pool_no`, `twap`, `seeded`, `void_price_yes` and `residual_claimed`; the fee formula; `sell(market_id, side, shares, min_collateral)` in place of `collateral_out` and `max_shares_in`; the Void, which now pays each holder back what they put in; the operator's last-day halt rule, which is gone; the events `market_seeded`, `create_fee_set`, `void_rules_set` and `open_price_bounds_set`; and invariant I-M1, restated in section 10. Section 10 and the scope line are updated; the rest stays as design history.
+
 **Current implementation, 2026-10-23.** Market state version 4 adds native storage funding, reserve policy, exact holder counts for new records, a seeder mirror and bounded exempt-account position windows. See [market contract](../market.md) for the current policy and [website ABI](website-abi.md) for exact JSON fields. The older proposal tables below document previous work; where they differ, the current implementation and ABI take precedence. Migration reads the exact version-3 root, preserves tag-0 market records and writes new records with tag 1. Sweeps and withdrawals retain tag 0. No balance, receipt or payout ledger is discarded.
 
 
@@ -9,7 +11,7 @@
 | --- | --- |
 | Date | 2026-10-21 |
 | Status | Draft design spec, kept for the design history. Existing rows were checked in source on 2026-10-21 and rows marked NEW or CHANGED were proposed. Later work (in-flight withdrawal tracking, settable settings, the positions index, version-tagged records and the newer events) is described in the market manual [market.md](../market.md), which is authoritative where the two differ |
-| Scope | `contracts/market/src/lib.rs` and `contracts/market/src/curve.rs` |
+| Scope | `contracts/market/src/lib.rs` and `contracts/dpm/src/lib.rs` (`curve.rs` until 2026-10-27) |
 | Source | Working tree on top of commit `6cad02e`, read 2026-10-21 09:06 to 09:38 |
 | Revision checked | `market/src/lib.rs` sha256 prefix `6bed015aa459a237` (4122 lines, copied at 09:22 and compared again at 09:38). Phase I2 is editing this file, see [README section 2](README.md#2-how-to-read-these-specs) |
 | Index | [README.md](README.md) |
@@ -81,7 +83,7 @@ The rest of this document lists every method, grammar, event, error and invarian
 
 ## 2. Purpose and roles
 
-The market lists binary questions, prices every trade on a constant-product curve, holds all backing in its own Intents account, and pays holders after the oracle sets an outcome. It does not decide outcomes.
+The market lists binary questions, prices every trade by a dynamic parimutuel cost function (a constant-product curve until 2026-10-27), holds all backing in its own Intents account, and pays holders after the oracle sets an outcome. It does not decide outcomes.
 
 | Role | Set by | Powers |
 | --- | --- | --- |
@@ -490,7 +492,7 @@ An indexer must treat `withdraw` as a request, not as a payout. The existing eve
 
 | Invariant | Statement | Test status |
 | --- | --- | --- |
-| I-M1 conservation of backing | For each open market, `locked == pool_yes + user_yes == pool_no + user_no`. After resolution `locked >= owed` | `check_invariant`, proptest `lib.rs:1767`, sandbox `flow.rs:7` (tests exist, not run) |
+| I-M1 conservation of backing | For each open market, `locked >= ceil(sqrt(user_yes^2 + user_no^2))`, the cost of the shares outstanding. Resolved to an answer with holders, `locked >= ` the winning shares outstanding; a refund market pays `claim * min(locked, claims) / claims`, which never exceeds `locked` | `check_invariant` after every step of the random trading proptest, the `dpm` crate's proptests (the pool holds its cost, payouts never exceed the pool), sandbox `flow.rs` |
 | I-M2 reconciliation | With nothing in flight, `mt_balance_of(M, token) >= total_owed`. Equality means no surplus. Less is an incident | `intents_market.rs:54` (test exists, not run). Needs the NEW `in_flight` rule |
 | I-M3 one unit, one place | Each unit of a fee is in exactly one of `fees`, `revenue_due`, `treasury_due`, `revenue_unresolved`, a pending leg, or gone | proptest `lib.rs:3631` (test exists, not run) |
 | I-M4 independent legs | A failed or unresolved leg changes only its own bucket | `hardening.rs:500`, `:606` (tests exist, not run) |

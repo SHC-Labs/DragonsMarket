@@ -73,7 +73,7 @@ async fn scoped_key(w: &World, receiver: &near_workspaces::AccountId, methods: &
     Ok(key)
 }
 
-// A seeded market that closes in 120s and must be answered within `gap_secs` after that, with nobody to answer it.
+// A market that closes in 120s and must be answered within `gap_secs` after that, with nobody to answer it.
 async fn market_with_gap(w: &World, gap_secs: u64) -> anyhow::Result<u64> {
     let close_at = now(&w.worker).await + 120 * 1_000_000_000;
     let id: String = w
@@ -90,9 +90,7 @@ async fn market_with_gap(w: &World, gap_secs: u64) -> anyhow::Result<u64> {
         .await?
         .into_result()?
         .json()?;
-    let id: u64 = id.parse()?;
-    ft_call(w, &w.owner, w.market.id(), SEED, &format!("seed:{id}")).await?;
-    Ok(id)
+    Ok(id.parse()?)
 }
 
 // `extra` new accounts each holding a staked seat, on top of the five the setup stakes.
@@ -110,9 +108,9 @@ async fn one_run_of_the_keeper_unsticks_everything_that_is_due_and_a_second_find
     let w = setup().await?;
     let state = scratch(&w, "state.json");
     let state_arg = state.to_str().unwrap();
-    let unfinalized = create_seeded_market(&w, 120).await?;
-    let undrawn = create_seeded_market(&w, 120).await?;
-    let locked = create_seeded_market(&w, 120).await?;
+    let unfinalized = new_market(&w, 120).await?;
+    let undrawn = new_market(&w, 120).await?;
+    let locked = new_market(&w, 120).await?;
     let unanswered = market_with_gap(&w, 600).await?;
     skip_secs(&w.worker, 130).await;
 
@@ -225,13 +223,13 @@ async fn one_run_of_the_keeper_unsticks_everything_that_is_due_and_a_second_find
 #[tokio::test]
 async fn the_keeper_sweeps_fees_once_they_reach_the_minimum_with_keys_scoped_to_each_receiver() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     buy(&w, &w.alice, id, "yes", 100 * USD).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     skip_secs(&w.worker, WINDOW_MS / 1000 + 5).await;
     let (collected, _, _) = fees(&w).await;
-    assert!(collected > CREATE_FEE, "the trade paid a fee: {collected}");
+    assert_eq!(collected, 2 * USD, "the trade paid a fee");
 
     // One more unit than there is: not due. Exactly what there is: due.
     let (below, ok) = keeper(&w, &["run", "--dry-run", "--min-sweep", &(collected + 1).to_string()]).await;
@@ -346,8 +344,27 @@ async fn check_showing(w: &World, expected: &str) -> (String, bool) {
 }
 
 #[tokio::test]
+async fn the_deploy_check_reports_whether_the_token_knows_the_market() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let (out, ok) = keeper(&w, &["check"]).await;
+    assert!(
+        !ok && out.contains(&format!(
+            "PROBLEM: market {} is not registered with the token {}",
+            w.market.id(),
+            w.ft.id()
+        )),
+        "{out}"
+    );
+    register_ft(&w, w.market.id()).await?;
+    let (out, _) = check_showing(&w, "the market and the verifier are registered").await;
+    assert!(!out.contains("is not registered with the token"), "{out}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_deploy_check_reports_whether_the_council_can_seat_a_jury_and_a_second_one() -> anyhow::Result<()> {
     let w = setup().await?;
+    register_ft(&w, w.market.id()).await?;
     for seed in [1u8, 2] {
         let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
         let public = format!("ed25519:{}", bs58::encode(key.verifying_key().to_bytes()).into_string());
@@ -464,7 +481,7 @@ async fn the_deploy_check_reconciles_the_oracle_with_what_the_verifier_holds_for
     let (out, _) = keeper(&w, &["check"]).await;
     assert!(out.contains("oracle owes 0 and holds 0 in the verifier\n"), "{out}");
 
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     let (out, _) = keeper(&w, &["check"]).await;
@@ -528,7 +545,7 @@ async fn the_deploy_check_reconciles_all_three_contracts_and_reads_what_the_veri
     );
 
     // Money in all three: a market with a trade, a bond in the oracle, and a sweep that sends the Council its 25%.
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     buy(&w, &w.alice, id, "yes", 100 * USD).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
@@ -629,7 +646,8 @@ async fn the_deploy_check_reconciles_all_three_contracts_and_reads_what_the_veri
 #[tokio::test]
 async fn the_deploy_check_reports_money_missing_from_the_verifier_only_after_reading_again() -> anyhow::Result<()> {
     let w = setup().await?;
-    create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
+    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     let (owed, held) = books_of(&keeper(&w, &["check"]).await.0, "market owes ");
     assert!(owed > 0 && owed == held);
 

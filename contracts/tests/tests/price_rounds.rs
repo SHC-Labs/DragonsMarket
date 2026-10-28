@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 const SECOND: u64 = 1_000_000_000;
 const INTERVAL_SECS: u64 = 120;
 const WINDOW_SECS: u64 = 60;
+const CLOSE_BEFORE_SECS: u64 = 15;
 
 struct Rounds {
     contract: Contract,
@@ -21,6 +22,10 @@ struct Rounds {
 impl Rounds {
     fn start_of(&self, round: u64) -> u64 {
         self.first_start + round * INTERVAL_SECS * SECOND
+    }
+
+    fn close_of(&self, round: u64) -> u64 {
+        self.start_of(round + 1) - CLOSE_BEFORE_SECS * SECOND
     }
 
     // `signers`' entries over the price at the start of `round`.
@@ -54,7 +59,7 @@ fn public_key(key: &SigningKey) -> String {
     format!("ed25519:{}", bs58::encode(key.verifying_key().as_bytes()).into_string())
 }
 
-// Three publishers, two of whom must sign, and one series of 2-minute rounds whose round 0 is taking stakes.
+// Three publishers, two of whom must sign, and one series of 2-minute rounds whose round 0 starts shortly.
 async fn deploy(w: &World) -> anyhow::Result<Rounds> {
     let contract = w.worker.dev_deploy(&wasm("rounds")).await?;
     contract
@@ -75,12 +80,13 @@ async fn deploy(w: &World) -> anyhow::Result<Rounds> {
             .await?
             .into_result()?;
     }
-    let first_start = now(&w.worker).await + 110 * SECOND;
+    let first_start = now(&w.worker).await + 30 * SECOND;
     w.owner
         .call(contract.id(), "add_series")
         .args_json(json!({
             "asset": "btc-usd", "decimals": 2, "first_start": first_start.to_string(),
-            "interval": (INTERVAL_SECS * SECOND).to_string(), "price_window": (WINDOW_SECS * SECOND).to_string()
+            "interval": (INTERVAL_SECS * SECOND).to_string(), "price_window": (WINDOW_SECS * SECOND).to_string(),
+            "close_before": (CLOSE_BEFORE_SECS * SECOND).to_string()
         }))
         .transact()
         .await?
@@ -174,6 +180,16 @@ async fn round(r: &Rounds, round: u64) -> Value {
         .unwrap()
 }
 
+async fn recorded(r: &Rounds, round: u64) -> Value {
+    r.contract
+        .view("get_price")
+        .args_json(json!({ "series_id": 0, "round": round.to_string() }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap()
+}
+
 async fn assert_books_match(w: &World, r: &Rounds) {
     assert_eq!(
         view_u128(r, "total_owed", json!({})).await,
@@ -182,14 +198,20 @@ async fn assert_books_match(w: &World, r: &Rounds) {
     );
 }
 
-async fn stake_from_balance(r: &Rounds, who: &Account, side: &str, amount: u128) -> anyhow::Result<()> {
-    who.call(r.contract.id(), "stake")
-        .args_json(json!({ "series_id": 0, "round": "0", "side": side, "amount": amount.to_string() }))
+async fn stake_from_balance(
+    r: &Rounds,
+    who: &Account,
+    side: &str,
+    amount: u128,
+) -> anyhow::Result<ExecutionFinalResult> {
+    Ok(who
+        .call(r.contract.id(), "stake")
+        .args_json(
+            json!({ "series_id": 0, "round": "0", "side": side, "amount": amount.to_string(), "min_shares": "1" }),
+        )
         .deposit(NearToken::from_yoctonear(1))
         .transact()
-        .await?
-        .into_result()?;
-    Ok(())
+        .await?)
 }
 
 #[tokio::test]
@@ -209,24 +231,35 @@ async fn a_signer_with_no_near_registers_stakes_wins_and_withdraws_by_signed_int
 
     let result = relay(&w, signed(&w, &winner_key, transfer(&w, &id, 20 * USD, "register"), 1)).await?;
     assert_clean(&r, "register with collateral", &result);
+    let result = relay(&w, signed(&w, &loser_key, transfer(&w, &id, USD, "register"), 1)).await?;
+    assert_clean(&r, "second registration", &result);
+
+    skip_until(&w, r.start_of(0)).await;
     let result = relay(
         &w,
-        signed(&w, &winner_key, action(&id, &format!("stake:0:0:up:{}", 10 * USD)), 2),
+        signed(&w, &winner_key, action(&id, &format!("stake:0:0:up:{}:1", 10 * USD)), 2),
     )
     .await?;
     assert_clean(&r, "signed stake from the balance", &result);
-    let result = relay(&w, signed(&w, &loser_key, transfer(&w, &id, USD, "register"), 1)).await?;
-    assert_clean(&r, "second registration", &result);
     let result = relay(
         &w,
-        signed(&w, &loser_key, transfer(&w, &id, 8 * USD, "stake:0:0:down"), 2),
+        signed(&w, &loser_key, transfer(&w, &id, 8 * USD, "stake:0:0:down:1"), 2),
     )
     .await?;
     assert_clean(&r, "stake that arrives with its money", &result);
     assert_eq!(balance(&r, &winner).await, 10 * USD - fee);
+    let down: Value = r
+        .contract
+        .view("get_stake")
+        .args_json(json!({ "series_id": 0, "round": "0", "account_id": loser }))
+        .await?
+        .json()?;
+    assert_eq!(
+        down["shares"], "14966629",
+        "8 on Down after 10 on Up buys sqrt(18^2 - 10^2) million shares"
+    );
     assert_books_match(&w, &r).await;
 
-    skip_until(&w, r.start_of(0)).await;
     let result = record_price(&w, &r, 0, 6_500_000, r.quorum(0, 6_500_000)).await?;
     assert_clean(&r, "start price, two signatures", &result);
     skip_until(&w, r.start_of(1)).await;
@@ -274,9 +307,14 @@ async fn a_round_its_publishers_never_priced_refunds_both_sides() -> anyhow::Res
     let r = deploy(&w).await?;
     let id = r.contract.id().clone();
     ft_call(&w, &w.bob, &id, 5 * USD, "register").await?;
-    ft_call(&w, &w.bob, &id, 5 * USD, "stake:0:0:up").await?;
     ft_call(&w, &w.dave, &id, 10 * USD, "register").await?;
-    stake_from_balance(&r, &w.dave, "down", 5 * USD).await?;
+    assert!(
+        stake_from_balance(&r, &w.dave, "down", USD).await?.is_failure(),
+        "round 0 takes no stakes before it starts"
+    );
+    skip_until(&w, r.start_of(0)).await;
+    ft_call(&w, &w.bob, &id, 5 * USD, "stake:0:0:up:1").await?;
+    stake_from_balance(&r, &w.dave, "down", 5 * USD).await?.into_result()?;
     assert_books_match(&w, &r).await;
 
     skip_until(&w, r.start_of(0) + WINDOW_SECS * SECOND + SECOND).await;
@@ -285,6 +323,11 @@ async fn a_round_its_publishers_never_priced_refunds_both_sides() -> anyhow::Res
             .await?
             .is_failure(),
         "a price after its window is refused"
+    );
+    skip_until(&w, r.close_of(0)).await;
+    assert!(
+        stake_from_balance(&r, &w.dave, "down", USD).await?.is_failure(),
+        "and stakes close before the round ends"
     );
     assert_eq!(claim(&w, &r, 0, w.bob.id()).await?, 5 * USD);
     assert_eq!(claim(&w, &r, 0, w.dave.id()).await?, 5 * USD);
@@ -299,8 +342,8 @@ async fn only_two_publishers_signing_the_exact_moment_and_price_record_it() -> a
     let r = deploy(&w).await?;
     let id = r.contract.id().clone();
     ft_call(&w, &w.bob, &id, 5 * USD, "register").await?;
-    ft_call(&w, &w.bob, &id, 5 * USD, "stake:0:0:up").await?;
     skip_until(&w, r.start_of(0)).await;
+    ft_call(&w, &w.bob, &id, 5 * USD, "stake:0:0:up:1").await?;
 
     let stranger = SigningKey::from_bytes(&[99u8; 32]);
     let price = 6_500_000;
@@ -320,7 +363,7 @@ async fn only_two_publishers_signing_the_exact_moment_and_price_record_it() -> a
         let result = record_price(&w, &r, 0, price, submission).await?;
         assert!(result.is_failure(), "{why} must not record a price");
     }
-    assert_eq!(round(&r, 0).await["start_price"], Value::Null);
+    assert_eq!(recorded(&r, 0).await, Value::Null);
 
     let quorum = r.quorum(0, price);
     let result = record_price(&w, &r, 0, price, quorum.clone()).await?;
@@ -335,6 +378,6 @@ async fn only_two_publishers_signing_the_exact_moment_and_price_record_it() -> a
             .is_failure(),
         "and so is a later quorum for another price"
     );
-    assert_eq!(round(&r, 0).await["start_price"], price.to_string());
+    assert_eq!(recorded(&r, 0).await, Value::String(price.to_string()));
     Ok(())
 }

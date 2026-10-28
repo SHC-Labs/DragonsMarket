@@ -6,6 +6,7 @@
 | --- | --- |
 | Date | 2026-10-22 |
 | Comparable-venue review | 2026-10-23. Section 5 updated; measurements were not rerun |
+| Dynamic parimutuel pricing | 2026-10-27. Markets are no longer seeded. The seed rows below were measured on the constant-product market; `scale_ops.rs` `operator_index_cost` now measures the operator's buy in their place. A position now takes two entries, so the hard cap of 30 holds 15 markets. Measurements were not rerun |
 | Status | Historical scale measurements plus the implementation update in section 6. Implemented so far: the account-to-markets index, the reward page cap and lookup budget, the position cap of 30 and the keeper's sweep timing read from config (section 2) |
 | Scope | `contracts/market`, `contracts/oracle`, `contracts/council`, the keeper (`contracts/keeper`) and the website library (`web/lib`) |
 | Target | Hundreds of thousands of markets and users, with trading, fee sweeps, quarterly rewards and disputes running continuously for five years |

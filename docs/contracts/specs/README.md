@@ -163,8 +163,8 @@ A plain deposit to the market's own account, in any message form, credits M and 
 
 | Step | Caller | Method | Verifier calls | Events | Failure and refund | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | User | `market.sell(market_id, side, collateral_out, max_shares_in)`, 1 yocto. Use `quote_sell` first | none | `sell` | `price moved, would need more shares than your maximum` reverts. The market must be open and not halted | BUILT |
-| 2 | Market | Removes shares, takes the fee, credits `collateral_out - fee` to the internal balance | none | none | none | BUILT |
+| 1 | User | `market.sell(market_id, side, shares, min_collateral)`, 1 yocto. Use `quote_sell` first | none | `sell` | `price moved, you would get less than your minimum` reverts. The market must be open and not halted | BUILT (2026-10-27 form) |
+| 2 | Market | Removes the shares, takes the fee from what they fetch, credits the rest to the internal balance and takes it off the position's cost record | none | none | none | BUILT |
 
 Proceeds are in the internal balance. They reach U only through `withdraw` (J6).
 
@@ -186,8 +186,8 @@ Proceeds are in the internal balance. They reach U only through `withdraw` (J6).
 
 | Step | Caller | Method | Verifier calls | Events | Failure and refund | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | Holder | `market.redeem(market_id)` after the outcome. Yes pays 1 per Yes share, No pays 1 per No share, Void pays the closing price | none | `redeemed` | `nothing to redeem`. Works while paused or halted | BUILT |
-| 2 | Operator or owner | `claim_residual(market_id)` | none | `residual_claimed` | Today the residual lands in the treasury's internal balance. CHANGED: it joins the treasury leg | PARTIAL |
+| 1 | Holder | `market.redeem(market_id)` after the outcome. Winning shares split the pool; a Void, or an answer nobody holds, pays each holder back what they put in | none | `redeemed` | `nothing to redeem`. Works while paused or halted | BUILT (2026-10-27 rules) |
+| 2 | Operator or owner | `claim_residual(market_id)` once nobody is owed a payout | none | `residual_claimed` | `holders are still owed their payouts`, `nothing is left over`. The residual joins the treasury leg of the next sweep | BUILT |
 
 ### J6. Withdraw to Intents and exit
 
@@ -242,7 +242,7 @@ Gas is what the caller reserves for the call. Source lines are the 09:22 to 09:3
 | market | verifier | `mt_transfer_call` | Council leg | 42 (22 verifier overhead plus 20 Council receipt) | `on_revenue_sent` 10 | BUILT (`:56-58`, `:933`). The Council receipt reserve needs measuring after the quarterly change |
 | market | oracle | `register_market` | `create_market`, `retry_register` | 20 | `on_registered` 10 | BUILT (`:59`) |
 | market | council | `received_of` | NEW `settle_leg` | 10 | callback 10 | NEW |
-| verifier | market | `mt_on_transfer` | funding, buy, seed | attached minus about 20.5 | none | BUILT |
+| verifier | market | `mt_on_transfer` | funding, buy, register | attached minus about 20.5 | none | BUILT |
 | verifier | council | `mt_on_transfer` | revenue | attached minus about 20.5 | none | BUILT |
 | verifier | oracle | `mt_on_transfer` | bonds | attached minus about 20.5 | none | NEW |
 | oracle | market | `set_outcome` | `settle`, `resolve_by_deadline`, `retry_apply` | 20 | `on_applied` 10 | BUILT (`oracle lib.rs:18`, `:1252`) |

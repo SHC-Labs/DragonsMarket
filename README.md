@@ -9,7 +9,8 @@ The product story and growth plan are in [PITCH.md](PITCH.md).
 
 ## How it works
 
-The market contract prices shares on a constant-product curve. An oracle accepts proposed results
+The market contract prices shares with a dynamic parimutuel cost function, so a market needs no
+seed and opens for trading as soon as it is registered. An oracle accepts proposed results
 and challenges. A challenged result goes to a jury drawn from eligible Council seats; jurors commit
 their votes before revealing them. The Council contract handles NFT staking and reward accounting.
 The accepted administration target is a Trezu treasury backed by SputnikDAO. The custom

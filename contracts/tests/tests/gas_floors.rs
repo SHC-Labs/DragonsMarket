@@ -82,7 +82,7 @@ async fn draw_with(w: &World, id: u64, tgas: u64) -> anyhow::Result<ExecutionFin
 // A challenged case whose first jury of 11 said nothing, so a second jury of 21 is drawn: the largest case there is, with
 // the first jury still held. Returns the market id and the second jury.
 async fn second_round_of_21(w: &World, all: &[Account]) -> anyhow::Result<(u64, Vec<Account>)> {
-    let id = create_seeded_market(w, 120).await?;
+    let id = new_market(w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(w, &w.carol, id, "yes").await?;
     challenge(w, &w.dave, id).await?;
@@ -128,7 +128,7 @@ async fn the_settling_floor_covers_the_largest_case_there_is() -> anyhow::Result
         .into_result()?;
 
     // Too little gas for the draw is refused with the amount, and the case is not changed.
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     challenge(&w, &w.dave, id).await?;
@@ -245,7 +245,7 @@ async fn the_settling_floor_covers_the_largest_case_there_is() -> anyhow::Result
 #[tokio::test]
 async fn a_retry_with_exactly_the_floor_frees_a_seat_a_failed_unlock_left_held() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
@@ -282,8 +282,8 @@ async fn a_retry_with_exactly_the_floor_frees_a_seat_a_failed_unlock_left_held()
 async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_work_with_exactly_that(
 ) -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
-    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    let id = new_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", SWEEP_BUY).await?;
 
     let sweep_with = |tgas: u64| {
         w.carol
@@ -295,7 +295,7 @@ async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_w
         sweep_with(86).await?.into_result(),
         "attach at least 87 TGas: a sweep sends the Council its part and the treasury its part",
     );
-    assert_eq!(fees(&w).await.0, CREATE_FEE + 95_193, "a refused sweep changed nothing");
+    assert_eq!(fees(&w).await.0, SWEEP_FEE, "a refused sweep changed nothing");
     let r = sweep_with(87).await?;
     assert_clean("sweep_fees at its floor", &r);
     println!(
@@ -306,12 +306,12 @@ async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_w
     assert_eq!(fees(&w).await, (1, 0, 0));
     assert_eq!(
         intents_balance(&w, w.treasury.id()).await,
-        821_394,
+        TREASURY_SHARE,
         "the treasury share arrived at the floor"
     );
     assert_eq!(
         council_total_received(&w).await,
-        273_798,
+        COUNCIL_SHARE,
         "and so did the Council's, so its receipt got the gas it needs at the floor"
     );
 
@@ -370,8 +370,8 @@ async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_w
 #[tokio::test]
 async fn settling_a_lost_leg_and_finalizing_a_quarter_take_the_gas_they_reserve() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
-    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    let id = new_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", SWEEP_BUY).await?;
     // The verifier refuses the market's payouts, so the Council's leg is unresolved.
     lock_account(&w, w.market.id()).await?;
     sweep(&w, &w.carol).await?;
@@ -436,7 +436,7 @@ async fn settling_a_lost_leg_and_finalizing_a_quarter_take_the_gas_they_reserve(
 #[tokio::test]
 async fn the_deadline_answer_refuses_less_than_the_settling_floor() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market_gap(&w, 120, 600).await?;
+    let id = create_market(&w, 120, 600).await?;
     skip_secs(&w.worker, 120 + 600 + 10).await;
     let call = |tgas: u64| {
         w.dave
@@ -461,7 +461,7 @@ async fn the_deadline_answer_refuses_less_than_the_settling_floor() -> anyhow::R
 async fn a_bond_withdrawal_refuses_less_than_its_floor_and_works_with_exactly_that() -> anyhow::Result<()> {
     const PAYOUT_RESERVE_TGAS: f64 = 15.0;
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     skip_secs(&w.worker, 70).await;
@@ -610,7 +610,7 @@ async fn the_gas_the_contracts_reserve_for_the_verifier_covers_what_it_needs() -
     const PAYOUT_RESERVE_TGAS: f64 = 15.0;
     const TRANSFER_CALL_RESERVE_TGAS: u64 = 42;
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
+    let id = new_market(&w, 600).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     deposit_to_intents(&w, &w.alice, w.alice.id(), 100 * USD).await?;
 

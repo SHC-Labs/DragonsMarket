@@ -60,15 +60,19 @@ const markets = SPECS.map(([title, source, voidPolicy, category, sub, days], i) 
   const closeAt = started + BigInt(Math.round(days * 86_400)) * SEC;
   const hist = history(i, closeAt);
   const price = hist[hist.length - 1].price_yes;
+  const locked = BigInt(200 + ((i * 7919) % 4800)) * USD + BigInt((i * 104729) % 1_000_000);
+  // The pool is the length of the share vector and the Yes price is yes squared over the pool squared.
+  const sharesAt = (chance) => String(BigInt(Math.floor(Number(locked) * Math.sqrt(chance))));
   return {
     id: String(i), title,
     rule_text: `Resolves Yes if the answer to "${title}" is yes according to the source below when the market closes. Resolves No otherwise.`,
     resolution_source: source, void_policy: voidPolicy, category, subcategory: sub,
     rule_hash: (BigInt(i + 1) * 0x9e3779b97f4a7c15n).toString(16).padStart(64, "0").slice(-64),
     close_at: String(closeAt), resolve_by: String(closeAt + 7n * DAY),
-    status: closeAt < started ? "closed" : "open", registered: true, seeded: true, void_price_yes: null, outcome: null,
+    status: closeAt < started ? "closed" : "open", registered: true, outcome: null, refunds: false,
     price_yes: String(price), price_no: String(1_000_000 - price),
-    locked: String((BigInt(200 + ((i * 7919) % 4800)) * USD) + BigInt((i * 104729) % 1_000_000)),
+    yes_shares: sharesAt(price / 1e6), no_shares: sharesAt(1 - price / 1e6),
+    locked: String(locked),
     history: hist,
   };
 });
@@ -95,8 +99,12 @@ const ALICE = "alice.test.near";
 const holdings = { 0: [42_500_000n, 0n], 3: [0n, 18_000_000n], 5: [25_000_000n, 0n], 6: [12_000_000n, 3_000_000n], 12: [0n, 30_000_000n], 15: [8_750_000n, 0n] };
 const sharesOf = (id, account) => (account === ALICE && holdings[id] ? holdings[id].map(String) : ["0", "0"]);
 
-// What redeem would credit: a winning share pays one unit of collateral, a losing one nothing.
-const redeemable = (m, [yes, no]) => (m.outcome === "yes" ? yes : m.outcome === "no" ? no : 0n);
+// What redeem would credit: a winning position's share of the pool, a losing one nothing.
+const redeemable = (m, [yes, no]) => {
+  if (m.outcome !== "yes" && m.outcome !== "no") return 0n;
+  const [held, winners] = m.outcome === "yes" ? [yes, m.yes_shares] : [no, m.no_shares];
+  return (held * BigInt(m.locked)) / BigInt(winners);
+};
 const positionsOf = (account) => (account === ALICE ? Object.keys(holdings).map(Number).sort((a, b) => a - b) : []).map((id) => {
   const m = markets[id], [yes, no] = holdings[id];
   return { market_id: String(id), yes: String(yes), no: String(no), status: m.status, outcome: m.outcome, redeemable: String(redeemable(m, [yes, no])) };
@@ -119,14 +127,13 @@ const views = {
       owner: "owner.test.near", pending_owner: null, operator: "keeper.test.near", oracle: ORACLE,
       verifier: VERIFIER, collateral_token_id: "nep141:ft.test.near",
       paused: false, sells_paused: false, markets: String(markets.length), storage_deposit: "50000000000000000000000",
-      max_positions: 20, fee_rate_bps: 200, create_fee: "1000000",
+      max_positions: 20, fee_rate_bps: 200,
       revenue_pool: "council.test.near", treasury: "treasury.test.near",
       revenue_share_bps: 2500, treasury_share_bps: 7500,
       min_sweep: "1000000", next_sweep_id: "1", revenue_unresolved: "0",
-      void_price_window_ns: String(24n * 3600n * SEC), void_grace_ns: String(7n * 24n * 3600n * SEC),
+      void_grace_ns: String(7n * 24n * 3600n * SEC),
       settle_wait_minutes: 10, reconcile_wait_minutes: 60, min_sweep_interval_minutes: 60,
-      min_open_price: "10000", max_open_price: "990000",
-      max_fee_rate_bps: 500, max_create_fee: "10000000", min_revenue_share_bps: 1000, max_revenue_share_bps: 5000, max_min_sweep: "100000000",
+      max_fee_rate_bps: 500, min_revenue_share_bps: 1000, max_revenue_share_bps: 5000, max_min_sweep: "100000000",
     }),
     list_markets: ({ from_index = "0", limit = "50" }) => markets.slice(Number(from_index), Number(from_index) + Number(limit)).map(pub),
     get_market: ({ market_id }) => (markets[Number(market_id)] ? pub(markets[Number(market_id)]) : null),

@@ -19,9 +19,8 @@ describe("market pagination", () => {
     read.mockResolvedValueOnce(batch(0,50)).mockResolvedValueOnce(batch(0,50));
     await expect(listMarkets()).rejects.toThrow("repeated");
   });
-  it("does not display explicitly unregistered or unseeded markets as tradable", () => {
-    expect(isMarketListed({registered:true,seeded:false} as MarketView)).toBe(false);
-    expect(isMarketListed({registered:false,seeded:true} as MarketView)).toBe(false);
-    expect(isMarketListed({registered:true,seeded:true} as MarketView)).toBe(true);
+  it("does not display a market the oracle has not registered as tradable", () => {
+    expect(isMarketListed({registered:false} as MarketView)).toBe(false);
+    expect(isMarketListed({registered:true} as MarketView)).toBe(true);
   });
 });

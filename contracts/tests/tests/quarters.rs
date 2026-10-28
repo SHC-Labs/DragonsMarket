@@ -21,8 +21,8 @@ async fn weight_of(w: &World, quarter: u32, token: &str, who: &Account) -> u128 
 
 // Trades that pay a fee, and a sweep that sends the Council its share. Returns the share.
 async fn fees_swept_to_the_council(w: &World) -> anyhow::Result<u128> {
-    let id = create_seeded_market(w, 600).await?;
-    buy(w, &w.alice, id, "yes", 10 * USD).await?;
+    let id = new_market(w, 600).await?;
+    buy(w, &w.alice, id, "yes", SWEEP_BUY).await?;
     let before = council_total_received(w).await;
     past_sweep_interval(w).await;
     sweep(w, &w.carol).await?;
@@ -34,7 +34,7 @@ async fn fees_go_from_a_sweep_to_a_quarter_to_one_claim_per_seat_and_a_late_clai
 {
     let w = setup().await?;
     let share = fees_swept_to_the_council(&w).await?;
-    assert_eq!(share, 273_798);
+    assert_eq!(share, COUNCIL_SHARE);
     assert_eq!(intents_balance(&w, w.council.id()).await, share);
     assert_eq!(u(&current_quarter(&w).await["revenue_in"]), share);
 

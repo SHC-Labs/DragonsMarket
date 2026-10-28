@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
 const ns = (ms:number) => String(BigInt(ms)*1_000_000n);
-const markets = Array.from({length:53},(_,i)=>({id:String(i),title:`Market ${i}: will the project reach its next milestone?`,rule_text:"Yes if the published milestone is completed by the deadline.",resolution_source:"https://example.org/result",void_policy:"Cancelled if the source becomes unavailable.",category:"tech",subcategory:"ai",rule_hash:"a".repeat(64),close_at:ns(Date.now()+86400000),resolve_by:ns(Date.now()+172800000),status:"open",registered:true,seeded:true,outcome:null,price_yes:"600000",price_no:"400000",locked:String((1000-i)*1000000)}));
+const markets = Array.from({length:53},(_,i)=>({id:String(i),title:`Market ${i}: will the project reach its next milestone?`,rule_text:"Yes if the published milestone is completed by the deadline.",resolution_source:"https://example.org/result",void_policy:"Cancelled if the source becomes unavailable.",category:"tech",subcategory:"ai",rule_hash:"a".repeat(64),close_at:ns(Date.now()+86400000),resolve_by:ns(Date.now()+172800000),status:"open",registered:true,outcome:null,refunds:false,price_yes:"600000",price_no:"400000",locked:String((1000-i)*1000000)}));
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/local-rpc", async route => {
@@ -80,11 +80,11 @@ test("portfolio writes remain disabled until the final withdrawal flow is wired"
   await expect(page.getByText("53 positions",{exact:true})).toBeVisible();
 });
 
-test("explicitly unseeded detail is not presented as a tradable market",async({page})=>{
+test("an unregistered market's detail is not presented as a tradable market",async({page})=>{
   await page.route("**/local-rpc",async route=>{
     const request=route.request().postDataJSON();
     if(request.params.method_name!=="get_market")return route.fallback();
-    await route.fulfill({json:{jsonrpc:"2.0",id:request.id,result:{result:[...Buffer.from(JSON.stringify({...markets[0],seeded:false}))]}}});
+    await route.fulfill({json:{jsonrpc:"2.0",id:request.id,result:{result:[...Buffer.from(JSON.stringify({...markets[0],status:"unregistered",registered:false}))]}}});
   });
   await page.goto("/market?id=0");
   await expect(page.getByText("This market is not ready for trading.",{exact:false})).toBeVisible();

@@ -55,3 +55,45 @@ test('CMC refuses stale, missing, duplicate, wrong-asset, wrong-quote and vendor
  await assert.rejects(coinmarketcapLatest(boundary,{mode:'keyless'},async()=>new Response('limited',{status:429})),/price_rate_limited/);
  await assert.rejects(coinmarketcapLatest(boundary,{mode:'keyed',apiKey:'bad\r\nkey'}),/invalid_cmc_key/);
 });
+
+import {usdBoundary,type Exchange} from '../src/prices.js';
+const at=1700000040;
+const coinbaseBody=(time=at)=>`[[${time},80784.77,80809,80787.92,80809.12345678,0.49802106]]`;
+const krakenBody=(count=35,last=at,key='XXBTZUSD')=>`{"error":[],"result":{"${key}":[[${at},"80800.1","80813.9","80800.0","80813.9","80808.0","0.18882354",${count}],[${at+60},"80813.9","80821.0","80803.0","80821.0","80811.5","0.17554749",43]],"last":${last}}}`;
+const bitstampBody=(volume='0.01093903',time=at)=>`{"data":{"pair":"BTC/USD","ohlc":[{"timestamp":"${time}","open":"80795.33","high":"80809.44","low":"80795.33","close":"80809.44","volume":"${volume}"}]}}`;
+test('Coinbase, Kraken and Bitstamp give the USD close of the minute ending at the boundary and form a quorum together',async()=>{
+ const requested:string[]=[];
+ const serve=(body:string):typeof fetch=>async input=>{requested.push(String(input));return new Response(body);};
+ const coinbase=await usdBoundary('coinbase','BTC',boundary,serve(coinbaseBody()));
+ const kraken=await usdBoundary('kraken','BTC',boundary,serve(krakenBody()));
+ const bitstamp=await usdBoundary('bitstamp','BTC',boundary,serve(bitstampBody()));
+ assert.deepEqual(requested,[
+  'https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60&start=2023-11-14T22%3A14%3A00.000Z&end=2023-11-14T22%3A14%3A00.000Z',
+  'https://api.kraken.com/0/public/OHLC?pair=XXBTZUSD&interval=1&since=1700000040',
+  'https://www.bitstamp.net/api/v2/ohlc/btcusd/?step=60&limit=1&start=1700000040',
+ ]);
+ assert.deepEqual([coinbase,kraken,bitstamp].map(o=>[o.source,o.price]),[['coinbase','80809.12345678'],['kraken','80813.9'],['bitstamp','80809.44']]);
+ assert.ok([coinbase,kraken,bitstamp].every(o=>o.quote==='USD'&&o.exactBoundary&&o.sourceTimeNs==='1700000099999000000'));
+ const policy={asset:'BTC' as const,quote:'USD' as const,boundaryNs:boundary,decimals:8,minimumSources:2,maxDeviationBps:100};
+ assert.equal(candidate([coinbase,kraken,bitstamp],policy),'8080944000000');
+ assert.equal(candidate([coinbase,kraken],policy),'8081390000000');
+ assert.throws(()=>candidate([coinbase,kraken,bitstamp],{...policy,quote:'USDC'}),/insufficient_exact_independent_sources/);
+ assert.throws(()=>candidate([coinbase,kraken,{...bitstamp,price:'82000'}],policy),/divergent_price_sources/);
+});
+test('USD candles are refused when the minute is empty, still open, another minute or not a final five-minute boundary',async()=>{
+ const cases:Array<[Exchange,string,string]>=[
+ ['coinbase','[]','boundary_candle_missing'],
+ ['coinbase',coinbaseBody(at-60),'invalid_boundary_candle'],
+ ['kraken',krakenBody(0),'invalid_boundary_candle'],
+ ['kraken',krakenBody(35,at-60),'boundary_candle_missing'],
+ ['kraken','{"error":["EGeneral:Too many requests"]}','invalid_price_response'],
+ ['kraken',krakenBody(35,at,'XBTUSD'),'invalid_price_response'],
+ ['bitstamp',bitstampBody('0.000'),'invalid_boundary_candle'],
+ ['bitstamp',bitstampBody('0.01093903',at+60),'invalid_boundary_candle'],
+ ];
+ for(const [source,body,error] of cases)await assert.rejects(usdBoundary(source,'BTC',boundary,async()=>new Response(body)),new RegExp(error));
+ const never:typeof fetch=async()=>{throw new Error('no request expected');};
+ await assert.rejects(usdBoundary('kraken','BTC','1700000160000000000',never),/boundary_not_final/);
+ await assert.rejects(usdBoundary('kraken','BTC',((BigInt(Date.now())/300000n+1n)*300000000000n).toString(),never),/boundary_not_final/);
+ await assert.rejects(usdBoundary('gemini' as Exchange,'BTC',boundary,never),/invalid_boundary/);
+});

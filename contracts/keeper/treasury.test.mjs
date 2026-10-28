@@ -19,7 +19,7 @@ const ED_KEY = `ed25519:${b58encode(Buffer.alloc(32, 7))}`;
 const SECP_KEY = `secp256k1:${b58encode(Buffer.alloc(64, 5))}`;
 const CONTRACTS_DIR = path.resolve(import.meta.dirname, "..");
 const NEXT_SWEEP_ID = "5";
-const MARKET_STORAGE_DEPOSIT = "50090000000000000000000";
+const MARKET_STORAGE_DEPOSIT = "47750000000000000000000";
 
 // A DAO and three contracts that answer only the views the helper is meant to ask.
 function chain({ bond = BOND, proposals = [], staged = true, proven = true } = {}) {
@@ -63,18 +63,16 @@ const SAMPLES = {
     set_min_sweep: { min_sweep: "1000000" },
     set_next_sweep_id: { next_sweep_id: "50" },
     set_fee_rate_bps: { fee_rate_bps: 150 },
-    set_create_fee: { create_fee: "1000000" },
     set_storage_policy: { market_storage_deposit: MARKET_STORAGE_DEPOSIT, reserve: "1000000000000000000000000" },
     set_registration_fee: { registration_fee: "250000" },
     reconcile_leg: { sweep_id: "3", leg: "council", arrived: true },
     reconcile_withdrawal: { id: "3", paid: false },
     set_paused: { paused: true },
     set_sells_paused: { sells_paused: true },
-    set_void_rules: { price_window_ns: "86400000000000", grace_ns: "604800000000000" },
+    set_void_grace: { grace_ns: "604800000000000" },
     set_sweep_timing: { settle_wait_minutes: 10, reconcile_wait_minutes: 60, min_interval_minutes: 60 },
-    set_open_price_bounds: { min: "10000", max: "990000" },
     set_max_positions: { max_positions: 20 },
-    set_fee_limits: { max_fee_rate_bps: 500, max_create_fee: "10000000", min_revenue_share_bps: 1000, max_revenue_share_bps: 5000, max_min_sweep: "100000000" },
+    set_fee_limits: { max_fee_rate_bps: 500, min_revenue_share_bps: 1000, max_revenue_share_bps: 5000, max_min_sweep: "100000000" },
     halt: { market_id: "3", reason: "the source is down" },
     resume: { market_id: "3" },
     claim_residual: { market_id: "3" },
@@ -189,9 +187,9 @@ test("a value past what the contract allows is refused, and the value at the lim
     ["market", "set_fee_rate_bps", { fee_rate_bps: 0 }, { fee_rate_bps: -1 }],
     ["market", "set_fee_rate_bps", { fee_rate_bps: 1 }, { fee_rate_bps: "150" }],
     ["market", "set_fee_rate_bps", { fee_rate_bps: 1 }, { fee_rate_bps: 1.5 }],
-    ["market", "set_create_fee", { create_fee: "100000000" }, { create_fee: "100000001" }],
-    ["market", "set_create_fee", { create_fee: "0" }, { create_fee: 1000000 }],
-    ["market", "set_create_fee", { create_fee: "5" }, { create_fee: "05" }],
+    ["market", "set_void_grace", { grace_ns: "86400000000000" }, { grace_ns: "86399999999999" }],
+    ["market", "set_void_grace", { grace_ns: "5184000000000000" }, { grace_ns: "5184000000000001" }],
+    ["market", "set_void_grace", { grace_ns: "604800000000000" }, { grace_ns: 604800000000000 }],
     ["market", "set_registration_fee", { registration_fee: "10000" }, { registration_fee: "9999" }],
     ["market", "set_registration_fee", { registration_fee: "2000000" }, { registration_fee: "2000001" }],
     ["market", "reconcile_leg", { sweep_id: "1", leg: "council", arrived: false }, { sweep_id: "0", leg: "council", arrived: false }],
@@ -571,10 +569,7 @@ const UPGRADE_PATH_EXCLUDED = {
   migrate: "private: it runs inside the batch that upgrade sends, in the new code, and nobody can call it",
 };
 const EXCLUDED = {
-  market: {
-    ...UPGRADE_PATH_EXCLUDED,
-    mt_on_transfer: "only the verifier calls it, and its seed message compares the sender with the owner and operator; the DAO would send that through intents.near, which is not one of the three contracts",
-  },
+  market: UPGRADE_PATH_EXCLUDED,
   oracle: UPGRADE_PATH_EXCLUDED,
   council: UPGRADE_PATH_EXCLUDED,
 };

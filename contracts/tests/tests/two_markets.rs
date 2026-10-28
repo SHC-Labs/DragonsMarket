@@ -100,13 +100,10 @@ async fn two_markets_share_one_oracle_and_one_council_without_colliding() -> any
     );
 
     // Both markets have a market 0, trade, and sweep their fees under sweep id 1.
-    let (id1, id2) = (
-        create_seeded_market(&w1, 600).await?,
-        create_seeded_market(&w2, 600).await?,
-    );
+    let (id1, id2) = (new_market(&w1, 600).await?, new_market(&w2, 600).await?);
     assert_eq!((id1, id2), (0, 0));
-    buy(&w1, &w1.alice, 0, "yes", 10 * USD).await?;
-    buy(&w2, &w2.alice, 0, "yes", 10 * USD).await?;
+    buy(&w1, &w1.alice, 0, "yes", SWEEP_BUY).await?;
+    buy(&w2, &w2.alice, 0, "yes", SWEEP_BUY).await?;
     sweep(&w1, &w1.carol).await?;
     sweep(&w2, &w2.carol).await?;
     let (first, second) = (

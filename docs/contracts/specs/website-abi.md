@@ -2,6 +2,8 @@
 
 **The views, events, messages, gas, error strings and status enums the website needs from each contract, written so web types can be generated from it, with the places where `web/lib` differs today.**
 
+**Dynamic parimutuel pricing, 2026-10-27.** The market's types, `sell`, `config`, the message grammar and the trade events below are updated for market state version 6, which replaced the constant-product pool and its seed (see [market.md](../market.md)). `web/lib/market.ts` and the portfolio were changed to match on the same day. Rows elsewhere that still name the seed or the closing-price Void are history.
+
 | Field | Value |
 | --- | --- |
 | Date | 2026-10-21 |
@@ -93,24 +95,26 @@ type Side = "yes" | "no";
 
 interface PriceRule { observation_time: U64; strike: U128; decimals: number; above: boolean }
 
-type MarketStatus = "resolved" | "halted" | "closed" | "unregistered" | "unseeded" | "open";
+type MarketStatus = "resolved" | "halted" | "closed" | "unregistered" | "open";
 
 interface MarketView {                       // market.get_market, market.list_markets   EXISTING
   id: U64; title: string; rule_text: string; resolution_source: string; void_policy: string;
   category: string; subcategory: string; rule_hash: string; price_rule: PriceRule | null;
-  close_at: U64; resolve_by: U64; status: MarketStatus; registered: boolean; seeded: boolean;
-  outcome: Outcome | null; void_price_yes: U128 | null;
-  price_yes: U128; price_no: U128; locked: U128;
-  holders: number | null; seeder: {account_id: AccountId; yes: U128; no: U128} | null; pruned: boolean;
+  close_at: U64; resolve_by: U64; status: MarketStatus; registered: boolean;
+  outcome: Outcome | null; refunds: boolean;   // refunds: a Void, or an answer nobody holds
+  price_yes: U128; price_no: U128; yes_shares: U128; no_shares: U128; locked: U128;
+  holders: number; pruned: boolean;
 }
 interface PricePoint { at: U64; price_yes: number }            // price_yes is a u32 number
 interface BuyQuote  { shares_out: U128; fee: U128 }
-interface SellQuote { collateral_out: U128; shares_in: U128; fee: U128 }
+interface SellQuote { collateral_out: U128; shares_in: U128; fee: U128 }   // collateral_out before the fee
 interface PositionView { market_id: U64; yes: U128; no: U128; status: MarketStatus;
                          outcome: Outcome | null; redeemable: U128 }
 ```
 
-`status` is evaluated in this order (`Market::status` in `market/src/lib.rs`): `resolved`, `halted`, `closed`, then `unregistered` while the oracle has not confirmed, `unseeded` while there is no liquidity, otherwise `open`.
+`status` is evaluated in this order (`Market::status` in `market/src/lib.rs`): `resolved`, `halted`, `closed`, then `unregistered` while the oracle has not confirmed, otherwise `open`. A registered market is open from the start, empty, at `price_yes` `"500000"`.
+
+`redeemable` in `PositionView` is the only correct source for what a resolved position pays: a winner's part of the pool depends on all the winning shares, and a refund on the position's cost record, which no view exposes.
 
 PROPOSED additions:
 
@@ -149,13 +153,13 @@ interface OwedView { balances: U128; locked: U128; fees: U128; revenue_due: U128
 | `get_sweep`, `list_sweeps` | `{sweep_id: U64}`, `{from_index: U64, limit: U64}` | `SweepView \| null`, `SweepView[]` | BUILT |
 | `in_flight`, `owed_breakdown` | `{}` | `InFlightView`, `OwedView`. `total` equals `total_owed`, which includes `pending_withdrawals`. `legs` counts fee legs that are `pending` or `unresolved` | BUILT |
 
-`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `create_fee: U128`, `revenue_pool: string \| null`, `treasury: string \| null`, `revenue_share_bps: number`, `treasury_share_bps: number`, `min_sweep: U128`, `next_sweep_id: U64`, `revenue_unresolved: U128`, `void_price_window_ns: U64`, `void_grace_ns: U64`, `settle_wait_minutes: number`, `reconcile_wait_minutes: number`, `min_sweep_interval_minutes: number`, `min_open_price: U128`, `max_open_price: U128`, `max_fee_rate_bps: number`, `max_create_fee: U128`, `min_revenue_share_bps: number`, `max_revenue_share_bps: number`, `max_min_sweep: U128`. `max_positions` is the stored cap. Also returned: `last_sweep_at: U64 | null`, `market_storage_deposit: U128`, `storage_reserve: U128`, `position_page_default: number` (50), `position_page_max: number` (100). Market state version is 4; oracle 2 and Council 3.
+`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `revenue_pool: string \| null`, `treasury: string \| null`, `revenue_share_bps: number`, `treasury_share_bps: number`, `min_sweep: U128`, `next_sweep_id: U64`, `revenue_unresolved: U128`, `void_grace_ns: U64`, `settle_wait_minutes: number`, `reconcile_wait_minutes: number`, `min_sweep_interval_minutes: number`, `max_fee_rate_bps: number`, `min_revenue_share_bps: number`, `max_revenue_share_bps: number`, `max_min_sweep: U128`, `registration_fee: U128`. `max_positions` is the stored cap on entries: a position on one side takes two, its shares and its cost record. Also returned: `last_sweep_at: U64 | null`, `market_storage_deposit: U128`, `storage_reserve: U128`, `position_page_default: number` (50), `position_page_max: number` (100). Market state version is 6; oracle 2 and Council 3.
 
 ---
 
 ## 5. Market calls and messages
 
-`create_market` now requires the native deposit in `config.market_storage_deposit` (0.05009 NEAR initially, hard range 0.05009 to 0.5). Read it when preparing an operator or Treasury request. It refunds surplus; creation fee in collateral is unchanged. Owner-only `set_storage_policy({market_storage_deposit: U128, reserve: U128})` takes no deposit and 30 TGas; reserve range 0.1 to 100 NEAR, initially 1. `prune_market({market_id: U64})` is permissionless, no deposit, 30 TGas; only resolved markets with no holders or shares can prune. It returns a boolean. Store display metadata off-chain before pruning because text and history become empty. New `MarketView` fields are above.
+`create_market` now requires the native deposit in `config.market_storage_deposit` (0.04775 NEAR initially, hard range 0.04775 to 0.5). Read it when preparing an operator or Treasury request. It refunds surplus; there is no creation fee in collateral. Owner-only `set_storage_policy({market_storage_deposit: U128, reserve: U128})` takes no deposit and 30 TGas; reserve range 0.1 to 100 NEAR, initially 1. `prune_market({market_id: U64})` is permissionless, no deposit, 30 TGas; only resolved markets with no holders or shares can prune. It returns a boolean. Store display metadata off-chain before pruning because text and history become empty. New `MarketView` fields are above.
 
 Sweep interval hard range is now 60 to 1,440 minutes. Migration raises an old shorter interval to 60. New events: `storage_policy_set {market_storage_deposit, reserve}` and `market_pruned {market_id, rule_hash}`. Monetary and payout records survive pruning.
 
@@ -170,7 +174,7 @@ Each row is one `FunctionCall` for the wallet (`web/lib/market.ts:114-120`). Dep
 | Deposit to market | verifier | `mt_transfer_call` | `{receiver_id: market, token_id, amount, msg: "deposit"}` | `1` | 100 TGas | NEW builder |
 | Buy with funds in the verifier | verifier | `mt_transfer_call` | `{receiver_id: market, token_id, amount, msg: "buy:<id>:<side>:<min_shares>"}` | `1` | 100 TGas | NEW builder. Replaces `buyCall` |
 | Buy from the market balance | market | `buy` | `{market_id, side, amount, min_shares}` | `1` | 100 TGas | EXISTING contract, no builder yet |
-| Sell | market | `sell` | `{market_id, side, collateral_out, max_shares_in}` | `1` | 100 TGas | EXISTING (`market.ts:145-151`) |
+| Sell | market | `sell` | `{market_id, side, shares, min_collateral}` | `1` | 100 TGas | EXISTING (`sellCall` in `market.ts`) |
 | Redeem | market | `redeem` | `{market_id}` | `0` | 100 TGas | EXISTING (`market.ts:153-159`) |
 | Withdraw to the user's Intents account | market | `withdraw` | `{amount}` | `1` | 100 TGas | EXISTING (`market.ts:161-167`) |
 | Unregister | market | `storage_unregister` | `{force: false}` | `1` | 30 TGas | EXISTING contract, no builder |
@@ -181,11 +185,11 @@ For `mt_transfer_call` to the market. Split on `:`. Extra trailing parts are ign
 
 ```text
 deposit
+register                                     an account with no NEAR, at least config.registration_fee
 buy:<market_id>:<yes|no>:<min_shares>        min_shares is a decimal above zero
-seed:<market_id>[:<yes_price_micro>]         operator or owner only, 10000 to 990000
 ```
 
-A refusal makes the verifier refund the sender and return `["0"]`. Compute `min_shares` from `quote_buy` with `minSharesWithSlippage` (`web/lib/format.ts:59-63`). For sells compute `max_shares_in` with `maxSharesWithSlippage`.
+A refusal makes the verifier refund the sender and return `["0"]`. Compute `min_shares` from `quote_buy` with `minSharesWithSlippage` (`web/lib/format.ts:59-63`). For a sell, quote the shares with `quote_sell` and send `min_collateral` as `collateral_out - fee` less the slippage the user accepts.
 
 ### 5.3 Funding states
 
@@ -378,12 +382,12 @@ The site does not parse events today. When it does, the envelope is `EVENT_JSON:
 | --- | --- | --- | --- |
 | market | `registered` | `account`, `paid_by` | Storage deposit paid |
 | market | `deposit` | `account`, `amount` | Funds credited to the market balance |
-| market | `buy`, `sell` | `market_id`, `account`, `side`, `shares`, `collateral`, `fee` | Trade done |
+| market | `buy`, `sell` | `market_id`, `account`, `side`, `shares`, `collateral`, `fee`, `price_yes`, `price_no`, `yes_shares`, `no_shares` | Trade done. A buy's `collateral` includes the fee; a sell's is what the shares fetched before it |
 | market | `redeemed` | `market_id`, `account`, `amount` | Winnings credited to the market balance |
 | market | `withdraw` | `account`, `amount`, `id` (`U64`, string) | Requested. It is emitted before the transfer, so it is not a payout |
 | market | `withdraw_confirmed` | `account`, `amount`, `id` | The verifier moved the money |
 | market | `withdraw_failed` | `account`, `amount`, `id` | The verifier refused, the balance came back |
-| market | `outcome_set` | `market_id`, `outcome` | Market resolved |
+| market | `outcome_set` | `market_id`, `outcome`, `refunds` | Market resolved. `refunds` true means every holder is paid back what they put in |
 | oracle | `proposed`, `challenged`, `jury_drawn`, `draw_failed`, `vote_committed`, `vote_revealed`, `escalated`, `final`, `outcome_applied` | see oracle.md | Case progress |
 | oracle | `bond_payout_requested`, `bond_paid`, `bond_payout_failed` | `account`, `amount`, `id` (`U64`, string) | Bond payout progress. The request is emitted before the transfer, so it is not a payout |
 | oracle | `bond_received` NEW | `account`, `amount` | Bond custody |
@@ -429,7 +433,7 @@ A transaction that succeeds while the receiver refuses (`mt_transfer_call`) has 
 
 | Enum | Values | Where |
 | --- | --- | --- |
-| `MarketStatus` | `resolved`, `halted`, `closed`, `unregistered`, `unseeded`, `open` | `MarketView.status` |
+| `MarketStatus` | `resolved`, `halted`, `closed`, `unregistered`, `open` | `MarketView.status` |
 | `Outcome` | `yes`, `no`, `void` | everywhere |
 | `Stage` | `proposed`, `disputed`, `final` | `Case.stage` |
 | `Ruling` | `unchallenged`, `decided`, `no_decision`, `no_jury` | `final` event |

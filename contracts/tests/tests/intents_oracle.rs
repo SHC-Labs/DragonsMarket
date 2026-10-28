@@ -33,7 +33,7 @@ async fn predecessor_auth_enabled(w: &World, who: &AccountId) -> bool {
 
 // A market that has closed and is registered with the oracle, ready for a proposal.
 async fn closed_market(w: &World) -> anyhow::Result<u64> {
-    let id = create_seeded_market(w, 120).await?;
+    let id = new_market(w, 120).await?;
     skip_secs(&w.worker, 130).await;
     Ok(id)
 }
@@ -136,8 +136,8 @@ async fn a_bond_through_the_real_verifier_is_credited_to_the_account_that_sent_i
 #[tokio::test]
 async fn a_message_the_oracle_refuses_is_refunded_in_full_by_the_verifier() -> anyhow::Result<()> {
     let w = setup().await?;
-    let closed = create_seeded_market(&w, 120).await?;
-    let open = create_seeded_market(&w, 600).await?;
+    let closed = new_market(&w, 120).await?;
+    let open = new_market(&w, 600).await?;
     skip_secs(&w.worker, 130).await;
     deposit_to_intents(&w, &w.carol, w.carol.id(), 30 * USD).await?;
     deposit_to_intents(&w, &w.dave, w.dave.id(), 30 * USD).await?;

@@ -48,17 +48,17 @@ async fn predecessor_auth_enabled(w: &World, who: &AccountId) -> bool {
         .unwrap()
 }
 
-// Deposit, buy, sell, resolve, redeem, claim the residual, withdraw and sweep. After every step that has finished, the market's
-// books say exactly what the verifier holds for it, and it never registers a key or turns off predecessor authentication.
+// Deposit, buy, sell, resolve, redeem, withdraw and sweep. After every step that has finished, the market's books say
+// exactly what the verifier holds for it, and it never registers a key or turns off predecessor authentication.
 #[tokio::test]
 async fn a_full_journey_keeps_total_owed_equal_to_the_verifiers_balance() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     assert_reconciled(&w).await;
     assert_eq!(
         intents_balance(&w, w.market.id()).await,
-        SEED,
-        "the seed is all the market holds"
+        0,
+        "a market opens holding nothing"
     );
     assert_eq!(
         ft_balance(&w, w.market.id()).await,
@@ -70,13 +70,13 @@ async fn a_full_journey_keeps_total_owed_equal_to_the_verifiers_balance() -> any
     assert_eq!(market_balance(&w, w.alice.id()).await, 10 * USD);
     assert_reconciled(&w).await;
 
-    buy(&w, &w.alice, id, "yes", 20 * USD).await?;
+    buy(&w, &w.alice, id, "yes", 40 * USD).await?;
     buy(&w, &w.bob, id, "no", 15 * USD).await?;
     assert_reconciled(&w).await;
 
     let (yes, _) = shares(&w, id, w.alice.id()).await;
-    let (out, needed, _) = quote_sell(&w, id, "yes", yes / 2).await;
-    sell(&w, &w.alice, id, "yes", out, needed).await?;
+    let (out, _, fee) = quote_sell(&w, id, "yes", yes / 2).await;
+    sell(&w, &w.alice, id, "yes", yes / 2, out - fee).await?;
     assert_reconciled(&w).await;
     assert!(invariant(&w, id).await);
 
@@ -94,13 +94,11 @@ async fn a_full_journey_keeps_total_owed_equal_to_the_verifiers_balance() -> any
             .into_result()?;
     }
     assert_reconciled(&w).await;
-    w.owner
-        .call(w.market.id(), "claim_residual")
-        .args_json(json!({ "market_id": id.to_string() }))
-        .transact()
-        .await?
-        .into_result()?;
-    assert_reconciled(&w).await;
+    assert_eq!(
+        market_json(&w, id).await["locked"],
+        "0",
+        "the only Yes holder took the pool"
+    );
 
     let balance = market_balance(&w, w.alice.id()).await;
     assert!(balance > 0);
@@ -149,7 +147,7 @@ async fn a_full_journey_keeps_total_owed_equal_to_the_verifiers_balance() -> any
 #[tokio::test]
 async fn a_message_the_market_refuses_is_refunded_in_full_by_the_verifier() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
+    let id = new_market(&w, 600).await?;
     deposit_to_intents(&w, &w.alice, w.alice.id(), 10 * USD).await?;
     deposit_to_intents(&w, &w.carol, w.carol.id(), 10 * USD).await?;
     let (owed, market_held) = (total_owed(&w).await, intents_balance(&w, w.market.id()).await);
@@ -394,7 +392,7 @@ async fn the_hook_checks_the_delivery_as_well_as_the_caller() -> anyhow::Result<
 #[tokio::test]
 async fn a_plain_deposit_to_the_market_is_surplus_with_no_callback_and_no_credit() -> anyhow::Result<()> {
     let w = setup().await?;
-    create_seeded_market(&w, 600).await?;
+    new_market(&w, 600).await?;
     let owed = total_owed(&w).await;
     assert_reconciled(&w).await;
 
@@ -448,7 +446,7 @@ async fn a_plain_deposit_to_the_market_is_surplus_with_no_callback_and_no_credit
 #[tokio::test]
 async fn a_withdrawal_the_verifier_refuses_restores_the_balance() -> anyhow::Result<()> {
     let w = setup().await?;
-    create_seeded_market(&w, 600).await?;
+    new_market(&w, 600).await?;
     ft_call(&w, &w.alice, w.market.id(), 10 * USD, "deposit").await?;
     let owed = total_owed(&w).await;
     let alice_intents = intents_balance(&w, w.alice.id()).await;
@@ -492,7 +490,7 @@ async fn a_withdrawal_the_verifier_refuses_restores_the_balance() -> anyhow::Res
 #[tokio::test]
 async fn redeeming_works_inside_the_market_while_the_verifier_refuses_payouts() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;

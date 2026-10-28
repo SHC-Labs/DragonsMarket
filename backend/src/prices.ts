@@ -7,7 +7,8 @@ import {setTimeout as sleep} from 'node:timers/promises';
 import {createPool,verifyDatabase} from './database.js';
 import {readConfig} from './config.js';
 export type Asset='BTC'|'ETH'|'NEAR';
-export interface Observation{asset:Asset;source:'binance'|'coingecko'|'coinmarketcap';quote:'USD'|'USDC';boundaryNs:string;sourceTimeNs:string;retrievedAt:string;price:string;exactBoundary:boolean;raw:string;}
+export type Exchange='coinbase'|'kraken'|'bitstamp';
+export interface Observation{asset:Asset;source:'binance'|Exchange|'coingecko'|'coinmarketcap';quote:'USD'|'USDC';boundaryNs:string;sourceTimeNs:string;retrievedAt:string;price:string;exactBoundary:boolean;raw:string;}
 const assets:Asset[]=['BTC','ETH','NEAR'];
 const coinIds:Record<Asset,string>={BTC:'bitcoin',ETH:'ethereum',NEAR:'near'};
 export function decimal(value:unknown,decimals=8){
@@ -37,6 +38,46 @@ export async function binanceBoundary(asset:Asset,boundaryNs:string,transport:ty
  if(row[0]!==start.toString()||row[6]!==(ms-1n).toString()||typeof row[8]!=='string'||BigInt(row[8])<=0n)throw new Error('invalid_boundary_candle');
  decimal(row[4],18);
  return {asset,source:'binance',quote:'USDC',boundaryNs,sourceTimeNs:((ms-1n)*1000000n).toString(),retrievedAt:new Date().toISOString(),price:row[4] as string,exactBoundary:true,raw};
+}
+const usdPairs:Record<Exchange,Record<Asset,string>>={
+ coinbase:{BTC:'BTC-USD',ETH:'ETH-USD',NEAR:'NEAR-USD'},
+ kraken:{BTC:'XXBTZUSD',ETH:'XETHZUSD',NEAR:'NEARUSD'},
+ bitstamp:{BTC:'btcusd',ETH:'ethusd',NEAR:'nearusd'},
+};
+function usdCandleUrl(source:Exchange,pair:string,start:bigint){
+ if(source==='coinbase'){
+  const at=new Date(Number(start)*1000).toISOString(),url=new URL(`https://api.exchange.coinbase.com/products/${pair}/candles`);
+  url.search=new URLSearchParams({granularity:'60',start:at,end:at}).toString();return url;
+ }
+ const url=new URL(source==='kraken'?'https://api.kraken.com/0/public/OHLC':`https://www.bitstamp.net/api/v2/ohlc/${pair}/`);
+ url.search=new URLSearchParams(source==='kraken'?{pair,interval:'1',since:start.toString()}:{step:'60',limit:'1',start:start.toString()}).toString();return url;
+}
+function usdCandle(source:Exchange,pair:string,start:bigint,data:unknown):{start:unknown;close:unknown;traded:boolean}{
+ if(source==='coinbase'){
+  if(!Array.isArray(data)||data.length!==1||!Array.isArray(data[0]))throw new Error('boundary_candle_missing');
+  const row=data[0];return {start:row[0],close:row[4],traded:typeof row[5]==='string'&&Number(row[5])>0};
+ }
+ if(source==='kraken'){
+  if(!object(data)||!Array.isArray(data.error)||data.error.length>0||!object(data.result))throw new Error('invalid_price_response');
+  const rows=data.result[pair],last=data.result.last;
+  if(!Array.isArray(rows)||typeof last!=='string'||!/^\d{1,12}$/.test(last))throw new Error('invalid_price_response');
+  const row=rows.find(r=>Array.isArray(r)&&r[0]===start.toString());
+  if(!Array.isArray(row)||BigInt(last)<start)throw new Error('boundary_candle_missing');
+  return {start:row[0],close:row[4],traded:typeof row[7]==='string'&&/^\d{1,12}$/.test(row[7])&&BigInt(row[7])>0n};
+ }
+ const rows=object(data)&&object(data.data)?data.data.ohlc:null;
+ if(!Array.isArray(rows)||rows.length!==1||!object(rows[0]))throw new Error('boundary_candle_missing');
+ const row=rows[0];return {start:row.timestamp,close:row.close,traded:typeof row.volume==='string'&&Number(row.volume)>0};
+}
+export async function usdBoundary(source:Exchange,asset:Asset,boundaryNs:string,transport:typeof fetch=fetch):Promise<Observation>{
+ if(!assets.includes(asset)||!Object.hasOwn(usdPairs,source)||!/^\d{1,20}$/.test(boundaryNs))throw new Error('invalid_boundary');
+ const boundary=BigInt(boundaryNs);if(boundary%300000000000n!==0n||boundary>BigInt(Date.now()-3000)*1000000n)throw new Error('boundary_not_final');
+ const start=boundary/1000000000n-60n,pair=usdPairs[source][asset];
+ const {raw,data}=await get(usdCandleUrl(source,pair,start),transport);
+ const candle=usdCandle(source,pair,start,data);
+ if(candle.start!==start.toString()||!candle.traded)throw new Error('invalid_boundary_candle');
+ decimal(candle.close,18);
+ return {asset,source,quote:'USD',boundaryNs,sourceTimeNs:(boundary-1000000n).toString(),retrievedAt:new Date().toISOString(),price:candle.close as string,exactBoundary:true,raw};
 }
 export async function coingeckoLatest(asset:Asset,boundaryNs:string,demoKey:string|null=null,transport:typeof fetch=fetch):Promise<Observation>{
  if(!assets.includes(asset)||!/^\d{1,20}$/.test(boundaryNs))throw new Error('invalid_asset');
@@ -99,8 +140,8 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).hr
  const config=readConfig(process.env);pool=createPool(config.databaseUrl);await verifyDatabase(pool,{...config,deployment:null});
  do {
  const boundary=(BigInt(Date.now()-5000)/300000n*300000000000n).toString();
- for(const asset of assets){for(const source of ['binance','coingecko'] as const){
-  try{const o=source==='binance'?await binanceBoundary(asset,boundary):await coingeckoLatest(asset,boundary,process.env.COINGECKO_DEMO_API_KEY||null);await recordEvidence(pool,o);console.log(JSON.stringify({asset,source,quote:o.quote,price:o.price,exactBoundary:o.exactBoundary,signing:false}));}
+ for(const asset of assets){for(const source of ['binance','coinbase','kraken','bitstamp','coingecko'] as const){
+  try{const o=source==='binance'?await binanceBoundary(asset,boundary):source==='coingecko'?await coingeckoLatest(asset,boundary,process.env.COINGECKO_DEMO_API_KEY||null):await usdBoundary(source,asset,boundary);await recordEvidence(pool,o);console.log(JSON.stringify({asset,source,quote:o.quote,price:o.price,exactBoundary:o.exactBoundary,signing:false}));}
   catch{console.error(JSON.stringify({asset,source,error:'observation_unavailable',signing:false}));process.exitCode=1;}
  }}
  if(cmcMode!=='off'){

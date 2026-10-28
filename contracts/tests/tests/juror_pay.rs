@@ -14,7 +14,7 @@ fn tok(a: &Account) -> &str {
 async fn decided_with_one_silent_juror(w: &World) -> anyhow::Result<(Vec<Account>, Account, u64, Vec<String>)> {
     mint(w, w.owner.id(), 10_000 * USD).await?;
     send_revenue(w, 1_000 * USD).await?;
-    let id = create_seeded_market(w, 120).await?;
+    let id = new_market(w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(w, &w.carol, id, "yes").await?;
     challenge(w, &w.dave, id).await?;
@@ -116,7 +116,7 @@ async fn a_juror_who_committed_but_was_not_given_time_to_reveal_is_not_penalised
     let w = setup().await?;
     mint(&w, w.owner.id(), 10_000 * USD).await?;
     send_revenue(&w, 1_000 * USD).await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     challenge(&w, &w.dave, id).await?;

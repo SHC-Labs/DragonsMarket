@@ -214,7 +214,6 @@ async fn make(w: &World, index: usize) -> anyhow::Result<u64> {
         .into_result()?
         .json()?;
     let id: u64 = id.parse()?;
-    ft_call(w, &w.owner, w.market.id(), SEED, &format!("seed:{id}")).await?;
     // Trades with a different mix per market, so each chart has a shape. States markets get a few more.
     let plan: [(bool, u128); 6] = [(true, 4), (false, 2), (true, 6), (false, 3), (true, 2), (false, 5)];
     let take = if index < 6 { 6 } else { 4 };

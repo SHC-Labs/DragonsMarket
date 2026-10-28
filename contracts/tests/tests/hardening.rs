@@ -43,7 +43,7 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
         contract.call("new").args_json(&args).transact().await?.into_result()?;
         let config: serde_json::Value = contract.view("config").await?.json()?;
         let version = match name {
-            "market" => 5,
+            "market" => 6,
             "oracle" => 2,
             _ => 3,
         };
@@ -171,7 +171,7 @@ async fn a_user_registers_alone_or_is_registered_by_someone_else_and_leaves_with
         unregister(&w.carol, json!({ "force": true })).await?.into_result(),
         "force is not supported",
     );
-    let id = create_seeded_market(&w, 600).await?;
+    let id = new_market(&w, 600).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     refused(
         unregister(&w.alice, json!({})).await?.into_result(),
@@ -520,9 +520,6 @@ async fn a_full_batch_of_long_token_ids_fits_in_one_call() -> anyhow::Result<()>
 
 // ---- a revenue transfer whose result is lost ------------------------------------------------------------------
 
-const REVENUE_SHARE: u128 = 273_798;
-const TREASURY_SHARE: u128 = 821_394;
-
 async fn revenue_unresolved(w: &World) -> u128 {
     let f: serde_json::Value = w.market.view("get_fees").await.unwrap().json().unwrap();
     u(&f["revenue_unresolved"])
@@ -567,8 +564,8 @@ async fn sweep_anything(w: &World) -> anyhow::Result<()> {
 }
 
 async fn market_with_fees(w: &World) -> anyhow::Result<()> {
-    let id = create_seeded_market(w, 600).await?;
-    buy(w, &w.alice, id, "yes", 10 * USD).await?;
+    let id = new_market(w, 600).await?;
+    buy(w, &w.alice, id, "yes", SWEEP_BUY).await?;
     Ok(())
 }
 
@@ -603,8 +600,8 @@ async fn a_revenue_transfer_the_verifier_refused_is_parked_and_not_paid_a_second
         (1, 0, TREASURY_SHARE),
         "the treasury share is due again, the Council share is not"
     );
-    assert_eq!(revenue_unresolved(&w).await, REVENUE_SHARE);
-    assert_eq!(config(&w.market).await["revenue_unresolved"], REVENUE_SHARE.to_string());
+    assert_eq!(revenue_unresolved(&w).await, COUNCIL_SHARE);
+    assert_eq!(config(&w.market).await["revenue_unresolved"], COUNCIL_SHARE.to_string());
     let first = sweep_record(&w, 1).await;
     assert_eq!(
         (
@@ -647,7 +644,7 @@ async fn a_revenue_transfer_the_verifier_refused_is_parked_and_not_paid_a_second
         !event_names(&logs).contains(&"fee_transfer_unresolved".to_string()),
         "{logs:?}"
     );
-    assert_eq!(revenue_unresolved(&w).await, REVENUE_SHARE);
+    assert_eq!(revenue_unresolved(&w).await, COUNCIL_SHARE);
     assert_eq!(fees(&w).await, (1, 0, TREASURY_SHARE));
 
     unlock_account(&w, w.market.id()).await?;
@@ -658,7 +655,7 @@ async fn a_revenue_transfer_the_verifier_refused_is_parked_and_not_paid_a_second
     assert_eq!(events_named(&logs, "fee_transfer_failed")[0]["leg"], "council");
     assert_eq!(
         (revenue_unresolved(&w).await, fees(&w).await),
-        (0, (1, REVENUE_SHARE, TREASURY_SHARE)),
+        (0, (1, COUNCIL_SHARE, TREASURY_SHARE)),
         "the Council has no record of the sweep, so its share is due again"
     );
     assert_eq!(sweep_record(&w, 1).await["council"]["status"], "refused");
@@ -668,9 +665,9 @@ async fn a_revenue_transfer_the_verifier_refused_is_parked_and_not_paid_a_second
     sweep(&w, &w.carol).await?;
     assert_eq!(
         intents_balance(&w, w.council.id()).await - council_before,
-        REVENUE_SHARE
+        COUNCIL_SHARE
     );
-    assert_eq!((total_received(&w).await, fees(&w).await), (REVENUE_SHARE, (1, 0, 0)));
+    assert_eq!((total_received(&w).await, fees(&w).await), (COUNCIL_SHARE, (1, 0, 0)));
     assert_eq!(intents_balance(&w, w.treasury.id()).await, TREASURY_SHARE);
     assert_reconciled(&w).await;
     Ok(())
@@ -708,7 +705,7 @@ async fn settling_an_unresolved_amount_as_arrived_when_it_did_not_shows_up_as_su
     let owed: String = w.market.view("total_owed").await?.json()?;
     assert_eq!(
         intents_balance(&w, w.market.id()).await - owed.parse::<u128>()?,
-        REVENUE_SHARE,
+        COUNCIL_SHARE,
         "the verifier holds what the books no longer owe"
     );
     Ok(())
@@ -755,7 +752,7 @@ async fn a_council_that_refuses_the_revenue_gets_it_back_as_due_and_is_not_paid_
         assert_eq!(revenue_unresolved(&w).await, 0);
         assert_eq!(
             fees(&w).await,
-            (1, REVENUE_SHARE, 0),
+            (1, COUNCIL_SHARE, 0),
             "the Council's share is due again"
         );
         assert_reconciled(&w).await;
@@ -770,8 +767,8 @@ async fn a_council_that_refuses_the_revenue_gets_it_back_as_due_and_is_not_paid_
     set_pool(w.council.id().clone()).await?.into_result()?;
     past_sweep_interval(&w).await;
     sweep(&w, &w.carol).await?;
-    assert_eq!(intents_balance(&w, w.council.id()).await, REVENUE_SHARE);
-    assert_eq!((total_received(&w).await, fees(&w).await), (REVENUE_SHARE, (1, 0, 0)));
+    assert_eq!(intents_balance(&w, w.council.id()).await, COUNCIL_SHARE);
+    assert_eq!((total_received(&w).await, fees(&w).await), (COUNCIL_SHARE, (1, 0, 0)));
     assert_eq!(intents_balance(&w, w.treasury.id()).await, TREASURY_SHARE);
     assert_reconciled(&w).await;
     Ok(())

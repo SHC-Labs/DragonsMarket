@@ -38,9 +38,16 @@ example DAO names and sandbox keys are not production configuration.
 ## 2. Settlement and rewards
 
 - [ ] Prove external funding reaches the correct authenticated beneficiary and collateral asset.
+- [ ] Register the market account with the collateral token (`storage_deposit` on the token, once)
+      and send a small token `deposit`. Until then the token refuses `ft_transfer_call` to the market,
+      so only the Intents path can fund it, and `keeper.mjs check` reports it.
 - [ ] Show committed backing remains controlled inside Intents and reconciles with positions.
 - [ ] Verify buy, sell, Yes/No/Void redemption and available-balance withdrawal.
 - [ ] Complete the oracle bond/juror-payment migration to Intents.
+- [ ] Run at least `price_threshold` publishers (`keeper/publisher.mjs`), each on its own host with its own key, and
+      have the DAO add each key with `add_publisher`. Run `keeper/resolver.mjs run` on a schedule from an account that
+      holds only the bond float in Intents, and answer event markets with `resolver.mjs propose` (see "Publishing and
+      submitting prices" in [oracle.md](oracle.md)). Without them every market Voids at its `resolve_by`.
 - [ ] Verify earned-fee allocation: 75% treasury and 25% Council-controlled rewards, with the real
       treasury account (see the configuration order below).
 - [x] Quarterly entitlement and claim rules, with repeat and cross-path claims refused (built
@@ -96,7 +103,10 @@ every contract, that its policy matches the
 - [ ] Check owner handover on every application contract and reconcile pending-owner state.
 - [ ] Prove the upgrade path before removing deployment keys; verify the resulting key list.
 - [ ] Confirm routine operators cannot redirect fees or spend backing.
-- [ ] Seed markets from a dedicated operator account, not the DAO owner account.
+- [ ] Create markets from a dedicated operator account, not the DAO owner account.
+- [ ] Market state version 6 (dynamic parimutuel pricing) upgrades a version-5 market only while it
+  has created no market. A version-5 deployment that has markets is not upgraded: deploy version 6
+  fresh, stop creating markets on the old one, and let its markets resolve and pay out there.
 
 [The treasury handoff](governance.md) describes what remains unconfigured. Do not turn its
 proposal-preparation helper into a production submitter without reviewing the chosen interfaces.

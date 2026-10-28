@@ -13,9 +13,9 @@ const NEAR_PER_BYTE: f64 = 1e-5;
 const TRADES: usize = 130;
 const PRE_TRADES: usize = 2;
 const HISTORY_POINTS: i64 = 120;
-const POSITION_STEPS: [usize; 3] = [1, 20, 30];
-const POSITION_POOL: u64 = 30;
-const SEED_AMOUNT: u128 = 3 * USD;
+// A position is two entries, its shares and what it paid in, so the hard cap of 30 entries is 15 markets.
+const POSITION_STEPS: [usize; 3] = [1, 7, 15];
+const POSITION_POOL: u64 = 15;
 const CLOSE_SECS: u64 = 100;
 const PAST_CLOSE_SECS: u64 = 130;
 const LONG_EVIDENCE: usize = 512;
@@ -80,16 +80,6 @@ async fn create_measured(w: &World, args: Value) -> anyhow::Result<(u64, i64, i6
     ))
 }
 
-// Seeds at one half from the owner's Intents balance and returns the market's change in storage.
-async fn seed_measured(w: &World, id: u64) -> anyhow::Result<i64> {
-    let before = used(w, w.market.id()).await?;
-    intents_call(w, &w.owner, w.market.id(), SEED_AMOUNT, &format!("seed:{id}"))
-        .await?
-        .into_result()?;
-    assert_eq!(market_json(w, id).await["seeded"], true);
-    Ok(used(w, w.market.id()).await? - before)
-}
-
 async fn trade_from_balance(w: &World, who: &Account, id: u64, side: &str) -> anyhow::Result<()> {
     who.call(w.market.id(), "buy")
         .args_json(json!({ "market_id": id.to_string(), "side": side, "amount": USD.to_string(), "min_shares": "1" }))
@@ -136,8 +126,6 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let base = used(&w, w.market.id()).await?;
     println!("market contract storage_usage at the start: {base} B; 1 NEAR locks 100,000 B");
-    mint(&w, w.owner.id(), 300 * SEED_AMOUNT).await?;
-    deposit_to_intents(&w, &w.owner, w.owner.id(), 300 * SEED_AMOUNT).await?;
     mint(&w, w.bob.id(), 600 * USD).await?;
     ft_call(&w, &w.bob, w.market.id(), 500 * USD, "deposit").await?;
     w.owner
@@ -152,10 +140,10 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
     // Warm up: the first market and the first account entries can grow the state's own bookkeeping.
     let warm = now(&w.worker).await + THIRTY_DAYS_SECS * 1_000_000_000;
     let (warm_id, _, _) = create_measured(&w, typical_args(warm, 3_600)).await?;
-    seed_measured(&w, warm_id).await?;
+    trade_from_balance(&w, &w.bob, warm_id, "yes").await?;
 
     let close = now(&w.worker).await + THIRTY_DAYS_SECS * 1_000_000_000;
-    let (min_id, min_market, min_oracle) = create_measured(&w, minimum_args(close)).await?;
+    let (_, min_market, min_oracle) = create_measured(&w, minimum_args(close)).await?;
     row(
         "create_market, minimum text (market record)",
         min_market,
@@ -167,13 +155,6 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
         min_oracle,
         "about 180",
         "the oracle's info for the market",
-    );
-    let min_seed = seed_measured(&w, min_id).await?;
-    row(
-        "seed of the minimum market (record update, first history point)",
-        min_seed,
-        "-",
-        "seeded at one half",
     );
 
     let (typ_id, typ_market, typ_oracle) = create_measured(&w, typical_args(close, 3_600)).await?;
@@ -189,8 +170,6 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
         "about 180",
         "",
     );
-    let typ_seed = seed_measured(&w, typ_id).await?;
-    row("seed of the typical market", typ_seed, "-", "");
     let (typ_growth, typ_points) = history_growth(&w, typ_id).await?;
     let per_point = typ_growth as f64 / typ_points as f64;
     row(
@@ -199,11 +178,11 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
         "-",
         &format!("{per_point:.1} bytes per history point"),
     );
-    let typ_total = typ_market + typ_seed + typ_growth + (PRE_TRADES as f64 * per_point) as i64;
+    let typ_total = typ_market + typ_growth + (PRE_TRADES as f64 * per_point) as i64;
     row(
-        "typical market record after 120 trades (create + seed + history, computed)",
+        "typical market record after 120 trades (create + history, computed)",
         typ_total,
-        "about 2800",
+        "about 2600",
         "market record only, not the trader's entries",
     );
 
@@ -220,7 +199,6 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
         "about 180",
         "",
     );
-    let max_seed = seed_measured(&w, max_id).await?;
     let (max_growth, max_points) = history_growth(&w, max_id).await?;
     let max_per_point = max_growth as f64 / max_points as f64;
     row(
@@ -229,19 +207,19 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
         "-",
         &format!("{max_per_point:.1} bytes per history point"),
     );
-    let max_total = max_market + max_seed + max_growth + (PRE_TRADES as f64 * max_per_point) as i64;
+    let max_total = max_market + max_growth + (PRE_TRADES as f64 * max_per_point) as i64;
     row(
-        "maximum market record after 120 trades (create + seed + history, computed)",
+        "maximum market record after 120 trades (create + history, computed)",
         max_total,
-        "about 4900",
+        "about 4775",
         "market record only",
     );
-    let min_total = min_market + min_seed + max_growth + (PRE_TRADES as f64 * max_per_point) as i64;
+    let min_total = min_market + max_growth + (PRE_TRADES as f64 * max_per_point) as i64;
     row(
         "minimum market record with a full 120-point history (computed)",
         min_total,
         "-",
-        "measured minimum create and seed, plus the measured history growth",
+        "measured minimum create, plus the measured history growth",
     );
 
     // Sweep: the fees collected so far are over the minimum, so one sweep goes out.
@@ -263,7 +241,7 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
 
     // Accounts: a storage deposit, a credited balance, then positions. Each buy also adds a history point to its market, so the
     // growth of that is taken off to leave what the account itself costs.
-    let pool_first = bulk_seeded_markets(&w, POSITION_POOL, None).await?;
+    let pool_first = bulk_markets(&w, POSITION_POOL).await?;
     for id_len in [20usize, 64] {
         let user = account_with_id_len(&w, id_len, &format!("s{id_len}")).await?;
         mint(&w, user.id(), 400 * USD).await?;
@@ -310,11 +288,7 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
             row(
                 &format!("{id_len}-character id, {held} positions held (cumulative, history growth taken off)"),
                 account_only,
-                if id_len == 20 {
-                    "20 positions: 2300 to 3200"
-                } else {
-                    "-"
-                },
+                "-",
                 &format!(
                     "raw storage_usage change {raw} B, about {:.0} B per position beyond the first deposit",
                     (account_only - funded) as f64 / held as f64
