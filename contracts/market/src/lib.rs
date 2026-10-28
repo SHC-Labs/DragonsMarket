@@ -4,8 +4,6 @@
 // The JSON interface takes one argument per field, so a few methods are long on purpose.
 #![allow(clippy::too_many_arguments)]
 
-mod dpm;
-
 use near_contract_standards::fungible_token::core::ext_ft_core;
 use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds, StorageManagement};

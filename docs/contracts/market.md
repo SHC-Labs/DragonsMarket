@@ -1,6 +1,6 @@
 # market
 
-**Dynamic parimutuel pricing, 2026-10-27.** The constant-product pool and its seed are gone. Every market now prices by a dynamic parimutuel cost function (`market/src/dpm.rs`, see "How trading works"). A registered market opens empty at even odds and anyone can make the first trade: there is no `seed:` message, no creation fee and no opening price. A winning share is paid its part of the pool, never less than it cost, and a Void, or an answer nobody holds, pays each holder back what they put in (see "Void"). `sell` takes the shares to sell and the least collateral to accept. State is version 6. `migrate` takes a version-5 root only while it has created no market, because a constant-product pool cannot be turned into parimutuel shares, so a deployment that has markets is replaced, not upgraded. The largest market record is now 4,775 bytes and a new market's storage deposit 0.04775 NEAR.
+**Dynamic parimutuel pricing, 2026-10-27.** The constant-product pool and its seed are gone. Every market now prices by a dynamic parimutuel cost function (`dpm/src/lib.rs`, see "How trading works"). A registered market opens empty at even odds and anyone can make the first trade: there is no `seed:` message, no creation fee and no opening price. A winning share is paid its part of the pool, never less than it cost, and a Void, or an answer nobody holds, pays each holder back what they put in (see "Void"). `sell` takes the shares to sell and the least collateral to accept. State is version 6. `migrate` takes a version-5 root only while it has created no market, because a constant-product pool cannot be turned into parimutuel shares, so a deployment that has markets is replaced, not upgraded. The largest market record is now 4,775 bytes and a new market's storage deposit 0.04775 NEAR.
 
 **Token deposits, 2026-10-27.** An account that holds the collateral as a NEAR token and nothing in the verifier can now pay the market with the token's `ft_transfer_call` and the message `deposit` or `buy`, after registering with `storage_deposit` in NEAR. The market moves the money into its own Intents account and credits the sender only once it is there (see "Money in by token"). A `buy` is then bought in a receipt of its own, so a buy the price outran stays a balance. State stays at version 5.
 
@@ -39,7 +39,7 @@ through `mt_transfer` and `mt_transfer_call` from this contract, with no signed 
 registered in the verifier. The DAO voting period is the only delay before an owner action
 (decided 2026-10-21, R-07). Oracle bonds still use a NEP-141 token and are the next phase.
 
-Source: `market/src/lib.rs` (the contract) and `market/src/dpm.rs` (the pricing maths). Written
+Source: `market/src/lib.rs` (the contract) and `dpm/src/lib.rs` (the pricing maths). Written
 2026-10-18 from the code as it stands, including everything added that day. The upgrade path was
 added 2026-10-19 and the shared helpers are in `upgrade/src/lib.rs`. The upgrade mark was added
 2026-10-20, and dynamic parimutuel pricing replaced the constant-product pool on 2026-10-27. For current behaviour, follow the code. For required target behaviour, follow the accepted
@@ -539,7 +539,7 @@ An example without fees. Alice puts 100 tokens on Yes in an empty market and get
 100 on No and gets 173.2, because No was the side with fewer shares. A third trader then puts 100 on
 Yes and gets 144.9. If Yes wins, the 300 in the pool is split over the 244.9 Yes shares: Alice gets 122.5
 and the third trader 177.5. Both get back more than they put in, and Bob loses his 100. The unit test
-`early_winners_are_diluted_by_late_money_but_never_below_what_they_paid` in `dpm.rs` runs these numbers.
+`early_winners_are_diluted_by_late_money_but_never_below_what_they_paid` in `dpm/src/lib.rs` runs these numbers.
 
 ### Buying
 

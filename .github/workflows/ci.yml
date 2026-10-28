@@ -47,7 +47,7 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Contracts for wasm
         run: >
-          cargo clippy -p oracle -p council -p market -p rounds -p price-signatures -p upgrade -p mock-ft -p mock-nft
+          cargo clippy -p oracle -p council -p market -p rounds -p dpm -p price-signatures -p upgrade -p mock-ft -p mock-nft
           --target wasm32-unknown-unknown -- -D warnings
       - name: Everything, tests included
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -67,7 +67,7 @@ jobs:
           restore-keys: unit-${{ runner.os }}-
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo test -p market -p oracle -p council -p rounds -p price-signatures -p upgrade
+      - run: cargo test -p market -p oracle -p council -p rounds -p dpm -p price-signatures -p upgrade
 
   sandbox:
     runs-on: ubuntu-24.04

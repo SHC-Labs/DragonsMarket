@@ -3,7 +3,15 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const CONTRACTS: [&str; 6] = ["market", "oracle", "council", "rounds", "price-signatures", "upgrade"];
+const CONTRACTS: [&str; 7] = [
+    "market",
+    "oracle",
+    "council",
+    "rounds",
+    "dpm",
+    "price-signatures",
+    "upgrade",
+];
 
 // The verifier methods that change who may act, what the verifier holds, or how it is run. No contract of ours may call
 // any of them as itself: its balance is moved only by mt_transfer and mt_transfer_call, and only the verifier's own roles
@@ -41,7 +49,7 @@ const FORBIDDEN_VERIFIER_CALLS: [&str; 28] = [
 
 // Every cross-contract interface a contract declares, and the methods it declares on each. A new target or a new method
 // fails here until it is added on purpose.
-const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 10] = [
+const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 11] = [
     ("market", "ext_verifier", &["mt_transfer", "mt_transfer_call"]),
     ("market", "ext_oracle", &["register_market"]),
     ("market", "ext_council", &["received_of"]),
@@ -50,6 +58,7 @@ const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 10] = [
     ("oracle", "ext_market", &["set_outcome"]),
     ("oracle", "ext_council", &["draw", "unlock_case"]),
     ("rounds", "ext_verifier", &["mt_transfer"]),
+    ("dpm", "", &[]),
     ("price-signatures", "", &[]),
     ("upgrade", "", &[]),
 ];

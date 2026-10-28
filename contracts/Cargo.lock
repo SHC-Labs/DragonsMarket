@@ -811,6 +811,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dpm"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1789,6 +1796,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 name = "market"
 version = "0.1.0"
 dependencies = [
+ "dpm",
  "near-contract-standards",
  "near-sdk",
  "proptest",
@@ -3108,6 +3116,7 @@ dependencies = [
 name = "rounds"
 version = "0.1.0"
 dependencies = [
+ "dpm",
  "ed25519-dalek",
  "near-sdk",
  "price-signatures",

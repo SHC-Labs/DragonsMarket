@@ -17,6 +17,7 @@ container_build_command = ["cargo", "near", "build", "non-reproducible-wasm", "-
 [dependencies]
 near-sdk = { workspace = true }
 near-contract-standards = { workspace = true }
+dpm = { path = "../dpm" }
 upgrade = { path = "../upgrade" }
 
 [dev-dependencies]
