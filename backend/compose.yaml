@@ -1,0 +1,105 @@
+name: dragons-market-backend
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dragons}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dragons_local_only}
+      POSTGRES_DB: ${POSTGRES_DB:-dragons_market}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-dragons}:${POSTGRES_PASSWORD:-dragons_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
+    command: ["node", "dist/src/migrate.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  api:
+    build: .
+    environment: &backend_environment
+      DATABASE_URL: postgresql://${POSTGRES_USER:-dragons}:${POSTGRES_PASSWORD:-dragons_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
+      HOST: 0.0.0.0
+      PORT: 3500
+      NETWORK: ${NETWORK:-mainnet}
+      DEPLOYMENT_ID: ${DEPLOYMENT_ID:-}
+      DEPLOYMENT_START_BLOCK: ${DEPLOYMENT_START_BLOCK:-}
+      MARKET_CONTRACT_ID: ${MARKET_CONTRACT_ID:-}
+      ROUNDS_CONTRACT_ID: ${ROUNDS_CONTRACT_ID:-}
+      ORACLE_CONTRACT_ID: ${ORACLE_CONTRACT_ID:-}
+      COUNCIL_CONTRACT_ID: ${COUNCIL_CONTRACT_ID:-}
+      VERIFIER_CONTRACT_ID: ${VERIFIER_CONTRACT_ID:-}
+      COLLATERAL_TOKEN_ID: ${COLLATERAL_TOKEN_ID:-}
+      COLLATERAL_DECIMALS: ${COLLATERAL_DECIMALS:-6}
+      RPC_URL: ${RPC_URL:-}
+      RPC_ARCHIVAL_URL: ${RPC_ARCHIVAL_URL:-}
+      RPC_PRIMARY_BEARER_TOKEN: ${RPC_PRIMARY_BEARER_TOKEN:-}
+      RPC_TIMEOUT_MS: ${RPC_TIMEOUT_MS:-10000}
+      RPC_INTERVAL_MS: ${RPC_INTERVAL_MS:-1000}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3400}
+      POLICY_TERMS_HASH: ${POLICY_TERMS_HASH:-}
+      POLICY_PRIVACY_HASH: ${POLICY_PRIVACY_HASH:-}
+    ports:
+      - "127.0.0.1:${PORT:-3500}:3500"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3500/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+    restart: unless-stopped
+  indexer:
+    build: .
+    profiles: [indexing]
+    environment: *backend_environment
+    command: [node, dist/src/ingestion/follow.js]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  feed:
+    build: .
+    profiles: [indexing]
+    environment: *backend_environment
+    command: [node, dist/src/ingestion/feed.js, --follow]
+    volumes:
+      - ./.local/feeds:/app/.local/feeds
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  reconcile:
+    build: .
+    profiles: [indexing]
+    environment: *backend_environment
+    command: [node, dist/src/reconcile.js, --follow]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  prices:
+    build: .
+    profiles: [prices]
+    environment:
+      <<: *backend_environment
+      COINGECKO_DEMO_API_KEY: ${COINGECKO_DEMO_API_KEY:-}
+      COINMARKETCAP_MODE: ${COINMARKETCAP_MODE:-keyless}
+      COINMARKETCAP_API_KEY: ${COINMARKETCAP_API_KEY:-}
+    command: [node, dist/src/prices.js, --follow]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+volumes:
+  postgres_data:
