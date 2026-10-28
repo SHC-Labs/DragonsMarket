@@ -235,9 +235,9 @@ async fn fresh_trader(w: &World, usd: u128) -> anyhow::Result<Account> {
     Ok(who)
 }
 
-// A seeded market that closes in 30 days. Returns its id.
-async fn seeded_market(w: &World) -> anyhow::Result<u64> {
-    create_seeded_market_gap(w, THIRTY_DAYS_SECS, RESOLVE_GAP_SECS).await
+// A market that closes in 30 days. Returns its id.
+async fn month_market(w: &World) -> anyhow::Result<u64> {
+    create_market(w, THIRTY_DAYS_SECS, RESOLVE_GAP_SECS).await
 }
 
 // Returns the get_positions gas.
@@ -286,19 +286,20 @@ async fn views_keep_working_as_markets_pile_up() -> anyhow::Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(20);
     let w = setup().await?;
+    // A position is two entries, its shares and what it paid in, so the cap on entries holds half as many markets.
     let held: u64 = config(&w.market).await["max_positions"]
         .as_u64()
-        .expect("max_positions");
+        .expect("max_positions")
+        / 2;
     assert!(
         target >= HEAVY_MARKETS + 10,
         "SCALE_MARKETS must be at least {}",
         HEAVY_MARKETS + 10
     );
-    mint(&w, w.owner.id(), (HEAVY_MARKETS + 10) as u128 * SEED).await?;
     mint(&w, w.carol.id(), 300 * USD).await?;
 
-    // Markets 0..cases close soon and get real cases. The rest are bare until the last HEAVY_MARKETS, which are seeded and
-    // traded (alice holds a position in each of the newest `held`).
+    // Markets 0..cases close soon and get real cases. The rest are bare until the last HEAVY_MARKETS, which are traded
+    // (alice holds a position in each of the newest `held`).
     let bulk = target - HEAVY_MARKETS;
     let cases = bulk.min(PAGE);
     let create_start = Instant::now();
@@ -328,13 +329,13 @@ async fn views_keep_working_as_markets_pile_up() -> anyhow::Result<()> {
     create_many(&w, cases, bulk - cases, THIRTY_DAYS_SECS, per_call, &mut batch_size).await?;
     let bulk_secs = create_start.elapsed().as_secs_f64();
     println!(
-        "created {bulk} unseeded markets in {bulk_secs:.0}s ({:.2}/s), largest batch that went through: {batch_size}",
+        "created {bulk} untraded markets in {bulk_secs:.0}s ({:.2}/s), largest batch that went through: {batch_size}",
         bulk as f64 / bulk_secs.max(0.001)
     );
     let rate = bulk as f64 / bulk_secs.max(0.001);
 
     for i in 0..HEAVY_MARKETS {
-        let id = seeded_market(&w).await?;
+        let id = month_market(&w).await?;
         if i >= HEAVY_MARKETS - held {
             buy(&w, &w.alice, id, "yes", USD).await?;
         } else {
@@ -558,7 +559,7 @@ async fn views_keep_working_as_markets_pile_up() -> anyhow::Result<()> {
             break;
         }
         one_held = fresh_trader(&w, 200).await?;
-        newest = seeded_market(&w).await?;
+        newest = month_market(&w).await?;
         buy(&w, &one_held, newest, "yes", USD).await?;
         next_index = size;
         reached = size;

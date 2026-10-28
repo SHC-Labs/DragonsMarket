@@ -9,23 +9,16 @@ import { Embers } from "@/components/Embers";
 import { Award, Lock, Wallet } from "@/components/icons";
 import { useWallet } from "@/components/WalletProvider";
 import { config } from "@/lib/config";
-import { voidPayout } from "@/lib/settlement";
 import { formatMoney, formatShares } from "@/lib/format";
 import { usePoll } from "@/lib/hooks";
 import {
-  getBalance, getShares, listMarkets, tokenBalance,
+  getBalance, getPositions, getShares, listMarkets, tokenBalance,
   type MarketView,
 } from "@/lib/market";
 
-interface Position { market: MarketView; yes: bigint; no: bigint }
-
-// Read-only estimate from published settlement values; no fixed Void refund.
-function payout(p: Position): bigint | null {
-  if (p.market.outcome === "yes") return p.yes;
-  if (p.market.outcome === "no") return p.no;
-  if (p.market.outcome === "void") return voidPayout(p.yes, p.no, p.market.void_price_yes);
-  return 0n;
-}
+// redeemable is the contract's own figure for what redeem would pay now: a winner's share of the pool, or on a Void what the
+// position put in. It is 0 while the market is unresolved.
+interface Position { market: MarketView; yes: bigint; no: bigint; redeemable: bigint }
 
 const money = (n: number) => n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -55,7 +48,9 @@ export default function Portfolio() {
       await Promise.all(
         markets.map(async (market) => {
           const [y, n] = await getShares(market.id, account);
-          if (BigInt(y) + BigInt(n) > 0n) positions.push({ market, yes: BigInt(y), no: BigInt(n) });
+          if (BigInt(y) + BigInt(n) === 0n) return;
+          const [held] = market.outcome ? await getPositions(account, market.id, 1) : [];
+          positions.push({ market, yes: BigInt(y), no: BigInt(n), redeemable: BigInt(held?.redeemable ?? "0") });
         }),
       );
       positions.sort((a, b) => Number(BigInt(a.market.id) - BigInt(b.market.id)));
@@ -116,9 +111,9 @@ export default function Portfolio() {
           ) : (
             <ul className="position-list">
               {data.positions.map((p, i) => {
-                const pay = payout(p);
+                const pay = p.redeemable;
                 const resolved = p.market.status === "resolved";
-                const won = resolved && p.market.outcome !== "void" && pay !== null && pay > 0n;
+                const won = resolved && p.market.outcome !== "void" && pay > 0n;
                 return (
                   <li key={p.market.id} className="position-row enter" data-won={won || undefined} style={{ "--i": i } as React.CSSProperties}>
                     <MarketIcon category={p.market.category} sub={p.market.subcategory} small />
@@ -134,8 +129,8 @@ export default function Portfolio() {
                         {won && <Award size={16} variant="Bold" />}
                         {!resolved
                           ? p.market.status === "closed" ? "Waiting for the answer" : "Open"
-                          : p.market.outcome === "void" ? pay === null ? "Void: settlement price has not been published." : `Void: estimated payout ${formatMoney(pay)} ${config.tokenSymbol}`
-                          : pay !== null && pay > 0n ? `Estimated payout: ${formatMoney(pay)} ${config.tokenSymbol}`
+                          : p.market.outcome === "void" ? `Void: estimated payout ${formatMoney(pay)} ${config.tokenSymbol}`
+                          : pay > 0n ? `Estimated payout: ${formatMoney(pay)} ${config.tokenSymbol}`
                           : `Resolved ${p.market.outcome === "yes" ? "Yes" : "No"}. Nothing to redeem.`}
                       </span>
                     </div>

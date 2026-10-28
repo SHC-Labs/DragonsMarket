@@ -24,7 +24,7 @@ async fn case_time(w: &World, id: u64, field: &str) -> u64 {
 
 // A closed market with Carol's proposal of Yes open for a challenge.
 async fn proposed(w: &World) -> anyhow::Result<u64> {
-    let id = create_seeded_market(w, 120).await?;
+    let id = new_market(w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(w, &w.carol, id, "yes").await?;
     Ok(id)

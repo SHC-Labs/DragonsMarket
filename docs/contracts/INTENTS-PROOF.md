@@ -168,7 +168,8 @@ roles:
 
 1. Deposits never notify. A deposit to the market, in any message form, credits the market's Intents
    balance and nothing else. The market must treat every deposit as surplus, never as a funded
-   position. Funding goes only through `mt_transfer_call` or a signed transfer with a notification.
+   position. Funding goes only through `mt_transfer_call`, a signed transfer with a notification, or
+   the market's own token hook, which makes the deposit itself and credits the sender in its callback.
 2. `mt_on_transfer` runs after the credit. A panic in it is safe and refunds in full. Returning a
    non-empty refund list is honoured and clamped.
 3. The verifier call `mt_transfer_call` returns the amount kept, so an `Err` in the payer's callback

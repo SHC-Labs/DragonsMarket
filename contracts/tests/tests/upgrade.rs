@@ -101,8 +101,8 @@ async fn config_without_proof(c: &Contract) -> serde_json::Value {
 }
 
 // A market with a position in it, a case waiting for its challenge window, and the five seats the setup stakes.
-async fn seed_state(w: &World) -> anyhow::Result<u64> {
-    let id = create_seeded_market(w, 40).await?;
+async fn live_state(w: &World) -> anyhow::Result<u64> {
+    let id = new_market(w, 40).await?;
     buy(w, &w.alice, id, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 41).await;
     propose(w, &w.carol, id, "yes").await?;
@@ -128,12 +128,12 @@ fn governed_contracts(w: &World) -> Vec<(&'static str, &'static str, &Contract)>
     ]
 }
 
-// Market layout 5, Council layout 3 and oracle layout 2.
+// Market layout 6, Council layout 3 and oracle layout 2.
 fn state_version_of(label: &str) -> u32 {
     if label == "oracle" {
         2
     } else if label == "market" {
-        5
+        6
     } else {
         3
     }
@@ -143,7 +143,7 @@ fn state_version_of(label: &str) -> u32 {
 async fn the_market_the_oracle_and_the_council_upgrade_through_the_configured_owner_and_keep_their_state(
 ) -> anyhow::Result<()> {
     let (w, admin) = setup_admin_owned().await?;
-    let id = seed_state(&w).await?;
+    let id = live_state(&w).await?;
     let before = snapshot(&w, id).await;
 
     for (wasm_name, label, target) in governed_contracts(&w) {
@@ -208,7 +208,7 @@ async fn the_market_the_oracle_and_the_council_upgrade_through_the_configured_ow
 #[tokio::test]
 async fn an_upgrade_that_cannot_finish_leaves_the_old_code_in_place_and_the_state_intact() -> anyhow::Result<()> {
     let (w, admin) = setup_admin_owned().await?;
-    let id = seed_state(&w).await?;
+    let id = live_state(&w).await?;
     let before = snapshot(&w, id).await;
 
     for (wasm_name, label, target) in governed_contracts(&w) {
@@ -320,21 +320,21 @@ async fn a_balance_can_be_withdrawn_while_the_market_is_paused_and_after_it_is_u
     Ok(())
 }
 
-fn version_four_market() -> Vec<u8> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/near-v4/market.wasm");
+fn version_five_market() -> Vec<u8> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/near-v5/market.wasm");
     std::fs::read(&p).unwrap_or_else(|_| {
         panic!(
-            "{p:?} is missing. Build the market at ff34312, the last version-4 layout, and copy it there:\n  \
-             git worktree add $SCRATCH/v4 ff34312\n  \
-             (cd $SCRATCH/v4/contracts/market && cargo near build non-reproducible-wasm)\n  \
-             mkdir -p contracts/target/near-v4\n  \
-             cp <that build's target dir>/near/market/market.wasm contracts/target/near-v4/market.wasm"
+            "{p:?} is missing. Build the market at a42ae7e, the last version-5 layout, and copy it there:\n  \
+             git worktree add $SCRATCH/v5 a42ae7e\n  \
+             (cd $SCRATCH/v5/contracts/market && cargo near build non-reproducible-wasm)\n  \
+             mkdir -p contracts/target/near-v5\n  \
+             cp <that build's target dir>/near/market/market.wasm contracts/target/near-v5/market.wasm"
         )
     })
 }
 
-async fn version_four_world(base: &World) -> anyhow::Result<World> {
-    let market = base.worker.dev_deploy(&version_four_market()).await?;
+async fn version_five_world(base: &World) -> anyhow::Result<World> {
+    let market = base.worker.dev_deploy(&version_five_market()).await?;
     market
         .call("new")
         .args_json(json!({
@@ -375,44 +375,34 @@ async fn version_four_world(base: &World) -> anyhow::Result<World> {
     })
 }
 
-async fn market_records(w: &World, id: u64) -> serde_json::Value {
-    let (yes, no) = shares(w, id, w.alice.id()).await;
+async fn account_records(w: &World) -> serde_json::Value {
     let owed: String = w.market.view("total_owed").await.unwrap().json().unwrap();
-    let mut registered = vec![];
-    for who in [w.alice.id(), w.dave.id()] {
-        registered.push(
-            w.market
-                .view("is_registered")
-                .args_json(json!({ "account_id": who }))
-                .await
-                .unwrap()
-                .json::<bool>()
-                .unwrap(),
-        );
+    let mut accounts = vec![];
+    for who in [w.alice.id(), w.carol.id(), w.dave.id()] {
+        let registered: bool = w
+            .market
+            .view("is_registered")
+            .args_json(json!({ "account_id": who }))
+            .await
+            .unwrap()
+            .json()
+            .unwrap();
+        accounts.push(json!([registered, market_balance(w, who).await.to_string()]));
     }
-    json!({
-        "market": market_json(w, id).await, "alice": [yes.to_string(), no.to_string()],
-        "balance": market_balance(w, w.alice.id()).await.to_string(), "owed": owed, "registered": registered,
-    })
+    json!({ "owed": owed, "accounts": accounts })
 }
 
+// The CPMM's pools cannot be turned into parimutuel shares, so version 6 takes a version 5 market only while it has
+// created no market: registrations and balances carry over, and trading starts on the new pricing.
 #[tokio::test]
 #[ignore]
-async fn the_version_four_build_upgrades_to_this_one_and_keeps_every_record_and_balance() -> anyhow::Result<()> {
+async fn the_version_five_build_upgrades_to_this_one_before_any_market_and_keeps_every_balance() -> anyhow::Result<()> {
     let base = setup().await?;
-    let w = version_four_world(&base).await?;
-    assert_eq!(config(&w.market).await["state_version"], 4);
-    w.owner
-        .call(w.market.id(), "storage_deposit")
-        .args_json(json!({ "account_id": w.dave.id() }))
-        .deposit(NearToken::from_millinear(50))
-        .transact()
-        .await?
-        .into_result()?;
-    let id = create_seeded_market(&w, 600).await?;
-    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    let w = version_five_world(&base).await?;
+    assert_eq!(config(&w.market).await["state_version"], 5);
     ft_call(&w, &w.alice, w.market.id(), 5 * USD, "deposit").await?;
-    let before = market_records(&w, id).await;
+    ft_call(&w, &w.carol, w.market.id(), USD, "register").await?;
+    let before = account_records(&w).await;
     assert_reconciled(&w).await;
 
     let hash = stage(&w.bob, w.market.id(), &wasm("market")).await?;
@@ -424,34 +414,43 @@ async fn the_version_four_build_upgrades_to_this_one_and_keeps_every_record_and_
         .await?
         .into_result()?;
     let c = config(&w.market).await;
+    assert_eq!((&c["state_version"], &c["upgrade_proven"]), (&json!(6), &json!(true)));
     assert_eq!(
-        (&c["state_version"], &c["upgrade_proven"], &c["registration_fee"]),
-        (&json!(5), &json!(true), &json!("250000"))
-    );
-    assert_eq!(
-        market_records(&w, id).await,
+        account_records(&w).await,
         before,
-        "every record and balance reads back the same"
+        "every balance and registration reads back the same"
     );
     assert_reconciled(&w).await;
 
-    let dave_before = w.dave.view_account().await?.balance.as_yoctonear();
-    w.dave
-        .call(w.market.id(), "storage_unregister")
-        .args_json(json!({}))
-        .deposit(NearToken::from_yoctonear(1))
+    let id = new_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    assert_eq!(shares(&w, id, w.alice.id()).await, (10 * USD - 200_000, 0));
+    assert_reconciled(&w).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_version_five_build_that_has_created_a_market_refuses_the_upgrade_and_keeps_its_code() -> anyhow::Result<()> {
+    let base = setup().await?;
+    let w = version_five_world(&base).await?;
+    create_market(&w, 600, 3_600).await?;
+    let old = deployed_hash(&w.market).await;
+    let hash = stage(&w.bob, w.market.id(), &wasm("market")).await?;
+    let r = w
+        .owner
+        .call(w.market.id(), "upgrade")
+        .args_json(json!({ "code_hash": hash }))
+        .gas(Gas::from_tgas(UPGRADE_CALL_TGAS))
         .transact()
-        .await?
-        .into_result()?;
-    let gained = w.dave.view_account().await?.balance.as_yoctonear() as i128 - dave_before as i128;
+        .await?;
     assert!(
-        gained > 40_000_000_000_000_000_000_000,
-        "a deposit paid before version 5 has no payer on record and comes back to the account: {gained}"
+        format!("{:?}", r.receipt_failures()).contains("cannot move to dynamic parimutuel pricing"),
+        "{:?}",
+        r.receipt_failures()
     );
-
-    ft_call(&w, &w.carol, w.market.id(), USD, "register").await?;
-    assert_eq!(market_balance(&w, w.carol.id()).await, USD - u(&c["registration_fee"]));
-    assert_reconciled(&w).await;
+    assert_eq!(deployed_hash(&w.market).await, old, "the old code stays");
+    assert_eq!(config(&w.market).await["state_version"], 5);
     Ok(())
 }
 
@@ -475,7 +474,7 @@ async fn the_upgrade_call_names_the_gas_it_needs() -> anyhow::Result<()> {
 #[tokio::test]
 async fn seal_waits_for_a_proven_upgrade_and_then_removes_every_access_key() -> anyhow::Result<()> {
     let (w, admin) = setup_admin_owned().await?;
-    let id = seed_state(&w).await?;
+    let id = live_state(&w).await?;
 
     for (wasm_name, label, target) in governed_contracts(&w) {
         let key = public_key(target).await;

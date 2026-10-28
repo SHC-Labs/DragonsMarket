@@ -18,8 +18,7 @@ const TGAS = 10n ** 12n;
 const MAX_TX_TGAS = 300n;
 const U32_MAX = 2 ** 32 - 1;
 const NS_PER_DAY = 86_400n * 10n ** 9n;
-// The ranges the market accepts for the void rules, in nanoseconds: the window is 1 hour to 7 days, the grace 1 to 60 days.
-const VOID_WINDOW_NS = { min: NS_PER_DAY / 24n, max: 7n * NS_PER_DAY };
+// The range the market accepts for the void grace, in nanoseconds: 1 to 60 days.
 const VOID_GRACE_NS = { min: NS_PER_DAY, max: 60n * NS_PER_DAY };
 // The range the Council and the oracle accept for their reconcile wait: 10 minutes to 7 days.
 const RECONCILE_WAIT_NS = { min: 600n * 10n ** 9n, max: 7n * NS_PER_DAY };
@@ -53,9 +52,6 @@ export const CONTRACT_LIMITS = {
     HARD_MIN_REVENUE_SHARE_BPS: 500,
     HARD_MAX_REVENUE_SHARE_BPS: 9_000,
     HARD_MAX_MIN_SWEEP: 1_000_000_000n,
-    HARD_MAX_CREATE_FEE: 100_000_000n,
-    HARD_MIN_OPEN_PRICE: 1_000n,
-    HARD_MAX_OPEN_PRICE: 999_000n,
     HARD_MIN_POSITIONS: 5,
     HARD_MAX_POSITIONS: 30,
     HARD_MAX_SETTLE_WAIT_MINUTES: 1_440,
@@ -63,7 +59,7 @@ export const CONTRACT_LIMITS = {
     HARD_MAX_RECONCILE_WAIT_MINUTES: 10_080,
     HARD_MAX_SWEEP_INTERVAL_MINUTES: 1_440,
     HARD_MIN_SWEEP_INTERVAL_MINUTES: 60,
-    HARD_MIN_MARKET_STORAGE_DEPOSIT: 50_090_000_000_000_000_000_000n,
+    HARD_MIN_MARKET_STORAGE_DEPOSIT: 47_750_000_000_000_000_000_000n,
     HARD_MAX_MARKET_STORAGE_DEPOSIT: 500_000_000_000_000_000_000_000n,
     HARD_MIN_STORAGE_RESERVE: 100_000_000_000_000_000_000_000n,
     HARD_MAX_STORAGE_RESERVE: 100_000_000_000_000_000_000_000_000n,
@@ -218,7 +214,6 @@ export const ALLOWED = {
     set_min_sweep: call({ min_sweep: u128(1n, LIMIT_MARKET.HARD_MAX_MIN_SWEEP) }),
     set_next_sweep_id: call({ next_sweep_id: u64(1n) }, { needs: "sweep_id_forward" }),
     set_fee_rate_bps: call({ fee_rate_bps: integer(LIMIT_MARKET.HARD_MAX_FEE_RATE_BPS) }),
-    set_create_fee: call({ create_fee: u128(0n, LIMIT_MARKET.HARD_MAX_CREATE_FEE) }),
     set_storage_policy: call({
       market_storage_deposit: u128(LIMIT_MARKET.HARD_MIN_MARKET_STORAGE_DEPOSIT, LIMIT_MARKET.HARD_MAX_MARKET_STORAGE_DEPOSIT),
       reserve: u128(LIMIT_MARKET.HARD_MIN_STORAGE_RESERVE, LIMIT_MARKET.HARD_MAX_STORAGE_RESERVE),
@@ -230,10 +225,7 @@ export const ALLOWED = {
     reconcile_withdrawal: call({ id: u64(1n), paid: flag }),
     set_paused: call({ paused: flag }),
     set_sells_paused: call({ sells_paused: flag }),
-    set_void_rules: call({
-      price_window_ns: u64(VOID_WINDOW_NS.min, VOID_WINDOW_NS.max),
-      grace_ns: u64(VOID_GRACE_NS.min, VOID_GRACE_NS.max),
-    }),
+    set_void_grace: call({ grace_ns: u64(VOID_GRACE_NS.min, VOID_GRACE_NS.max) }),
     set_sweep_timing: call(
       {
         settle_wait_minutes: integer(LIMIT_MARKET.HARD_MAX_SETTLE_WAIT_MINUTES, 1),
@@ -242,15 +234,10 @@ export const ALLOWED = {
       },
       { check: ordered("settle_wait_minutes", "reconcile_wait_minutes") },
     ),
-    set_open_price_bounds: call(
-      { min: u128(LIMIT_MARKET.HARD_MIN_OPEN_PRICE, LIMIT_MARKET.HARD_MAX_OPEN_PRICE), max: u128(LIMIT_MARKET.HARD_MIN_OPEN_PRICE, LIMIT_MARKET.HARD_MAX_OPEN_PRICE) },
-      { check: ordered("min", "max") },
-    ),
     set_max_positions: call({ max_positions: integer(LIMIT_MARKET.HARD_MAX_POSITIONS, LIMIT_MARKET.HARD_MIN_POSITIONS) }),
     set_fee_limits: call(
       {
         max_fee_rate_bps: integer(LIMIT_MARKET.HARD_MAX_FEE_RATE_BPS),
-        max_create_fee: u128(0n, LIMIT_MARKET.HARD_MAX_CREATE_FEE),
         min_revenue_share_bps: integer(LIMIT_MARKET.HARD_MAX_REVENUE_SHARE_BPS, LIMIT_MARKET.HARD_MIN_REVENUE_SHARE_BPS),
         max_revenue_share_bps: integer(LIMIT_MARKET.HARD_MAX_REVENUE_SHARE_BPS, LIMIT_MARKET.HARD_MIN_REVENUE_SHARE_BPS),
         max_min_sweep: u128(1n, LIMIT_MARKET.HARD_MAX_MIN_SWEEP),

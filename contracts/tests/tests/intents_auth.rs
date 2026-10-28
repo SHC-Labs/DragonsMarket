@@ -59,7 +59,7 @@ async fn sponsor(w: &World, who: &AccountId) -> anyhow::Result<()> {
 #[tokio::test]
 async fn a_signer_with_no_near_trades_and_exits_by_signed_intents() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     let key = SigningKey::from_bytes(&[11u8; 32]);
     let signer: AccountId = implicit_id(&key).parse()?;
     assert!(
@@ -84,10 +84,15 @@ async fn a_signer_with_no_near_trades_and_exits_by_signed_intents() -> anyhow::R
     assert!(yes > 0);
     assert_eq!(intents_balance(&w, &signer).await, 20 * USD);
 
-    let (out, needed, fee) = quote_sell(&w, id, "yes", yes / 2).await;
+    let (out, sold, fee) = quote_sell(&w, id, "yes", yes / 2).await;
     let r = relay(
         &w,
-        signed(&w, &key, market_action(&w, &format!("sell:{id}:yes:{out}:{needed}")), 2),
+        signed(
+            &w,
+            &key,
+            market_action(&w, &format!("sell:{id}:yes:{sold}:{}", out - fee)),
+            2,
+        ),
     )
     .await?;
     assert_clean(&w, "signed sell", &r);
@@ -134,7 +139,7 @@ async fn a_signer_with_no_near_trades_and_exits_by_signed_intents() -> anyhow::R
 #[tokio::test]
 async fn a_signer_registers_with_collateral_and_never_needs_near() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
+    let id = new_market(&w, 600).await?;
     let key = SigningKey::from_bytes(&[13u8; 32]);
     let signer: AccountId = implicit_id(&key).parse()?;
     deposit_to_intents(&w, &w.alice, &signer, 30 * USD).await?;

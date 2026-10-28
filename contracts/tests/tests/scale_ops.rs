@@ -12,11 +12,10 @@ use std::process::Command;
 use std::time::Instant;
 
 const SIZES: [u64; 4] = [250, 1_000, 2_500, 5_000];
-const SEED_AMOUNT: u128 = 3 * USD;
-const SEED_PRICE: &str = "300000";
+const OPERATOR_BUY: u128 = 3 * USD;
 const CREATE_PER_CALL: u64 = 70;
 const CREATE_BATCH: usize = 4;
-const SEED_PER_CALL: u64 = 70;
+const BUY_PER_CALL: u64 = 70;
 const THIRTY_DAYS_SECS: u64 = 30 * 24 * 3_600;
 const MAX_READBACK: u64 = 1_000;
 const LIMIT_SECS: f64 = 30.0 * 60.0;
@@ -117,7 +116,7 @@ async fn protocol_constants() -> anyhow::Result<()> {
 // The next market ids come from a running counter, checked against the chain after each size.
 struct Fleet {
     next_id: u64,
-    seeded: u64,
+    held: u64,
 }
 
 async fn create_batch(w: &World, fleet: &mut Fleet, count: usize) -> anyhow::Result<()> {
@@ -145,37 +144,33 @@ async fn create_batch(w: &World, fleet: &mut Fleet, count: usize) -> anyhow::Res
     Ok(())
 }
 
-fn seed_args(w: &World, id: u64, price: Option<&str>) -> Value {
-    let msg = match price {
-        Some(p) => format!("seed:{id}:{p}"),
-        None => format!("seed:{id}"),
-    };
-    json!({ "receiver_id": w.market.id(), "token_id": token_id(w), "amount": SEED_AMOUNT.to_string(), "msg": msg })
+fn buy_args(w: &World, id: u64) -> Value {
+    json!({ "receiver_id": w.market.id(), "token_id": token_id(w), "amount": OPERATOR_BUY.to_string(), "msg": format!("buy:{id}:yes:1") })
 }
 
-// Seeds markets first..first+count in one transaction, from the operator's Intents balance.
-async fn seed_batch(w: &World, first: u64, count: usize, price: Option<&str>) -> anyhow::Result<()> {
+// The operator buys Yes in markets first..first+count in one transaction, from its Intents balance.
+async fn buy_batch(w: &World, first: u64, count: usize) -> anyhow::Result<()> {
     let mut batch = w.owner.batch(w.verifier.id());
     for id in first..first + count as u64 {
         batch = batch.call(
             Function::new("mt_transfer_call")
-                .args_json(seed_args(w, id, price))
+                .args_json(buy_args(w, id))
                 .deposit(NearToken::from_yoctonear(1))
-                .gas(Gas::from_tgas(SEED_PER_CALL)),
+                .gas(Gas::from_tgas(BUY_PER_CALL)),
         );
     }
     batch.transact().await?.into_result()?;
     Ok(())
 }
 
-// Creates and seeds markets until `target` are held by the operator.
+// Creates markets and buys into each until `target` are held by the operator.
 async fn grow_to(w: &World, fleet: &mut Fleet, target: u64) -> anyhow::Result<()> {
-    while fleet.seeded < target {
-        let take = CREATE_BATCH.min((target - fleet.seeded) as usize);
+    while fleet.held < target {
+        let take = CREATE_BATCH.min((target - fleet.held) as usize);
         let first = fleet.next_id;
         create_batch(w, fleet, take).await?;
-        seed_batch(w, first, take, Some(SEED_PRICE)).await?;
-        fleet.seeded += take as u64;
+        buy_batch(w, first, take).await?;
+        fleet.held += take as u64;
     }
     Ok(())
 }
@@ -256,7 +251,7 @@ fn report_fit(name: &str, points: &[(f64, f64)]) {
     }
 }
 
-// How much one market receipt of the operator's seed and redeem costs as the operator's list of held markets grows.
+// How much one market receipt of the operator's buy and redeem costs as the operator's list of held markets grows.
 #[tokio::test]
 #[ignore]
 async fn operator_index_cost() -> anyhow::Result<()> {
@@ -264,11 +259,11 @@ async fn operator_index_cost() -> anyhow::Result<()> {
     let w = setup().await?;
     top_up(&w, w.market.id()).await?;
     top_up(&w, w.oracle.id()).await?;
-    let needed = (SIZES[SIZES.len() - 1] + 20) as u128 * SEED_AMOUNT;
+    let needed = (SIZES[SIZES.len() - 1] + 20) as u128 * OPERATOR_BUY;
     mint(&w, w.owner.id(), needed).await?;
     deposit_to_intents(&w, &w.owner, w.owner.id(), needed).await?;
-    let mut fleet = Fleet { next_id: 0, seeded: 0 };
-    let mut seed_points = vec![];
+    let mut fleet = Fleet { next_id: 0, held: 0 };
+    let mut buy_points = vec![];
     let mut redeem_points = vec![];
     let mut rate = 0.0;
     println!("\nwhat | held N | burnt TGas (market receipt) | whole tx TGas | ms | notes");
@@ -277,19 +272,19 @@ async fn operator_index_cost() -> anyhow::Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(u64::MAX);
     for size in SIZES.into_iter().filter(|s| *s <= largest) {
-        if rate > 0.0 && started.elapsed().as_secs_f64() + (size - fleet.seeded) as f64 / rate > LIMIT_SECS {
+        if rate > 0.0 && started.elapsed().as_secs_f64() + (size - fleet.held) as f64 / rate > LIMIT_SECS {
             println!("stopped before {size}: the run would pass 30 minutes");
             break;
         }
         let step = Instant::now();
-        let before = fleet.seeded;
+        let before = fleet.held;
         grow_to(&w, &mut fleet, size).await?;
-        if fleet.seeded > before {
-            rate = (fleet.seeded - before) as f64 / step.elapsed().as_secs_f64();
+        if fleet.held > before {
+            rate = (fleet.held - before) as f64 / step.elapsed().as_secs_f64();
         }
         check_held(&w, size).await?;
         println!(
-            "-- {size} markets created and seeded, {:.1} markets per second, {:.0}s since start",
+            "-- {size} markets created and bought into, {:.1} markets per second, {:.0}s since start",
             rate,
             started.elapsed().as_secs_f64()
         );
@@ -304,7 +299,7 @@ async fn operator_index_cost() -> anyhow::Result<()> {
             list_total as f64 * YOCTO_PER_BYTE / 1e24
         );
 
-        // (a) one more seed.
+        // (a) one more buy.
         let probe = create_market(&w, PROBE_CLOSE_SECS, 3_600).await?;
         fleet.next_id = fleet.next_id.max(probe + 1);
         let usage_before = storage_used(&w, w.market.id()).await?;
@@ -312,7 +307,7 @@ async fn operator_index_cost() -> anyhow::Result<()> {
         let r = w
             .owner
             .call(w.verifier.id(), "mt_transfer_call")
-            .args_json(seed_args(&w, probe, Some(SEED_PRICE)))
+            .args_json(buy_args(&w, probe))
             .deposit(NearToken::from_yoctonear(1))
             .max_gas()
             .transact()
@@ -320,13 +315,13 @@ async fn operator_index_cost() -> anyhow::Result<()> {
         let ms = t.elapsed().as_millis();
         let (market_gas, total) = (burnt_on(&r, w.market.id()), tg(r.total_gas_burnt));
         r.into_result()?;
-        assert_eq!(market_json(&w, probe).await["seeded"], true);
+        assert!(shares(&w, probe, w.owner.id()).await.0 > 0);
         let usage_after = storage_used(&w, w.market.id()).await?;
         println!(
-            "seed (operator, 1 more) | {size} | {market_gas:.2} | {total:.2} | {ms} | market storage_usage +{} B",
+            "buy (operator, 1 more) | {size} | {market_gas:.2} | {total:.2} | {ms} | market storage_usage +{} B",
             usage_after - usage_before
         );
-        seed_points.push((size as f64, market_gas));
+        buy_points.push((size as f64, market_gas));
 
         // (c) the account views at size + 1 held.
         let args = json!({ "account_id": w.owner.id() });
@@ -376,7 +371,7 @@ async fn operator_index_cost() -> anyhow::Result<()> {
         check_held(&w, size).await?;
     }
     println!();
-    report_fit("seed market receipt", &seed_points);
+    report_fit("buy market receipt", &buy_points);
     report_fit("redeem market receipt", &redeem_points);
     println!("total run time {:.0}s", started.elapsed().as_secs_f64());
     Ok(())
@@ -385,14 +380,16 @@ async fn operator_index_cost() -> anyhow::Result<()> {
 // ---- M2: gas for ordinary trades and the verifier path -----------------------------------------------------------------
 
 const POOL_MARKETS: u64 = 102;
-const LEVELS: [u64; 3] = [0, 20, 100];
+// A position is two entries, its shares and what it paid in, so the hard cap of 30 entries is 15 markets.
+const MAX_POSITIONS: u32 = 30;
+const MAX_MARKETS: u64 = MAX_POSITIONS as u64 / 2;
+const LEVELS: [u64; 3] = [0, 7, MAX_MARKETS];
 const ID_LENGTHS: [usize; 2] = [20, 64];
 const BUILD_BATCH: usize = 10;
 const BUILD_PER_CALL: u64 = 28;
 const R_CLOSE_SECS: u64 = 3_000;
 const R_PAST_CLOSE_SECS: u64 = 3_030;
 const ATTACHED_TRIES: [u64; 13] = [22, 24, 26, 28, 30, 35, 40, 50, 60, 80, 100, 150, 300];
-const MAX_POSITIONS: u32 = 30;
 const TRADE: u128 = USD;
 
 fn row(what: &str, size: &str, market: f64, total: f64, ms: u128, note: &str) {
@@ -446,6 +443,19 @@ fn buy_balance(w: &World, user: &near_workspaces::Account, id: u64) -> near_work
         .gas(Gas::from_tgas(300))
 }
 
+fn sell_shares(
+    w: &World,
+    user: &near_workspaces::Account,
+    id: u64,
+    shares: u128,
+    min_collateral: u128,
+) -> near_workspaces::operations::CallTransaction {
+    user.call(w.market.id(), "sell")
+        .args_json(json!({ "market_id": id.to_string(), "side": "yes", "shares": shares.to_string(), "min_collateral": min_collateral.to_string() }))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(300))
+}
+
 async fn ask_held(w: &World, user: &near_workspaces::Account) -> anyhow::Result<usize> {
     held(w, user.id()).await
 }
@@ -461,19 +471,14 @@ async fn trade_gas_by_account_length_and_positions() -> anyhow::Result<()> {
         .transact()
         .await?
         .into_result()?;
-    let needed = (POOL_MARKETS + 10) as u128 * SEED_AMOUNT;
-    mint(&w, w.owner.id(), needed).await?;
-    deposit_to_intents(&w, &w.owner, w.owner.id(), needed).await?;
-    let mut fleet = Fleet { next_id: 0, seeded: 0 };
+    let mut fleet = Fleet { next_id: 0, held: 0 };
     while fleet.next_id < POOL_MARKETS {
         let take = CREATE_BATCH.min((POOL_MARKETS - fleet.next_id) as usize);
-        let first = fleet.next_id;
         create_batch(&w, &mut fleet, take).await?;
-        seed_batch(&w, first, take, None).await?;
     }
-    assert_eq!(market_json(&w, POOL_MARKETS - 1).await["seeded"], true);
+    assert_eq!(market_json(&w, POOL_MARKETS - 1).await["registered"], true);
     println!(
-        "pool of {POOL_MARKETS} seeded markets ready after {:.0}s",
+        "pool of {POOL_MARKETS} open markets ready after {:.0}s",
         started.elapsed().as_secs_f64()
     );
     println!("\n| what | account id length / positions held | market receipt TGas | whole tx TGas | ms | notes |");
@@ -484,7 +489,6 @@ async fn trade_gas_by_account_length_and_positions() -> anyhow::Result<()> {
             let user = long_user(&w, id_len, &format!("u{p}x")).await?;
             // The reserved market R that the user redeems at the end.
             let r_id = create_market(&w, R_CLOSE_SECS, 3_600).await?;
-            seed_batch(&w, r_id, 1, None).await?;
             ft_call(&w, &user, w.market.id(), 200 * USD, "deposit").await?;
             deposit_to_intents(&w, &user, user.id(), 300 * USD).await?;
             if p >= 1 {
@@ -494,7 +498,7 @@ async fn trade_gas_by_account_length_and_positions() -> anyhow::Result<()> {
             }
             assert_eq!(ask_held(&w, &user).await? as u64, p);
             let (new1, new2) = if p == 0 { (r_id, 0) } else { (p.saturating_sub(1), p) };
-            let at_cap = p >= MAX_POSITIONS as u64;
+            let at_cap = p + 2 > MAX_MARKETS;
             let tag = format!("id {id_len} chars / {p} held");
             let mut sell_market = new1;
             if !at_cap {
@@ -524,7 +528,7 @@ async fn trade_gas_by_account_length_and_positions() -> anyhow::Result<()> {
                 r.into_result()?;
             } else {
                 sell_market = 0;
-                println!("(at the position cap of {MAX_POSITIONS}: a buy into a new market is refused, so only held markets are measured) {tag}");
+                println!("(near the cap of {MAX_MARKETS} markets: a buy into a new market is refused, so only held markets are measured) {tag}");
             }
             let held_market = sell_market;
             let h = ask_held(&w, &user).await?;
@@ -553,14 +557,8 @@ async fn trade_gas_by_account_length_and_positions() -> anyhow::Result<()> {
 
             // A partial sell, then a sell of everything in a second market.
             let (yes, _) = shares(&w, held_market, user.id()).await;
-            let (out, shares_in, _) = quote_sell(&w, held_market, "yes", yes / 2).await;
-            let (r, ms) = timed(
-                user.call(w.market.id(), "sell")
-                    .args_json(json!({ "market_id": held_market.to_string(), "side": "yes", "collateral_out": out.to_string(), "max_shares_in": shares_in.to_string() }))
-                    .deposit(NearToken::from_yoctonear(1))
-                    .gas(Gas::from_tgas(300)),
-            )
-            .await?;
+            let (out, _, fee) = quote_sell(&w, held_market, "yes", yes / 2).await;
+            let (r, ms) = timed(sell_shares(&w, &user, held_market, yes / 2, out - fee)).await?;
             row(
                 "sell, partial (entry stays)",
                 &format!("{id_len} / {h}"),
@@ -573,32 +571,18 @@ async fn trade_gas_by_account_length_and_positions() -> anyhow::Result<()> {
 
             let zero_market = if at_cap { held_market } else { new2 };
             let (all, _) = shares(&w, zero_market, user.id()).await;
-            let (out, _, _) = quote_sell(&w, zero_market, "yes", all).await;
-            let mut done = false;
-            for extra in 0..4u128 {
-                let (r, ms) = timed(
-                    user.call(w.market.id(), "sell")
-                        .args_json(json!({ "market_id": zero_market.to_string(), "side": "yes", "collateral_out": (out + extra).to_string(), "max_shares_in": all.to_string() }))
-                        .deposit(NearToken::from_yoctonear(1))
-                        .gas(Gas::from_tgas(300)),
-                )
-                .await?;
-                if r.is_success() && shares(&w, zero_market, user.id()).await.0 == 0 {
-                    row(
-                        "sell, everything (entry closes)",
-                        &format!("{id_len} / {h}"),
-                        burnt_on(&r, w.market.id()),
-                        tg(r.total_gas_burnt),
-                        ms,
-                        "",
-                    );
-                    done = true;
-                    break;
-                }
-            }
-            if !done {
-                println!("sell of everything could not be made exact at {tag}: dust always left");
-            }
+            let (out, _, fee) = quote_sell(&w, zero_market, "yes", all).await;
+            let (r, ms) = timed(sell_shares(&w, &user, zero_market, all, out - fee)).await?;
+            row(
+                "sell, everything (entry closes)",
+                &format!("{id_len} / {h}"),
+                burnt_on(&r, w.market.id()),
+                tg(r.total_gas_burnt),
+                ms,
+                "",
+            );
+            r.into_result()?;
+            assert_eq!(shares(&w, zero_market, user.id()).await.0, 0);
 
             // Resolve R and redeem.
             skip_secs(&w.worker, R_PAST_CLOSE_SECS).await;
@@ -653,13 +637,10 @@ async fn intents_call_gas(
 
 #[tokio::test]
 #[ignore]
-async fn verifier_gas_floors_for_buy_and_seed() -> anyhow::Result<()> {
+async fn verifier_gas_floors_for_a_buy() -> anyhow::Result<()> {
     let w = setup().await?;
-    let needed = 40 * SEED_AMOUNT;
-    mint(&w, w.owner.id(), needed).await?;
-    deposit_to_intents(&w, &w.owner, w.owner.id(), needed).await?;
     deposit_to_intents(&w, &w.alice, w.alice.id(), 100 * USD).await?;
-    let trading = create_seeded_market(&w, 3_600).await?;
+    let trading = new_market(&w, 3_600).await?;
 
     println!("\n| what | attached TGas | landed? | market receipt TGas | whole tx TGas | notes |");
     println!("|---|---|---|---|---|---|");
@@ -681,33 +662,6 @@ async fn verifier_gas_floors_for_buy_and_seed() -> anyhow::Result<()> {
             tg(r.total_gas_burnt),
             r.is_success()
         );
-    }
-    for (label, price) in [
-        ("seed at one half", None),
-        ("seed off-middle (seeder holds shares)", Some(SEED_PRICE)),
-    ] {
-        for tgas in ATTACHED_TRIES {
-            let id = create_market(&w, 3_600, 3_600).await?;
-            let r = intents_call_gas(
-                &w,
-                &w.owner,
-                w.market.id(),
-                SEED_AMOUNT,
-                &match price {
-                    Some(p) => format!("seed:{id}:{p}"),
-                    None => format!("seed:{id}"),
-                },
-                tgas,
-            )
-            .await?;
-            let landed = market_json(&w, id).await["seeded"] == true;
-            println!(
-                "| {label} via mt_transfer_call | {tgas} | {landed} | {:.2} | {:.2} | tx ok: {} |",
-                burnt_on(&r, w.market.id()),
-                tg(r.total_gas_burnt),
-                r.is_success()
-            );
-        }
     }
 
     // The gas the verifier hands the receiver, read from a receiver that records its prepaid gas.
@@ -737,12 +691,8 @@ fn max_text(len: usize) -> String {
 #[ignore]
 async fn cost_of_rewriting_one_market_record() -> anyhow::Result<()> {
     let w = setup().await?;
-    let needed = 5 * SEED_AMOUNT;
-    mint(&w, w.owner.id(), needed).await?;
-    deposit_to_intents(&w, &w.owner, w.owner.id(), needed).await?;
-    deposit_to_intents(&w, &w.alice, w.alice.id(), 20 * USD).await?;
     ft_call(&w, &w.bob, w.market.id(), 150 * USD, "deposit").await?;
-    let small = create_seeded_market(&w, THIRTY_DAYS_SECS).await?;
+    let small = new_market(&w, THIRTY_DAYS_SECS).await?;
     let close_at = now(&w.worker).await + THIRTY_DAYS_SECS * 1_000_000_000;
     let big: String = w
         .owner
@@ -759,7 +709,6 @@ async fn cost_of_rewriting_one_market_record() -> anyhow::Result<()> {
         .into_result()?
         .json()?;
     let big: u64 = big.parse()?;
-    seed_batch(&w, big, 1, None).await?;
     let trades = 130;
     for i in 0..trades {
         let side = if i % 2 == 0 { "yes" } else { "no" };
@@ -785,7 +734,7 @@ async fn cost_of_rewriting_one_market_record() -> anyhow::Result<()> {
     println!("|---|---|---|---|---|");
     let mut halts = vec![];
     for (label, id) in [
-        ("typical text, 1 history point", small),
+        ("typical text, no history", small),
         ("big (maximum text, 120 history points)", big),
     ] {
         for round in 0..2 {

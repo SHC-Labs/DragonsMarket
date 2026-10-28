@@ -1,6 +1,6 @@
-// Parimutuel Up and Down rounds on an asset's price. A series cuts time into rounds of one interval. A round takes stakes
-// while the round before it runs, and the prices publishers sign at its start and at its end decide it: the side that was
-// right shares the other side's pool less the fee. A round with an empty side, a tie or a price that never came refunds.
+// Up and Down rounds on an asset's price, priced by dynamic parimutuel. A series cuts time into rounds of one interval. A
+// round takes stakes while it runs, until a set time before its end, and the prices publishers sign at its start and end
+// decide it: the side that was right shares the pool less the fee. An empty side, a tie or a missing price refunds.
 
 use std::cmp::Ordering;
 
@@ -16,7 +16,7 @@ const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 const NEP141_PREFIX: &str = "nep141:";
 const STATE_VERSION: u16 = 1;
 const BPS_DENOMINATOR: u128 = 10_000;
-// Taken from the losing pool alone, so a winner never gets back less than the stake.
+// Taken from what the losing side paid, and capped so a winner never gets back less than the stake.
 const DEFAULT_FEE_BPS: u32 = 300;
 const HARD_MAX_FEE_BPS: u32 = 1_000;
 const DEFAULT_REGISTRATION_FEE: u128 = 250_000;
@@ -28,8 +28,10 @@ const STORAGE_RESERVE: u128 = 1_000_000_000_000_000_000_000_000;
 // Verifying this many signatures fits a call with room to spare, as measured for the oracle.
 const MAX_PUBLISHERS: usize = 25;
 const MAX_DECIMALS: u8 = 18;
-const NS_PER_MINUTE: u64 = 60_000_000_000;
+const NS_PER_SECOND: u64 = 1_000_000_000;
+const NS_PER_MINUTE: u64 = 60 * NS_PER_SECOND;
 const NS_PER_DAY: u64 = 1_440 * NS_PER_MINUTE;
+const HARD_MIN_CLOSE_BEFORE_NS: u64 = NS_PER_SECOND;
 const HARD_MIN_INTERVAL_NS: u64 = NS_PER_MINUTE;
 const HARD_MAX_INTERVAL_NS: u64 = NS_PER_DAY;
 const HARD_MIN_PRICE_WINDOW_NS: u64 = NS_PER_MINUTE;
@@ -48,6 +50,7 @@ enum Key {
     Balances,
     Withdrawals,
     PendingByAccount,
+    Prices,
 }
 
 #[near(serializers=[borsh, json])]
@@ -68,7 +71,8 @@ pub enum Outcome {
 }
 
 // Fixed when it is added, so nothing about a round changes after anyone has staked in it. Round r starts at
-// first_start + r * interval and ends where round r + 1 starts. A price is taken from price_window after its moment.
+// first_start + r * interval and ends where round r + 1 starts, and takes stakes until close_before ahead of its end. A
+// price is taken from price_window after its moment.
 #[near(serializers=[borsh, json])]
 #[derive(Clone)]
 pub struct Series {
@@ -77,18 +81,20 @@ pub struct Series {
     first_start: U64,
     interval: U64,
     price_window: U64,
+    close_before: U64,
 }
 
-// Stored only once someone stakes. `left` is the stakes less the fee and the claims paid so far.
+// Stored only once someone stakes. `up` and `down` are the shares outstanding, `paid_up` and `paid_down` what each side
+// paid for them, and `left` what was paid less the fee and the claims paid so far.
 #[near(serializers=[borsh, json])]
 #[derive(Clone)]
 pub struct Round {
     up: U128,
     down: U128,
+    paid_up: U128,
+    paid_down: U128,
     left: U128,
     fee_bps: u32,
-    start_price: Option<U128>,
-    end_price: Option<U128>,
     outcome: Option<Outcome>,
 }
 
@@ -96,7 +102,16 @@ pub struct Round {
 #[derive(Clone, Copy)]
 pub struct Stake {
     side: Side,
+    shares: U128,
     amount: U128,
+}
+
+struct Bet {
+    series_id: u32,
+    round: u64,
+    side: Side,
+    amount: u128,
+    min_shares: u128,
 }
 
 #[near(serializers=[borsh, json])]
@@ -197,6 +212,8 @@ pub struct RoundsContract {
     next_series_id: u32,
     series: LookupMap<u32, VersionedSeries>,
     rounds: LookupMap<(u32, u64), VersionedRound>,
+    // The price at the start of a round, which is also the end price of the round before. Recorded once.
+    prices: LookupMap<(u32, u64), U128>,
     stakes: LookupMap<(u32, u64, AccountId), Stake>,
     // account -> the stakes it has not claimed. Presence means it paid the registration fee.
     accounts: LookupMap<AccountId, u32>,
@@ -233,6 +250,11 @@ impl Series {
     fn start_of(&self, round: u64) -> u64 {
         self.first_start.0.saturating_add(round.saturating_mul(self.interval.0))
     }
+
+    fn close_of(&self, round: u64) -> u64 {
+        self.start_of(round.saturating_add(1))
+            .saturating_sub(self.close_before.0)
+    }
 }
 
 impl Round {
@@ -240,35 +262,64 @@ impl Round {
         Round {
             up: U128(0),
             down: U128(0),
+            paid_up: U128(0),
+            paid_down: U128(0),
             left: U128(0),
             fee_bps,
-            start_price: None,
-            end_price: None,
             outcome: None,
         }
     }
 
-    fn pool(&self, side: Side) -> u128 {
+    fn shares(&self, side: Side) -> u128 {
         match side {
             Side::Up => self.up.0,
             Side::Down => self.down.0,
         }
     }
 
+    fn paid(&self, side: Side) -> u128 {
+        match side {
+            Side::Up => self.paid_up.0,
+            Side::Down => self.paid_down.0,
+        }
+    }
+
+    // Buys shares of `side` for `amount` at the price the shares outstanding set, and returns how many it bought.
+    fn take(&mut self, side: Side, amount: u128) -> Option<u128> {
+        let (shares, grown) = dpm::buy(self.shares(side), self.shares(side.other()), amount)?;
+        match side {
+            Side::Up => {
+                self.up = U128(grown);
+                self.paid_up = U128(self.paid_up.0 + amount);
+            }
+            Side::Down => {
+                self.down = U128(grown);
+                self.paid_down = U128(self.paid_down.0 + amount);
+            }
+        }
+        self.left = U128(self.left.0 + amount);
+        Some(shares)
+    }
+
+    // fee_bps of what the losing side paid, but never so much that the pool keeps less than a unit for each winning share.
+    // No share costs more than a unit, so no winner gets back less than the stake.
     fn fee(&self, outcome: Outcome) -> u128 {
         outcome.winner().map_or(0, |side| {
-            self.pool(side.other()) * u128::from(self.fee_bps) / BPS_DENOMINATOR
+            let pool = self.paid_up.0 + self.paid_down.0;
+            (self.paid(side.other()) * u128::from(self.fee_bps) / BPS_DENOMINATOR)
+                .min(pool.saturating_sub(self.shares(side)))
         })
     }
 
-    // Each winner's share of the losing pool is rounded down, so the shares never add up to more than the pool.
+    // Every winning share gets the same part of the pool less the fee, rounded down, so the parts never add up to more
+    // than the pool.
     fn payout(&self, outcome: Outcome, stake: &Stake) -> u128 {
-        let amount = stake.amount.0;
         match outcome.winner() {
-            None => amount,
+            None => stake.amount.0,
             Some(side) if side == stake.side => {
-                let winnings = self.pool(side.other()) - self.fee(outcome);
-                amount + amount * winnings / self.pool(side)
+                let pool = self.paid_up.0 + self.paid_down.0 - self.fee(outcome);
+                dpm::winning_payout(stake.shares.0, self.shares(side), pool)
+                    .unwrap_or_else(|| env::panic_str("invariant broken"))
             }
             Some(_) => 0,
         }
@@ -276,11 +327,17 @@ impl Round {
 
     // Only a price recorded inside its window counts and a late one is refused, so once a deadline has passed the answer
     // is fixed, whoever asks and whenever.
-    fn decide(&self, series: &Series, round: u64, now: u64) -> Option<(Outcome, &'static str)> {
+    fn decide(
+        &self,
+        series: &Series,
+        round: u64,
+        now: u64,
+        (start, end): (Option<U128>, Option<U128>),
+    ) -> Option<(Outcome, &'static str)> {
         if self.up.0 == 0 || self.down.0 == 0 {
             return Some((Outcome::Refund, "one_sided"));
         }
-        if let (Some(start), Some(end)) = (self.start_price, self.end_price) {
+        if let (Some(start), Some(end)) = (start, end) {
             return Some(match end.0.cmp(&start.0) {
                 Ordering::Greater => (Outcome::Up, "price"),
                 Ordering::Less => (Outcome::Down, "price"),
@@ -288,9 +345,8 @@ impl Round {
             });
         }
         let window = series.price_window.0;
-        let start_missed = self.start_price.is_none() && now > series.start_of(round).saturating_add(window);
-        let end_missed =
-            self.end_price.is_none() && now > series.start_of(round.saturating_add(1)).saturating_add(window);
+        let start_missed = start.is_none() && now > series.start_of(round).saturating_add(window);
+        let end_missed = end.is_none() && now > series.start_of(round.saturating_add(1)).saturating_add(window);
         (start_missed || end_missed).then_some((Outcome::Refund, "no_price"))
     }
 }
@@ -330,6 +386,21 @@ fn parse_part<T: std::str::FromStr>(part: Option<&str>, what: &str) -> T {
         .unwrap_or_else(|| env::panic_str(&format!("bad {what}")))
 }
 
+// `<series>:<round>:<up|down>`, then the amount unless the stake came with its money, then the fewest shares to accept.
+fn parse_bet<'a>(mut parts: impl Iterator<Item = &'a str>, sent: Option<u128>) -> Bet {
+    let series_id = parse_part(parts.next(), "series id");
+    let round = parse_part(parts.next(), "round");
+    let side = parse_side(parts.next().unwrap_or(""));
+    let amount = sent.unwrap_or_else(|| parse_part(parts.next(), "amount"));
+    Bet {
+        series_id,
+        round,
+        side,
+        amount,
+        min_shares: parse_part(parts.next(), "minimum shares"),
+    }
+}
+
 #[near]
 impl RoundsContract {
     #[private]
@@ -366,6 +437,7 @@ impl RoundsContract {
             next_series_id: 0,
             series: LookupMap::new(Key::Series),
             rounds: LookupMap::new(Key::Rounds),
+            prices: LookupMap::new(Key::Prices),
             stakes: LookupMap::new(Key::Stakes),
             accounts: LookupMap::new(Key::Accounts),
             balances: LookupMap::new(Key::Balances),
@@ -509,6 +581,7 @@ impl RoundsContract {
         first_start: U64,
         interval: U64,
         price_window: U64,
+        close_before: U64,
     ) -> u32 {
         self.only_operator_or_owner();
         require!(
@@ -524,6 +597,10 @@ impl RoundsContract {
             (HARD_MIN_PRICE_WINDOW_NS..=HARD_MAX_PRICE_WINDOW_NS).contains(&price_window.0),
             "price window outside hard range"
         );
+        require!(
+            (HARD_MIN_CLOSE_BEFORE_NS..=interval.0 / 2).contains(&close_before.0),
+            "stakes must close between a second and half the interval before the end"
+        );
         let id = self.next_series_id;
         self.next_series_id += 1;
         let series = Series {
@@ -532,6 +609,7 @@ impl RoundsContract {
             first_start,
             interval,
             price_window,
+            close_before,
         };
         emit("series_added", json!({ "series_id": id, "series": series }));
         self.series.insert(id, series.into());
@@ -541,7 +619,7 @@ impl RoundsContract {
     }
 
     // Anyone can record the price at the start of `round` that enough publishers signed. It is the start price of that
-    // round and the end price of the one before, and is kept only in those of the two that hold stakes and lack it.
+    // round and the end price of the one before, so it is kept once, and only while one of the two holds open stakes.
     pub fn record_price(&mut self, series_id: u32, round: U64, price: U128, signatures: String) {
         let series = self.series_by_id(series_id);
         let at = series.start_of(round.0);
@@ -551,30 +629,23 @@ impl RoundsContract {
             now <= at.saturating_add(series.price_window.0),
             "too late to record that price"
         );
+        let key = (series_id, round.0);
+        require!(!self.prices.contains_key(&key), "that price is already recorded");
+        let open = |r: Option<Round>| r.is_some_and(|r| r.outcome.is_none());
+        let before = round.0.checked_sub(1).and_then(|b| self.find_round(series_id, b));
+        require!(
+            open(self.find_round(series_id, round.0)) || open(before),
+            "no open round needs that price"
+        );
         let message = price_message(&env::current_account_id(), &self.network, &series, at, price.0);
         let signers = price_signatures::verified_signers(&self.publishers, &message, &signatures);
         require!(
             signers.len() >= self.price_threshold as usize,
             "not enough valid publisher signatures"
         );
-        let mut used = false;
-        if let Some(mut r) = self.find_round(series_id, round.0) {
-            if r.outcome.is_none() && r.start_price.is_none() {
-                r.start_price = Some(price);
-                self.store_round(series_id, round.0, r);
-                used = true;
-            }
-        }
-        if let Some(before) = round.0.checked_sub(1) {
-            if let Some(mut r) = self.find_round(series_id, before) {
-                if r.outcome.is_none() && r.end_price.is_none() {
-                    r.end_price = Some(price);
-                    self.store_round(series_id, before, r);
-                    used = true;
-                }
-            }
-        }
-        require!(used, "no open round needs that price");
+        self.prices.insert(key, price);
+        self.prices.flush();
+        self.assert_storage_reserve();
         emit(
             "price_recorded",
             json!({ "series_id": series_id, "round": round, "at": at.to_string(), "price": price, "signers": signers }),
@@ -613,7 +684,7 @@ impl RoundsContract {
         emit(
             "claimed",
             json!({ "series_id": series_id, "round": round, "account": account_id, "side": stake.side,
-                    "stake": stake.amount, "payout": payout.to_string() }),
+                    "stake": stake.amount, "shares": stake.shares, "payout": payout.to_string() }),
         );
         U128(payout)
     }
@@ -651,12 +722,7 @@ impl RoundsContract {
                 self.credit(&sender_id, amount);
                 emit("deposit", json!({ "account": sender_id, "amount": amount.to_string() }));
             }
-            Some("stake") => {
-                let series_id: u32 = parse_part(parts.next(), "series id");
-                let round: u64 = parse_part(parts.next(), "round");
-                let side = parse_side(parts.next().unwrap_or(""));
-                self.stake_for(&sender_id, series_id, round, side, amount);
-            }
+            Some("stake") => self.stake_for(&sender_id, parse_bet(parts, Some(amount))),
             _ => env::panic_str("unknown action"),
         }
         vec![U128(0)]
@@ -670,12 +736,9 @@ impl RoundsContract {
         let mut parts = msg.split(':');
         match parts.next() {
             Some("stake") => {
-                let series_id: u32 = parse_part(parts.next(), "series id");
-                let round: u64 = parse_part(parts.next(), "round");
-                let side = parse_side(parts.next().unwrap_or(""));
-                let amount: u128 = parse_part(parts.next(), "amount");
-                self.debit(&signer_id, amount);
-                self.stake_for(&signer_id, series_id, round, side, amount);
+                let bet = parse_bet(parts, None);
+                self.debit(&signer_id, bet.amount);
+                self.stake_for(&signer_id, bet);
             }
             Some("withdraw") => {
                 let amount: u128 = parse_part(parts.next(), "amount");
@@ -688,11 +751,18 @@ impl RoundsContract {
 
     // Stakes from the balance held here. Needs exactly 1 yocto, so a limited-access key cannot move money.
     #[payable]
-    pub fn stake(&mut self, series_id: u32, round: U64, side: String, amount: U128) {
+    pub fn stake(&mut self, series_id: u32, round: U64, side: String, amount: U128, min_shares: U128) {
         assert_one_yocto();
         let who = env::predecessor_account_id();
         self.debit(&who, amount.0);
-        self.stake_for(&who, series_id, round.0, parse_side(&side), amount.0);
+        let bet = Bet {
+            series_id,
+            round: round.0,
+            side: parse_side(&side),
+            amount: amount.0,
+            min_shares: min_shares.0,
+        };
+        self.stake_for(&who, bet);
     }
 
     #[payable]
@@ -753,19 +823,38 @@ impl RoundsContract {
         self.find_series(series_id)
     }
 
-    // The round taking stakes now, or round 0 of a series that has not opened yet.
+    // The round taking stakes now, or the next to open when none is.
     pub fn next_round(&self, series_id: u32) -> U64 {
         let s = self.series_by_id(series_id);
         let now = env::block_timestamp();
-        U64(if now < s.first_start.0 {
-            0
+        if now < s.first_start.0 {
+            return U64(0);
+        }
+        let current = (now - s.first_start.0) / s.interval.0;
+        U64(if now < s.close_of(current) {
+            current
         } else {
-            (now - s.first_start.0) / s.interval.0 + 1
+            current + 1
         })
     }
 
     pub fn get_round(&self, series_id: u32, round: U64) -> Option<Round> {
         self.find_round(series_id, round.0)
+    }
+
+    // The price at the start of `round`, which is also the end price of the round before.
+    pub fn get_price(&self, series_id: u32, round: U64) -> Option<U128> {
+        self.prices.get(&(series_id, round.0)).copied()
+    }
+
+    // The shares `amount` would buy of `side` in `round` at the price it has reached, or 0 when it is more than a round
+    // can take.
+    pub fn quote_stake(&self, series_id: u32, round: U64, side: String, amount: U128) -> U128 {
+        let side = parse_side(&side);
+        let r = self
+            .find_round(series_id, round.0)
+            .unwrap_or_else(|| Round::new(self.fee_bps));
+        U128(dpm::buy(r.shares(side), r.shares(side.other()), amount.0).map_or(0, |(shares, _)| shares))
     }
 
     pub fn get_stake(&self, series_id: u32, round: U64, account_id: AccountId) -> Option<Stake> {
@@ -846,9 +935,13 @@ impl RoundsContract {
         }
         let series = self.series_by_id(series_id);
         let now = env::block_timestamp();
-        require!(now >= series.start_of(round), "the round is still taking stakes");
+        require!(now >= series.close_of(round), "the round is still taking stakes");
+        let prices = (
+            self.prices.get(&(series_id, round)).copied(),
+            self.prices.get(&(series_id, round.saturating_add(1))).copied(),
+        );
         let (outcome, reason) = r
-            .decide(&series, round, now)
+            .decide(&series, round, now, prices)
             .unwrap_or_else(|| env::panic_str("the round is waiting for its prices"));
         let fee = r.fee(outcome);
         r.left = U128(r.left.0 - fee);
@@ -864,62 +957,69 @@ impl RoundsContract {
         (r, outcome)
     }
 
-    fn stake_for(&mut self, who: &AccountId, series_id: u32, round: u64, side: Side, amount: u128) {
+    // A round takes stakes from its start until close_before ahead of its end, and only while its start price is recorded or
+    // still can be.
+    fn require_taking_stakes(&self, series_id: u32, round: u64) {
+        let series = self.series_by_id(series_id);
+        let start = series.start_of(round);
+        let now = env::block_timestamp();
+        require!(now >= start, "the round has not started");
+        require!(now < series.close_of(round), "stakes on this round have closed");
+        require!(
+            self.prices.contains_key(&(series_id, round)) || now <= start.saturating_add(series.price_window.0),
+            "the start price of this round can no longer be recorded"
+        );
+    }
+
+    fn stake_for(&mut self, who: &AccountId, bet: Bet) {
         require!(!self.paused, "paused");
         let open = self
             .accounts
             .get(who)
             .copied()
             .unwrap_or_else(|| env::panic_str("register first"));
-        require!(amount >= MIN_STAKE, "the stake is below the minimum");
-        let series = self.series_by_id(series_id);
-        let start = series.start_of(round);
-        let now = env::block_timestamp();
-        require!(now < start, "the round has started, stakes are closed");
-        require!(
-            now >= start.saturating_sub(series.interval.0),
-            "a round takes stakes only while the round before it runs"
-        );
-        let key = (series_id, round, who.clone());
-        let staked = match self.stakes.get(&key).copied() {
-            Some(s) => {
-                require!(s.side == side, "you staked the other side of this round");
-                s.amount.0 + amount
-            }
-            None => {
-                require!(
-                    open < MAX_OPEN_STAKES,
-                    "claim a settled round before staking in another"
-                );
-                self.accounts.insert(who.clone(), open + 1);
-                amount
-            }
-        };
+        require!(bet.amount >= MIN_STAKE, "the stake is below the minimum");
+        self.require_taking_stakes(bet.series_id, bet.round);
+        let key = (bet.series_id, bet.round, who.clone());
+        let held = self.stakes.get(&key).copied();
+        match held {
+            Some(s) => require!(s.side == bet.side, "you staked the other side of this round"),
+            None => require!(
+                open < MAX_OPEN_STAKES,
+                "claim a settled round before staking in another"
+            ),
+        }
+        let mut r = self
+            .find_round(bet.series_id, bet.round)
+            .unwrap_or_else(|| Round::new(self.fee_bps));
+        let shares = r
+            .take(bet.side, bet.amount)
+            .unwrap_or_else(|| env::panic_str("the round cannot take that much"));
+        require!(shares >= bet.min_shares, "fewer shares than the minimum");
+        let (up, down) = (r.up, r.down);
+        self.store_round(bet.series_id, bet.round, r);
+        if held.is_none() {
+            self.accounts.insert(who.clone(), open + 1);
+        }
+        let (had_shares, had_amount) = held.map_or((0, 0), |s| (s.shares.0, s.amount.0));
         self.stakes.insert(
             key,
             Stake {
-                side,
-                amount: U128(staked),
+                side: bet.side,
+                shares: U128(had_shares + shares),
+                amount: U128(had_amount + bet.amount),
             },
         );
-        let mut r = self
-            .find_round(series_id, round)
-            .unwrap_or_else(|| Round::new(self.fee_bps));
-        match side {
-            Side::Up => r.up = U128(r.up.0 + amount),
-            Side::Down => r.down = U128(r.down.0 + amount),
-        }
-        r.left = U128(r.left.0 + amount);
-        self.store_round(series_id, round, r);
-        self.locked_total += amount;
+        self.locked_total += bet.amount;
         self.stakes.flush();
         self.rounds.flush();
         self.accounts.flush();
         self.assert_storage_reserve();
         emit(
             "staked",
-            json!({ "series_id": series_id, "round": round.to_string(), "account": who, "side": side,
-                    "amount": amount.to_string() }),
+            json!({ "series_id": bet.series_id, "round": bet.round.to_string(), "account": who, "side": bet.side,
+                    "amount": bet.amount.to_string(), "shares": shares.to_string(), "up_shares": up,
+                    "down_shares": down }),
         );
     }
 
@@ -1029,12 +1129,15 @@ mod tests {
     const START: u64 = 1_000 * NS_PER_MINUTE;
     const INTERVAL: u64 = 5 * NS_PER_MINUTE;
     const WINDOW: u64 = 2 * NS_PER_MINUTE;
-    const BETTING: u64 = START - NS_PER_MINUTE;
+    const CLOSE_BEFORE: u64 = 15 * NS_PER_SECOND;
+    const BETTING: u64 = START + NS_PER_MINUTE;
     const END: u64 = START + INTERVAL;
+    const CLOSE: u64 = END - CLOSE_BEFORE;
     const RECEIVED: u128 = 300 * USD;
     const MEASURED_REGISTRATION_BYTES: u64 = 238;
-    const MEASURED_STAKE_BYTES: u64 = 138;
-    const MEASURED_ROUND_BYTES: u64 = 142;
+    const MEASURED_STAKE_BYTES: u64 = 154;
+    const MEASURED_ROUND_BYTES: u64 = 140;
+    const MEASURED_PRICE_BYTES: u64 = 69;
 
     fn acct(name: &str) -> AccountId {
         name.parse().unwrap()
@@ -1069,15 +1172,20 @@ mod tests {
         receive(c, from, amount, msg);
     }
 
-    // A signed stake out of the balance, so no new money comes in.
+    // A signed stake out of the balance that takes any number of shares, so no new money comes in.
     fn stake(c: &mut RoundsContract, at: u64, who: &str, round: u64, side: &str, amount: u128) {
         act_as(VERIFIER, at);
-        let _ = c.on_auth(acct(who), format!("stake:0:{round}:{side}:{amount}"));
+        let _ = c.on_auth(acct(who), format!("stake:0:{round}:{side}:{amount}:0"));
     }
 
     // A moment when `round` takes stakes.
     fn betting_on(round: u64) -> u64 {
-        START - INTERVAL + round * INTERVAL + 1
+        START + round * INTERVAL + 1
+    }
+
+    fn quote(c: &RoundsContract, at: u64, side: &str, amount: u128) -> u128 {
+        act_as("keeper.near", at);
+        c.quote_stake(0, U64(0), side.into(), U128(amount)).0
     }
 
     fn signing_key(seed: u8) -> SigningKey {
@@ -1110,6 +1218,7 @@ mod tests {
             first_start: U64(START),
             interval: U64(INTERVAL),
             price_window: U64(WINDOW),
+            close_before: U64(CLOSE_BEFORE),
         }
     }
 
@@ -1132,7 +1241,14 @@ mod tests {
             c.add_publisher(public(k));
         }
         let s = btc();
-        c.add_series(s.asset, s.decimals, s.first_start, s.interval, s.price_window);
+        c.add_series(
+            s.asset,
+            s.decimals,
+            s.first_start,
+            s.interval,
+            s.price_window,
+            s.close_before,
+        );
         for u in USERS {
             deliver(&mut c, 0, u, 100 * USD, "register");
         }
@@ -1179,7 +1295,7 @@ mod tests {
         stake(c, BETTING, USERS[0], 0, "up", 10 * USD);
         stake(c, BETTING, USERS[1], 0, "up", 30 * USD);
         stake(c, BETTING, USERS[2], 0, "down", 20 * USD);
-        record(c, keys, 0, 10_000, START);
+        record(c, keys, 0, 10_000, BETTING);
     }
 
     #[test]
@@ -1216,15 +1332,15 @@ mod tests {
     }
 
     #[test]
-    fn a_round_with_an_empty_side_refunds_as_soon_as_it_starts() {
+    fn a_round_with_an_empty_side_refunds_as_soon_as_its_stakes_close() {
         let (mut c, _) = world();
         stake(&mut c, BETTING, USERS[0], 0, "up", 10 * USD);
         stake(&mut c, BETTING, USERS[1], 0, "up", 5 * USD);
-        act_as("keeper.near", START);
+        act_as("keeper.near", CLOSE);
         assert_eq!(c.settle_round(0, U64(0)), Outcome::Refund);
         assert_eq!(last_event()["data"]["reason"], "one_sided");
-        assert_eq!(claim(&mut c, START, USERS[0], 0), 10 * USD);
-        assert_eq!(claim(&mut c, START, USERS[1], 0), 5 * USD);
+        assert_eq!(claim(&mut c, CLOSE, USERS[0], 0), 10 * USD);
+        assert_eq!(claim(&mut c, CLOSE, USERS[1], 0), 5 * USD);
         assert_conserved(&c, RECEIVED, 0..1);
     }
 
@@ -1233,7 +1349,7 @@ mod tests {
     fn a_round_cannot_settle_while_it_takes_stakes() {
         let (mut c, _) = world();
         stake(&mut c, BETTING, USERS[0], 0, "up", 10 * USD);
-        act_as("keeper.near", START - 1);
+        act_as("keeper.near", CLOSE - 1);
         c.settle_round(0, U64(0));
     }
 
@@ -1250,7 +1366,7 @@ mod tests {
         stake(&mut c, BETTING, USERS[0], 0, "up", 10 * USD);
         stake(&mut c, BETTING, USERS[2], 0, "down", 20 * USD);
         assert_eq!(
-            claim(&mut c, START + WINDOW + 1, USERS[2], 0),
+            claim(&mut c, CLOSE, USERS[2], 0),
             20 * USD,
             "a missing start price refunds before the round would have ended"
         );
@@ -1314,12 +1430,12 @@ mod tests {
                 refused(|| c.record_price(0, U64(0), U128(10_000), signatures)),
                 "a signature over {message} must not record 10000"
             );
-            assert_eq!(c.find_round(0, 0).unwrap().start_price, None);
+            assert_eq!(c.get_price(0, U64(0)), None);
         }
     }
 
     #[test]
-    #[should_panic(expected = "no open round needs that price")]
+    #[should_panic(expected = "that price is already recorded")]
     fn the_first_quorum_for_a_moment_is_final() {
         let (mut c, keys) = world();
         staked_round(&mut c, &keys);
@@ -1334,48 +1450,180 @@ mod tests {
     }
 
     #[test]
-    fn one_price_ends_a_round_and_starts_the_next() {
+    fn one_price_ends_a_round_and_starts_the_next_even_if_it_came_before_anyone_staked_in_the_next() {
         let (mut c, keys) = world();
         staked_round(&mut c, &keys);
-        stake(&mut c, START, USERS[0], 1, "down", 5 * USD);
         record(&mut c, &keys, 1, 10_100, END);
-        assert_eq!(c.find_round(0, 0).unwrap().end_price, Some(U128(10_100)));
-        assert_eq!(c.find_round(0, 1).unwrap().start_price, Some(U128(10_100)));
+        stake(&mut c, betting_on(1), USERS[0], 1, "down", 5 * USD);
+        stake(&mut c, betting_on(1), USERS[1], 1, "up", 5 * USD);
+        record(&mut c, &keys, 2, 10_050, END + INTERVAL);
+        act_as("keeper.near", END + INTERVAL);
+        assert_eq!(
+            c.settle_round(0, U64(0)),
+            Outcome::Up,
+            "10_100 ends round 0 above 10_000"
+        );
+        assert_eq!(
+            c.settle_round(0, U64(1)),
+            Outcome::Down,
+            "and starts round 1, which ends below it"
+        );
         assert_conserved(&c, RECEIVED, 0..2);
     }
 
     #[test]
-    fn a_round_takes_stakes_from_the_moment_the_round_before_it_starts() {
-        let (mut c, _) = world();
-        stake(&mut c, START - INTERVAL, USERS[0], 0, "up", 10 * USD);
-        stake(&mut c, START, USERS[0], 1, "up", 10 * USD);
-        assert_eq!(c.get_account(acct(USERS[0])).open_stakes, 2);
-        act_as("keeper.near", START);
+    fn a_round_takes_stakes_from_its_start_until_close_before_its_end() {
+        let (mut c, keys) = world();
+        act_as("keeper.near", START - 1);
+        assert_eq!(c.next_round(0), U64(0));
+        assert!(refused(|| stake(&mut c, START - 1, USERS[0], 0, "up", MIN_STAKE)));
+        stake(&mut c, START, USERS[0], 0, "up", MIN_STAKE);
+        record(&mut c, &keys, 0, 10_000, START);
+        stake(&mut c, CLOSE - 1, USERS[0], 0, "up", MIN_STAKE);
+        act_as("keeper.near", CLOSE - 1);
+        assert_eq!(c.next_round(0), U64(0));
+        assert!(refused(|| stake(&mut c, CLOSE, USERS[0], 0, "up", MIN_STAKE)));
+        assert!(
+            refused(|| stake(&mut c, CLOSE, USERS[0], 1, "up", MIN_STAKE)),
+            "between the close and the end no round takes stakes"
+        );
+        act_as("keeper.near", CLOSE);
         assert_eq!(c.next_round(0), U64(1));
+        stake(&mut c, END, USERS[0], 1, "up", MIN_STAKE);
+        assert_eq!(c.get_account(acct(USERS[0])).open_stakes, 2);
     }
 
     #[test]
-    #[should_panic(expected = "a round takes stakes only while the round before it runs")]
-    fn a_round_two_ahead_takes_no_stakes() {
+    #[should_panic(expected = "the round has not started")]
+    fn a_round_takes_no_stakes_before_it_starts() {
         let (mut c, _) = world();
         stake(&mut c, BETTING, USERS[0], 1, "up", 10 * USD);
     }
 
     #[test]
-    #[should_panic(expected = "the round has started, stakes are closed")]
-    fn a_round_takes_no_stakes_once_it_starts() {
+    #[should_panic(expected = "stakes on this round have closed")]
+    fn a_round_takes_no_stakes_once_they_close() {
         let (mut c, _) = world();
-        stake(&mut c, START, USERS[0], 0, "up", 10 * USD);
+        stake(&mut c, CLOSE, USERS[0], 0, "up", 10 * USD);
+    }
+
+    #[test]
+    fn a_round_whose_start_price_can_no_longer_be_recorded_takes_no_stakes() {
+        let (mut c, keys) = world();
+        assert!(
+            refused(|| record(&mut c, &keys, 0, 10_000, START)),
+            "nobody has staked in round 0 or the round before"
+        );
+        assert!(refused(|| stake(
+            &mut c,
+            START + WINDOW + 1,
+            USERS[0],
+            0,
+            "up",
+            MIN_STAKE
+        )));
+        stake(&mut c, betting_on(1), USERS[0], 1, "up", MIN_STAKE);
+        record(&mut c, &keys, 1, 10_000, betting_on(1));
+        stake(&mut c, END + WINDOW + 1, USERS[1], 1, "down", MIN_STAKE);
+        assert_eq!(
+            c.get_round(0, U64(1)).unwrap().paid_down.0,
+            MIN_STAKE,
+            "a recorded start price keeps the round open to stakes"
+        );
+    }
+
+    #[test]
+    fn a_stake_buys_shares_at_the_price_the_round_has_reached_and_the_quote_says_how_many() {
+        let (mut c, keys) = world();
+        assert_eq!(
+            quote(&c, BETTING, "up", 10 * USD),
+            10 * USD,
+            "a share a unit in an empty round"
+        );
+        stake(&mut c, BETTING, USERS[0], 0, "up", 10 * USD);
+        stake(&mut c, BETTING, USERS[2], 0, "down", 10 * USD);
+        let quoted = quote(&c, BETTING, "up", 10 * USD);
+        stake(&mut c, BETTING, USERS[1], 0, "up", 10 * USD);
+        assert_eq!(last_event()["data"]["shares"], quoted.to_string());
+        let shares = |c: &RoundsContract, u: &str| c.get_stake(0, U64(0), acct(u)).unwrap().shares.0;
+        assert_eq!(shares(&c, USERS[1]), quoted);
+        assert!(
+            shares(&c, USERS[2]) > shares(&c, USERS[0]),
+            "Down was cheaper when cat staked"
+        );
+        assert!(
+            shares(&c, USERS[1]) > shares(&c, USERS[0]),
+            "and cat's stake made Up cheaper"
+        );
+        record(&mut c, &keys, 0, 10_000, BETTING);
+        record(&mut c, &keys, 1, 10_100, END);
+        let (ann, ben) = (claim(&mut c, END, USERS[0], 0), claim(&mut c, END, USERS[1], 0));
+        assert!(
+            ann >= 10 * USD && ben > ann,
+            "each winner gets the stake back at least, more shares more"
+        );
+        assert_eq!(c.fees, 3 * DEFAULT_REGISTRATION_FEE + 300_000, "3% of the 10 Down paid");
+        assert!(
+            30 * USD - 300_000 - ann - ben < 2,
+            "the winners share the pool less the fee"
+        );
+        assert_conserved(&c, RECEIVED, 0..1);
+    }
+
+    #[test]
+    fn a_winner_never_gets_back_less_than_the_stake_even_when_the_losers_paid_almost_nothing() {
+        let (mut c, keys) = world();
+        stake(&mut c, BETTING, USERS[2], 0, "down", MIN_STAKE);
+        stake(&mut c, BETTING, USERS[0], 0, "up", 99 * USD);
+        stake(&mut c, BETTING, USERS[1], 0, "up", 99 * USD);
+        record(&mut c, &keys, 0, 10_000, BETTING);
+        record(&mut c, &keys, 1, 10_100, END);
+        let r = c.find_round(0, 0).unwrap();
+        let cap = r.paid_up.0 + r.paid_down.0 - r.up.0;
+        assert!(
+            cap < MIN_STAKE * u128::from(DEFAULT_FEE_BPS) / BPS_DENOMINATOR,
+            "the cap is lower than 3% here"
+        );
+        assert!(claim(&mut c, END, USERS[0], 0) >= 99 * USD);
+        assert!(
+            claim(&mut c, END, USERS[1], 0) >= 99 * USD,
+            "the last stake bought at almost a unit a share"
+        );
+        assert_eq!(c.fees, 3 * DEFAULT_REGISTRATION_FEE + cap);
+        assert_conserved(&c, RECEIVED, 0..1);
+    }
+
+    #[test]
+    fn a_stake_that_would_get_fewer_shares_than_asked_is_refused() {
+        let (mut c, _) = world();
+        stake(&mut c, BETTING, USERS[2], 0, "down", 10 * USD);
+        let quoted = quote(&c, BETTING, "up", 10 * USD);
+        stake(&mut c, BETTING, USERS[1], 0, "up", 10 * USD);
+        act_as(VERIFIER, BETTING);
+        let stale = format!("stake:0:0:up:{}:{quoted}", 10 * USD);
+        assert!(
+            refused(|| c.on_auth(acct(USERS[0]), stale)),
+            "ben's stake moved the price first"
+        );
+        let now = quote(&c, BETTING, "up", 10 * USD);
+        assert!(now < quoted);
+        act_as(VERIFIER, BETTING);
+        let _ = c.on_auth(acct(USERS[0]), format!("stake:0:0:up:{}:{now}", 10 * USD));
+        assert_eq!(c.get_stake(0, U64(0), acct(USERS[0])).unwrap().shares.0, now);
     }
 
     #[test]
     fn a_stake_can_arrive_with_its_money() {
         let (mut c, _) = world();
-        deliver(&mut c, BETTING, USERS[0], 7 * USD, "stake:0:0:down");
+        deliver(&mut c, BETTING, USERS[0], 7 * USD, "stake:0:0:down:0");
         let s = c.get_stake(0, U64(0), acct(USERS[0])).unwrap();
-        assert_eq!((s.side, s.amount.0), (Side::Down, 7 * USD));
+        assert_eq!((s.side, s.amount.0, s.shares.0), (Side::Down, 7 * USD, 7 * USD));
         assert_eq!(balance(&c, USERS[0]), 100 * USD - DEFAULT_REGISTRATION_FEE);
         assert_conserved(&c, RECEIVED + 7 * USD, 0..1);
+        assert!(
+            refused(|| deliver(&mut c, BETTING, USERS[0], 7 * USD, "stake:0:0:down")),
+            "a stake names the fewest shares it takes"
+        );
     }
 
     #[test]
@@ -1384,7 +1632,7 @@ mod tests {
         stake(&mut c, BETTING, USERS[0], 0, "up", 10 * USD);
         stake(&mut c, BETTING, USERS[0], 0, "up", 5 * USD);
         let s = c.get_stake(0, U64(0), acct(USERS[0])).unwrap();
-        assert_eq!((s.side, s.amount.0), (Side::Up, 15 * USD));
+        assert_eq!((s.side, s.amount.0, s.shares.0), (Side::Up, 15 * USD, 15 * USD));
         assert_eq!(c.get_account(acct(USERS[0])).open_stakes, 1);
     }
 
@@ -1415,7 +1663,7 @@ mod tests {
     #[should_panic(expected = "register first")]
     fn an_unregistered_account_cannot_stake() {
         let (mut c, _) = world();
-        deliver(&mut c, BETTING, "dan.near", 10 * USD, "stake:0:0:up");
+        deliver(&mut c, BETTING, "dan.near", 10 * USD, "stake:0:0:up:0");
     }
 
     #[test]
@@ -1453,7 +1701,7 @@ mod tests {
         act_as(OWNER, BETTING);
         c.set_fee_bps(HARD_MAX_FEE_BPS);
         stake(&mut c, BETTING, USERS[2], 0, "down", 20 * USD);
-        record(&mut c, &keys, 0, 10_000, START);
+        record(&mut c, &keys, 0, 10_000, BETTING);
         record(&mut c, &keys, 1, 10_100, END);
         assert_eq!(claim(&mut c, END, USERS[0], 0), 10 * USD + 20 * USD - 600_000);
     }
@@ -1464,7 +1712,7 @@ mod tests {
         staked_round(&mut c, &keys);
         act_as(OWNER, START);
         c.set_paused(true);
-        for msg in ["register", "deposit", "stake:0:1:up"] {
+        for msg in ["register", "deposit", "stake:0:0:up:0"] {
             assert!(
                 refused(|| deliver(&mut c, START, USERS[0], USD, msg)),
                 "{msg} while paused"
@@ -1544,34 +1792,30 @@ mod tests {
         assert!(refused(|| c.add_publisher(secp)));
         assert!(refused(|| c.add_publisher(public(&keys[0]))));
         let s = btc();
-        assert!(refused(|| c.add_series(
-            "BTC".into(),
-            2,
-            s.first_start,
-            s.interval,
-            s.price_window
-        )));
-        assert!(refused(|| c.add_series(
-            s.asset.clone(),
-            19,
-            s.first_start,
-            s.interval,
-            s.price_window
-        )));
-        assert!(refused(|| c.add_series(
-            s.asset.clone(),
-            2,
-            s.first_start,
-            U64(HARD_MIN_INTERVAL_NS - 1),
-            s.price_window
-        )));
-        assert!(refused(|| c.add_series(
-            s.asset.clone(),
-            2,
-            s.first_start,
-            s.interval,
-            U64(HARD_MAX_PRICE_WINDOW_NS + 1)
-        )));
+        let add = |c: &mut RoundsContract, change: &dyn Fn(&mut Series)| {
+            let mut s = btc();
+            change(&mut s);
+            c.add_series(
+                s.asset,
+                s.decimals,
+                s.first_start,
+                s.interval,
+                s.price_window,
+                s.close_before,
+            )
+        };
+        let changes: [&dyn Fn(&mut Series); 6] = [
+            &|s| s.asset = "BTC".into(),
+            &|s| s.decimals = 19,
+            &|s| s.interval = U64(HARD_MIN_INTERVAL_NS - 1),
+            &|s| s.price_window = U64(HARD_MAX_PRICE_WINDOW_NS + 1),
+            &|s| s.close_before = U64(HARD_MIN_CLOSE_BEFORE_NS - 1),
+            &|s| s.close_before = U64(INTERVAL / 2 + 1),
+        ];
+        for change in changes {
+            assert!(refused(|| add(&mut c, change)));
+        }
+        add(&mut c, &|s| s.close_before = U64(INTERVAL / 2));
         c.remove_publisher(public(&keys[0]));
         assert!(
             refused(|| c.remove_publisher(public(&keys[1]))),
@@ -1587,7 +1831,8 @@ mod tests {
             2,
             s.first_start,
             s.interval,
-            s.price_window
+            s.price_window,
+            s.close_before
         )));
     }
 
@@ -1599,26 +1844,35 @@ mod tests {
         let before = env::storage_usage();
         receive(&mut c, &longest, 100 * USD, "register");
         let registered = env::storage_usage() - before;
-        let _ = c.on_auth(acct(USERS[0]), format!("stake:0:0:up:{MIN_STAKE}"));
+        let _ = c.on_auth(acct(USERS[0]), format!("stake:0:0:up:{MIN_STAKE}:0"));
         let before = env::storage_usage();
-        let _ = c.on_auth(acct(&longest), format!("stake:0:0:up:{MIN_STAKE}"));
+        let _ = c.on_auth(acct(&longest), format!("stake:0:0:up:{MIN_STAKE}:0"));
         let per_stake = env::storage_usage() - before;
         let before = env::storage_usage();
         let largest = Round {
             up: U128(u128::MAX),
             down: U128(u128::MAX),
+            paid_up: U128(u128::MAX),
+            paid_down: U128(u128::MAX),
             left: U128(u128::MAX),
             fee_bps: HARD_MAX_FEE_BPS,
-            start_price: Some(U128(u128::MAX)),
-            end_price: Some(U128(u128::MAX)),
             outcome: Some(Outcome::Refund),
         };
         c.store_round(u32::MAX, u64::MAX, largest);
         c.rounds.flush();
         let per_round = env::storage_usage() - before;
+        let before = env::storage_usage();
+        c.prices.insert((u32::MAX, u64::MAX), U128(u128::MAX));
+        c.prices.flush();
+        let per_price = env::storage_usage() - before;
         assert_eq!(
-            (registered, per_stake, per_round),
-            (MEASURED_REGISTRATION_BYTES, MEASURED_STAKE_BYTES, MEASURED_ROUND_BYTES),
+            (registered, per_stake, per_round, per_price),
+            (
+                MEASURED_REGISTRATION_BYTES,
+                MEASURED_STAKE_BYTES,
+                MEASURED_ROUND_BYTES,
+                MEASURED_PRICE_BYTES
+            ),
             "update the storage figures in docs/contracts/rounds.md"
         );
     }
@@ -1642,7 +1896,7 @@ mod tests {
             let at = if ending == 3 {
                 END + WINDOW + 1
             } else {
-                record(&mut c, &keys, 0, 10_000, START);
+                record(&mut c, &keys, 0, 10_000, BETTING);
                 record(&mut c, &keys, 1, [10_001, 9_999, 10_000][ending], END);
                 END
             };
@@ -1659,7 +1913,7 @@ mod tests {
                 paid += payout;
             }
             let r = c.find_round(0, 0).unwrap();
-            prop_assert_eq!(paid + r.fee(r.outcome.unwrap()) + r.left.0, r.up.0 + r.down.0);
+            prop_assert_eq!(paid + r.fee(r.outcome.unwrap()) + r.left.0, r.paid_up.0 + r.paid_down.0);
             prop_assert!(r.left.0 < 3, "rounding leaves less than one unit a winner");
             prop_assert_eq!(USERS.iter().map(|u| balance(&c, u)).sum::<u128>(), before + paid);
             assert_conserved(&c, RECEIVED, 0..1);

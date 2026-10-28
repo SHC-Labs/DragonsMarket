@@ -47,7 +47,7 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Contracts for wasm
         run: >
-          cargo clippy -p oracle -p council -p market -p rounds -p price-signatures -p upgrade -p mock-ft -p mock-nft
+          cargo clippy -p oracle -p council -p market -p rounds -p dpm -p price-signatures -p upgrade -p mock-ft -p mock-nft
           --target wasm32-unknown-unknown -- -D warnings
       - name: Everything, tests included
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -67,7 +67,7 @@ jobs:
           restore-keys: unit-${{ runner.os }}-
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo test -p market -p oracle -p council -p rounds -p price-signatures -p upgrade
+      - run: cargo test -p market -p oracle -p council -p rounds -p dpm -p price-signatures -p upgrade
 
   sandbox:
     runs-on: ubuntu-24.04
@@ -83,8 +83,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             contracts/target
-          key: sandbox-${{ runner.os }}-${{ hashFiles('contracts/Cargo.lock', 'contracts/rust-toolchain.toml') }}
-          restore-keys: sandbox-${{ runner.os }}-
+          key: sandbox-nodebug-${{ runner.os }}-${{ hashFiles('contracts/Cargo.lock', 'contracts/rust-toolchain.toml') }}
+          restore-keys: sandbox-nodebug-${{ runner.os }}-
       - uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: ~/.cargo/bin/cargo-near
@@ -109,7 +109,11 @@ jobs:
       - name: Sandbox tests
         # near-workspaces downloads the nearcore sandbox binary itself the first time it runs. Sandbox chain time follows
         # the wall clock, so on a 2 core runner many parallel sandboxes slow each transaction until a short dispute
-        # window closes mid-test. Two threads keep the tests inside their windows.
+        # window closes mid-test. Two threads keep the tests inside their windows. With debug info the test binaries
+        # fill the runner's disk.
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: cargo test -p tests -- --test-threads=2
       - name: Record the sha256 of each wasm
         run: sha256sum target/near/*/*.wasm | tee wasm-sha256.txt
@@ -126,4 +130,4 @@ jobs:
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
         with:
           node-version-file: web/.node-version
-      - run: node --test verify-build.test.mjs keeper/release-check.test.mjs keeper/keeper.test.mjs keeper/treasury.test.mjs
+      - run: node --test verify-build.test.mjs keeper/*.test.mjs
