@@ -8,10 +8,15 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// The keeper reads the last final block, which trails the chain by a few blocks, so let it catch up first. The child
-// sees only the environment given here, so a key from the shell running the tests can never leak into a run.
+// The keeper reads the last final block, and a fast forward returns before that moves, so wait for the next block, after
+// which the final block is two below the head. The child sees only the environment given here, so a key from the shell
+// running the tests can never leak into a run.
 async fn run_keeper(w: &World, args: &[&str], env: &[(&str, String)]) -> (String, bool) {
     w.worker.fast_forward(6).await.unwrap();
+    let jumped = w.worker.view_block().await.unwrap().height();
+    while w.worker.view_block().await.unwrap().height() <= jumped {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../keeper/keeper.mjs");
     let rpc = w.worker.rpc_addr();
     let mut command = Command::new("node");
