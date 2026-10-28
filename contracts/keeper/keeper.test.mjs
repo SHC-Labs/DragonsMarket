@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   accessKeyReport, advanceCursor, councilFloor, daoReport, describeOutcome, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options,
-  quarterEnd, quarterOf, readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, verifierProblems,
+  quarterEnd, quarterOf, readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, tokenProblems, verifierProblems,
   writeCursor, refuseRetiredController, releaseReport, validateActionKeys,
 } from "./keeper.mjs";
 import { b58encode } from "./chain.mjs";
@@ -204,6 +204,14 @@ test("the verifier's view of a contract is a problem when it has a key, refuses 
   assert.match(verifierProblems({ ...view, predecessorAuth: false })[0], /^market m\.near does not authenticate by predecessor/);
   assert.match(verifierProblems({ ...view, locked: true })[0], /^market m\.near is locked in the verifier.*stop advertising deposits/);
   assert.equal(verifierProblems({ ...view, keys: ["a"], predecessorAuth: false, locked: true }).length, 3);
+});
+
+test("the token must know the market and the verifier, or a deposit or buy by token cannot arrive", () => {
+  const view = { token: "usdc.near", market: "m.near", marketRegistered: true, verifier: "v.near", verifierRegistered: true };
+  assert.deepEqual(tokenProblems(view), []);
+  assert.match(tokenProblems({ ...view, marketRegistered: false })[0], /^market m\.near is not registered with the token usdc\.near: the token refuses every deposit and buy/);
+  assert.match(tokenProblems({ ...view, verifierRegistered: false })[0], /^the verifier v\.near is not registered with the token usdc\.near: .*goes back to its sender$/);
+  assert.equal(tokenProblems({ ...view, marketRegistered: false, verifierRegistered: false }).length, 2);
 });
 
 test("access keys are counted, and are a problem only when the contracts are expected to be sealed", () => {

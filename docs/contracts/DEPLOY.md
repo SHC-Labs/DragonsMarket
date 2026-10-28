@@ -40,10 +40,14 @@ example DAO names and sandbox keys are not production configuration.
 - [ ] Prove external funding reaches the correct authenticated beneficiary and collateral asset.
 - [ ] Register the market account with the collateral token (`storage_deposit` on the token, once)
       and send a small token `deposit`. Until then the token refuses `ft_transfer_call` to the market,
-      so only the Intents path can fund it.
+      so only the Intents path can fund it, and `keeper.mjs check` reports it.
 - [ ] Show committed backing remains controlled inside Intents and reconciles with positions.
 - [ ] Verify buy, sell, Yes/No/Void redemption and available-balance withdrawal.
 - [ ] Complete the oracle bond/juror-payment migration to Intents.
+- [ ] Run at least `price_threshold` publishers (`keeper/publisher.mjs`), each on its own host with its own key, and
+      have the DAO add each key with `add_publisher`. Run `keeper/resolver.mjs run` on a schedule from an account that
+      holds only the bond float in Intents, and answer event markets with `resolver.mjs propose` (see "Publishing and
+      submitting prices" in [oracle.md](oracle.md)). Without them every market Voids at its `resolve_by`.
 - [ ] Verify earned-fee allocation: 75% treasury and 25% Council-controlled rewards, with the real
       treasury account (see the configuration order below).
 - [x] Quarterly entitlement and claim rules, with repeat and cross-path claims refused (built

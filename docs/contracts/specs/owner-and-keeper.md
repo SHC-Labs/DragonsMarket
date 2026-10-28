@@ -457,6 +457,7 @@ Checked in source and by run on 2026-10-21: `contracts/keeper/keeper.mjs`, with 
 | Check NEAR left after storage for each contract and an optional treasury | `check` | none | `marginReport` |
 | Reconcile the market, the oracle and the Council with the verifier | `check` | none | `reconciliation`, `reconcile`, `councilBooks` |
 | Read what the verifier says about each of the three: keys, predecessor authentication, lock, paused transfers | `check` | none | `verifierProblems`, `check` |
+| Check that the collateral token has the market and the verifier registered, so a deposit or buy by `ft_transfer_call` can arrive | `check` | none | `tokenProblems` |
 | Count NEAR access keys, and fail on any with `--expect-sealed` | `check` | none | `accessKeyReport` |
 | List open DAO proposals that name the contracts, and flag any the allow-list refuses, with `--watch-dao --treasury ID` | `check` | none | `daoReport`, `openProposals` |
 

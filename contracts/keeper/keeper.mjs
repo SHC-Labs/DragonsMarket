@@ -85,6 +85,7 @@ const CONTRACTS = ["market", "oracle", "council"];
 // The verifier pauses transfers under this feature key, and a paused verifier refuses every mt_transfer and mt_transfer_call
 // (pause_and_lock_stop_payouts_but_not_receipts in intents_verifier.rs).
 const VERIFIER_PAUSE_KEY = "mt_transfer";
+const NEP141_PREFIX = "nep141:";
 // A shortfall is read again this many times, each time this many blocks later, before it is reported. The wait ends after the
 // timeout even if the chain has not moved.
 const SHORTFALL_RECHECKS = 2;
@@ -549,6 +550,13 @@ export function verifierProblems({ name, id, keys, predecessorAuth, locked }) {
   return problems;
 }
 
+export function tokenProblems({ token, market, marketRegistered, verifier, verifierRegistered }) {
+  const problems = [];
+  if (!marketRegistered) problems.push(`market ${market} is not registered with the token ${token}: the token refuses every deposit and buy by ft_transfer_call, so register it with storage_deposit on the token`);
+  if (!verifierRegistered) problems.push(`the verifier ${verifier} is not registered with the token ${token}: the market cannot move a token deposit into Intents, so every one goes back to its sender`);
+  return problems;
+}
+
 // accounts: [{ name, id, count }] of NEAR access keys. After seal there should be none, which is only a problem when asked for.
 export function accessKeyReport(accounts, expectSealed) {
   const line = `access keys: ${accounts.map(({ name, count }) => `${name} ${count}`).join(", ")}`;
@@ -718,6 +726,14 @@ async function check(opts) {
   }
   if (!trouble.length) console.log(`verifier ${[...verifiers].join(", ")}: no keys registered, predecessor authentication on, not locked and ${VERIFIER_PAUSE_KEY} running for the market, oracle and council`);
   problems.push(...trouble);
+
+  const token = configs.market.collateral_token_id.slice(NEP141_PREFIX.length);
+  const registered = async (id) => (await view(opts.rpc, token, "storage_balance_of", { account_id: id }, at)) !== null;
+  const tokenTrouble = tokenProblems({
+    token, market: opts.market, marketRegistered: await registered(opts.market), verifier: configs.market.verifier, verifierRegistered: await registered(configs.market.verifier),
+  });
+  if (!tokenTrouble.length) console.log(`token ${token}: the market and the verifier are registered, so deposits and buys by ft_transfer_call can arrive`);
+  problems.push(...tokenTrouble);
 
   const keyCounts = [];
   for (const name of CONTRACTS) {

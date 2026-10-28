@@ -346,8 +346,27 @@ async fn check_showing(w: &World, expected: &str) -> (String, bool) {
 }
 
 #[tokio::test]
+async fn the_deploy_check_reports_whether_the_token_knows_the_market() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let (out, ok) = keeper(&w, &["check"]).await;
+    assert!(
+        !ok && out.contains(&format!(
+            "PROBLEM: market {} is not registered with the token {}",
+            w.market.id(),
+            w.ft.id()
+        )),
+        "{out}"
+    );
+    register_ft(&w, w.market.id()).await?;
+    let (out, _) = check_showing(&w, "the market and the verifier are registered").await;
+    assert!(!out.contains("is not registered with the token"), "{out}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_deploy_check_reports_whether_the_council_can_seat_a_jury_and_a_second_one() -> anyhow::Result<()> {
     let w = setup().await?;
+    register_ft(&w, w.market.id()).await?;
     for seed in [1u8, 2] {
         let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
         let public = format!("ed25519:{}", bs58::encode(key.verifying_key().to_bytes()).into_string());

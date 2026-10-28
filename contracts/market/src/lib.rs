@@ -1863,22 +1863,20 @@ impl MarketContract {
         if taken == 0 {
             return amount;
         }
-        match arrival {
-            Arrival::Deposit => self.credit_deposit(&sender_id, taken),
-            Arrival::Buy {
+        self.credit_deposit(&sender_id, taken);
+        if let Arrival::Buy {
+            market_id,
+            side,
+            min_shares,
+        } = arrival
+        {
+            let _ = Self::ext(env::current_account_id()).with_static_gas(GAS_BUY).buy_for(
+                sender_id,
                 market_id,
                 side,
+                U128(taken),
                 min_shares,
-            } => {
-                self.credit_deposit(&sender_id, taken);
-                let _ = Self::ext(env::current_account_id()).with_static_gas(GAS_BUY).buy_for(
-                    sender_id,
-                    market_id,
-                    side,
-                    U128(taken),
-                    min_shares,
-                );
-            }
+            );
         }
         U128(amount.0 - taken)
     }

@@ -436,8 +436,36 @@ A submission with all 10 signing (the start limit) burned about 4.5 TGas here (9
 attached to a direct call. Through the verifier, which keeps about 21 TGas of what is attached, a wallet's
 100 TGas leaves the oracle's receipt about 79.
 
-The off-chain publisher service that reads exchange prices and signs them is not built; until it
-exists price markets can be created and answered by hand, but nothing produces the signatures.
+### Publishing and submitting prices
+
+`keeper/publisher.mjs serve --rpc URL --oracle ID` is a publisher. Each one runs on its own host with its own key
+(`PUBLISHER_KEY` or `--key-file`, chmod 600) and answers `GET /price?market=<market account>&id=<market id>` with the price
+and its signature. It signs only what it works out itself:
+
+1. It reads the price rule from this contract, and the pair from the market's `resolution_source`, which must name exactly
+   one of `BTC-USD`, `ETH-USD` or `NEAR-USD`, as in "Median of BTC-USD one minute closes on Coinbase, Kraken and Bitstamp".
+   Anything else is refused (422).
+2. It waits until two minutes after the observation time (425 before then), so every candle it reads is final.
+3. On Coinbase, Kraken and Bitstamp it takes the close of the last one minute candle with a trade that started in the five
+   minutes before the observation time's minute.
+4. It signs the median at the rule's decimals, rounding half up: the middle of three, the mean of two. With fewer than two,
+   or when they are more than 1% apart, it signs nothing (503).
+
+The arithmetic is in integers on finished candles, so publishers that reach the same exchanges sign the same price. A
+price from all three is kept; one from two is signed and worked out again on the next request. Kraken serves only its
+last 720 minutes, so a publisher asked more than 12 hours late works from two exchanges.
+
+`keeper/resolver.mjs` submits, as its own account with its own key (`RESOLVER_KEY` or `--key-file`). A bond is an
+`mt_transfer_call` with 1 yoctoNEAR attached, so this needs a full access key, and the account should hold no more than
+the bond float in its Intents balance. It is kept apart from the keeper, whose calls move no money.
+
+| Command | What it does |
+| --- | --- |
+| `run --publishers URL,URL,...` | For each price market two minutes past its observation time with no case: asks every publisher, checks each signature against this contract's publishers, and once `price_threshold` agree on one price submits it with the bond and every matching signature. Exits 1 when a due market was left unanswered. `--dry-run` sends nothing |
+| `pending` | Lists closed markets that have no case yet, event and price |
+| `propose --market-id N --answer yes\|no\|void --evidence TEXT` | How an operator answers an event market. It checks that the market is an event market, has closed and has no case, and that the evidence is at most 512 bytes, then posts the bond |
+
+A bond the oracle refuses comes back from the verifier, and the resolver prints the refusal.
 
 ---
 
