@@ -51,8 +51,8 @@ describe("market calls that move value carry one yocto", () => {
       receiverId: "market.near", methodName: "buy", deposit: "1",
       args: { market_id: "7", side: "no", amount: "1000000", min_shares: "900000" },
     });
-    expect(sellCall("7", "yes", 500_000n, 600_000n)).toMatchObject({
-      methodName: "sell", deposit: "1", args: { market_id: "7", side: "yes", collateral_out: "500000", max_shares_in: "600000" },
+    expect(sellCall("7", "yes", 600_000n, 500_000n)).toMatchObject({
+      methodName: "sell", deposit: "1", args: { market_id: "7", side: "yes", shares: "600000", min_collateral: "500000" },
     });
     expect(withdrawCall(3n)).toMatchObject({ methodName: "withdraw", deposit: "1", args: { amount: "3" } });
   });

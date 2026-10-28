@@ -50,7 +50,7 @@ the current behaviour; it does not limit the accepted product.
 | Included | Purpose |
 | --- | --- |
 | Binary prediction markets | One question, Yes/No positions and a published result source |
-| Curve-based trading | Buy and sell through the existing constant-product pricing model |
+| Parimutuel trading | Buy and sell at any time while a market is open, priced by a dynamic parimutuel cost function. No seed and no market maker (decided by the team 2026-10-27, replacing the constant-product pool) |
 | Intents-backed funding and settlement | Separate available funds, backing, pending transfers and payouts |
 | Dragon Council | Eligible NFT staking, juror selection, case obligations and public decisions |
 | Quarterly holder claims | Earnings attributed to eligible participation and claimed once |
@@ -85,18 +85,19 @@ an unfinished challenge cannot be presented as a final result.
 
 ## 4. Trading and payouts
 
-A winning share redeems for one collateral unit; a losing share pays zero. Selling before close
-uses the curve quote, the applicable fee and the user's accepted slippage limit. Position amounts
-and collateral use integer base units.
+Every unit paid in stays in the market's pool. The winning shares split the pool, so a winning
+share pays its part, never less than it cost; a losing share pays zero. Selling before close uses
+the contract's quote, the applicable fee and the user's accepted minimum. Position amounts and
+collateral use integer base units.
 
-A complete Yes/No set must remain backed. Pool/seeder positions, user positions and remaining
-redemption liabilities must reconcile with the controlled collateral. Released fees cannot also
-count as position backing.
+The pool must always hold at least the cost of the shares outstanding, and payouts and refunds
+must reconcile with the controlled collateral. Released fees cannot also count as position
+backing.
 
-Void payouts follow the contract's published price-weighted rule. The existing curve contract
-uses the closing-price history and its fallback rules; do not substitute a flat 50/50 payout.
-Show a Void estimate only when the required final data is available. The current implementation
-and edge cases are described in [the market manual](contracts/market.md).
+A Void, and an answer nobody holds a share of, pays each holder back what their position put in,
+less what it has already taken out by selling. Fees are not refunded. Show the payout the contract
+reports for a position (`get_positions`' `redeemable`), not one worked out in the browser. The
+current implementation and edge cases are described in [the market manual](contracts/market.md).
 
 The UI shows a real quote, estimated shares or proceeds, fees and slippage before confirmation.
 Displayed probabilities and charts describe observed market state; decorative movement must not

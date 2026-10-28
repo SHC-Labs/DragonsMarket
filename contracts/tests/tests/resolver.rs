@@ -138,9 +138,7 @@ async fn btc_price_market(w: &World) -> anyhow::Result<u64> {
         .await?
         .into_result()?
         .json()?;
-    let id: u64 = id.parse()?;
-    ft_call(w, &w.owner, w.market.id(), SEED, &format!("seed:{id}")).await?;
-    Ok(id)
+    Ok(id.parse()?)
 }
 
 #[tokio::test]
@@ -216,7 +214,7 @@ async fn publishers_sign_the_exchange_median_and_the_resolver_answers_the_price_
 #[tokio::test]
 async fn an_operator_answers_an_event_market_through_the_resolver_with_its_bond() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     let propose = [
         "propose",
         "--market-id",

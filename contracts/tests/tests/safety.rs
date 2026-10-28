@@ -4,7 +4,7 @@ use common::*;
 use near_workspaces::types::Gas;
 use serde_json::json;
 
-// A seeded market that closes in `close_in` seconds and must be answered within `answer_within` seconds after that.
+// A market that closes in `close_in` seconds and must be answered within `answer_within` seconds after that.
 async fn market_with_deadline(w: &World, close_in: u64, answer_within: u64) -> anyhow::Result<u64> {
     let t = now(&w.worker).await;
     let close_at = t + close_in * 1_000_000_000;
@@ -24,7 +24,6 @@ async fn market_with_deadline(w: &World, close_in: u64, answer_within: u64) -> a
         .json()?;
     let id: u64 = id.parse()?;
     assert_eq!(market_json(w, id).await["registered"], true);
-    ft_call(w, &w.owner, w.market.id(), SEED, &format!("seed:{id}")).await?;
     Ok(id)
 }
 
@@ -36,8 +35,6 @@ async fn an_unanswered_market_is_voided_by_anyone_after_its_deadline_so_money_is
     let id = market_with_deadline(&w, 120, 600).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     buy(&w, &w.bob, id, "no", 10 * USD).await?;
-    let (alice_yes, _) = shares(&w, id, w.alice.id()).await;
-    let (_, bob_no) = shares(&w, id, w.bob.id()).await;
     let deadline_call = |who: &near_workspaces::Account| {
         who.call(w.oracle.id(), "resolve_by_deadline")
             .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
@@ -70,34 +67,26 @@ async fn an_unanswered_market_is_voided_by_anyone_after_its_deadline_so_money_is
         "the answer deadline and the 7 day grace period have not passed",
     );
 
-    // A stranger asks the oracle, which voids it. Everyone redeems at the market's closing price.
+    // A stranger asks the oracle, which voids it. Everyone redeems what they put in, less the fee.
     deadline_call(&w.dave).await?.into_result()?;
     let m = market_json(&w, id).await;
-    assert_eq!(m["outcome"], "void");
-    assert_eq!(m["status"], "resolved");
-    let price = u(&m["void_price_yes"]);
-    w.alice
-        .call(w.market.id(), "redeem")
-        .args_json(json!({ "market_id": id.to_string() }))
-        .transact()
-        .await?
-        .into_result()?;
-    w.bob
-        .call(w.market.id(), "redeem")
-        .args_json(json!({ "market_id": id.to_string() }))
-        .transact()
-        .await?
-        .into_result()?;
-    assert_eq!(market_balance(&w, w.alice.id()).await, alice_yes * price / 1_000_000);
     assert_eq!(
-        market_balance(&w, w.bob.id()).await,
-        bob_no * (1_000_000 - price) / 1_000_000
+        (&m["outcome"], &m["status"], &m["refunds"]),
+        (&json!("void"), &json!("resolved"), &json!(true))
     );
+    for who in [&w.alice, &w.bob] {
+        who.call(w.market.id(), "redeem")
+            .args_json(json!({ "market_id": id.to_string() }))
+            .transact()
+            .await?
+            .into_result()?;
+        assert_eq!(market_balance(&w, who.id()).await, 10 * USD - 200_000);
+    }
     assert!(invariant(&w, id).await);
 
     // Asking again changes nothing, and the market's own void refuses a market that is already resolved.
     deadline_call(&w.dave).await?.into_result()?;
-    assert_eq!(market_json(&w, id).await["void_price_yes"], m["void_price_yes"]);
+    assert_eq!(market_json(&w, id).await["outcome"], "void");
     refused(
         w.dave
             .call(w.market.id(), "void_if_unresolved")
@@ -119,7 +108,7 @@ async fn a_keeper_outage_for_the_whole_answer_period_still_ends_with_the_propose
     let id = market_with_deadline(&w, 120, 600).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     buy(&w, &w.bob, id, "no", 10 * USD).await?;
-    let (alice_yes, _) = shares(&w, id, w.alice.id()).await;
+    let pool = u(&market_json(&w, id).await["locked"]);
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     let window_ends: u64 = case_json(&w, id).await["window_ends_at"].as_str().unwrap().parse()?;
@@ -173,14 +162,14 @@ async fn a_keeper_outage_for_the_whole_answer_period_still_ends_with_the_propose
     assert_eq!(market_json(&w, id).await["outcome"], "yes");
     assert_eq!(claimable(&w, w.carol.id()).await, BOND, "the proposer's bond is back");
 
-    // Yes holders are paid a unit a share and No holders nothing, and the market's own void is still shut.
+    // The Yes holder is paid the pool and the No holder nothing, and the market's own void is still shut.
     w.alice
         .call(w.market.id(), "redeem")
         .args_json(json!({ "market_id": id.to_string() }))
         .transact()
         .await?
         .into_result()?;
-    assert_eq!(market_balance(&w, w.alice.id()).await, alice_yes);
+    assert_eq!(market_balance(&w, w.alice.id()).await, pool);
     w.bob
         .call(w.market.id(), "redeem")
         .args_json(json!({ "market_id": id.to_string() }))
@@ -208,7 +197,7 @@ async fn a_keeper_outage_for_the_whole_answer_period_still_ends_with_the_propose
 async fn a_keeper_outage_through_a_dispute_ends_in_a_void_at_the_deadline_not_in_a_stuck_market() -> anyhow::Result<()>
 {
     let w = setup().await?;
-    let id = create_seeded_market_gap(&w, 120, 600).await?;
+    let id = create_market(&w, 120, 600).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     challenge(&w, &w.dave, id).await?;
@@ -253,7 +242,7 @@ async fn a_keeper_outage_through_a_dispute_ends_in_a_void_at_the_deadline_not_in
 #[tokio::test]
 async fn the_owner_cannot_change_who_decides_an_open_dispute() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
@@ -411,8 +400,8 @@ async fn a_late_proposal_is_refused_when_apply_could_not_land_but_an_early_one_o
     Ok(())
 }
 
-// A market whose deadline leaves no room for any case to finish could only end in a flat-half Void, which pays
-// whoever holds the cheap side. The oracle refuses to register it, and market keeps an unregistered market shut.
+// A market whose deadline leaves no room for any case to finish could only end in a Void. The oracle refuses to
+// register it, and the market keeps an unregistered market shut.
 #[tokio::test]
 async fn a_market_that_leaves_too_little_time_to_resolve_never_opens() -> anyhow::Result<()> {
     let w = setup().await?;
@@ -457,12 +446,12 @@ async fn a_market_that_leaves_too_little_time_to_resolve_never_opens() -> anyhow
         false,
         "retrying cannot change the dates"
     );
-    let before = holdings(&w, w.owner.id()).await;
-    ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{too_short}")).await?;
+    let before = holdings(&w, w.alice.id()).await;
+    let _ = buy(&w, &w.alice, too_short, "yes", 10 * USD).await;
     assert_eq!(
-        holdings(&w, w.owner.id()).await,
+        holdings(&w, w.alice.id()).await,
         before,
-        "the seed is refunded: the market cannot be funded or traded"
+        "the buy is refunded: the market cannot be traded"
     );
     assert_eq!(u(&market_json(&w, too_short).await["locked"]), 0);
 
@@ -482,7 +471,7 @@ async fn a_market_that_leaves_too_little_time_to_resolve_never_opens() -> anyhow
 #[tokio::test]
 async fn oversized_evidence_and_reasons_are_refused() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
 
     // A 600 byte evidence link is refused and the bond is refunded.
@@ -524,7 +513,7 @@ async fn oversized_evidence_and_reasons_are_refused() -> anyhow::Result<()> {
 #[tokio::test]
 async fn a_failed_unlock_leaves_seats_locked_until_anyone_retries_it() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 130).await;
     let retry = |who: &near_workspaces::Account| {
@@ -577,7 +566,7 @@ async fn a_failed_unlock_leaves_seats_locked_until_anyone_retries_it() -> anyhow
 #[tokio::test]
 async fn an_unchallenged_case_has_no_jury_to_unlock() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     skip_secs(&w.worker, 70).await;
@@ -596,37 +585,31 @@ async fn an_unchallenged_case_has_no_jury_to_unlock() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Seeding away from one half leaves the seeder holding shares, one position for each market. The operator, here the owner
-// account, seeds 25 of them: more than the 20 positions an ordinary account can hold.
+// A position takes two of an account's entries, its shares and what it paid in, so an ordinary account holds
+// positions in at most 10 markets. The operator, here the owner account, is exempt and holds positions in 25.
 #[tokio::test]
-async fn the_operator_can_seed_25_markets_away_from_one_half() -> anyhow::Result<()> {
+async fn the_operator_can_hold_positions_in_25_markets() -> anyhow::Result<()> {
     let w = setup().await?;
-    mint(&w, w.owner.id(), 5_000 * USD).await?;
     let mut ids = vec![];
     for _ in 0..25 {
         let id = create_market(&w, 600, 3_600).await?;
-        ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{id}:300000")).await?;
+        buy(&w, &w.owner, id, "yes", USD).await?;
         ids.push(id);
     }
     for id in ids {
-        assert!(u(&market_json(&w, id).await["locked"]) > 0, "market {id} was seeded");
-        assert_ne!(
-            shares(&w, id, w.owner.id()).await,
-            (0, 0),
-            "the seeder holds the shares the pools do not"
-        );
+        assert_eq!(shares(&w, id, w.owner.id()).await, (USD - 20_000, 0), "market {id}");
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn a_market_cannot_be_seeded_once_it_has_closed() -> anyhow::Result<()> {
+async fn a_market_takes_no_money_once_it_has_closed() -> anyhow::Result<()> {
     let w = setup().await?;
     let id = create_market(&w, 20, 3_600).await?;
     skip_secs(&w.worker, 30).await;
-    let before = holdings(&w, w.owner.id()).await;
-    ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{id}")).await?;
-    assert_eq!(holdings(&w, w.owner.id()).await, before, "the seed came back");
+    let before = holdings(&w, w.alice.id()).await;
+    let _ = buy(&w, &w.alice, id, "yes", 10 * USD).await;
+    assert_eq!(holdings(&w, w.alice.id()).await, before, "the buy came back");
     assert_eq!(u(&market_json(&w, id).await["locked"]), 0);
     Ok(())
 }
@@ -634,7 +617,7 @@ async fn a_market_cannot_be_seeded_once_it_has_closed() -> anyhow::Result<()> {
 #[tokio::test]
 async fn a_resolved_market_cannot_be_resumed() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     let call = |method: &str| {
         w.owner
             .call(w.market.id(), method)

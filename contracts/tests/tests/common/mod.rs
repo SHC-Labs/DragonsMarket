@@ -14,7 +14,6 @@ pub const BOND: u128 = 5 * USD;
 pub const WINDOW_MS: u64 = 60_000;
 pub const PANEL_MS: u64 = 120_000;
 pub const DRAW_WINDOW_MS: u64 = 60_000;
-pub const SEED: u128 = 100 * USD;
 pub const JURY: u32 = 3;
 pub const DRAW_DELAY_BLOCKS: u64 = 2;
 // With the 60s window, two rounds of a 60s draw window and a 120s panel, and the oracle's 30s apply buffer, a market
@@ -25,7 +24,12 @@ pub const NETWORK: &str = "sandbox";
 pub const PRICE_THRESHOLD: u32 = 2;
 pub const MAX_SEATS_PER_ACCOUNT: u32 = 10;
 pub const COOLDOWN_SECS: u64 = 60;
-pub const CREATE_FEE: u128 = USD;
+// A buy whose 2% fee, 1,000,001, is just over the default minimum sweep. A sweep of it pays the Council 250,000 and the
+// treasury 750,000, both rounded down, and leaves one unit collected.
+pub const SWEEP_BUY: u128 = 50 * USD + 50;
+pub const SWEEP_FEE: u128 = 1_000_001;
+pub const COUNCIL_SHARE: u128 = 250_000;
+pub const TREASURY_SHARE: u128 = 750_000;
 pub const FAR_DEADLINE: &str = "2100-01-01T00:00:00Z";
 const NEP413_PREFIX_TAG: u32 = 2_147_484_061;
 
@@ -570,20 +574,13 @@ pub async fn case_json(w: &World, id: u64) -> serde_json::Value {
         .unwrap()
 }
 
-// Creates market 0 closing in `close_in_secs`, waits for the oracle registration, and seeds it. It must be answered
-// within an hour after it closes.
-pub async fn create_seeded_market(w: &World, close_in_secs: u64) -> anyhow::Result<u64> {
-    create_seeded_market_gap(w, close_in_secs, 3_600).await
+// A market closing in `close_in_secs` that must be answered within an hour after it closes.
+pub async fn new_market(w: &World, close_in_secs: u64) -> anyhow::Result<u64> {
+    create_market(w, close_in_secs, 3_600).await
 }
 
-// Like create_seeded_market, with resolve_by `gap_secs` after the close.
-pub async fn create_seeded_market_gap(w: &World, close_in_secs: u64, gap_secs: u64) -> anyhow::Result<u64> {
-    let id = create_market(w, close_in_secs, gap_secs).await?;
-    ft_call(w, &w.owner, w.market.id(), SEED, &format!("seed:{id}")).await?;
-    Ok(id)
-}
-
-// Creates a market closing in `close_in_secs` and waits for the oracle registration. It is not seeded.
+// Creates a market closing in `close_in_secs`, with resolve_by `gap_secs` after the close, and waits for the oracle
+// registration. It is open for trading as soon as it is registered.
 pub async fn create_market(w: &World, close_in_secs: u64, gap_secs: u64) -> anyhow::Result<u64> {
     let t = now(&w.worker).await;
     let close_at = t + close_in_secs * 1_000_000_000;
@@ -908,7 +905,7 @@ pub async fn quote_buy(w: &World, id: u64, side: &str, amount: u128) -> (u128, u
     (u(&q["shares_out"]), u(&q["fee"]))
 }
 
-// (collateral out, shares in, fee) for selling up to `shares`.
+// (collateral out, shares in, fee) for selling `shares`. The seller receives collateral out less the fee.
 pub async fn quote_sell(w: &World, id: u64, side: &str, shares: u128) -> (u128, u128, u128) {
     let q: serde_json::Value = w
         .market
@@ -926,13 +923,13 @@ pub async fn sell(
     who: &Account,
     id: u64,
     side: &str,
-    collateral_out: u128,
-    max_shares_in: u128,
+    shares: u128,
+    min_collateral: u128,
 ) -> anyhow::Result<()> {
     who.call(w.market.id(), "sell")
         .args_json(
-            json!({ "market_id": id.to_string(), "side": side, "collateral_out": collateral_out.to_string(),
-                           "max_shares_in": max_shares_in.to_string() }),
+            json!({ "market_id": id.to_string(), "side": side, "shares": shares.to_string(),
+                           "min_collateral": min_collateral.to_string() }),
         )
         .deposit(NearToken::from_yoctonear(1))
         .transact()
@@ -1275,9 +1272,9 @@ pub async fn account_with_id_len(w: &World, id_len: usize, tag: &str) -> anyhow:
     Ok(account)
 }
 
-// Creates `count` markets that close in 30 days and seeds each with 3 USD from the owner's Intents balance, which must already
-// hold enough. Returns the id of the first. Creation goes four to a transaction at 70 TGas each.
-pub async fn bulk_seeded_markets(w: &World, count: u64, yes_price: Option<&str>) -> anyhow::Result<u64> {
+// Creates `count` markets that close in 30 days. Returns the id of the first. Creation goes four to a transaction at
+// 70 TGas each.
+pub async fn bulk_markets(w: &World, count: u64) -> anyhow::Result<u64> {
     use near_workspaces::operations::Function;
     const PER_CALL: u64 = 70;
     const BATCH: u64 = 4;
@@ -1289,7 +1286,6 @@ pub async fn bulk_seeded_markets(w: &World, count: u64, yes_price: Option<&str>)
         let take = BATCH.min(count - made);
         let close_at = now(&w.worker).await + 30 * 24 * 3_600 * 1_000_000_000;
         let mut create = w.owner.batch(w.market.id());
-        let mut seed = w.owner.batch(w.verifier.id());
         for i in 0..take {
             let id = first + made + i;
             create = create.call(
@@ -1303,25 +1299,13 @@ pub async fn bulk_seeded_markets(w: &World, count: u64, yes_price: Option<&str>)
                     }))
                     .gas(Gas::from_tgas(PER_CALL)),
             );
-            let msg = match yes_price {
-                Some(p) => format!("seed:{id}:{p}"),
-                None => format!("seed:{id}"),
-            };
-            seed = seed.call(
-                Function::new("mt_transfer_call")
-                    .args_json(json!({ "receiver_id": w.market.id(), "token_id": token_id(w),
-                                        "amount": (3 * USD).to_string(), "msg": msg }))
-                    .deposit(NearToken::from_yoctonear(1))
-                    .gas(Gas::from_tgas(PER_CALL)),
-            );
         }
         create.transact().await?.into_result()?;
-        seed.transact().await?.into_result()?;
         made += take;
     }
     anyhow::ensure!(
-        market_json(w, first + count - 1).await["seeded"] == true,
-        "the last bulk market was not seeded"
+        market_json(w, first + count - 1).await["registered"] == true,
+        "the last bulk market was not registered"
     );
     Ok(first)
 }

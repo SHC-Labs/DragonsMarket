@@ -104,12 +104,13 @@ const SAMPLE_MARKET: MarketView = {
   resolve_by: String(BigInt(Date.UTC(2027, 1, 6, 21, 8)) * NS_PER_MS),
   status: "open",
   registered: true,
-  seeded: true,
-  void_price_yes: null,
   outcome: null,
+  refunds: false,
   price_yes: "710000",
   price_no: "290000",
-  holders: 0, seeder: null, pruned: false,
+  yes_shares: "1044860000",
+  no_shares: "667770000",
+  holders: 0, pruned: false,
   locked: "1240000000",
 };
 
@@ -283,7 +284,7 @@ export default function BrandPage() {
         </div>
       </Specimen>
       <Specimen title="Notices" guidance="Info for context, warning for a deadline or risk, danger for an error that says what to do next. Not for promotion.">
-        <Notice>Trading opens when the market is seeded.</Notice>
+        <Notice>Trading opens when the oracle registers the market.</Notice>
         <Notice tone="warning">The challenge window closes 21 Nov, 21:08.</Notice>
         <Notice tone="danger">Your wallet declined the request. Try again from the ticket.</Notice>
       </Specimen>

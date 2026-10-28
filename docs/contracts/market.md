@@ -1,5 +1,7 @@
 # market
 
+**Dynamic parimutuel pricing, 2026-10-27.** The constant-product pool and its seed are gone. Every market now prices by a dynamic parimutuel cost function (`market/src/dpm.rs`, see "How trading works"). A registered market opens empty at even odds and anyone can make the first trade: there is no `seed:` message, no creation fee and no opening price. A winning share is paid its part of the pool, never less than it cost, and a Void, or an answer nobody holds, pays each holder back what they put in (see "Void"). `sell` takes the shares to sell and the least collateral to accept. State is version 6. `migrate` takes a version-5 root only while it has created no market, because a constant-product pool cannot be turned into parimutuel shares, so a deployment that has markets is replaced, not upgraded. The largest market record is now 4,775 bytes and a new market's storage deposit 0.04775 NEAR.
+
 **Token deposits, 2026-10-27.** An account that holds the collateral as a NEAR token and nothing in the verifier can now pay the market with the token's `ft_transfer_call` and the message `deposit` or `buy`, after registering with `storage_deposit` in NEAR. The market moves the money into its own Intents account and credits the sender only once it is there (see "Money in by token"). A `buy` is then bought in a receipt of its own, so a buy the price outran stays a balance. State stays at version 5.
 
 **Signed actions and collateral registration, 2026-10-26.** Market state is now version 5. `migrate` accepts the exact version-3 root, the exact version-4 root or the current version; oracle stays at 2 and Council at 3. A signed Intents intent can buy, sell, redeem and withdraw for its signer through `on_auth` (see "Signed actions"). An account with no NEAR registers by sending the registration fee in collateral with the message `register` (see "Money in"). A deposit paid by someone else for an account now goes back to that payer when the account leaves.
@@ -8,11 +10,11 @@
 
 | Change | Current behavior |
 | --- | --- |
-| Creation payer | `create_market` is payable and requires `config.market_storage_deposit`. Starting amount and hard minimum: **0.05009 NEAR**, measured from the complete 5,009-byte maximum record, including history, price rule, seeder and key overhead. Hard maximum: 0.5 NEAR. Surplus deposit is refunded. This is separate from the collateral creation fee and user registration. |
+| Creation payer | `create_market` is payable and requires `config.market_storage_deposit`. Starting amount and hard minimum: **0.04775 NEAR**, measured from the complete 4,775-byte maximum record, including history, price rule and key overhead. Hard maximum: 0.5 NEAR. Surplus deposit is refunded. This is separate from user registration. |
 | Reserve | `set_storage_policy(market_storage_deposit: U128, reserve: U128)`, owner only. Starting reserve 1 NEAR; hard range 0.1 to 100 NEAR. New market/share/sweep records and entry-side market updates must leave this margin after locked storage and refunds. Existing redemptions, withdrawals and callbacks can spend it. Top-ups remain necessary; this is a buffer, not an unlimited exit guarantee. |
 | Exempt accounts | Current owner and operator, and accounts previously made exempt, do not extend the position index. Shares remain authoritative. `get_positions` scans a window for these accounts, default 50 and maximum 100 IDs. Ordinary accounts retain their bounded sorted index. Only the current owner/operator bypass the share-entry cap. |
-| Seeder and holders | `MarketView.seeder` carries `{account_id, yes, no}`; `holders` counts accounts with either side once. Both are nullable for legacy records. New records have exact counts. At 50/50 the seeder holds zero shares. |
-| Pruning | Anyone can call `prune_market(market_id: U64)` after resolution and redemption of both winning and losing shares. Clears title, rules, source, Void text, history and TWAP; keeps rule hash, category, result and money. Returns false on a repeat. Indexers retain published metadata. Never deletes sweep records, receipts or payout evidence. |
+| Holders | `MarketView.holders` counts accounts holding either side once. |
+| Pruning | Anyone can call `prune_market(market_id: U64)` after resolution and redemption of both winning and losing shares. Clears title, rules, source, Void text and history; keeps rule hash, category, result and money. Returns false on a repeat. Indexers retain published metadata. Never deletes sweep records, receipts or payout evidence. |
 | Legacy positions | Migration never scans a large old owner/operator index. Their total position count is null while old shares remain; bounded windows still return holdings. Legacy records become provably empty when both aggregate share totals reach zero, then can be pruned. Old index bytes remain reserved but are no longer extended or used for paging. |
 | Sweep floor | `set_sweep_timing` now enforces 60 to 1,440 minutes. Migration raises any shorter interval to 60 minutes. Hourly records still cost an estimated 143 NEAR over five years across market and Council, excluding gas and other state. |
 | New events | `storage_policy_set {market_storage_deposit, reserve}` and `market_pruned {market_id, rule_hash}`. |
@@ -37,10 +39,10 @@ through `mt_transfer` and `mt_transfer_call` from this contract, with no signed 
 registered in the verifier. The DAO voting period is the only delay before an owner action
 (decided 2026-10-21, R-07). Oracle bonds still use a NEP-141 token and are the next phase.
 
-Source: `market/src/lib.rs` (the contract) and `market/src/curve.rs` (the pricing maths). Written
+Source: `market/src/lib.rs` (the contract) and `market/src/dpm.rs` (the pricing maths). Written
 2026-10-18 from the code as it stands, including everything added that day. The upgrade path was
-added 2026-10-19 and the shared helpers are in `upgrade/src/lib.rs`. The halt rule, the Void price
-fallback, `seeded` and the new statuses, and the upgrade mark were added 2026-10-20. For current behaviour, follow the code. For required target behaviour, follow the accepted
+added 2026-10-19 and the shared helpers are in `upgrade/src/lib.rs`. The upgrade mark was added
+2026-10-20, and dynamic parimutuel pricing replaced the constant-product pool on 2026-10-27. For current behaviour, follow the code. For required target behaviour, follow the accepted
 spec and the implementation requirements below; differences are work to complete.
 
 ---
@@ -84,7 +86,7 @@ coverage for the pricing and payout rules that are kept.
 10. [How trading works](#how-trading-works)
 11. [Fees](#fees)
 12. [Void](#void)
-13. [Seeding at a chosen price](#seeding-at-a-chosen-price)
+13. [The residual](#the-residual)
 14. [Price markets](#price-markets)
 15. [The rule hash](#the-rule-hash)
 16. [Winning and getting paid](#winning-and-getting-paid)
@@ -103,10 +105,11 @@ coverage for the pricing and payout rules that are kept.
 market is the trading contract. It holds the money, lists the markets, prices every trade, and pays
 people out after a market resolves.
 
-A market is one yes or no question. People buy Yes shares or No shares. When the question is
-answered, each winning share pays exactly one unit of the collateral token and each losing share
-pays nothing. If the question cannot be answered, the market is Void and each share pays the
-market's closing price instead (see "Void").
+A market is one yes or no question. People buy Yes shares or No shares, and every unit they pay in
+stays in the market's pool. When the question is answered, the winning shares split the whole pool
+between them, so each is paid its part, never less than it cost, and each losing share pays nothing.
+If the question cannot be answered, the market is Void and each holder gets back what they put in
+(see "Void").
 
 It does not decide outcomes. A separate contract, oracle, does that, and market only accepts an
 outcome from it.
@@ -135,8 +138,8 @@ There are four kinds of caller. The first three are stored accounts, the fourth 
 
 | Role     | Set by                                         | Can do                                                                                                                                                                                                                                                                               |
 | -------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Owner    | `new`, then `propose_owner` and `accept_owner` | Everything the operator can, plus `set_operator`, `propose_owner`, `set_fee_recipients`, `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id`, `set_fee_rate_bps`, `set_create_fee`, `set_void_rules`, `set_sweep_timing`, `set_open_price_bounds`, `set_max_positions`, `set_fee_limits`, `set_storage_policy`, `set_registration_fee`, `reconcile_leg`, `reconcile_withdrawal`, `upgrade` and `seal`. In a real deployment this is the DAO, so each of these needs a DAO proposal. SputnikDAO executes a proposal at the approval that reaches its threshold. Its voting period is the only delay, by owner decision (R-07). |
-| Operator | `new`, then `set_operator` (owner only)        | Routine running: `create_market`, `retry_register`, `halt` (but not in the last 24 hours before a market closes, see "Void"), `resume`, `set_paused`, `claim_residual`, and seeding a market. Cannot move fees, change owner, change the operator, or touch user money.              |
+| Owner    | `new`, then `propose_owner` and `accept_owner` | Everything the operator can, plus `set_operator`, `propose_owner`, `set_fee_recipients`, `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id`, `set_fee_rate_bps`, `set_void_grace`, `set_sweep_timing`, `set_max_positions`, `set_fee_limits`, `set_storage_policy`, `set_registration_fee`, `reconcile_leg`, `reconcile_withdrawal`, `upgrade` and `seal`. In a real deployment this is the DAO, so each of these needs a DAO proposal. SputnikDAO executes a proposal at the approval that reaches its threshold. Its voting period is the only delay, by owner decision (R-07). |
+| Operator | `new`, then `set_operator` (owner only)        | Routine running: `create_market`, `retry_register`, `halt`, `resume`, `set_paused` and `claim_residual`. Cannot move fees, change owner, change the operator, or touch user money.              |
 | Oracle   | `new` (fixed, no setter)                       | Only `set_outcome`.                                                                                                                                                                                                                                                                  |
 | Anyone   | n/a                                            | Trade, deposit, withdraw, redeem (also by signed intent), register for storage (for themselves or for someone else) and unregister, `void_if_unresolved` (a grace period after `resolve_by`), `sweep_fees`, `prune_market`, `stage_code` (paying for the storage), and every view.                   |
 
@@ -170,11 +173,11 @@ deployed the contract.
 `new` takes no fee recipient. The treasury is the Trezu account, which does not exist when the
 contract is deployed, so the owner sets both recipients afterwards with `set_fee_recipients`.
 
-Starting values: trade fee rate 200 basis points (2%), creation fee 1,000,000 units, Council share
-of a sweep 2,500 basis points (25%), minimum sweep 1,000,000 units, first sweep id 1, not paused, no
-markets, no fee recipients. The other policy values start at the numbers shown under "Owner and operator
-management": Void rules 24 hours and 7 days, sweep waits 10, 60 and 60 minutes, opening prices 10,000 to 990,000,
-20 positions, and fee limits 500, 10,000,000, 1,000, 5,000 and 100,000,000.
+Starting values: trade fee rate 200 basis points (2%), Council share of a sweep 2,500 basis points
+(25%), minimum sweep 1,000,000 units, first sweep id 1, not paused, no markets, no fee recipients.
+The other policy values start at the numbers shown under "Owner and operator management": Void grace
+7 days, sweep waits 10, 60 and 60 minutes, 20 position entries, and fee limits 500, 1,000, 5,000 and
+100,000,000.
 
 Deploy and initialise in one batch signed by the contract account, and check afterwards that the
 owner is yours. A deploy with no init in the batch leaves nothing open to a stranger, but it leaves
@@ -187,8 +190,8 @@ the contract unusable until its own account calls `new`.
 | Thing               | Convention                                                                                                            |
 | ------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | Collateral amounts  | Raw integer units of the token. The code assumes a 6-decimal token, so 1,000,000 units is 1 token.                    |
-| Shares              | Integers. One share of the winning outcome redeems for exactly 1 raw unit.                                            |
-| Prices              | Integers in millionths. 1,000,000 means 1.00 and 500,000 means 50 cents. Yes price plus No price is always 1,000,000. |
+| Shares              | Integers. A winning share redeems for its part of the pool, which is at least 1 raw unit.                             |
+| Prices              | Integers in millionths: the chance the pool implies. 500,000 means 50%. Yes price plus No price is always 1,000,000. |
 | Times               | Nanoseconds since the Unix epoch, as the chain reports them. Passed in JSON as strings (`U64`).                       |
 | Big numbers in JSON | `U64` and `U128` travel as strings, for example `"1000000"`.                                                          |
 | Fee rates           | Basis points. 200 is 2%.                                                                                              |
@@ -201,23 +204,21 @@ the contract unusable until its own account calls `new`.
    to register it.
 2. The oracle's answer comes back in a callback, and the market is marked `registered`. If the
    oracle refused or the call failed, the market stays shut and `retry_register` can send it again.
-3. The operator (or owner) seeds it by sending collateral with the message `seed:<id>`. This opens
-   the market for trading.
-4. People trade until `close_at`. At the exact moment of close trading stops.
-5. After close, someone proposes an outcome through oracle. Once the oracle has a final answer it
+   A registered market is open for trading at once, empty, at even odds.
+3. People trade until `close_at`. At the exact moment of close trading stops.
+4. After close, someone proposes an outcome through oracle. Once the oracle has a final answer it
    calls `set_outcome`. If nothing has resolved the market by `resolve_by`, anyone asks the oracle
    for its deadline answer (`resolve_by_deadline`), which settles what can be settled and voids the
    rest. `void_if_unresolved` on this contract opens a grace period after `resolve_by` (7 days to start), for an
    oracle that is gone.
-6. Holders call `redeem` to turn shares into balance, and `withdraw` to take the balance out as
-   tokens. The operator or owner calls `claim_residual` to move whatever the pool still holds to the
-   business wallet.
+5. Holders call `redeem` to turn shares into balance, and `withdraw` to take the balance out as
+   tokens. Once nobody is owed anything more, the operator or owner calls `claim_residual` to move
+   whatever the pool still holds to the treasury (see "The residual").
 
 The `status` shown by the views is, in this order of precedence: `resolved` if an outcome is set,
 otherwise `halted` if halted, otherwise `closed` if the time has passed `close_at`, otherwise
-`unregistered` if the oracle has not confirmed the market, otherwise `unseeded` if it has no
-liquidity, otherwise `open`. Only `open` can trade. `registered` and `seeded` are in the view as
-well.
+`unregistered` if the oracle has not confirmed the market, otherwise `open`. Only `open` can trade.
+`registered` is in the view as well.
 
 ---
 
@@ -233,15 +234,18 @@ well.
 | `resolve_by`                                             | The deadline for an answer. After it, anyone can ask the oracle for the deadline answer, and 7 days later anyone can void the market here.                                             |
 | `halted`                                                 | Set by `halt`. Stops trading.                                                                                                                                                          |
 | `registered`                                             | True once the oracle has accepted the market.                                                                                                                                          |
-| `seeded`                                                 | True once opening liquidity exists.                                                                                                                                                    |
 | `outcome`                                                | Empty until resolved, then Yes, No or Void.                                                                                                                                            |
-| `void_price_yes`                                         | Set only when the outcome is Void. See "Void".                                                                                                                                         |
-| `pool_yes`, `pool_no`                                    | The two sides of the pricing pool.                                                                                                                                                     |
-| `locked`                                                 | All collateral held for this market.                                                                                                                                                   |
-| `user_yes`, `user_no`                                    | Total shares held by users (and the seeder), per side.                                                                                                                                 |
-| `residual_claimed`                                       | True once `claim_residual` has run.                                                                                                                                                    |
-| `history`                                                | The last 120 prices, one per seed, buy and sell, for drawing a chart. Chart only.                                                                                                      |
-| `twap`                                                   | A running time-weighted price used for Void, kept as a sum of price times trading time and the trading time. It does not count time while the market is halted. Not shown by any view. |
+| `refunds`                                                | Set at resolution: true for a Void and for an answer nobody holds a share of, when each holder is paid back what they put in. See "Void".                                             |
+| `locked`                                                 | The pool: every unit paid in less what sales and redemptions paid out. Never less than the cost of the shares outstanding while the market is open.                                  |
+| `user_yes`, `user_no`                                    | Total shares outstanding, per side. They set the price (see "How trading works").                                                                                                    |
+| `claims`                                                 | The sum, over positions that still hold shares, of what each has put in less what it has taken out, a position that has taken out more counting as zero. Refunds are shared by it.  |
+| `holders`                                                | How many accounts hold a share of either side.                                                                                                                                         |
+| `history`                                                | The last 120 prices, one per buy and sell, for drawing a chart. Chart only.                                                                                                            |
+
+Next to the markets the contract keeps one cost record per position, `(market, account)`: what that
+position has paid in less what it has taken out by selling. It is what a refund pays back. It is
+removed when the position no longer holds a share, so a position that has sold everything is out of
+any later refund.
 
 ### Limits
 
@@ -252,10 +256,10 @@ well.
 | Resolution source          | 300 bytes                                                                                                |
 | Void policy                | 500 bytes                                                                                                |
 | Category and subcategory   | 1 to 32 characters, lowercase letters, digits and hyphens only                                           |
-| Shares entries per account | 20 to start, owner-settable from 5 to 30 (each market and side an account holds counts as one). 30 is the most the 0.05 NEAR deposit pays for with the longest account id. The operator and the owner are not held to it. |
+| Entries per account        | 20 to start, owner-settable from 5 to 30. Each side an account holds in a market counts as one, and so does the market's cost record, so a position on one side takes two and 20 entries hold 10 single-sided markets. 30 is the most the 0.05 NEAR deposit pays for with the longest account id. The operator and the owner are not held to it. |
 | Price history per market   | 120 points                                                                                               |
 | `list_markets` page        | at most 50 per call                                                                                      |
-| Pool size                  | each side at most 1,000,000,000,000,000 units (10^15)                                                    |
+| Pool size                  | at most 1,000,000,000,000 units (10^12, a million tokens at 6 decimals) per market                      |
 
 Policy values the owner can change (the DAO, by proposal) are listed under "Owner and operator management", each with a hard
 range so a bad vote cannot brick the contract. Everything else here stays a compile-time constant: the gas floors, the text
@@ -292,21 +296,19 @@ none is a policy choice.
 | `set_min_sweep(min_sweep)`                          | Owner                | Sets the least a sweep acts on, from 1 to the stored ceiling (100,000,000 units to start). |
 | `set_next_sweep_id(next_sweep_id)`                  | Owner                | Moves the id of the next sweep up, never down. A sweep id is used once and the Council refuses a repeat, so a market that replaces an old one starts above the ids the Council has taken. |
 | `set_fee_rate_bps(fee_rate_bps)`                    | Owner                | Sets the trade fee rate. Refused above the stored ceiling (500, 5%, to start). Zero is allowed. Applies from the next trade.                                                                  |
-| `set_create_fee(create_fee)`                        | Owner                | Sets the fee taken from each market's seed. Refused above the stored ceiling (10,000,000 units, 10 tokens, to start). Zero is allowed. Applies from the next seed.                            |
-| `set_void_rules(price_window_ns, grace_ns)`         | Owner                | Sets the Void price window (1 hour to 7 days, 24 hours to start) and the Void grace after `resolve_by` (1 to 60 days, 7 days to start), for markets created after the call. A market keeps the two values it was created with. |
+| `set_void_grace(grace_ns)`                          | Owner                | Sets the Void grace after `resolve_by` (1 to 60 days, 7 days to start), for markets created after the call. A market keeps the grace it was created with (event `void_grace_set`). |
 | `set_sweep_timing(settle_wait_minutes, reconcile_wait_minutes, min_interval_minutes)` | Owner | Sets the wait before `settle_leg` (1 to 1,440 minutes, 10 to start), the wait before `reconcile_leg` (10 to 10,080 minutes, 60 to start, never under the settle wait) and the least time between two sweeps (60 to 1,440 minutes, 60 to start). Applies to every sweep, including those already made. |
-| `set_open_price_bounds(min, max)`                   | Owner                | Sets the Yes prices a market can be seeded at, in millionths. Min at least 1,000, max at most 999,000, min below max. Starts at 10,000 and 990,000. Applies from the next seed. |
-| `set_max_positions(max_positions)`                  | Owner                | Sets how many share entries an ordinary account can hold, from 5 to 30 (20 to start). Positions already held stay. The operator and owner are still exempt. |
+| `set_max_positions(max_positions)`                  | Owner                | Sets how many entries an ordinary account can hold, from 5 to 30 (20 to start): each side it holds and each market's cost record count one. Positions already held stay. The operator and owner are still exempt. |
 | `set_registration_fee(registration_fee)`            | Owner                | Sets the fee, in collateral units, that a `register` transfer pays to register an account with no NEAR. 250,000 (0.25 of the 6-decimal collateral) to start, from 10,000 to 2,000,000 (0.01 to 2). Applies to registrations from then on (event `registration_fee_set`). |
-| `set_fee_limits(max_fee_rate_bps, max_create_fee, min_revenue_share_bps, max_revenue_share_bps, max_min_sweep)` | Owner | Sets the ceilings and floors the fee setters check against. Hard ranges: fee rate ceiling at most 2,000 basis points, creation fee ceiling at most 100,000,000 units, Council share floor at least 500 and ceiling at most 9,000 with the floor below the ceiling, sweep minimum ceiling from 1 to 1,000,000,000. Starts at 500, 10,000,000, 1,000, 5,000 and 100,000,000. Refused when the current fee rate, creation fee, Council share or sweep minimum would fall outside the new limit, so the value is moved first. |
+| `set_fee_limits(max_fee_rate_bps, min_revenue_share_bps, max_revenue_share_bps, max_min_sweep)` | Owner | Sets the ceilings and floors the fee setters check against. Hard ranges: fee rate ceiling at most 2,000 basis points, Council share floor at least 500 and ceiling at most 9,000 with the floor below the ceiling, sweep minimum ceiling from 1 to 1,000,000,000. Starts at 500, 1,000, 5,000 and 100,000,000. Refused when the current fee rate, Council share or sweep minimum would fall outside the new limit, so the value is moved first. |
 | `reconcile_leg(sweep_id, leg, arrived)`             | Owner                | Decides a fee leg (`council` or `treasury`) that is still pending or unresolved an hour after its sweep. See "Revenue whose result was lost". |
 | `reconcile_withdrawal(id, paid)`                    | Owner                | Decides a withdrawal whose callback never arrived, once the reconcile wait (60 minutes to start, `set_sweep_timing`) has passed since the withdrawal. `paid: true` drops the record and the amount from the pending total, so it is no longer owed. `paid: false` drops the record and credits the balance back. The owner checks the verifier's events first. A callback that comes later finds no record and changes nothing. |
 | `upgrade(code_hash)`                                | Owner                | Deploys the staged wasm with that sha256 and runs its `migrate`, in one batch. Needs at least 100 TGas attached. See "Upgrading this contract".                 |
 | `seal(public_key)`                                  | Owner                | Deletes that access key from this account. Refused until an upgrade has gone through `migrate`.                                                                 |
 
-The ceilings (5% and 10 units) are written into the code, so even a captured owner cannot set a
-fee above them. The bounds of the Council's share (10% to 50%) and of the minimum sweep are written
-there too.
+The fee rate ceiling's hard limit (20%) is written into the code, so even a captured owner cannot
+set a fee above it. The hard bounds of the Council's share (5% to 90%) and of the minimum sweep are
+written there too.
 
 ### Code
 
@@ -322,11 +324,11 @@ there too.
 | -------------------------------------------------------------------------------------------------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `create_market(title, rule_text, resolution_source, void_policy, category, subcategory, close_at, resolve_by, price_rule)` | Operator or owner | Payable: requires `market_storage_deposit`, refunds excess, creates a market and asks the oracle to register it. `price_rule` is optional. New state must leave `storage_reserve`.                                                                                                | Not operator or owner; contract paused; any of the four text fields empty; text over its limit; bad category slugs; `close_at` not in the future; `resolve_by` not after `close_at`; for a price rule: observation time before `close_at` or not before `resolve_by`, strike zero, or more than 18 decimals. |
 | `retry_register(market_id)`                                                                                                | Operator or owner | Sends the oracle registration again.                                                                                                                                                           | Already registered.                                                                                                                                                                                                                                                                                          |
-| `halt(market_id, reason)`                                                                                                  | Operator or owner | Stops trading in one market, with a recorded reason. Redemption after resolution still works. Brings the closing-price average up to date before halting.                                      | Not operator or owner; market already resolved; the caller is the operator and the market closes within 24 hours or has closed (`a halt in the last day before close is an owner action`). The owner can halt at any time.                                                                               |
-| `resume(market_id)`                                                                                                        | Operator or owner | Lifts a halt. Brings the closing-price average up to date first, so the halted time counts for nothing.                                                                                        | Not operator or owner; market already resolved.                                                                                                                                                                                                                                                              |
+| `halt(market_id, reason)`                                                                                                  | Operator or owner | Stops trading in one market, with a recorded reason. Redemption after resolution still works. A halt changes no payout, so it can come at any time before resolution.                         | Not operator or owner; market already resolved.                                                                                                                                                                                                                                                              |
+| `resume(market_id)`                                                                                                        | Operator or owner | Lifts a halt.                                                                                                                                                                                  | Not operator or owner; market already resolved.                                                                                                                                                                                                                                                              |
 | `set_sells_paused(sells_paused)`                                                                                           | Owner             | Stops `sell` (`sells are paused`). Kept apart from `set_paused` so the operator cannot take away the exit from an open position. Logs `sells_paused`. | Not owner. |
-| `set_paused(paused)`                                                                                                       | Operator or owner | Stops buys, deposits, seeding and new markets. Sells, withdrawals and redemptions keep working.                                                                                                 | Not operator or owner.                                                                                                                                                                                                                                                                                       |
-| `claim_residual(market_id)`                                                                                                | Operator or owner | After resolution, moves what the pool holds beyond what holders are owed into the treasury's due bucket (`treasury_due`). The next sweep pays it on the treasury leg, whole and not split with the Council. Can be done once per market, before or after holders redeem. | Not resolved; already claimed.                                                                                                                                                                                                                                                                               |
+| `set_paused(paused)`                                                                                                       | Operator or owner | Stops buys, deposits and new markets. Sells, withdrawals and redemptions keep working.                                                                                                         | Not operator or owner.                                                                                                                                                                                                                                                                                       |
+| `claim_residual(market_id)`                                                                                                | Operator or owner | After resolution, once every holder who is owed a payout has redeemed, moves what the pool still holds into the treasury's due bucket (`treasury_due`). The next sweep pays it on the treasury leg, whole and not split with the Council. See "The residual". | Not resolved (`not resolved`); a holder is still owed a payout (`holders are still owed their payouts`); nothing is left (`nothing is left over`), which is also the answer to a second call.                                                                                                              |
 
 The treasury needs no proposal to collect it: the next sweep sends it.
 
@@ -343,7 +345,7 @@ The treasury needs no proposal to collect it: the next sweep sends it.
 | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `void_if_unresolved(market_id)`                                           | The way out if the oracle is gone. If `resolve_by` plus a 7 day grace period has passed and no outcome was ever applied, sets the outcome to Void. Refused if already resolved or before the grace period is over. While the oracle is working it answers the market itself at `resolve_by` through `resolve_by_deadline`, and a proposal that was nearly final is applied, not voided over. |
 | `buy(market_id, side, amount, min_shares)` (payable, 1 yocto)             | Buys using balance already held in the contract. `side` is `"yes"` or `"no"`. Needs exactly 1 yoctoNEAR attached, so a limited-access key cannot spend a balance.                                                                                                                                                                                                                            |
-| `sell(market_id, side, collateral_out, max_shares_in)` (payable, 1 yocto) | Sells shares back to the pool. You name how much collateral you want out, and the contract works out how many shares that costs. Needs exactly 1 yoctoNEAR.                                                                                                                                                                                                                                  |
+| `sell(market_id, side, shares, min_collateral)` (payable, 1 yocto)        | Sells `shares` back to the pool for what they are worth now, and refuses if that, less the fee, is under `min_collateral`. Needs exactly 1 yoctoNEAR.                                                                                                                                                                                                                                        |
 | `redeem(market_id)`                                                       | After resolution, converts all the caller's shares in that market into balance. No deadline.                                                                                                                                                                                                                                                                                                 |
 | `withdraw(amount)` (payable, 1 yocto)                                     | Pays `amount` of the caller's balance into the caller's own Intents account with an `mt_transfer` of 1 yocto from this contract. The balance is reduced first and the withdrawal is recorded under a new id (a counter that starts at 1 and only goes up) with its account, amount and time, before the transfer is sent (event `withdraw`). The callback `on_withdraw(id)` takes the amount and account from that record: success removes it (event `withdraw_confirmed`), failure removes it and restores the balance (event `withdraw_failed`). A callback for an id with no record changes nothing. A callback that never reports leaves the amount in the pending total, visible and still owed, and it is not credited back until the owner decides it with `reconcile_withdrawal`. Needs exactly 1 yoctoNEAR attached. It pays only the caller, so a mistyped target cannot lose money.                                                                                                                                                                                                                             |
 | `sweep_fees()`                                                            | Splits collected fees between the Council and the treasury, records both legs under a sweep id, and sends them through the verifier. Returns the sweep id, or null when there was too little to act on. See "Fees".                                                                                                                                                                                                                                |
@@ -372,8 +374,6 @@ message decides what to do. The message grammar is the one the NEP-141 hook had.
 | `deposit`                          | Registered account | Adds the amount to the sender's balance. Refused if paused or not registered. Extra text after `deposit` is ignored.                                               |
 | `register`                         | Not yet registered | Registers the sender for the registration fee (`config.registration_fee`), which is due to the treasury whole, and credits the rest to the sender's balance. The market's own NEAR carries the account's storage, inside the storage reserve. Refused if paused, if the sender is registered already (`already registered`) or if the amount is short of the fee (`send at least the registration fee`). Extra text after `register` is ignored. |
 | `buy:<market>:<side>:<min shares>` | Registered account | Buys directly with the money sent. `side` is `yes` or `no`. `min shares` is a slippage floor and must be above zero. Extra text after the fourth part is ignored. |
-| `seed:<market>`                    | Operator or owner  | Opens the market at one half. Refused at or after the market's `close_at`.                                                                                         |
-| `seed:<market>:<yes price>`        | Operator or owner  | Opens the market at a chosen starting Yes price, in millionths, from 10,000 to 990,000 (1% to 99%).                                                                |
 
 Also refused for any message: an amount of zero, an unknown action, or a market id that is not a
 number.
@@ -412,7 +412,7 @@ Then:
 | `deposit`                          | Registered account | Credits the amount to the sender's balance once the verifier has it. Refused if paused or not registered. Extra text after `deposit` is ignored. |
 | `buy:<market>:<side>:<min shares>` | Registered account | Credits the amount once the verifier has it, then buys `side` with it as `buy` does from a balance. Refused if paused, not registered, the market is not open, the side is not `yes` or `no`, or the minimum is zero. A buy that fails after the credit, because the price moved or the market closed in between, leaves the money in the balance. |
 
-Any other message is refused (`unknown action`), `register` and `seed` included: an account with no
+Any other message is refused (`unknown action`), `register` included: an account with no
 NEAR registers through the verifier instead (see "Money in"). Every refusal comes before the
 forward, so the token hands the whole amount back to the sender.
 
@@ -446,12 +446,12 @@ verifier's own documentation says that wNEAR is not refunded, so clients leave i
 | `msg`                                                   | Runs as                                           |
 | ------------------------------------------------------- | ------------------------------------------------- |
 | `buy:<market>:<side>:<amount>:<min shares>`             | `buy`, out of the signer's balance                |
-| `sell:<market>:<side>:<collateral out>:<max shares in>` | `sell`                                            |
+| `sell:<market>:<side>:<shares>:<min collateral>`        | `sell`                                            |
 | `redeem:<market>`                                       | `redeem`                                          |
 | `withdraw:<amount>`                                     | `withdraw`, into the signer's own Intents account |
 
 Also refused: an unknown action (`unknown action`) and a part that is not a number (`bad market id`,
-`bad amount`, `bad min shares`, `bad collateral out`, `bad max shares in`). Extra text after the last
+`bad amount`, `bad min shares`, `bad shares`, `bad min collateral`). Extra text after the last
 part is ignored, as above.
 
 The verifier starts `on_auth` without waiting for it, so `execute_intents` succeeds even when this
@@ -484,13 +484,14 @@ build.
 | Prove   | `migrate` refuses to run unless `upgrade_in_flight` is set (`migrate runs only inside an upgrade`), then clears it and sets `upgrade_proven`. A hand-called `migrate` therefore proves nothing. When the batch fails, the old code keeps the mark set and the next `upgrade` sets it again. `config` shows both flags with `state_version`.                                                     |
 | Seal    | `seal(public_key)` deletes an access key. It is refused until `upgrade_proven` is true (`prove the upgrade path before deleting keys`), so keys are deleted only after one upgrade has worked on this chain.                                                                                                                                                                                    |
 
-The state struct starts with `state_version: u16`, 5 today. `migrate` reads those two bytes and accepts only the exact version-3 root (`StateV3`), the exact version-4 root (`StateV4`) or the current version-5 root. Other versions fail with `unsupported state version`; there is no trial decoding. Version 3 converts to version 4 and version 4 to version 5, each without scanning accounts or markets; version 5 adds the registration fee at its starting value and an empty registration map. Existing records retain their own tags. Fund the native buffer before upgrading an older catalog, whose original creation calls did not collect the new deposit.
+The state struct starts with `state_version: u16`, 6 today. `migrate` reads those two bytes and accepts only the exact version-5 root (`StateV5`) or the current version-6 root. Other versions fail with `unsupported state version`; there is no trial decoding. Version 5 converts to version 6 only while it has created no market (`a version 5 market that has created markets cannot move to dynamic parimutuel pricing; deploy this version fresh`): balances, registrations, fees, sweeps and withdrawals carry over, the creation fee, opening price bounds and Void price window are dropped, and an empty cost-record map is added. A constant-product pool has no record of what each holder paid, so its markets cannot become parimutuel ones; a version-5 deployment that has markets is wound down and this version deployed fresh beside it.
 
 Every market, sweep and withdrawal is stored inside a one-byte version tag (an enum such as
-`VersionedMarket::V1(MarketV1)` with tag 0 and `V2(Market)` with tag 1). Reads go through `into_current`, which
-turns an older variant into the current record, and every write stores the newest variant. A tag no build
-has written fails to decode (`Cannot deserialize element`) instead of being misread. A later layout of a
-record adds a variant and a conversion, and old records upgrade as they are read, with no pass over the map.
+`VersionedMarket::V1(Market)`, tag 0). Reads go through `into_current`, which turns an older variant into
+the current record, and every write stores the newest variant. A tag no build has written fails to decode
+(`Cannot deserialize element`) instead of being misread. A later layout of a record adds a variant and a
+conversion, and old records upgrade as they are read, with no pass over the map. The market tag restarts at 0
+with version 6: a migration only ever finds an empty market map, so no constant-product record is read.
 
 Withdraw and redeem stay unpausable: `set_paused` does not touch them, an upgrade does not touch
 them, and neither does `halt`. `set_paused` does not stop `sell` either: only the owner's `set_sells_paused`
@@ -508,49 +509,78 @@ integration evidence.
 
 ## How trading works
 
-The pricing is a constant-product pool, the same shape as Uniswap. Each market has a Yes pool and a
-No pool of shares. The price of an outcome is the other pool divided by the total of both, so buying
-Yes shrinks the Yes pool, grows the No pool, and raises the Yes price. A fresh market seeded at one
-half has equal pools.
+The pricing is a dynamic parimutuel market (Pennock, 2004). There is no pool of shares to trade
+against and nobody has to put money in first. The market keeps the two totals of shares outstanding,
+`user_yes` and `user_no`, and the cost of a market with those totals is the length of that pair:
 
-All rounding goes in favour of the pool, so the pool's product never shrinks and repeated tiny
+```text
+C(yes, no) = sqrt(yes^2 + no^2)
+```
+
+The pool, `locked`, never holds less than `C` rounded up. A buy adds to the pool and grows its side's
+total until the cost has grown by exactly what was paid in; a sale shrinks its side's total and pays
+out what the cost falls by:
+
+```text
+buy  amount on a side:  grown  = floor(sqrt((ceil(C) + amount)^2 - other^2)), shares = grown - side
+sell shares on a side:  refund = floor(C(side, other)) - ceil(C(side - shares, other))
+```
+
+Every rounding goes the pool's way, so a round trip returns at most what it paid, and repeated tiny
 trades cannot make money. The tests confirm that no sequence of buys and sells by one trader ends in
-profit.
+profit, and that the pool always holds at least its cost.
+
+The Yes price is the chance the totals imply, `yes^2 / (yes^2 + no^2)` in millionths, and the No price
+is the rest. An empty market shows 500,000. The first buyer of an empty market gets a share for every
+unit, and a share never costs more than one unit, so a winning share, which is paid
+`shares * locked / winning shares`, always pays back at least what it cost.
+
+An example without fees. Alice puts 100 tokens on Yes in an empty market and gets 100 shares. Bob puts
+100 on No and gets 173.2, because No was the side with fewer shares. A third trader then puts 100 on
+Yes and gets 144.9. If Yes wins, the 300 in the pool is split over the 244.9 Yes shares: Alice gets 122.5
+and the third trader 177.5. Both get back more than they put in, and Bob loses his 100. The unit test
+`early_winners_are_diluted_by_late_money_but_never_below_what_they_paid` in `dpm.rs` runs these numbers.
 
 ### Buying
 
 You send `amount` of collateral and a minimum number of shares. The contract:
 
-1. Works out how many shares the whole amount would buy, and from that the average price of the
-   trade.
-2. Charges the fee on that trade (see "Fees"), taken out of `amount`.
-3. Buys shares with what is left.
-4. Refuses if fewer shares than `min_shares` result ("price moved, you would get fewer shares than
-   your minimum").
+1. Takes the fee, 2% of `amount` rounded up (see "Fees").
+2. Buys shares with the rest.
+3. Refuses if fewer shares than `min_shares` result (`price moved, you would get fewer shares than
+   your minimum`), or if the buy would take the pool past 10^12 units (`cannot buy that amount`).
 
-The collateral less the fee is added to the market's `locked`. The fee goes to the fee bucket.
+The amount less the fee goes into the market's `locked` and onto the position's cost record. The fee
+goes to the fee bucket.
 
 ### Selling
 
-You name `collateral_out`, the amount you want to receive from the pool, and `max_shares_in`, the
-most shares you will give up. The contract works out the shares needed, charges the fee on
-`collateral_out`, and credits you `collateral_out` minus the fee. `quote_sell` tells you the largest
-`collateral_out` that `shares` can fetch. A sale so small that its fee would eat all of it is
-refused ("cannot sell that amount").
+You name `shares`, how many to sell, and `min_collateral`, the least you will accept after the fee.
+The contract works out what those shares fetch now, takes the fee, 2% of that rounded up, and credits
+you the rest. `quote_sell(market_id, side, shares)` returns the same numbers. A sale that would fetch
+nothing, or no more than its fee, is refused (`cannot sell that many shares`), and so is one that would
+pay less than the minimum (`price moved, you would get less than your minimum`). What the sale fetches
+comes off the position's cost record. A position sold to its last share is closed: the record is
+removed, and the position takes no part in a later refund, so an exit is final.
+
+A share is worth less to sell after money has gone onto the other side, and more after money has gone
+onto its own. A trader who bought Yes and then sees No buyers arrive sells at a loss, as in any market.
 
 ### The market must be open
 
-A buy or sell is refused unless the market is registered, seeded, not halted, not resolved, and
-strictly before `close_at`. Trading at the exact close instant is refused. The contract must also
-not be paused.
+A buy or sell is refused unless the market is registered, not halted, not resolved, and strictly
+before `close_at`. Trading at the exact close instant is refused. A buy also needs the contract not to
+be paused.
 
 ### Slippage and sandwiching
 
-Every buy needs a minimum and every sell needs a maximum, so a trader is never filled at a price
-they did not accept. The minimum cannot be zero, so there is no way to opt out of the protection.
-This protects the trader but not the pool: someone who buys ahead of a large order still profits
-from the price that order moves, and that profit comes out of the pool, meaning the seeder. This is
-true of every constant-product market. See `AUDIT.md`, "Attack testing", for the measured numbers.
+Every buy needs a minimum number of shares and every sell a minimum amount, so a trader is never
+filled at a price they did not accept. The minimum cannot be zero, so there is no way to opt out of
+the protection. It protects the trader, not the other holders: someone who buys ahead of a large order
+and sells after it is paid by the price that order moves, and that comes out of the pool the other
+holders share. The fee on both legs makes a small sandwich a loss. The unit tests
+`a_buyers_minimum_bounds_what_a_sandwich_can_take_from_the_buyer` and
+`when_the_victims_minimum_refuses_the_trade_the_attacker_is_left_with_a_loss` measure it.
 
 ---
 
@@ -558,15 +588,14 @@ true of every constant-product market. See `AUDIT.md`, "Attack testing", for the
 
 | Fee                       | Rate                                                                                                                                                               | Who pays                           | Where it goes  |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- | -------------- |
-| Trade fee                 | `rate × shares × p × (1 − p)`, where `p` is the trade's average price. At the starting 2%, about 1% of a 50 cent trade and almost nothing near 1 cent or 99 cents. | The buyer or seller, on each trade | The fee bucket |
-| Creation fee              | A flat amount, 1,000,000 units to start                                                                                                                            | The seeder, taken out of the seed  | The fee bucket |
-| Redeem, withdraw, deposit | None                                                                                                                                                               | n/a                                | n/a            |
+| Trade fee                 | `rate` of what the trade moves: of the amount a buy pays in, and of the amount a sale fetches. 2% to start. | The buyer or seller, on each trade | The fee bucket |
+| Redeem, withdraw, deposit | None                                                                                                         | n/a                                | n/a            |
 
 The fee is rounded up. The price you are quoted by `quote_buy` and `quote_sell` is produced by the
-same function that charges the trade, so what is quoted is what is charged.
+same function that charges the trade, so what is quoted is what is charged. Opening a market costs no
+fee; its storage deposit is NEAR and goes to storage, not to the fee bucket.
 
-Fees sit in a bucket outside every market's collateral, so they never touch the rule that collateral
-must equal shares outstanding.
+Fees sit in a bucket outside every market's pool, so they never count toward what a market pays out.
 
 ### Sweeping
 
@@ -586,8 +615,8 @@ carry    = fees - council - treasury               (0 or 1 unit, stays in fees)
 ```
 
 The carry is at most one unit and goes to neither leg. It stays in `fees` and joins the next sweep.
-Each leg then adds what earlier refused legs left in its due bucket. At the starting 2,500: 1,095,193
-units give 273,798 to the Council, 821,394 to the treasury and 1 left in `fees`; 7 give 1, 5 and 1;
+Each leg then adds what earlier refused legs left in its due bucket. At the starting 2,500: 1,000,001
+units give 250,000 to the Council, 750,000 to the treasury and 1 left in `fees`; 7 give 1, 5 and 1;
 3 give 0, 2 and 1.
 
 The sweep takes the next sweep id, writes the record (the account, amount and status of both legs,
@@ -673,45 +702,42 @@ cost does not grow with the number of markets.
 A market becomes Void when the oracle says so, including through `resolve_by_deadline`, or when
 `void_if_unresolved` is called after the grace period past `resolve_by` (7 days to start).
 
-A Void pays each Yes share the market's closing Yes price and each No share the rest, so a pair of
-one Yes and one No share always pays exactly 1. The closing price is the Yes price averaged over
-trading time across the Void price window before `close_at` (24 hours to start), or since the market opened if that was
-later. Time while the market is halted does not count, in the price or in the time it is divided by,
-so halting a market right after a pump does not leave the pumped price holding the average. A market
-with no trading time in that window, for example one halted for its whole last day, pays the average
-over all its trading time instead, so a pump followed by a halt that is held to close cannot make
-the Void pay the pumped price.
+A Void pays each holder back what their position put in, less what it has already taken out by
+selling: its cost record. The price at close plays no part, so pumping one side before a Void, or
+halting a market to hold a price, gains nothing (the unit test
+`pumping_one_side_before_a_void_returns_the_pumper_only_what_they_put_in` and the sandbox test
+`a_pump_held_by_a_halt_until_a_void_pays_each_holder_back_what_they_put_in`).
 
-Only a market that never traded at all pays its last price. The operator cannot halt in the last 24
-hours before close (`a halt in the last day before close is an owner action`), only the owner
-can, so the window itself cannot be emptied by the fast key. It is fixed at the moment the market
-becomes Void.
+The same refund applies when a market resolves Yes or No and nobody holds a share of that answer:
+there is no winner to pay, so everyone still in is paid back (`an_answer_nobody_holds_pays_everyone_back_like_a_void`).
+The `refunds` field and the `refunds` flag of the `outcome_set` event say which kind of payout a
+resolved market makes.
 
-The average is kept in a running time-weighted accumulator, not read from the 120-point chart log,
-so no number of trades can change how long a price held. An earlier version averaged the log and
-could be flooded; that was fixed after an attack test showed it.
+The fees are not refunded: they were the price of trading. A position's refund is
 
-This replaced a flat 0.50 per share, which paid a holder of the cheap side several times what their
-shares were worth. A known remaining risk: pumping the price and then forcing a Void pays the pumper
-from the pool, because shares bought on the way up cost less than the price they are paid at. It
-needs a Void that one party cannot force alone, and halting the market after the pump no longer
-helps, because the halted time does not count. See `AUDIT.md`.
+```text
+refund = claim * min(locked, claims) / claims
+```
+
+where `claim` is the position's cost record (never below zero) and `claims` their sum over every
+position still holding shares. The pool normally holds exactly the claims, so each holder gets their
+claim back in full. A holder who sold at a profit before the Void has taken out more than they put in,
+and that profit came from the pool, so the pool is short of the claims. The shortfall is then shared
+by everyone still in, in proportion to what each put in
+(`a_void_after_a_profit_taker_left_scales_every_refund_down_alike`). A holder who sold at a loss left
+the loss in the pool: it is more than the claims, and the surplus is the residual.
 
 ---
 
-## Seeding at a chosen price
+## The residual
 
-Collateral must equal the shares outstanding of each outcome. So a market opened away from one half
-needs its smaller pool made up: the seeder holds the difference. At 30% Yes, the Yes pool is the
-whole seed, the No pool is smaller, and the seeder holds the No shares the pool does not. The seeder
-is then an ordinary holder with those shares and must be registered (`storage_deposit`). Those
-shares are positions until redeemed, but the operator and the owner are not held to the 20 position
-limit, so seeding many markets away from one half does not fill it. Because the owner is the
-DAO, the operator should be the one to seed. A market cannot be seeded at or after
-its close.
-
-A seed of exactly one half leaves the seeder holding nothing. A seed too small to give either pool
-anything at its price is refused.
+What a resolved market's pool still holds once every holder who is owed a payout has redeemed is the
+residual. It comes from rounding, a unit or two per payout, and from refund markets where holders who
+sold at a loss left that loss in the pool. `claim_residual` moves it to `treasury_due`, and the next
+sweep pays it to the treasury. It is refused while anyone is still owed a payout, so it can never take
+a holder's money: a market resolved Yes or No waits for the winners, a refund market for everyone with
+a claim. Losing shares are owed nothing and do not hold it up, though `prune_market` still waits for
+them.
 
 ---
 
@@ -746,25 +772,31 @@ subcategory and `resolve_by` are not part of it.
 
 After resolution:
 
-| Outcome | A Yes share pays      | A No share pays                   |
-| ------- | --------------------- | --------------------------------- |
-| Yes     | 1 unit                | 0                                 |
-| No      | 0                     | 1 unit                            |
-| Void    | the closing Yes price | the rest, so one minus that price |
+| Outcome                          | A position is paid                                                          |
+| -------------------------------- | --------------------------------------------------------------------------- |
+| Yes, with Yes holders            | its Yes shares times `locked`, divided by all the Yes shares outstanding    |
+| No, with No holders              | its No shares times `locked`, divided by all the No shares outstanding      |
+| Void, or an answer nobody holds  | its refund (see "Void")                                                     |
 
-`redeem` pays all of the caller's shares in a market at once into their balance, rounding Void
-payouts down per holder (up to one unit of dust per holder can stay in the market, which
-`claim_residual` later collects). Redeeming has no deadline and works while paused or halted.
+Losing shares pay nothing. `redeem` pays all of the caller's shares in a market at once into their
+balance, rounded down (a unit or so of dust per holder can stay in the market, which
+`claim_residual` later collects), and returns the amount. As winners redeem, the pool and the winning
+shares shrink together, so the order in which they redeem does not change what each gets beyond rounding. Redeeming
+has no deadline and works while paused or halted.
 
 ---
 
 ## The invariant
 
-While a market is open, collateral held must equal shares outstanding on each side:
-`locked = pool_yes + user_yes = pool_no + user_no`. After resolution, `locked` must be at least what
-is owed. `check_invariant(market_id)` returns whether this holds. It is checked after every step of
-the randomized tests, which run sequences of up to 60 random trades across two markets (one opened
-at 30%), resolve each as Yes, No or Void, and redeem and claim the residual in both orders.
+While a market is open, the pool must hold at least the cost of the shares outstanding:
+`locked >= ceil(sqrt(user_yes^2 + user_no^2))`. Once it resolves to an answer that has holders, the
+pool must hold at least the winning shares outstanding, which is what makes every winning share worth
+at least one unit; a refund market only needs what it pays out, which the formula keeps within
+`locked`. `check_invariant(market_id)` returns whether this holds. It is checked after every step of
+the randomized tests, which run sequences of up to 60 random trades across two markets, resolve each
+as Yes, No or Void, and redeem in random order, ending with the pool empty and no claims left. The
+pricing module has its own property tests: the pool holds its cost after any sequence of trades,
+winning payouts together never exceed the pool, and a winning share pays back at least what it cost.
 
 ---
 
@@ -772,8 +804,8 @@ at 30%), resolve each as Yes, No or Void, and redeem and claim the residual in b
 
 | View                                                         | Returns                                                                                                                                                                                                                                         |
 | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `config()`                                                   | state version, upgrade proven, upgrade in flight, owner, pending owner, operator, oracle, verifier, collateral token id, paused, sells paused, number of markets, storage deposit, registration fee, position cap, fee rate, creation fee, revenue pool and treasury (null until set), the Council's and the treasury's share in basis points, minimum sweep, next sweep id, revenue unresolved, Void price window and grace (ns), settle wait, reconcile wait and sweep interval (minutes), lowest and highest opening price, and the fee limits (fee rate ceiling, creation fee ceiling, Council share floor and ceiling, sweep minimum ceiling) |
-| `get_market(market_id)`                                      | One market: id, title, rule text, source, void policy, category, subcategory, rule hash, price rule, close and resolve times, status, registered, seeded, outcome, void price, Yes and No price, locked                                         |
+| `config()`                                                   | state version, upgrade proven, upgrade in flight, owner, pending owner, operator, oracle, verifier, collateral token id, paused, sells paused, number of markets, storage deposit, registration fee, position cap, fee rate, revenue pool and treasury (null until set), the Council's and the treasury's share in basis points, minimum sweep, next sweep id, revenue unresolved, Void grace (ns), settle wait, reconcile wait and sweep interval (minutes), and the fee limits (fee rate ceiling, Council share floor and ceiling, sweep minimum ceiling) |
+| `get_market(market_id)`                                      | One market: id, title, rule text, source, void policy, category, subcategory, rule hash, price rule, close and resolve times, status, registered, outcome, refunds, Yes and No price, Yes and No shares outstanding, locked, holders, pruned |
 | `list_markets(from_index, limit)`                            | A page of markets (limit capped at 50)                                                                                                                                                                                                          |
 | `get_history(market_id)`                                     | The price log: time and Yes price for each point                                                                                                                                                                                                |
 | `total_owed()`                                               | Everything the contract owes in collateral units: balances, locked collateral, fees, both dues, revenue unresolved and withdrawals in flight. Compare with the verifier's `mt_balance_of` for this account. A constant-size sum |
@@ -784,13 +816,13 @@ at 30%), resolve each as Yes, No or Void, and redeem and claim the residual in b
 | `get_shares(market_id, account_id)`                          | The account's Yes shares and No shares in that market                                                                                                                                                                                           |
 | `get_positions(account_id, from_market?, limit?)`                                  | One bounded page where the account holds shares, by market id: Yes and No shares, status, outcome (null until resolved) and the amount `redeem` would credit now (0 until resolved). Ordinary accounts read their small index; exempt accounts scan at most 100 consecutive IDs. Advance the cursor by the window even when no holdings match                                                                 |
 | `quote_buy(market_id, side, amount)`                         | Shares you would get and the fee, or zeros if the trade cannot happen                                                                                                                                                                           |
-| `quote_sell(market_id, side, shares)`                        | The most collateral those shares can fetch, the shares actually needed, and the fee                                                                                                                                                             |
+| `quote_sell(market_id, side, shares)`                        | What those shares fetch before the fee, the shares (the number asked), and the fee, or zeros if the sale cannot happen                                                                                                                         |
 | `get_fees()`                                                 | Collected, owed to the revenue pool (`revenue_due`), owed to the treasury (`treasury_due`), revenue unresolved                                                                                                                                  |
 | `get_sweep(sweep_id)`, `list_sweeps(from_index, limit)`      | A sweep record: id, time, the part of the fees it split, what each leg carried, and each leg's account, amount and status. A page is at most 50, oldest first                                                                                   |
 | `storage_balance_bounds()`, `storage_balance_of(account_id)` | NEP-145 views, under "Setup and accounts"                                                                                                                                                                                                       |
 | `is_registered(account_id)`                                  | Whether the account registered                                                                                                                                                                                                                  |
 | `is_staged(code_hash)`                                       | Whether a wasm with that sha256 is staged                                                                                                                                                                                                       |
-| `check_invariant(market_id)`                                 | Whether the collateral rule holds                                                                                                                                                                                                               |
+| `check_invariant(market_id)`                                 | Whether the pool rule holds (see "The invariant")                                                                                                                                                                                               |
 
 ---
 
@@ -817,18 +849,15 @@ Every state change logs one line starting `EVENT_JSON:` followed by JSON of the 
 | `min_sweep_set`           | `set_min_sweep`                                                       | min_sweep                                         |
 | `next_sweep_id_set`       | `set_next_sweep_id`                                                   | next_sweep_id                                     |
 | `fee_rate_set`            | `set_fee_rate_bps`                                                    | fee_rate_bps                                      |
-| `create_fee_set`          | `set_create_fee`                                                      | create_fee                                        |
-| `void_rules_set`          | `set_void_rules`                                                      | price_window_ns, grace_ns                         |
+| `void_grace_set`          | `set_void_grace`                                                      | grace_ns                                          |
 | `sweep_timing_set`        | `set_sweep_timing`                                                    | settle_wait_minutes, reconcile_wait_minutes, min_interval_minutes |
-| `open_price_bounds_set`   | `set_open_price_bounds`                                               | min, max                                          |
 | `max_positions_set`       | `set_max_positions`                                                   | max_positions                                     |
-| `fee_limits_set`          | `set_fee_limits`                                                      | max_fee_rate_bps, max_create_fee, min_revenue_share_bps, max_revenue_share_bps, max_min_sweep |
+| `fee_limits_set`          | `set_fee_limits`                                                      | max_fee_rate_bps, min_revenue_share_bps, max_revenue_share_bps, max_min_sweep |
 | `residual_claimed`        | `claim_residual`                                                      | market_id, amount, to                             |
-| `outcome_set`             | `set_outcome`, or `void_if_unresolved` (which adds `"by":"deadline"`) | market_id, outcome, void_price_yes (null unless void) |
+| `outcome_set`             | `set_outcome`, or `void_if_unresolved` (which adds `"by":"deadline"`) | market_id, outcome, refunds                       |
 | `deposit`                 | a deposit                                                             | account, amount                                   |
-| `market_seeded`           | a seed                                                                | market_id, amount, fee, yes_price, seeder, price_yes, price_no, pool_yes, pool_no (after the trade) |
-| `buy`                     | a buy                                                                 | market_id, account, side, shares, collateral, fee, price_yes, price_no, pool_yes, pool_no (after the trade) |
-| `sell`                    | a sell                                                                | market_id, account, side, shares, collateral, fee, price_yes, price_no, pool_yes, pool_no (after the trade) |
+| `buy`                     | a buy                                                                 | market_id, account, side, shares, collateral (paid in, fee included), fee, price_yes, price_no, yes_shares, no_shares (after the trade) |
+| `sell`                    | a sell                                                                | market_id, account, side, shares, collateral (fetched, before the fee), fee, price_yes, price_no, yes_shares, no_shares (after the trade) |
 | `redeemed`                | `redeem`                                                              | market_id, account, amount, yes_shares, no_shares (burned) |
 | `withdraw`                | `withdraw`, before the transfer is sent                               | account, amount, id                               |
 | `withdraw_confirmed`      | the verifier moved the money                                          | account, amount, id                               |
@@ -876,30 +905,27 @@ All big numbers in event data are strings.
 | `paused`                                                                                                                                                         | The contract is paused.                                                                                |
 | `sells are paused`                                                                                                                                               | `sell` while the owner has set `set_sells_paused(true)`.                                               |
 | `wait an hour since the last sweep` / `wait <n> minutes since the last sweep`                                                                                    | `sweep_fees` within the sweep interval of the previous sweep (the first form while the interval is 60 minutes). |
-| `do the storage deposit first`                                                                                                                                   | The account has not registered (also for a seeder who would hold shares).                              |
-| `market is not registered with the oracle yet`                                                                                                                   | Trading or seeding before the oracle accepted it.                                                      |
-| `market has no liquidity yet`                                                                                                                                    | Trading before it was seeded.                                                                          |
-| `market is halted` / `market is resolved` / `market is closed`                                                                                                   | The market is not open for trading, or, for `market is closed`, a seed arrived at or after `close_at`. |
+| `do the storage deposit first`                                                                                                                                   | The account has not registered.                                                                        |
+| `market is not registered with the oracle yet`                                                                                                                   | Trading before the oracle accepted it.                                                                 |
+| `market is halted` / `market is resolved` / `market is closed`                                                                                                   | The market is not open for trading.                                                                    |
 | `price moved, you would get fewer shares than your minimum`                                                                                                      | A buy would fill below the buyer's floor.                                                              |
-| `price moved, would need more shares than your maximum`                                                                                                          | A sell would cost more shares than the seller's ceiling.                                               |
-| `cannot buy that amount` / `cannot sell that amount`                                                                                                             | Zero, too large for the pool, or too small to cover the fee.                                           |
+| `price moved, you would get less than your minimum`                                                                                                              | A sell would fetch less, after the fee, than the seller's floor.                                       |
+| `cannot buy that amount` / `cannot sell that many shares`                                                                                                        | Zero, more shares than the side has, a buy that would take the pool past 10^12 units, or a trade too small to cover the fee. |
 | `min shares must be above zero`                                                                                                                                  | A buy with a floor of zero.                                                                            |
 | `not enough balance` / `not enough shares`                                                                                                                       | Spending more than you hold.                                                                           |
-| `too many positions, redeem or sell one first`                                                                                                                   | At the position cap (20 to start), for an account that is neither operator nor owner.                              |
-| `already seeded` / `already registered` / `already resolved` / `already claimed`                                                                                 | A step done twice. `resume` of a market that has an outcome says `already resolved` too.               |
-| `the seed must be more than the creation fee` / `seed too large` / `the seed is too small to open at that price`                                                 | Bad seed size.                                                                                         |
-| `the starting price must be between <min> and <max> millionths` / `bad starting price`                                                                           | Bad opening price (1% to 99% to start).                                                                |
-| `the fee rate is capped at <n> basis points` / `the creation fee is capped at <n> units of the collateral`                                                       | Fee ceilings (500 and 10,000,000 to start).                                                            |
-| `the void price window must be between 1 hour and 7 days` / `the void grace period must be between 1 day and 60 days`                                            | `set_void_rules` out of range.                                                                         |
+| `too many positions, redeem or sell one first`                                                                                                                   | At the entry cap (20 to start, two for a position on one side), for an account that is neither operator nor owner. |
+| `already registered` / `already resolved`                                                                                                                        | A step done twice. `resume` of a market that has an outcome says `already resolved` too.               |
+| `the fee rate is capped at <n> basis points`                                                                                                                     | Fee ceiling (500 to start).                                                                            |
+| `the void grace period must be between 1 day and 60 days`                                                                                                        | `set_void_grace` out of range.                                                                         |
 | `the settle wait must be between 1 and 1440 minutes` / `the reconcile wait must be between 10 and 10080 minutes` / `the reconcile wait cannot be shorter than the settle wait` / `the sweep interval must be between 60 and 1440 minutes` | `set_sweep_timing` out of range.        |
-| `the lowest opening price cannot be under 1000` / `the highest opening price cannot be over 999000` / `the lowest opening price must be below the highest`         | `set_open_price_bounds` out of range.                                                                  |
 | `the position cap must be between 5 and 30`                                                                                                                      | `set_max_positions` out of range.                                                                      |
-| `the fee rate ceiling cannot be over 2000 basis points` / `the creation fee ceiling cannot be over 100000000` / `the Council share floor cannot be under 500 basis points` / `the Council share ceiling cannot be over 9000 basis points` / `the Council share floor must be below its ceiling` / `the sweep minimum ceiling must be between 1 and 1000000000` | `set_fee_limits` out of its hard range. |
-| `the current fee rate is above that ceiling, lower the fee rate first` / `the current creation fee is above that ceiling, lower the creation fee first` / `the current Council share is outside those limits, move the share first` / `the current sweep minimum is above that ceiling, lower the sweep minimum first` | `set_fee_limits` that would leave a current value outside the new limit. |
+| `the fee rate ceiling cannot be over 2000 basis points` / `the Council share floor cannot be under 500 basis points` / `the Council share ceiling cannot be over 9000 basis points` / `the Council share floor must be below its ceiling` / `the sweep minimum ceiling must be between 1 and 1000000000` | `set_fee_limits` out of its hard range. |
+| `the current fee rate is above that ceiling, lower the fee rate first` / `the current Council share is outside those limits, move the share first` / `the current sweep minimum is above that ceiling, lower the sweep minimum first` | `set_fee_limits` that would leave a current value outside the new limit. |
 | `market has not closed`                                                                                                                                          | The oracle tried to resolve early.                                                                     |
 | `market already resolved differently`                                                                                                                            | A second, conflicting outcome.                                                                         |
 | `the answer deadline and the <n> day grace period have not passed`                                                                                               | `void_if_unresolved` too early (7 days to start).                                                      |
 | `not resolved` / `not resolved yet` / `nothing to redeem`                                                                                                        | Claiming or redeeming too soon, or with nothing held.                                                  |
+| `holders are still owed their payouts` / `nothing is left over`                                                                                                  | `claim_residual` before every holder owed a payout has redeemed, or with nothing in the pool.          |
 | `text is too long` / `<field> is required` / `category and subcategory must be lowercase slugs of up to 32 characters`                                           | Bad market text.                                                                                       |
 | `close_at must be in the future` / `resolve_by must be after close_at`                                                                                           | Bad market times.                                                                                      |
 | `observation_time must not be before close_at` / `observation_time must be before resolve_by` / `a price rule needs a strike above zero and at most 18 decimals` | Bad price rule.                                                                                        |
@@ -921,9 +947,9 @@ All big numbers in event data are strings.
 | `no code is staged under that hash`                                                                                                                              | `upgrade` for a hash nobody staged, or one already used.                                               |
 | `attach at least <amount> to pay for the storage` / `the wasm goes in the call input`                                                                            | `stage_code` with too little deposit or no input.                                                      |
 | `prove the upgrade path before deleting keys`                                                                                                                    | `seal` before an upgrade has gone through `migrate`.                                                   |
-| `migrate expects version 2`                                                                                                                                      | `migrate` found state written by another version.                                                      |
+| `unsupported state version`                                                                                                                                      | `migrate` found state written by a version other than 5 or 6.                                          |
+| `a version 5 market that has created markets cannot move to dynamic parimutuel pricing; deploy this version fresh`                                              | An upgrade of a version-5 deployment that has markets. The batch reverts and the old code stays.       |
 | `migrate runs only inside an upgrade`                                                                                                                            | `migrate` called without `upgrade` having sent the batch.                                              |
-| `a halt in the last day before close is an owner action`                                                                                                         | The operator tried to halt a market that closes within 24 hours, or has closed.                        |
 | `Method <name> is private`                                                                                                                                       | An internal callback, `buy_for`, or `new`, was called by anyone but the contract's own account.        |
 
 ---
@@ -957,18 +983,20 @@ nothing, a stranger's signature acts only for the stranger, and a signed action 
 a direct call; malformed messages and a panicking receiver are refunded in full by the verifier; a second
 withdrawal, sweep or redeem sent while the first is in flight pays once; starving a transfer of gas
 never loses the sender's money; trading stops at the exact moment of close; buy and sell refuse a
-call with no deposit; a halt cannot pin the void price at a pumped price, not even one held through
-the whole last day (the second review's proof of concept), the operator cannot halt in the last day
-and the owner can, and a resume counts trading time again from the resume; a hand-called `migrate`
-is refused; a market reports `unregistered`, `unseeded` and `open` in turn; the emergency void stays
-shut for 7 days after the deadline; 25 skewed seeds by the operator all succeed while an ordinary
-trader stops at 20 positions; a seed after close is refused; a stranger and the operator cannot
+call with no deposit; a pump held by a halt until a Void pays each holder back only what they put
+in, a profit taken before a Void scales every later refund down alike, and an answer nobody holds
+refunds everyone; a winning share pays back at least what it cost and the winners' payouts never
+exceed the pool; a hand-called `migrate` is refused; a market reports `unregistered` until the oracle
+confirms it and `open` after; the emergency void stays shut for 7 days after the deadline; the
+operator holds positions in 25 markets while an ordinary trader stops at its entry cap; a market takes
+no money after it closes; a stranger and the operator cannot
 upgrade or seal, an unknown hash and too little gas or deposit are refused, seal waits for
 `upgrade_proven`, and `migrate` refuses another state version; withdraw and redeem work on a paused
 contract; a stranger cannot initialise a deployed contract; storage registers for a third party,
 refunds the surplus to the payer, unregisters only an empty account and sends a sponsored deposit back
 to its sponsor; a `register` transfer takes the fee once, for the treasury, and is refused when short,
-repeated or paused; a version-3 or 4 root keeps every record and balance; a revenue transfer with no
+repeated or paused; a version-5 root with no markets keeps every balance and registration and one
+with markets is refused; a revenue transfer with no
 report is parked and not paid again, a Council that refuses is refunded to due while the treasury
 leg is paid once, a locked or paused verifier restores every payout, `total_owed` equals the
 verifier's balance after a whole journey, a plain deposit is surplus with no callback,
@@ -997,17 +1025,17 @@ Details and the measured economic attacks are in `AUDIT.md`.
 | Surplus                                     | Money sent to the market's Intents account without `mt_transfer_call` is never credited. See "Money in" and "Reconciling with the verifier". |
 | Payout targets                              | The verifier does not check that a receiver exists. Payouts go only to the caller of `withdraw`, to `revenue_pool` and to `treasury`. Check what you pass to `set_fee_recipients`: a mistyped account takes the money. |
 | No keys in the verifier                     | The contract never calls `add_public_key`, `disable_auth_by_predecessor_id`, `auth_call`, `execute_intents` or any verifier admin method. Its balance moves only by `mt_transfer` and `mt_transfer_call` from this contract. A source test keeps it that way. |
-| Storage deposit                             | 0.05 NEAR per account. Chosen to cover a balance entry plus 20 share entries. It comes back through `storage_unregister`, to whoever paid it, once the account holds nothing. An account registered before version 5 has no record of who paid, so its deposit comes back to the account. An account with no NEAR registers with a `register` transfer instead: it pays the registration fee in collateral to the treasury, and the market's own NEAR carries its storage, so the treasury keeps the storage reserve topped up. `storage_unregister` is refused while a `withdraw` is still in flight, so a failed withdraw can never credit a balance to an account that has left.                                                                                                                       |
-| Operator and the owner's seed money         | Seeds are sent from the operator account, and leftovers go to the treasury, so the treasury has to refill the operator to keep seeding.                                                                                                                                                                                                                                                                                                                                                       |
-| A seeder holds shares                       | When a market is opened away from one half. See "Seeding at a chosen price".                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| The seed is a subsidy                       | A constant-product seeder loses to informed traders by design. The pool's winning-side shares go to the treasury at resolution, but that does not make the seed back. Budget the seed as a cost of opening the market, not as an investment.                                                                                                                                                                                                                                                         |
-| Positions are not transferable              | There is no NEP-245 multi-token interface, so a position cannot be sent, lent or used as collateral, and there is no secondary market. The 20-position cap binds ordinary accounts for that reason.                                                                                                                                                                                                                                                                                                         |
-| Nothing caps a market                       | Apart from the size of a pool, no code limits how much a market can hold. The most one market can hold is set by what the operator seeds and by the deposit limits at launch. That is the lever against the cost of corrupting a market (see "One bond cannot scale with market size" in `oracle.md`).                                                                                                                                                                                                      |
-| Halting is a grievance risk                 | A stolen operator key can halt trading until 24 hours before close, and only the owner can halt after that. Users are not locked in after close, and the owner can replace the operator.                                                                                                                                                                                                                                                                                                                    |
-| Selling during an upgrade is not guaranteed | `withdraw` and `redeem` never pause, so a balance and a resolved position can always leave while the verifier allows payouts. A holder of an open position can leave at a fair price only by `sell`ing. The operator's `set_paused` no longer stops that, but the owner's `set_sells_paused` and a `halt` of the market (the operator can halt except in the last day) do. The market does not know an upgrade is pending and nothing holds `sell` open while a proposal waits. This is a known limitation, left for the owner to decide.                                                                                                    |
-| Website, 2026-10-20                         | `get_market` and `list_markets` now return `seeded`, and `status` can be `unregistered` or `unseeded` before `open`. In `web/lib/market.ts` the `status` type admits `open`, `closed`, `halted` and `resolved` only, so it needs the two new values, and so does any code that switches on `status`. `isMarketListed` already reads `seeded !== false`, which passed every market while the field was never sent. It now drops unseeded markets, as that line intends. `config` gained `upgrade_in_flight`. |
-| Website                                     | The website still tells users a Void pays half in three places (the Council page FAQ and the portfolio payout calculation and its comment). The contract now pays the closing price. The website also has to attach 1 yoctoNEAR to `buy` and `sell`, and the keeper-facing void now goes through the oracle's `resolve_by_deadline`.                                                                                                                                                                        |
+| Storage deposit                             | 0.05 NEAR per account. Chosen to cover a balance entry plus 20 entries; a cost record is about the size of a share entry, so counting it as one keeps that true. It comes back through `storage_unregister`, to whoever paid it, once the account holds nothing. An account registered before version 5 has no record of who paid, so its deposit comes back to the account. An account with no NEAR registers with a `register` transfer instead: it pays the registration fee in collateral to the treasury, and the market's own NEAR carries its storage, so the treasury keeps the storage reserve topped up. `storage_unregister` is refused while a `withdraw` is still in flight, so a failed withdraw can never credit a balance to an account that has left.                                                                                                                       |
+| Nobody funds a market                       | There is no seed and no market maker. A market opens empty, and its very first buyer pays a unit a share. Until both sides have money the price says little, so the website should show a new market's volume beside its price. |
+| Late money and early money                  | A share's price depends on where the market stands when it is bought, and every winning share is paid the same at the end. Early winners are therefore diluted by later money on their side, though never below what they paid; buying the side with fewer shares is cheaper. This is the parimutuel trade-off the team chose on 2026-10-27, over a constant-product pool that needed a seed. |
+| An exit is final                            | A holder who sells everything is out of the market: if it is later voided, they keep what the sale paid and take no part in the refund. Selling at a profit before a Void lowers everyone else's refund, in proportion; selling at a loss leaves the loss as the residual. |
+| Positions are not transferable              | There is no NEP-245 multi-token interface, so a position cannot be sent, lent or used as collateral, and there is no secondary market. The entry cap binds ordinary accounts for that reason.                                                                                                                                                                                                                                                                                                               |
+| Nothing but the pool size caps a market     | A market's pool stops at 10^12 units (a million tokens at 6 decimals), which keeps the pricing arithmetic inside 128 bits. Below that, no code limits how much a market can hold; the deposit limits at launch do. That is the lever against the cost of corrupting a market (see "One bond cannot scale with market size" in `oracle.md`).                                                                                                                                                            |
+| Halting is a grievance risk                 | A stolen operator key can halt trading. Users are not locked in after close, and the owner can replace the operator. A halt cannot change any payout.                                                                                                                                                                                                                                                                                                                                                      |
+| Selling during an upgrade is not guaranteed | `withdraw` and `redeem` never pause, so a balance and a resolved position can always leave while the verifier allows payouts. A holder of an open position can leave before resolution only by `sell`ing. The operator's `set_paused` does not stop that, but the owner's `set_sells_paused` and a `halt` of the market do. The market does not know an upgrade is pending and nothing holds `sell` open while a proposal waits. This is a known limitation, left for the owner to decide.                                                                                                    |
+| Website, 2026-10-20                         | `get_market` and `list_markets` returned `seeded`, and `status` could be `unregistered` or `unseeded` before `open`. Superseded on 2026-10-27: see the next row. |
+| Website, 2026-10-27                         | `seeded`, `void_price_yes` and `seeder` are gone from `MarketView` and `unseeded` from `status`; `refunds`, `yes_shares` and `no_shares` are new and `holders` is always a number. `isMarketListed` reads `registered` alone. `sell` takes `shares` and `min_collateral`. The portfolio shows `get_positions`' `redeemable`, the contract's own payout, instead of working one out, because a winner's share of the pool and a Void refund need data only the contract has. `config` lost `create_fee`, `void_price_window_ns`, `min_open_price`, `max_open_price` and `max_create_fee`. |
 | Keys                                        | Until `seal` has run, the deploy key can replace this code outside every DAO proposal. After it, only an owner upgrade can. A sealed contract with a broken upgrade path cannot be fixed, so prove one upgrade first.                                                                                                                                                                                                                                                                                           |
 | Keeper                                      | The keeper script sweeps fees: when `collected` plus `revenue_due` plus `treasury_due` reaches its minimum (`--min-sweep`, 10 tokens at 6 decimals by default) it calls `sweep_fees` with 100 TGas, over the 87 TGas floor. It needs only a function-call key limited to this contract and that one method.                                                                                                                                                                                                 |
-| Website and keeper                          | The current ABI adds paged exempt positions, storage policy, seeder/holder fields and pruning. Creation requires a native deposit. Earlier upgrade additions to `config` included `state_version` and `upgrade_proven`, and now `revenue_unresolved`. `storage_deposit` now returns a `StorageBalance` and takes two optional arguments; the body must be a JSON object, so `{}` still works and an empty body no longer does. The website already sends `{}`.                                                                                                                                                                |
+| Website and keeper                          | The current ABI adds paged exempt positions, storage policy, the holder count and pruning. Creation requires a native deposit. Earlier upgrade additions to `config` included `state_version` and `upgrade_proven`, and now `revenue_unresolved`. `storage_deposit` now returns a `StorageBalance` and takes two optional arguments; the body must be a JSON object, so `{}` still works and an empty body no longer does. The website already sends `{}`.                                                                                                                                                                |
 | No outside audit                            | The only review is the self-review in `AUDIT.md`. One is required before mainnet money beyond a small capped test.                                                                                                                                                                                                                                                                                                                                                                                          |

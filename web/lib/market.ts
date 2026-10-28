@@ -11,7 +11,7 @@ export interface PriceRule {
   above: boolean;
 }
 
-export type MarketStatus = "resolved" | "halted" | "closed" | "unregistered" | "unseeded" | "open";
+export type MarketStatus = "resolved" | "halted" | "closed" | "unregistered" | "open";
 
 export interface MarketView {
   id: string;
@@ -27,14 +27,15 @@ export interface MarketView {
   resolve_by: string;
   status: MarketStatus;
   registered: boolean;
-  seeded: boolean;
-  void_price_yes: string | null;
   outcome: Outcome | null;
+  // True once resolved Void, or for an answer nobody held: each holder is paid back what they put in.
+  refunds: boolean;
   price_yes: string;
   price_no: string;
+  yes_shares: string;
+  no_shares: string;
   locked: string;
-  holders: number | null;
-  seeder: { account_id: string; yes: string; no: string } | null;
+  holders: number;
   pruned: boolean;
 }
 
@@ -160,23 +161,18 @@ export interface MarketConfig {
   storage_deposit: string;
   max_positions: number;
   fee_rate_bps: number;
-  create_fee: string;
   revenue_pool: string | null;
   treasury: string | null;
   revenue_share_bps: number;
   treasury_share_bps: number;
   sells_paused: boolean;
-  void_price_window_ns: string;
   void_grace_ns: string;
   settle_wait_minutes: number;
   reconcile_wait_minutes: number;
   min_sweep_interval_minutes: number;
-  min_open_price: string;
-  max_open_price: string;
   max_fee_rate_bps: number;
   min_revenue_share_bps: number;
   max_revenue_share_bps: number;
-  max_create_fee: string;
   max_min_sweep: string;
 }
 
@@ -275,8 +271,8 @@ export async function listMarkets(): Promise<MarketView[]> {
   }
 }
 
-// Unknown seeding state remains a pending contract field; explicit false is never tradable.
-export const isMarketListed = (m: MarketView) => m.registered && m.seeded !== false;
+// A market trades from the moment the oracle has registered it.
+export const isMarketListed = (m: MarketView) => m.registered;
 export interface BuyQuote { shares_out: string; fee: string }
 export interface SellQuote { collateral_out: string; shares_in: string; fee: string }
 
@@ -381,10 +377,10 @@ export const buyFromBalanceCall = (id: string, side: Side, amount: bigint, minSh
   deposit: ONE_YOCTO,
 });
 
-export const sellCall = (id: string, side: Side, collateralOut: bigint, maxSharesIn: bigint): FunctionCall => ({
+export const sellCall = (id: string, side: Side, shares: bigint, minCollateral: bigint): FunctionCall => ({
   receiverId: market(),
   methodName: "sell",
-  args: { market_id: id, side, collateral_out: collateralOut.toString(), max_shares_in: maxSharesIn.toString() },
+  args: { market_id: id, side, shares: shares.toString(), min_collateral: minCollateral.toString() },
   gas: GAS,
   deposit: ONE_YOCTO,
 });

@@ -4,58 +4,57 @@ use common::*;
 use near_workspaces::types::{Gas, NearToken};
 use serde_json::json;
 
-// The fee formula from spec section 4, with p = collateral / shares the trade's average price.
-fn fee_shape(collateral: u128, shares: u128) -> u128 {
-    (200 * collateral * (shares - collateral)).div_ceil(10_000 * shares)
+// The fee from spec section 4: 2% of what a buy pays in or a sell pays out, rounded up.
+fn fee_of(amount: u128) -> u128 {
+    (200 * amount).div_ceil(10_000)
 }
 
 #[tokio::test]
 async fn trades_pay_the_quoted_fee_and_redeem_and_withdraw_pay_none() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
-    assert_eq!(fees(&w).await, (CREATE_FEE, 0, 0), "the seed paid the creation fee");
-    assert_eq!(u(&market_json(&w, id).await["locked"]), SEED - CREATE_FEE);
+    let id = new_market(&w, 120).await?;
+    assert_eq!(fees(&w).await, (0, 0, 0), "opening a market costs no fee");
+    assert_eq!(u(&market_json(&w, id).await["locked"]), 0);
 
-    // 10 USD at 50c: the whole amount would buy 19,082,568 shares, an average price of 0.524, so the fee is
-    // 2% x 19,082,568 x 0.524 x 0.476 = 95,193 and the remaining 9,904,807 buys 18,908,779 shares.
-    assert_eq!(quote_buy(&w, id, "yes", 10 * USD).await, (18_908_779, 95_193));
+    // 10 USD into an empty market: the fee is 200,000 and the rest buys a share a unit.
+    assert_eq!(quote_buy(&w, id, "yes", 10 * USD).await, (9_800_000, 200_000));
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
-    assert_eq!(shares(&w, id, w.alice.id()).await, (18_908_779, 0));
-    assert_eq!(fees(&w).await.0, CREATE_FEE + 95_193);
-    assert_eq!(
-        u(&market_json(&w, id).await["locked"]),
-        SEED - CREATE_FEE + 10 * USD - 95_193
-    );
+    assert_eq!(shares(&w, id, w.alice.id()).await, (9_800_000, 0));
+    assert_eq!(fees(&w).await.0, 200_000);
+    assert_eq!(u(&market_json(&w, id).await["locked"]), 9_800_000);
     assert!(invariant(&w, id).await);
 
     let (bob_shares, bob_fee) = quote_buy(&w, id, "no", 20 * USD).await;
+    assert_eq!(bob_fee, fee_of(20 * USD));
     buy(&w, &w.bob, id, "no", 20 * USD).await?;
     assert_eq!(shares(&w, id, w.bob.id()).await, (0, bob_shares));
-    assert_eq!(fees(&w).await.0, CREATE_FEE + 95_193 + bob_fee);
+    assert_eq!(fees(&w).await.0, 200_000 + bob_fee);
     assert!(invariant(&w, id).await);
 
-    // Alice sells half. The quoted fee has the documented shape and is what she is charged.
-    let (c, s, f) = quote_sell(&w, id, "yes", 18_908_779 / 2).await;
-    assert_eq!(f, fee_shape(c, s));
-    sell(&w, &w.alice, id, "yes", c, s).await?;
+    // Alice sells half. The quoted fee is 2% of what the sale pays out, and it is what she is charged.
+    let (c, s, f) = quote_sell(&w, id, "yes", 9_800_000 / 2).await;
+    assert_eq!((s, f), (9_800_000 / 2, fee_of(c)));
+    sell(&w, &w.alice, id, "yes", s, c - f).await?;
     assert_eq!(market_balance(&w, w.alice.id()).await, c - f);
-    assert_eq!(shares(&w, id, w.alice.id()).await.0, 18_908_779 - s);
-    let collected = CREATE_FEE + 95_193 + bob_fee + f;
+    assert_eq!(shares(&w, id, w.alice.id()).await.0, 9_800_000 - s);
+    let collected = 200_000 + bob_fee + f;
     assert_eq!(fees(&w).await.0, collected);
     assert!(invariant(&w, id).await);
 
-    // Resolved Yes. Redeeming pays one unit a share and withdrawing moves the whole balance: no fee on either.
+    // Resolved Yes. Alice holds every Yes share, so redeeming pays her the whole pool, and withdrawing moves the whole
+    // balance: no fee on either.
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     skip_secs(&w.worker, 70).await;
     finalize(&w, id).await?;
+    let pool = u(&market_json(&w, id).await["locked"]);
     w.alice
         .call(w.market.id(), "redeem")
         .args_json(json!({ "market_id": id.to_string() }))
         .transact()
         .await?
         .into_result()?;
-    let balance = c - f + 18_908_779 - s;
+    let balance = c - f + pool;
     assert_eq!(market_balance(&w, w.alice.id()).await, balance);
     let before = holdings(&w, w.alice.id()).await;
     w.alice
@@ -75,10 +74,10 @@ async fn trades_pay_the_quoted_fee_and_redeem_and_withdraw_pay_none() -> anyhow:
 #[tokio::test]
 async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
-    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
-    let collected = CREATE_FEE + 95_193;
-    assert_eq!(collected % 4, 1, "neither share is a whole number of units");
+    let id = new_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", SWEEP_BUY).await?;
+    assert_eq!(fees(&w).await.0, SWEEP_FEE);
+    assert_eq!(SWEEP_FEE % 4, 1, "neither share is a whole number of units");
     let (council_before, treasury_before) = (holdings(&w, w.council.id()).await, holdings(&w, w.treasury.id()).await);
 
     // Anyone can sweep. Both shares round down and the one unit left over stays collected.
@@ -103,10 +102,10 @@ async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once() -
             swept["treasury"].as_str(),
             swept["total"].as_str()
         ),
-        (Some("1"), Some("273798"), Some("821394"), Some("1095193"))
+        (Some("1"), Some("250000"), Some("750000"), Some("1000001"))
     );
-    assert_eq!(holdings(&w, w.council.id()).await - council_before, 273_798);
-    assert_eq!(holdings(&w, w.treasury.id()).await - treasury_before, 821_394);
+    assert_eq!(holdings(&w, w.council.id()).await - council_before, COUNCIL_SHARE);
+    assert_eq!(holdings(&w, w.treasury.id()).await - treasury_before, TREASURY_SHARE);
     assert_eq!(fees(&w).await, (1, 0, 0));
     let record: serde_json::Value = w
         .market
@@ -131,10 +130,10 @@ async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once() -
         .args_json(json!({ "market": w.market.id(), "sweep_id": "1" }))
         .await?
         .json()?;
-    assert_eq!(u(&received["amount"]), 273_798);
+    assert_eq!(u(&received["amount"]), COUNCIL_SHARE);
     assert_eq!(received["quarter"], current_quarter(&w).await["quarter"]);
-    assert_eq!(u(&current_quarter(&w).await["revenue_in"]), 273_798);
-    assert_eq!(council_total_received(&w).await, 273_798);
+    assert_eq!(u(&current_quarter(&w).await["revenue_in"]), COUNCIL_SHARE);
+    assert_eq!(council_total_received(&w).await, COUNCIL_SHARE);
     assert_reconciled(&w).await;
 
     // Nothing new: a second sweep sends nothing, takes no id and changes nothing.
@@ -145,8 +144,8 @@ async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once() -
         .map(|l| l.to_string())
         .collect::<Vec<_>>();
     assert!(event_names(&logs).is_empty(), "{logs:?}");
-    assert_eq!(holdings(&w, w.council.id()).await - council_before, 273_798);
-    assert_eq!(holdings(&w, w.treasury.id()).await - treasury_before, 821_394);
+    assert_eq!(holdings(&w, w.council.id()).await - council_before, COUNCIL_SHARE);
+    assert_eq!(holdings(&w, w.treasury.id()).await - treasury_before, TREASURY_SHARE);
     assert_eq!(fees(&w).await, (1, 0, 0));
     assert!(w
         .market
@@ -163,8 +162,8 @@ async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once() -
 #[tokio::test]
 async fn a_treasury_that_never_registered_anywhere_is_paid_its_share() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
-    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    let id = new_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", SWEEP_BUY).await?;
     let new_treasury = w.worker.dev_create_account().await?;
     w.owner
         .call(w.market.id(), "set_fee_recipients")
@@ -180,13 +179,16 @@ async fn a_treasury_that_never_registered_anywhere_is_paid_its_share() -> anyhow
         .map(|l| l.to_string())
         .collect::<Vec<_>>();
     assert!(!event_names(&logs).contains(&"fee_transfer_failed".to_string()));
-    assert_eq!(intents_balance(&w, new_treasury.id()).await, 821_394);
+    assert_eq!(intents_balance(&w, new_treasury.id()).await, TREASURY_SHARE);
     assert_eq!(
         ft_balance(&w, new_treasury.id()).await,
         0,
         "paid in the verifier, not in tokens"
     );
-    assert_eq!(intents_balance(&w, w.council.id()).await - council_before, 273_798);
+    assert_eq!(
+        intents_balance(&w, w.council.id()).await - council_before,
+        COUNCIL_SHARE
+    );
     assert_eq!(fees(&w).await, (1, 0, 0));
     assert_reconciled(&w).await;
     Ok(())
@@ -206,8 +208,8 @@ async fn nothing_is_swept_or_claimed_until_the_owner_has_configured_the_recipien
         ),
         (&json!([]), &json!(w.nft.id()))
     );
-    let id = create_seeded_market(&w, 600).await?;
-    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    let id = new_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", SWEEP_BUY).await?;
     let collected = fees(&w).await.0;
     refused(
         sweep(&w, &w.carol).await,
@@ -242,10 +244,14 @@ async fn nothing_is_swept_or_claimed_until_the_owner_has_configured_the_recipien
     assert_eq!(council_total_received(&w).await, 0);
     assert_eq!(
         intents_balance(&w, w.treasury.id()).await,
-        821_394,
+        TREASURY_SHARE,
         "the treasury leg did not wait for the Council's"
     );
-    assert_eq!(fees(&w).await, (1, 273_798, 0), "the Council's share is due again");
+    assert_eq!(
+        fees(&w).await,
+        (1, COUNCIL_SHARE, 0),
+        "the Council's share is due again"
+    );
     refused(
         claim_quarter(&w, &w.jurors[0], 0, w.jurors[0].id().as_str()).await,
         "the Council is not configured, the owner must call allow_market",
@@ -258,8 +264,8 @@ async fn nothing_is_swept_or_claimed_until_the_owner_has_configured_the_recipien
 #[tokio::test]
 async fn a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_once() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
-    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    let id = new_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", SWEEP_BUY).await?;
     w.owner
         .call(w.market.id(), "set_min_sweep")
         .args_json(json!({ "min_sweep": "1" }))
@@ -272,7 +278,7 @@ async fn a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_o
     sweep(&w, &w.carol).await?;
     assert_eq!(
         holdings(&w, w.treasury.id()).await - treasury_before,
-        821_394,
+        TREASURY_SHARE,
         "the treasury leg was paid"
     );
     assert_eq!(
@@ -280,7 +286,7 @@ async fn a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_o
         council_before,
         "the Council's leg was given back"
     );
-    assert_eq!(fees(&w).await, (1, 273_798, 0));
+    assert_eq!(fees(&w).await, (1, COUNCIL_SHARE, 0));
     let first: serde_json::Value = w
         .market
         .view("get_sweep")
@@ -301,10 +307,10 @@ async fn a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_o
     set_council_market(&w, w.market.id()).await?;
     past_sweep_interval(&w).await;
     sweep(&w, &w.carol).await?;
-    assert_eq!(holdings(&w, w.council.id()).await - council_before, 273_798);
+    assert_eq!(holdings(&w, w.council.id()).await - council_before, COUNCIL_SHARE);
     assert_eq!(
         holdings(&w, w.treasury.id()).await - treasury_before,
-        821_394,
+        TREASURY_SHARE,
         "the treasury was paid once"
     );
     assert_eq!(fees(&w).await, (1, 0, 0));
@@ -320,7 +326,7 @@ async fn a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_o
             second["carried_council"].as_str(),
             second["treasury"]["status"].as_str()
         ),
-        (Some("273798"), Some("273798"), Some("settled"))
+        (Some("250000"), Some("250000"), Some("settled"))
     );
     let received: serde_json::Value = w
         .council
@@ -329,7 +335,7 @@ async fn a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_o
         .await?
         .json()?;
     assert!(received.is_null(), "the Council never took sweep 1");
-    assert_eq!(council_total_received(&w).await, 273_798);
+    assert_eq!(council_total_received(&w).await, COUNCIL_SHARE);
     assert_reconciled(&w).await;
     Ok(())
 }

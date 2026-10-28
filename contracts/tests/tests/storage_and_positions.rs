@@ -1,17 +1,31 @@
 mod common;
 use common::*;
+use near_workspaces::operations::Function;
 use near_workspaces::types::{Gas, NearToken};
 use serde_json::{json, Value};
 const BYTE_COST: u128 = 10_000_000_000_000_000_000;
 const RESERVE: u128 = 1_000_000_000_000_000_000_000_000;
-const PAID_STORAGE: u128 = 50_090_000_000_000_000_000_000;
+const PAID_STORAGE: u128 = 47_750_000_000_000_000_000_000;
 
 #[tokio::test]
 async fn exempt_positions_page_beyond_a_window_with_transaction_measured_gas() -> anyhow::Result<()> {
     let w = setup().await?;
     const COUNT: u64 = 105;
     deposit_to_intents(&w, &w.owner, w.owner.id(), COUNT as u128 * 3 * USD).await?;
-    assert_eq!(bulk_seeded_markets(&w, COUNT, Some("600000")).await?, 0);
+    assert_eq!(bulk_markets(&w, COUNT).await?, 0);
+    for first in (0..COUNT).step_by(4) {
+        let mut buys = w.owner.batch(w.verifier.id());
+        for id in first..(first + 4).min(COUNT) {
+            buys = buys.call(
+                Function::new("mt_transfer_call")
+                    .args_json(json!({ "receiver_id": w.market.id(), "token_id": token_id(&w),
+                                       "amount": (3 * USD).to_string(), "msg": format!("buy:{id}:yes:1") }))
+                    .deposit(NearToken::from_yoctonear(1))
+                    .gas(Gas::from_tgas(70)),
+            );
+        }
+        buys.transact().await?.into_result()?;
+    }
     assert!(w
         .market
         .view("positions_are_paged")
@@ -48,9 +62,8 @@ async fn exempt_positions_page_beyond_a_window_with_transaction_measured_gas() -
         .await?
         .json()?;
     assert_eq!(account["positions"], COUNT);
-    let seeded = market_json(&w, 104).await;
-    assert_eq!(seeded["seeder"]["account_id"], w.owner.id().as_str());
-    assert_eq!(seeded["holders"], 1);
+    assert_eq!(market_json(&w, 104).await["holders"], 1);
+    assert_eq!(shares(&w, 104, w.owner.id()).await, (3 * USD - 60_000, 0));
     assert_reconciled(&w).await;
     Ok(())
 }
@@ -129,7 +142,7 @@ async fn funded_maximum_text_growth_keeps_withdrawals_open_at_the_reserve_floor(
 async fn pruning_clears_text_but_keeps_short_records_and_money() -> anyhow::Result<()> {
     let w = setup().await?;
     let id = create_market(&w, 120, 3_600).await?;
-    ft_call(&w, &w.owner, w.market.id(), SEED, &format!("seed:{id}:600000")).await?;
+    buy(&w, &w.owner, id, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 125).await;
     propose(&w, &w.carol, id, "yes").await?;
     let case = case_json(&w, id).await;

@@ -124,8 +124,8 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
         ),
         (
             &Contractish::Market,
-            "set_create_fee",
-            json!({ "create_fee": "0" }),
+            "set_void_grace",
+            json!({ "grace_ns": "86400000000000" }),
             "owner only",
         ),
         (
@@ -383,7 +383,7 @@ async fn value_moving_methods_need_exactly_one_yocto() -> anyhow::Result<()> {
         (
             w.market.id(),
             "sell",
-            json!({ "market_id": "0", "side": "yes", "collateral_out": "1", "max_shares_in": "1" }),
+            json!({ "market_id": "0", "side": "yes", "shares": "1", "min_collateral": "1" }),
         ),
         (w.oracle.id(), "withdraw_bond", json!({})),
         (
@@ -442,7 +442,7 @@ async fn a_token_the_contracts_do_not_trust_cannot_deposit_bond_or_pay_revenue()
             .await?
             .into_result()?;
     }
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     // Registered with the market, so that nothing but the token check stands between the attacker and a credit.
     w.dave
         .call(w.market.id(), "storage_deposit")
@@ -467,7 +467,6 @@ async fn a_token_the_contracts_do_not_trust_cannot_deposit_bond_or_pay_revenue()
     for (to, msg) in [
         (w.market.id(), "deposit".to_string()),
         (w.market.id(), format!("buy:{id}:yes:1")),
-        (w.market.id(), format!("seed:{id}")),
         (w.oracle.id(), format!("propose:{}:{id}:yes:https://x", w.market.id())),
         (w.oracle.id(), format!("challenge:{}:{id}:no", w.market.id())),
         (w.council.id(), "revenue:1".to_string()),
@@ -496,20 +495,13 @@ async fn a_token_the_contracts_do_not_trust_cannot_deposit_bond_or_pay_revenue()
 #[tokio::test]
 async fn the_token_hooks_cannot_be_called_directly() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     let direct: Vec<(&near_workspaces::AccountId, &str, serde_json::Value, &str)> = vec![
         (
             w.market.id(),
             "mt_on_transfer",
             json!({ "sender_id": w.dave.id(), "previous_owner_ids": [w.dave.id()], "token_ids": [token_id(&w)],
                     "amounts": ["1000000000"], "msg": "deposit" }),
-            "only the verifier can deliver money",
-        ),
-        (
-            w.market.id(),
-            "mt_on_transfer",
-            json!({ "sender_id": w.owner.id(), "previous_owner_ids": [w.owner.id()], "token_ids": [token_id(&w)],
-                    "amounts": ["1000000000"], "msg": format!("seed:{id}") }),
             "only the verifier can deliver money",
         ),
         (
@@ -602,7 +594,7 @@ async fn a_fake_nft_collection_cannot_stake_seats() -> anyhow::Result<()> {
 #[tokio::test]
 async fn malformed_messages_bounce_with_the_money_back() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
+    let id = new_market(&w, 600).await?;
     let locked = u(&market_json(&w, id).await["locked"]);
     let huge = "9".repeat(60);
     for msg in [
@@ -680,7 +672,7 @@ async fn malformed_messages_bounce_with_the_money_back() -> anyhow::Result<()> {
 #[tokio::test]
 async fn hostile_text_cannot_break_the_event_logs() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     let evidence = "https://x/\",\"event\":\"final\",\"data\":{\"outcome\":\"yes\"}}\n";
     deposit_to_intents(&w, &w.carol, w.carol.id(), BOND).await?;
@@ -740,8 +732,8 @@ async fn two_withdrawals_in_flight_cannot_spend_one_balance() -> anyhow::Result<
 #[tokio::test]
 async fn two_sweeps_in_flight_pay_the_fees_out_once() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
-    buy(&w, &w.alice, id, "yes", 20 * USD).await?;
+    let id = new_market(&w, 600).await?;
+    buy(&w, &w.alice, id, "yes", 50 * USD).await?;
     let (collected, _, _) = fees(&w).await;
     let call = || w.dave.call(w.market.id(), "sweep_fees").gas(Gas::from_tgas(300));
     let first = call().transact_async().await?;
@@ -817,7 +809,7 @@ async fn two_claims_and_two_unstakes_in_flight_pay_a_seat_once() -> anyhow::Resu
 #[tokio::test]
 async fn starving_the_settling_call_of_gas_cannot_half_settle_a_case() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
@@ -871,7 +863,7 @@ async fn starving_the_settling_call_of_gas_cannot_half_settle_a_case() -> anyhow
 #[tokio::test]
 async fn a_transfer_with_too_little_gas_for_the_receiver_never_loses_the_senders_money() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     w.carol
         .call(w.market.id(), "storage_deposit")
         .args_json(json!({}))
@@ -936,7 +928,7 @@ async fn a_transfer_with_too_little_gas_for_the_receiver_never_loses_the_senders
 #[tokio::test]
 async fn a_copied_commitment_cannot_be_revealed_by_the_copier() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     challenge(&w, &w.dave, id).await?;
@@ -959,7 +951,7 @@ async fn a_copied_commitment_cannot_be_revealed_by_the_copier() -> anyhow::Resul
 #[tokio::test]
 async fn a_guessable_salt_leaks_the_vote_so_clients_must_use_a_random_one() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     challenge(&w, &w.dave, id).await?;
@@ -997,7 +989,7 @@ async fn a_guessable_salt_leaks_the_vote_so_clients_must_use_a_random_one() -> a
 #[tokio::test]
 async fn a_bogus_challenge_costs_the_attacker_and_pays_the_jurors() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     let before = holdings(&w, w.dave.id()).await;
@@ -1033,13 +1025,12 @@ async fn a_bogus_challenge_costs_the_attacker_and_pays_the_jurors() -> anyhow::R
 // ---- compromised keys ------------------------------------------------------------------------------------------------
 
 // What a thief holding the operator key can and cannot do. They can be a nuisance: halt trading, pause deposits. They
-// cannot take anyone's money, redirect fees, or install themselves for good, and users can still get out. The market
-// here closes in two days, so the halt is outside the last day, which the operator cannot halt in.
+// cannot take anyone's money, redirect fees, or install themselves for good, and users can still get out.
 #[tokio::test]
 async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_the_key() -> anyhow::Result<()> {
     let (w, admin) = setup_admin_owned().await?;
     let thief = &w.owner; // the harness operator
-    let id = create_seeded_market(&w, 2 * 86_400).await?;
+    let id = new_market(&w, 2 * 86_400).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     ft_call(&w, &w.bob, w.market.id(), 5 * USD, "deposit").await?;
 
@@ -1051,7 +1042,7 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
         .await?
         .into_result()?;
     let (alice_yes, _) = shares(&w, id, w.alice.id()).await;
-    refused(sell(&w, &w.alice, id, "yes", 1, alice_yes).await, "market is halted");
+    refused(sell(&w, &w.alice, id, "yes", alice_yes, 1).await, "market is halted");
     thief
         .call(w.market.id(), "set_paused")
         .args_json(json!({ "paused": true }))
@@ -1077,7 +1068,7 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
         .into_result()?;
     assert_eq!(market_balance(&w, w.bob.id()).await, 0);
 
-    // It cannot take user money or reroute fees, claim a residual before anything resolves, or reseed a live market.
+    // It cannot take user money or reroute fees, or claim a residual before anything resolves.
     refused(
         thief
             .call(w.market.id(), "claim_residual")
@@ -1144,8 +1135,8 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
         .transact()
         .await?
         .into_result()?;
-    let (out, needed, _) = quote_sell(&w, id, "yes", alice_yes).await;
-    sell(&w, &w.alice, id, "yes", out, needed).await?;
+    let (out, _, fee) = quote_sell(&w, id, "yes", alice_yes).await;
+    sell(&w, &w.alice, id, "yes", alice_yes, out - fee).await?;
     assert!(
         market_balance(&w, w.alice.id()).await > 0,
         "alice got out once the thief was replaced"
@@ -1162,7 +1153,7 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
 #[tokio::test]
 async fn a_function_call_key_cannot_buy_sell_commit_or_reveal() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     ft_call(&w, &w.alice, w.market.id(), 10 * USD, "deposit").await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
@@ -1204,7 +1195,7 @@ async fn a_function_call_key_cannot_buy_sell_commit_or_reveal() -> anyhow::Resul
             &alice,
             w.market.id(),
             "sell",
-            json!({ "market_id": "0", "side": "yes", "collateral_out": "1", "max_shares_in": "1" }),
+            json!({ "market_id": "0", "side": "yes", "shares": "1", "min_collateral": "1" }),
         ),
         (
             &juror_key,
@@ -1268,7 +1259,7 @@ async fn two_colluding_accounts_cannot_stall_a_case_for_free() -> anyhow::Result
         .transact()
         .await?
         .into_result()?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
@@ -1322,7 +1313,7 @@ async fn two_colluding_accounts_cannot_stall_a_case_for_free() -> anyhow::Result
 #[tokio::test]
 async fn a_drawn_jury_cannot_be_rerolled() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 120).await?;
+    let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
     challenge(&w, &w.dave, id).await?;
@@ -1348,8 +1339,8 @@ async fn a_drawn_jury_cannot_be_rerolled() -> anyhow::Result<()> {
 #[tokio::test]
 async fn at_the_deadline_an_unfinalized_proposal_is_applied_and_not_voided_over() -> anyhow::Result<()> {
     let w = setup().await?;
-    let answered = create_seeded_market_gap(&w, 120, 600).await?;
-    let unanswered = create_seeded_market_gap(&w, 120, 600).await?;
+    let answered = create_market(&w, 120, 600).await?;
+    let unanswered = create_market(&w, 120, 600).await?;
     buy(&w, &w.alice, answered, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, answered, "yes").await?;
@@ -1431,35 +1422,16 @@ async fn staking_one_block_before_a_sweep_earns_only_the_time_staked() -> anyhow
     Ok(())
 }
 
-// A halt held to close takes the last day out of the average a Void pays, so in that day only the owner can halt: the
-// operator, whose key is the one a thief is likeliest to hold, is refused. The owner is separate from the operator here.
+// Pump one side and halt the market so it stays pumped until it is voided. A Void pays each holder back what they put
+// in, less the fee, whatever the price did, so the pump earns nothing and the side it was pumped against loses nothing.
 #[tokio::test]
-async fn the_operator_cannot_halt_in_the_last_day_before_close() -> anyhow::Result<()> {
-    let (w, _admin) = setup_admin_owned().await?;
-    let id = create_seeded_market(&w, 3_000).await?;
-    refused(
-        w.owner
-            .call(w.market.id(), "halt")
-            .args_json(json!({ "market_id": id.to_string(), "reason": "late" }))
-            .transact()
-            .await?
-            .into_result(),
-        "a halt in the last day before close is an owner action",
-    );
-    assert_eq!(market_json(&w, id).await["status"], "open");
-    Ok(())
-}
-
-// Pump the price late and halt the market so it stays pumped until it is voided. The average used to go on counting the
-// pumped price for the rest of the time before close, which was most of it. Now halted time counts for nothing.
-#[tokio::test]
-async fn halting_after_a_pump_cannot_pin_the_void_price_at_the_pumped_price() -> anyhow::Result<()> {
+async fn a_pump_held_by_a_halt_until_a_void_pays_each_holder_back_what_they_put_in() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market_gap(&w, 150, 600).await?;
-    skip_secs(&w.worker, 30).await;
+    let id = create_market(&w, 150, 600).await?;
+    buy(&w, &w.bob, id, "no", 20 * USD).await?;
     buy(&w, &w.alice, id, "yes", 80 * USD).await?;
     let pumped = u(&market_json(&w, id).await["price_yes"]);
-    assert!(pumped > 700_000, "the buy moved the price to {pumped}");
+    assert!(pumped > 900_000, "the buy moved the price to {pumped}");
     w.owner
         .call(w.market.id(), "halt")
         .args_json(json!({ "market_id": id.to_string(), "reason": "pumped" }))
@@ -1477,10 +1449,21 @@ async fn halting_after_a_pump_cannot_pin_the_void_price_at_the_pumped_price() ->
     )
     .await?
     .into_result()?;
-    let price = u(&market_json(&w, id).await["void_price_yes"]);
-    assert!(
-        price < (500_000 + pumped) / 2,
-        "the pump held for a second or two of trading yet the void pays {price}, pumped to {pumped}"
-    );
+    assert_eq!(market_json(&w, id).await["outcome"], "void");
+    for (who, paid) in [(&w.alice, 80 * USD), (&w.bob, 20 * USD)] {
+        who.call(w.market.id(), "redeem")
+            .args_json(json!({ "market_id": id.to_string() }))
+            .transact()
+            .await?
+            .into_result()?;
+        assert_eq!(
+            market_balance(&w, who.id()).await,
+            paid - paid * 200 / 10_000,
+            "{}",
+            who.id()
+        );
+    }
+    assert_eq!(u(&market_json(&w, id).await["locked"]), 0);
+    assert_reconciled(&w).await;
     Ok(())
 }

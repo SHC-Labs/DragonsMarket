@@ -69,7 +69,7 @@ async fn credited(market: &Contract, who: &AccountId) -> u128 {
 #[tokio::test]
 async fn a_token_holder_registers_in_near_deposits_trades_and_exits() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
+    let id = new_market(&w, 600).await?;
     register_on_token(&w, w.market.id()).await?;
     let tokens = ft_balance(&w, w.dave.id()).await;
     let held = intents_balance(&w, w.market.id()).await;
@@ -162,7 +162,7 @@ async fn a_refused_transfer_comes_back_whole_and_moves_nothing() -> anyhow::Resu
 #[tokio::test]
 async fn a_token_buy_ends_as_shares_or_as_a_balance() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
+    let id = new_market(&w, 600).await?;
     register_on_token(&w, w.market.id()).await?;
     let held = intents_balance(&w, w.market.id()).await;
 
@@ -194,7 +194,7 @@ async fn a_token_buy_ends_as_shares_or_as_a_balance() -> anyhow::Result<()> {
 #[tokio::test]
 async fn a_token_buy_that_just_clears_the_floor_completes() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_seeded_market(&w, 600).await?;
+    let id = new_market(&w, 600).await?;
     register_on_token(&w, w.market.id()).await?;
     let order = format!("buy:{id}:yes:1");
     for tgas in 76..100 {

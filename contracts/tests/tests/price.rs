@@ -54,7 +54,7 @@ async fn world_with_publishers() -> anyhow::Result<(World, Vec<SigningKey>)> {
     Ok((w, keys))
 }
 
-// A seeded price market that closes in 120s, is observed the moment it closes, and is Yes if the price is at or above STRIKE.
+// A price market that closes in 120s, is observed the moment it closes, and is Yes if the price is at or above STRIKE.
 // Returns the market id and its observation time.
 async fn price_market(w: &World) -> anyhow::Result<(u64, u64)> {
     let t = now(&w.worker).await;
@@ -75,11 +75,7 @@ async fn price_market(w: &World) -> anyhow::Result<(u64, u64)> {
         .await?
         .into_result()?
         .json()?;
-    let id: u64 = id.parse()?;
-    if market_json(w, id).await["registered"] == true {
-        ft_call(w, &w.owner, w.market.id(), SEED, &format!("seed:{id}")).await?;
-    }
-    Ok((id, close_at))
+    Ok((id.parse()?, close_at))
 }
 
 async fn answer_price(w: &World, id: u64, price: u128, entries: &[String]) -> anyhow::Result<()> {
@@ -331,11 +327,7 @@ async fn a_price_market_never_opens_while_too_few_publishers_exist() -> anyhow::
         false,
         "one publisher, two must sign: the oracle refused it"
     );
-    assert_eq!(
-        u(&market_json(&w, id).await["locked"]),
-        0,
-        "so it was never seeded or traded"
-    );
+    assert_eq!(u(&market_json(&w, id).await["locked"]), 0, "so it was never traded");
 
     // Once a second publisher exists, the same market registers.
     add_publisher(&w, &signing_key(2)).await?;

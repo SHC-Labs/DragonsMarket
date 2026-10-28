@@ -8,7 +8,7 @@ use serde_json::json;
 
 // A closed market with a proposal by Carol challenged by Dave.
 async fn disputed(w: &World) -> anyhow::Result<u64> {
-    let id = create_seeded_market(w, 120).await?;
+    let id = new_market(w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(w, &w.carol, id, "yes").await?;
     challenge(w, &w.dave, id).await?;
@@ -238,7 +238,7 @@ async fn a_draw_picks_only_staked_seats_that_are_not_serving_or_leaving() -> any
     to_reveal_phase(&w, first).await;
 
     // A second case while all three are serving the first: nobody is left to draw.
-    let second = create_seeded_market(&w, 1).await?;
+    let second = new_market(&w, 1).await?;
     skip_secs(&w.worker, 2).await;
     propose(&w, &w.carol, second, "yes").await?;
     challenge(&w, &w.dave, second).await?;

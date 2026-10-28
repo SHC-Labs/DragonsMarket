@@ -103,7 +103,10 @@ every contract, that its policy matches the
 - [ ] Check owner handover on every application contract and reconcile pending-owner state.
 - [ ] Prove the upgrade path before removing deployment keys; verify the resulting key list.
 - [ ] Confirm routine operators cannot redirect fees or spend backing.
-- [ ] Seed markets from a dedicated operator account, not the DAO owner account.
+- [ ] Create markets from a dedicated operator account, not the DAO owner account.
+- [ ] Market state version 6 (dynamic parimutuel pricing) upgrades a version-5 market only while it
+  has created no market. A version-5 deployment that has markets is not upgraded: deploy version 6
+  fresh, stop creating markets on the old one, and let its markets resolve and pay out there.
 
 [The treasury handoff](governance.md) describes what remains unconfigured. Do not turn its
 proposal-preparation helper into a production submitter without reviewing the chosen interfaces.

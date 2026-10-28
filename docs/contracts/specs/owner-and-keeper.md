@@ -10,6 +10,8 @@
 | Source | Working tree on top of commit `6cad02e`, SputnikDAO source at revision `5434a59dec23ee0c49df8c8c4350c208a7e75b0b` (version 2.3.1), read 2026-10-21 |
 | Index | [README.md](README.md) |
 
+**Dynamic parimutuel pricing, 2026-10-27.** The market lost `set_create_fee` and `set_open_price_bounds`, `set_void_rules` became `set_void_grace(grace_ns)`, and `set_fee_limits` dropped `max_create_fee`. The allow-list in `treasury.mjs`, its tests and the tables in sections 3.1 and 4 below are updated. `mt_on_transfer` no longer has an owner check, because the seed message it guarded is gone, so it is no longer in the excluded list.
+
 **Build status, 2026-10-21.** The new owner methods are in the allow-list of `contracts/keeper/treasury.mjs` with their argument checks: market `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id` (it must not be below the market's `next_sweep_id`), `reconcile_leg` and `reconcile_withdrawal`; oracle `set_reconcile_wait_ns` and `reconcile_bond_payout`; Council `set_close_grace_ns`; oracle and Council `allow_market` and `disallow_market` (the Council's `set_market` is gone). `reconcile_revenue` is removed (see market.md). `set_fee_recipients` now takes `revenue_pool` and `treasury`. The Council reconciliation of section 9.2 uses `reward_totals`: the floor is total received less total paid less the claims in flight. `settle_leg` and `payout_bond` are still not prepared (anyone calls them). The keeper sends `advance_quarters`, `finalize_quarter` and `settle_leg` (section 9.1), and holds back `sweep_fees` for an hour after the last sweep. Tests: `treasury.test.mjs` (`the next sweep id can only move up from where the market is`, `the grace period bounds are the ones in the Council's source`, the sample table, the limits) and `keeper.test.mjs` (`the Council's floor is what it took in less what it paid and less the claims on their way`).
 
 
@@ -125,19 +127,17 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | Method | Caller | Args | Deposit | Gas | Tier | Note |
 | --- | --- | --- | --- | --- | --- | --- |
 | `set_fee_rate_bps` | Owner | `fee_rate_bps: u32` | 0 | 30 TGas | 1 | Refused above 500 |
-| `set_create_fee` | Owner | `create_fee: U128` | 0 | 30 TGas | 1 | Refused above 10,000,000 |
 | NEW `set_min_sweep` | Owner | `min_sweep: U128` | 0 | 30 TGas | 1 | At most 100,000,000 |
-| `set_paused` | Operator or owner | `paused: bool` | 0 | 30 TGas | 1 | Emergency stop for buys, deposits and seeds. Sells and exits stay open |
+| `set_paused` | Operator or owner | `paused: bool` | 0 | 30 TGas | 1 | Emergency stop for buys, deposits and new markets. Sells and exits stay open |
 | `set_sells_paused` | Owner | `sells_paused: bool` | 0 | 30 TGas | 1 | Stops `sell`. Withdraw and redeem stay open |
-| `set_void_rules` | Owner | `price_window_ns: U64`, `grace_ns: U64` | 0 | 30 TGas | 1 | Void price window 1 hour to 7 days, void grace 1 to 60 days. Applies to markets created afterwards |
+| `set_void_grace` | Owner | `grace_ns: U64` | 0 | 30 TGas | 1 | Void grace 1 to 60 days. Applies to markets created afterwards |
 | `set_sweep_timing` | Owner | `settle_wait_minutes`, `reconcile_wait_minutes`, `min_interval_minutes` (u32) | 0 | 30 TGas | 1 | Settle wait 1 to 1440, reconcile wait 10 to 10080 and not below the settle wait, sweep interval 1 to 1440. Live |
-| `set_open_price_bounds` | Owner | `min: U128`, `max: U128` | 0 | 30 TGas | 1 | Opening price range within 1000 to 999000 millionths, min below max. Live |
-| `set_max_positions` | Owner | `max_positions: u32` | 0 | 30 TGas | 1 | 5 to 30, the most the 0.05 NEAR deposit pays for with a 64-character id. Positions already held stay |
+| `set_max_positions` | Owner | `max_positions: u32` | 0 | 30 TGas | 1 | 5 to 30 entries, the most the 0.05 NEAR deposit pays for with a 64-character id. A position on one side takes two, its shares and its cost record. Positions already held stay |
 | `set_registration_fee` | Owner | `registration_fee: U128` | 0 | 30 TGas | 1 | 10,000 to 2,000,000 collateral units (0.01 to 2 of a 6-decimal token). What a `register` transfer pays to register an account with no NEAR, due to the treasury |
-| `set_fee_limits` | Owner | `max_fee_rate_bps`, `max_create_fee`, `min_revenue_share_bps`, `max_revenue_share_bps`, `max_min_sweep` | 0 | 30 TGas | 1 | The ceilings and floors the fee setters check against, each inside a hard range. Refused if it would leave a current value outside |
-| `halt`, `resume` | Operator or owner | `market_id: U64`, `reason: String` | 0 | 30 TGas | 1 | The operator cannot halt in the last 24 hours before close |
+| `set_fee_limits` | Owner | `max_fee_rate_bps`, `min_revenue_share_bps`, `max_revenue_share_bps`, `max_min_sweep` | 0 | 30 TGas | 1 | The ceilings and floors the fee setters check against, each inside a hard range. Refused if it would leave a current value outside |
+| `halt`, `resume` | Operator or owner | `market_id: U64`, `reason: String` | 0 | 30 TGas | 1 | Stops or restarts trading in one market. A halt changes no payout |
 | `create_market`, `retry_register`, `claim_residual` | Operator or owner | as in market.md | 0 | 100 TGas for `create_market` | 1 | Routine. The operator normally calls them |
-| `set_operator` | Owner | `operator_id: AccountId` | 0 | 30 TGas | 2 | Changes who can seed, halt and pause |
+| `set_operator` | Owner | `operator_id: AccountId` | 0 | 30 TGas | 2 | Changes who can create markets, halt and pause |
 | `set_fee_recipients` | Owner | `revenue_pool: AccountId`, `business_wallet: AccountId` (NEW name `treasury`) | 0 | 30 TGas | 2 | Redirects fees. `revenue_pool` must equal the Council. The treasury must be the verified Trezu account |
 | `reconcile_revenue` | Owner | `amount: U128`, `arrived: bool` | 0 | 30 TGas | 2 | Needs evidence from the Council's `total_received` |
 | NEW `reconcile_leg` | Owner | `sweep_id: U64`, `arrived: bool` | 0 | 30 TGas | 2 | Treasury leg fallback |
@@ -273,17 +273,15 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | market, oracle | `set_operator` | `operator_id`: account id | 0 | 5 to 30 |
 | market | `set_fee_recipients` | `revenue_pool` must be the Council, `business_wallet` must be the treasury | 0 | 5 to 30 |
 | market | `set_fee_rate_bps` | `fee_rate_bps`: integer 0 to 500 | 0 | 5 to 30 |
-| market | `set_create_fee` | `create_fee`: U128 0 to 10,000,000 | 0 | 5 to 30 |
 | market | `reconcile_revenue` | `amount`: U128 above 0, `arrived`: boolean | 0 | 5 to 30 |
 | market | `set_paused` | `paused`: boolean | 0 | 5 to 30 |
 | market | `set_sells_paused` | `sells_paused`: boolean | 0 | 5 to 30 |
-| market | `set_void_rules` | `price_window_ns`, `grace_ns`: decimal strings in range | 0 | 5 to 30 |
+| market | `set_void_grace` | `grace_ns`: decimal string from 1 to 60 days in nanoseconds | 0 | 5 to 30 |
 | market | `set_sweep_timing` | three integers in range, settle wait not above reconcile wait | 0 | 5 to 30 |
 | market | `reconcile_withdrawal` | `id`: decimal string from 1, `paid`: boolean | 0 | 5 to 30 |
-| market | `set_open_price_bounds` | `min`, `max`: decimal strings in range, min not above max | 0 | 5 to 30 |
 | market | `set_max_positions` | integer 5 to 30 | 0 | 5 to 30 |
 | market | `set_registration_fee` | `registration_fee`: decimal string 10000 to 2000000 | 0 | 5 to 30 |
-| market | `set_fee_limits` | five values in range, share floor not above ceiling | 0 | 5 to 30 |
+| market | `set_fee_limits` | four values in range, share floor not above ceiling | 0 | 5 to 30 |
 | market | `halt` | `market_id`: U64, `reason`: non-blank text up to 500 bytes | 0 | 5 to 30 |
 | market | `resume`, `claim_residual` | `market_id`: U64 | 0 | 5 to 30 |
 | market | `retry_register` | `market_id`: U64 | 0 | 50 to 150, 100 attached |
@@ -321,7 +319,6 @@ The owner methods come from a scan of `contracts/market/src/lib.rs`, `oracle/src
 | --- | --- |
 | `stage_code` (all three) | Open to anyone, and it takes the wasm as its raw call input. A stager sends it (below), and the proposal carries only the hash. `prepareAdministrationProposal` answers a request for it with that instruction |
 | `migrate` (all three) | Private. It runs inside the batch that `upgrade` sends, in the new code |
-| `mt_on_transfer` (market) | Only the verifier calls it. Its `seed` message compares the sender with the owner and operator, and the DAO would send that through `intents.near`, which is not one of the three contracts |
 | `set_min_sweep`, `reconcile_leg`, `set_close_grace_ns`, `settle_leg`, `payout_bond` | Listed as NEW in section 3 and not in the source. They are refused until a contract has them and the table does |
 
 Rules the helper enforces when it prepares a proposal and when it prepares a vote:
@@ -548,7 +545,7 @@ Status is as of 2026-10-21. The evidence column quotes the code as it was when t
 
 `node contracts/keeper/load-test.mjs workload.json` validates a plan without reading keys or contacting RPC. `--execute` first checks `status.chain_id == "testnet"`; every actor and application/verifier target must be a distinct configured `.testnet` account. Use dedicated funded testnet accounts and the tested verifier deployment. The runner permits workload methods only, caps attached deposit at 1 NEAR per call, serializes each actor's nonces, and uses 1 to 8 concurrent workers. Repeated calls from one actor do not create concurrent signing capacity.
 
-A minimal plan for a pre-created, registered and seeded market, with the actor already funded in the market balance:
+A minimal plan for a pre-created, registered market, with the actor already funded in the market balance:
 
 ```json
 {
