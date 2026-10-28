@@ -83,8 +83,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             contracts/target
-          key: sandbox-${{ runner.os }}-${{ hashFiles('contracts/Cargo.lock', 'contracts/rust-toolchain.toml') }}
-          restore-keys: sandbox-${{ runner.os }}-
+          key: sandbox-nodebug-${{ runner.os }}-${{ hashFiles('contracts/Cargo.lock', 'contracts/rust-toolchain.toml') }}
+          restore-keys: sandbox-nodebug-${{ runner.os }}-
       - uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: ~/.cargo/bin/cargo-near
@@ -109,7 +109,11 @@ jobs:
       - name: Sandbox tests
         # near-workspaces downloads the nearcore sandbox binary itself the first time it runs. Sandbox chain time follows
         # the wall clock, so on a 2 core runner many parallel sandboxes slow each transaction until a short dispute
-        # window closes mid-test. Two threads keep the tests inside their windows.
+        # window closes mid-test. Two threads keep the tests inside their windows. With debug info the test binaries
+        # fill the runner's disk.
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: cargo test -p tests -- --test-threads=2
       - name: Record the sha256 of each wasm
         run: sha256sum target/near/*/*.wasm | tee wasm-sha256.txt
