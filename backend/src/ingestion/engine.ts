@@ -39,7 +39,8 @@ export async function ingest(pool: pg.Pool, config: Config, source: BlockSource)
     return { committed, replayed, mode: source.mode, live: false };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
-    if (started) await client.query("UPDATE indexer_status SET state='error', last_error_code=$2, last_error_at=now(), updated_at=now() WHERE deployment_id=$1", [d.id, error instanceof IngestionError ? error.code : 'database_or_worker_error']).catch(() => {});
+    // A shutdown stops the batch between blocks. That is not a failure and must not raise indexer_not_live.
+    if (started && !(error instanceof Error && error.name === 'AbortError')) await client.query("UPDATE indexer_status SET state='error', last_error_code=$2, last_error_at=now(), updated_at=now() WHERE deployment_id=$1", [d.id, error instanceof IngestionError ? error.code : 'database_or_worker_error']).catch(() => {});
     throw error instanceof IngestionError ? error : new IngestionError('database_or_worker_error');
   } finally {
     if (locked) {

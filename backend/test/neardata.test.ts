@@ -76,3 +76,12 @@ test('transport enforces redirect origin/path, response bounds and safe rate-lim
   const missing = new NeardataReader(async () => new Response('null'), async () => {});
   await assert.rejects(missing.capture(1), /invalid_neardata_block/);
 });
+
+test('a cycle stops asking for blocks before its request budget runs out, so the next cycle carries on', async () => {
+  const reader = new NeardataReader(async () => new Response('null'), async () => {}, 400);
+  assert.equal(reader.hasBudget(), true);
+  for (let i = 0; i < 31; i++) await reader.document(`/v0/block/${i}`);
+  assert.equal(reader.hasBudget(), false);
+  reader.resetBudget();
+  assert.equal(reader.hasBudget(), true);
+});

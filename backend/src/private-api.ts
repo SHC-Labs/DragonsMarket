@@ -1,12 +1,14 @@
 import type {IncomingMessage,ServerResponse} from 'node:http';
 import type pg from 'pg';
 import type {Config} from './config.js';
-import {challenge,login,session,tokenHash,type CheckAccessKey} from './auth.js';
+import {challenge,isUuid,login,session,tokenHash,type CheckAccessKey} from './auth.js';
 import {account} from './ingestion/neardata.js';
 import {ReadError} from './read-api.js';
 export const isPrivateRoute=(p:string)=>p.startsWith('/v1/auth/')||p==='/v1/watchlist'||p==='/v1/policies/acknowledge'||/^\/v1\/operations\/[^/]+$/.test(p);
 export type PrivateHandler=(req:IncomingMessage,res:ServerResponse,url:URL)=>Promise<unknown>;
-function cookie(req:IncomingMessage,name:string){return req.headers.cookie?.split(';').map(s=>s.trim()).find(s=>s.startsWith(name+'='))?.slice(name.length+1)??'';}
+// A cookie name sent twice is ambiguous (a sibling subdomain can plant a second one), so it counts as absent.
+function cookie(req:IncomingMessage,name:string){const found=req.headers.cookie?.split(';').map(s=>s.trim()).filter(s=>s.startsWith(name+'='))??[];return found.length===1?found[0]!.slice(name.length+1):'';}
+const LOGIN_REJECTIONS=['invalid_login','challenge_used_or_expired','invalid_public_key','invalid_nonce'];
 async function body(req:IncomingMessage){
  if(!req.headers['content-type']?.startsWith('application/json'))throw new ReadError(415,'json_required');
  let length=0;const parts:Buffer[]=[];
@@ -14,26 +16,29 @@ async function body(req:IncomingMessage){
  try{const value:unknown=JSON.parse(Buffer.concat(parts).toString());if(!value||typeof value!=='object'||Array.isArray(value))throw new Error();return value as Record<string,unknown>;}catch{throw new ReadError(400,'invalid_json');}
 }
 export function createPrivateApi(pool:pg.Pool,config:Config,checkKey:CheckAccessKey,policies:{terms:string;privacy:string}|null=null):PrivateHandler{
- const attrs=`; HttpOnly; SameSite=Strict; Path=/v1${config.webOrigin.startsWith('https:')?'; Secure':''}`;
+ // Over https the __Host- prefix makes browsers refuse a cookie set by a sibling subdomain; it requires Secure and Path=/.
+ const https=config.webOrigin.startsWith('https:');
+ const attrs=`; HttpOnly; SameSite=Strict; Path=${https?'/':'/v1'}${https?'; Secure':''}`;
+ const challengeCookie=https?'__Host-dm_challenge':'dm_challenge',sessionCookie=https?'__Host-dm_session':'dm_session';
  return async(req,res,url)=>{
  const method=req.method??'GET',path=url.pathname;
  if(url.search)throw new ReadError(400,'invalid_query');
  if(!['GET','HEAD'].includes(method)&&req.headers.origin!==config.webOrigin)throw new ReadError(403,'origin_required');
  if(path==='/v1/auth/challenge'&&method==='POST'){
   const b=await body(req);if(!account(b.accountId))throw new ReadError(400,'account_required');
-  const c=await challenge(pool,config,b.accountId);res.setHeader('Set-Cookie',`dm_challenge=${c.browser}; Max-Age=300${attrs}`);return c.request;
+  const c=await challenge(pool,config,b.accountId).catch(e=>{throw e instanceof Error&&e.message==='invalid_account'?new ReadError(400,'invalid_account'):e instanceof Error&&e.message==='challenge_capacity'?new ReadError(503,'challenge_capacity'):e;});res.setHeader('Set-Cookie',`${challengeCookie}=${c.browser}; Max-Age=300${attrs}`);return c.request;
  }
  if(path==='/v1/auth/verify'&&method==='POST'){
   const b=await body(req);if(!['id','publicKey','signature'].every(k=>typeof b[k]==='string'))throw new ReadError(400,'invalid_login');
   let token:string;
-  try{token=await login(pool,config,b.id as string,b.publicKey as string,b.signature as string,cookie(req,'dm_challenge'),checkKey);}catch{throw new ReadError(401,'login_rejected');}
-  res.setHeader('Set-Cookie',[`dm_session=${token}; Max-Age=86400${attrs}`,`dm_challenge=; Max-Age=0${attrs}`]);return {authenticated:true};
+  try{token=await login(pool,config,b.id as string,b.publicKey as string,b.signature as string,cookie(req,challengeCookie),checkKey);}catch(e){throw e instanceof Error&&LOGIN_REJECTIONS.includes(e.message)?new ReadError(401,'login_rejected'):new ReadError(503,'login_unavailable');}
+  res.setHeader('Set-Cookie',[`${sessionCookie}=${token}; Max-Age=86400${attrs}`,`${challengeCookie}=; Max-Age=0${attrs}`]);return {authenticated:true};
  }
- const token=cookie(req,'dm_session'),identity=await session(pool,config,token);
+ const token=cookie(req,sessionCookie),identity=await session(pool,config,token);
  if(path==='/v1/auth/session'&&['GET','HEAD'].includes(method))return {session:identity};
  if(!identity)throw new ReadError(401,'session_required');
  if(path==='/v1/auth/logout'&&method==='POST'){
-  await pool.query('DELETE FROM wallet_sessions WHERE token_hash=$1',[tokenHash(token)]);res.setHeader('Set-Cookie',`dm_session=; Max-Age=0${attrs}`);return {authenticated:false};
+  await pool.query('DELETE FROM wallet_sessions WHERE token_hash=$1',[tokenHash(token)]);res.setHeader('Set-Cookie',`${sessionCookie}=; Max-Age=0${attrs}`);return {authenticated:false};
  }
  if(path==='/v1/policies/acknowledge'&&method==='POST'){
   if(!policies)throw new ReadError(503,'policy_hashes_not_configured');const b=await body(req);
@@ -54,8 +59,9 @@ export function createPrivateApi(pool:pg.Pool,config:Config,checkKey:CheckAccess
    }return {saved:true};
   }
  }
- const operation=/^\/v1\/operations\/([a-f0-9-]{36})$/.exec(path);
+ const operation=/^\/v1\/operations\/([^/]+)$/.exec(path);
  if(operation&&['GET','HEAD'].includes(method)){
+  if(!isUuid(operation[1]!))throw new ReadError(404,'operation_not_found');
   const row=(await pool.query('SELECT id,kind,state,transaction_hash,evidence,updated_at FROM user_operations WHERE id=$1 AND deployment_id=$2 AND account_id=$3',[operation[1],deployment,identity.account_id])).rows[0];
   if(!row)throw new ReadError(404,'operation_not_found');return row;
  }

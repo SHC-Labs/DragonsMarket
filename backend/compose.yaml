@@ -26,6 +26,8 @@ services:
         condition: service_healthy
   api:
     build: .
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
     environment: &backend_environment
       DATABASE_URL: postgresql://${POSTGRES_USER:-dragons}:${POSTGRES_PASSWORD:-dragons_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
       HOST: 0.0.0.0
@@ -46,6 +48,8 @@ services:
       RPC_TIMEOUT_MS: ${RPC_TIMEOUT_MS:-10000}
       RPC_INTERVAL_MS: ${RPC_INTERVAL_MS:-1000}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3400}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
+      TRUSTED_PROXY_ADDRESSES: ${TRUSTED_PROXY_ADDRESSES:-}
       POLICY_TERMS_HASH: ${POLICY_TERMS_HASH:-}
       POLICY_PRIVACY_HASH: ${POLICY_PRIVACY_HASH:-}
     ports:
@@ -62,6 +66,8 @@ services:
   indexer:
     build: .
     profiles: [indexing]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
     environment: *backend_environment
     command: [node, dist/src/ingestion/follow.js]
     depends_on:
@@ -71,6 +77,8 @@ services:
   feed:
     build: .
     profiles: [indexing]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
     environment: *backend_environment
     command: [node, dist/src/ingestion/feed.js, --follow]
     volumes:
@@ -82,6 +90,8 @@ services:
   reconcile:
     build: .
     profiles: [indexing]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
     environment: *backend_environment
     command: [node, dist/src/reconcile.js, --follow]
     depends_on:
@@ -91,6 +101,8 @@ services:
   prices:
     build: .
     profiles: [prices]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
     environment:
       <<: *backend_environment
       COINGECKO_DEMO_API_KEY: ${COINGECKO_DEMO_API_KEY:-}

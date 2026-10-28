@@ -10,6 +10,9 @@ import { LiveNeardataSource } from './live-source.js';
 import { ingest } from './engine.js';
 import { ReadRpcClient } from '../providers.js';
 
+// Outages that end by themselves. A database restart or a slow source must not end the follower; everything else needs a person.
+const RETRYABLE_CODES = ['neardata_unavailable', 'neardata_rate_limited', 'neardata_request_budget', 'source_or_database_unavailable', 'database_or_worker_error', 'database_connection_lost'];
+
 export async function followCycle(pool: pg.Pool, config: Config, reader: NeardataReader, signal?: AbortSignal) {
   if (config.network !== 'mainnet' || !config.deployment) throw new IngestionError('mainnet_deployment_required');
   await verifyDatabase(pool, config);
@@ -53,7 +56,7 @@ export async function follow(pool: pg.Pool, config: Config, signal: AbortSignal)
         console.error(JSON.stringify({ service:'indexer',error:code,attempt:failures }));
         await pool.query("UPDATE indexer_status SET state='error',last_error_code=$2,last_error_at=now(),updated_at=now() WHERE deployment_id=$1",[config.deployment.id,code]).catch(()=>{});
         // Schema/configuration/ancestry conflicts need intervention, not repeated retries.
-        if (!['neardata_unavailable','neardata_rate_limited','source_or_database_unavailable'].includes(code)) throw error;
+        if (!RETRYABLE_CODES.includes(code)) throw error;
       }
       await sleep(Math.min(60000, failures ? 1000*2**Math.min(failures,6) : 200), undefined, { signal }).catch(() => {});
     }

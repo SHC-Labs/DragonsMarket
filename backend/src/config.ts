@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { readRpcSettings, type RpcSettings } from './providers.js';
 
 export type Network = 'sandbox' | 'testnet' | 'mainnet';
@@ -7,6 +8,8 @@ export interface Config {
   host: string;
   port: number;
   webOrigin: string;
+  trustedProxyHops: number;
+  trustedProxyAddresses: string[];
   network: Network;
   rpc: RpcSettings;
   deployment: null | {
@@ -69,7 +72,15 @@ export function readConfig(env: NodeJS.ProcessEnv): Config {
     if (!/^nep141:[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(collateralTokenId) || collateralTokenId.length > 71) throw new Error('Invalid COLLATERAL_TOKEN_ID');
     deployment = { id, startBlock, contracts, collateralTokenId, collateralDecimals: integer(env.COLLATERAL_DECIMALS || '6', 'COLLATERAL_DECIMALS', 0, 38) };
   }
-  return { databaseUrl, network, rpc, host, port, webOrigin, deployment };
+  const trustedProxyHops = integer(env.TRUSTED_PROXY_HOPS || '0', 'TRUSTED_PROXY_HOPS', 0, 5);
+  const trustedProxyAddresses = (env.TRUSTED_PROXY_ADDRESSES || '').split(',').map(entry => entry.trim()).filter(Boolean);
+  for (const entry of trustedProxyAddresses) {
+    const [address = '', prefix] = entry.split('/');
+    const version = isIP(address);
+    if (!version || (prefix !== undefined && (!/^\d+$/.test(prefix) || Number(prefix) > (version === 6 ? 128 : 32)))) throw new Error('Invalid TRUSTED_PROXY_ADDRESSES');
+  }
+  if (trustedProxyHops > 0 && !trustedProxyAddresses.length) throw new Error('TRUSTED_PROXY_HOPS needs TRUSTED_PROXY_ADDRESSES: the addresses the proxy connects from');
+  return { databaseUrl, network, rpc, host, port, webOrigin, trustedProxyHops, trustedProxyAddresses, deployment };
 }
 
 // Deliberate allowlist: never spread process.env or expose database credentials.

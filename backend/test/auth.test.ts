@@ -9,7 +9,7 @@ import {migrate} from '../src/migrate.js';
 import {registerDeployment} from '../src/ingestion/store.js';
 import {createApp} from '../src/app.js';
 import {createPrivateApi} from '../src/private-api.js';
-import {challenge,login,session,cleanupExpiredAuth} from '../src/auth.js';
+import {challenge,cleanupExpiredAuth,login,session} from '../src/auth.js';
 
 test('SDK-signed NEP-413 login rejects replay, wrong browser, wrong key permissions and cross-user access',async()=>{
  const url=process.env.TEST_DATABASE_URL;assert.ok(url);const schema=`auth_${randomUUID().replaceAll('-','')}`;
@@ -26,12 +26,19 @@ test('SDK-signed NEP-413 login rejects replay, wrong browser, wrong key permissi
   const c=await challenge(pool,config,'alice.near'),s=await signed(c);
   await assert.rejects(login(pool,config,c.request.id,s.key,s.signature,'wrong-browser',async()=>true),/invalid_login/);
   await assert.rejects(login(pool,config,c.request.id,s.key,s.signature,c.browser,async()=>false),/invalid_login/);
-  const token=await login(pool,config,c.request.id,s.key,s.signature,c.browser,async()=>true);
-  assert.equal((await session(pool,config,token)).account_id,'alice.near');
-  await assert.rejects(login(pool,config,c.request.id,s.key,s.signature,c.browser,async()=>true),/invalid_login/);
+  await assert.rejects(login(pool,config,c.request.id,s.key,s.signature,c.browser,async()=>true),/invalid_login/,'a rejected attempt spends the challenge');
+  const outage=await challenge(pool,config,'alice.near'),os=await signed(outage);
+  await assert.rejects(login(pool,config,outage.request.id,os.key,os.signature,outage.browser,async()=>{throw new Error('rpc_unavailable');}),/rpc_unavailable/);
+  const c2=await challenge(pool,config,'alice.near'),s2=await signed(c2);
+  const token=await login(pool,config,outage.request.id,os.key,os.signature,outage.browser,async()=>true);
+  assert.equal((await session(pool,config,token)).account_id,'alice.near','an RPC outage leaves the challenge usable');
+  await assert.rejects(login(pool,config,outage.request.id,os.key,os.signature,outage.browser,async()=>true),/invalid_login/);
+  assert.ok(c2&&s2);
   const expired=await challenge(pool,config,'alice.near'),es=await signed(expired);
   await pool.query("UPDATE wallet_challenges SET expires_at=now()-interval '1 second' WHERE id=$1",[expired.request.id]);
   await assert.rejects(login(pool,config,expired.request.id,es.key,es.signature,expired.browser,async()=>true),/invalid_login/);
+  await pool.query("INSERT INTO wallet_challenges(id,account_id,network,origin,nonce,browser_hash,message,expires_at) SELECT gen_random_uuid(),'old.near',$1,$2,'n'||g,'b','m',now()-interval '3 hours' FROM generate_series(1,2500) g",[config.network,config.webOrigin]);
+  assert.equal((await cleanupExpiredAuth(pool)).challenges,2500,'cleanup drains more than one batch per run');
   const bob=await challenge(pool,config,'bob.near'),bs=await signed(bob),bobToken=await login(pool,config,bob.request.id,bs.key,bs.signature,bob.browser,async()=>true);
   app.listen(0,'127.0.0.1');await once(app,'listening');const address=app.address();assert.ok(address&&typeof address!=='string');const root=`http://127.0.0.1:${address.port}`;
   const headers={Origin:config.webOrigin,'Content-Type':'application/json',Cookie:`dm_session=${token}`};

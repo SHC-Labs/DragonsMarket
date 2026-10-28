@@ -56,3 +56,15 @@ test('source failures are sanitized and the fixture file preserves numeric heigh
   assert.deepEqual(heights, ['100', '101', '103']);
   await assert.rejects(async () => { for await (const _ of new FixtureSource('/missing/private/path').blocks()) {} }, /source_read_failed/);
 });
+
+test('verifier receipts are kept only when they name one of our contracts', async () => {
+  const block = await first();
+  const receipt = (id: string, logs: string[]) => ({ receipt_id: id, receiver_id: 'verifier.fixture.near', status: { SuccessValue: '' }, logs });
+  const other = receipt('4'.repeat(32), ['EVENT_JSON:{"standard":"nep245","event":"mt_transfer","data":[{"old_owner_id":"alice.near","new_owner_id":"bob.near"}]}']);
+  const ours = receipt('5'.repeat(32), ['EVENT_JSON:{"standard":"nep245","event":"mt_transfer","data":[{"old_owner_id":"alice.near","new_owner_id":"rounds.fixture.near"}]}']);
+  const before = prepareBlock(block, config).block.receipts.length;
+  const prepared = prepareBlock({ ...block, receipts: [...block.receipts, other, ours] }, config);
+  assert.equal(prepared.block.receipts.length, before + 1);
+  assert.ok(prepared.block.receipts.some(r => r.receipt_id === ours.receipt_id));
+  assert.ok(!prepared.block.receipts.some(r => r.receipt_id === other.receipt_id));
+});

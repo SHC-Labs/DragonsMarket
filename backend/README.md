@@ -288,6 +288,14 @@ Reconciliation reads current contract liabilities and verifier holdings at one f
 
 `ops/roles.sql` is a DBA provisioning template for NOLOGIN API/indexer/worker/backup groups. Use separate credentialed users and a migration owner; no credentials are embedded. A rollback-only isolated permission test checks API/indexer boundaries and removes its test roles. These roles are not automatically provisioned or verified as a production deployment. Grant templates must be reviewed after future migrations. The local Compose database uses public development credentials and is bound to loopback.
 
+Reconciliation subtracts what a contract has already sent out but not yet booked (market `in_flight().withdrawals`, rounds `owed_breakdown().pending_withdrawals`, oracle `bond_totals().pending_payouts`) before it compares with what the verifier holds, so a pending withdrawal is not a shortfall. The report carries `inFlight` per contract.
+
+`GET /v1/health/services` raises `indexer_lagging` when the follower is more than 1,000 blocks behind the source head and `reconciliation_stale` when no solvency report is newer than 15 minutes.
+
+Behind a reverse proxy set `TRUSTED_PROXY_HOPS` to the number of proxies and `TRUSTED_PROXY_ADDRESSES` to the addresses (or CIDR ranges) they connect from. `X-Forwarded-For` is read only from those addresses, and only the entry the nearest proxy appended. Without both, every client is limited by its socket address, which behind a proxy means one shared limit. IPv6 clients are limited per /64.
+
+`npm run backup` needs `PGHOST`, `PGPORT`, `PGDATABASE` and `PGUSER` set explicitly (it refuses to guess a local default server) and keeps the newest `BACKUP_KEEP` archives (default 14).
+
 The backup command writes a custom-format pg_dump archive with a SHA-256 file under ignored `.local/backups` and checks that pg_restore can list it. Never copy the live PostgreSQL data directory. `test:backup` dumps/restores an isolated full backend schema, verifies migration checksums/deployment identity, indexed events/checkpoint, unknown operation state and exact amounts. Production restore drills with the actual deployment and feed files, off-host backup storage, retention, alert routing and operational ownership remain deployment work. The website/contracts are not changed by these backend commands.
 
 ## Host development and checks

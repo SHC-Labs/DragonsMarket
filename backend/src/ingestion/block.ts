@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import type { Config, ContractRole } from '../config.js';
 
 export const MAX_BLOCK_BYTES = 8 * 1024 * 1024;
+// Receipts are counted before the filter keeps only ours, so a busy mainnet block must not trip this. The stored block is bounded by MAX_BLOCK_BYTES.
+export const MAX_INPUT_RECEIPTS = 200000;
 export type Deployment = NonNullable<Config['deployment']>;
 export class IngestionError extends Error {
   constructor(public readonly code: string) { super(code); }
@@ -42,7 +44,7 @@ export function prepareBlock(input: unknown, config: Config): PreparedBlock {
   if (input.finalized !== true) throw new IngestionError('finalized_block_required');
   const h = input.header;
   if (!object(h) || !uint(h.height) || !uint(h.timestamp_nanosec) || !hash(h.hash) || !hash(h.prev_hash)) throw new IngestionError('invalid_header');
-  if (!Array.isArray(input.receipts) || input.receipts.length > 10000) throw new IngestionError('invalid_receipts');
+  if (!Array.isArray(input.receipts) || input.receipts.length > MAX_INPUT_RECEIPTS) throw new IngestionError('invalid_receipts');
   const standards = new Map<string, string>();
   for (const role of ['market', 'rounds', 'oracle', 'council'] as const satisfies readonly ContractRole[]) {
     const receiver = d.contracts[role];
@@ -51,6 +53,8 @@ export function prepareBlock(input: unknown, config: Config): PreparedBlock {
       standards.set(receiver, role);
     }
   }
+  // The verifier is shared, so on mainnet its receipts are the whole network's. Only those that name one of our contracts are kept.
+  const names = [...standards.keys()];
   const seen = new Set<string>();
   const receipts: Receipt[] = [];
   const events: EventRow[] = [];
@@ -61,7 +65,7 @@ export function prepareBlock(input: unknown, config: Config): PreparedBlock {
     const status = raw.status;
     if (Object.keys(status).length !== 1 || !(typeof status.SuccessValue === 'string' || hash(status.SuccessReceiptId) || object(status.Failure))) throw new IngestionError('incomplete_receipt_outcome');
     const standard = standards.get(raw.receiver_id);
-    if (!standard && raw.receiver_id !== d.contracts.verifier) continue;
+    if (!standard && !(raw.receiver_id === d.contracts.verifier && (raw.logs as string[]).some(log => names.some(name => log.includes(`"${name}"`))))) continue;
     if (raw.transaction_hash !== undefined && !hash(raw.transaction_hash)) throw new IngestionError('invalid_transaction_hash');
     if (raw.child_receipt_ids !== undefined && (!Array.isArray(raw.child_receipt_ids) || raw.child_receipt_ids.length > 10000 || raw.child_receipt_ids.some(id => !hash(id)))) throw new IngestionError('invalid_receipt_links');
     const receipt: Receipt = { receipt_id: raw.receipt_id, receiver_id: raw.receiver_id, status, logs: raw.logs as string[] };

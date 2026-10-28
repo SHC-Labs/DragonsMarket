@@ -16,7 +16,7 @@ test('real PostgreSQL migrations, deduplication, atomic rollback and reconnect p
   try {
     await admin.query(`CREATE SCHEMA ${schema}`);
     pool = connect();
-    assert.equal(await migrate(pool), 7);
+    assert.equal(await migrate(pool), 8);
     assert.equal(await migrate(pool), 0);
     const config = readConfig({ DATABASE_URL: databaseUrl });
     await verifyDatabase(pool, config);
@@ -30,6 +30,8 @@ test('real PostgreSQL migrations, deduplication, atomic rollback and reconnect p
     try {
       await client.query('BEGIN');
       await client.query(insert, ['receipt-rollback']);
+      await client.query(`INSERT INTO indexed_blocks (deployment_id, block_height, block_hash, prev_hash, block_timestamp_ns, content_hash, event_count, keeper_payload)
+        VALUES ('test', 10, 'hash', 'prev', 10, repeat('a', 64), 0, '{}')`);
       await client.query(`INSERT INTO indexer_checkpoints VALUES ('test', 10, 'hash', 10, now())`);
       await client.query('ROLLBACK');
     } finally { client.release(); }
@@ -37,9 +39,14 @@ test('real PostgreSQL migrations, deduplication, atomic rollback and reconnect p
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM raw_events')).rows[0].n, 1);
     const { rows } = await pool.query('SELECT block_height::text FROM raw_events');
     assert.equal(rows[0].block_height, '18446744073709551615');
+    // A second deployment on the same network indexes the same receipt without colliding with the first.
+    await pool.query(`INSERT INTO deployments (id, network, start_block, contracts, collateral_token_id, collateral_decimals)
+      VALUES ('test2', 'sandbox', 0, '{"rounds":"rounds.test.near","verifier":"intents.test.near"}', 'nep141:usdc.test.near', 6)`);
+    await pool.query(insert.replace("'test'", "'test2'"), ['receipt-1']);
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM raw_events')).rows[0].n, 2);
     await pool.end();
     pool = connect();
-    assert.equal((await pool.query('SELECT count(*)::int AS n FROM raw_events')).rows[0].n, 1);
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM raw_events')).rows[0].n, 2);
     const configured = readConfig({ DATABASE_URL: databaseUrl, DEPLOYMENT_ID: 'test', DEPLOYMENT_START_BLOCK: '0', ROUNDS_CONTRACT_ID: 'rounds.test.near', VERIFIER_CONTRACT_ID: 'intents.test.near', COLLATERAL_TOKEN_ID: 'nep141:usdc.test.near', RPC_URL: 'http://localhost:3030' });
     await verifyDatabase(pool, configured);
     await assert.rejects(verifyDatabase(pool, { ...configured, network: 'testnet' }));

@@ -91,6 +91,8 @@ export async function recordEvidence(pool:pg.Pool,o:Observation){
  await pool.query(`INSERT INTO price_evidence(id,asset,source,quote,boundary_ns,source_time_ns,retrieved_at,price,raw_response,response_hash,accepted,reason)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(asset,source,boundary_ns,response_hash) DO NOTHING`,[randomUUID(),o.asset,o.source,o.quote,o.boundaryNs,o.sourceTimeNs,o.retrievedAt,o.price,o.raw,hash,o.exactBoundary,o.exactBoundary?'closed_one_minute_candle_not_yet_approved_for_signing':'display_only_not_a_boundary_price']);
 }
+// The reason a source failed (stale price, rate limit, bad response), without the raw response or any key.
+const reasonOf=(error:unknown)=>error instanceof Error?error.message.slice(0,120):'unknown';
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href){
  let pool:pg.Pool|undefined;const stop=new AbortController();process.on('SIGINT',()=>stop.abort());process.on('SIGTERM',()=>stop.abort());
  try{
@@ -101,14 +103,14 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).hr
  const boundary=(BigInt(Date.now()-5000)/300000n*300000000000n).toString();
  for(const asset of assets){for(const source of ['binance','coingecko'] as const){
   try{const o=source==='binance'?await binanceBoundary(asset,boundary):await coingeckoLatest(asset,boundary,process.env.COINGECKO_DEMO_API_KEY||null);await recordEvidence(pool,o);console.log(JSON.stringify({asset,source,quote:o.quote,price:o.price,exactBoundary:o.exactBoundary,signing:false}));}
-  catch{console.error(JSON.stringify({asset,source,error:'observation_unavailable',signing:false}));process.exitCode=1;}
+  catch(error){console.error(JSON.stringify({asset,source,error:'observation_unavailable',reason:reasonOf(error),signing:false}));process.exitCode=1;}
  }}
  if(cmcMode!=='off'){
   try{for(const o of await coinmarketcapLatest(boundary,{mode:cmcMode as 'keyed'|'keyless',apiKey:process.env.COINMARKETCAP_API_KEY})){
    await recordEvidence(pool,o);console.log(JSON.stringify({asset:o.asset,source:o.source,quote:o.quote,price:o.price,exactBoundary:false,signing:false}));
-  }}catch{console.error(JSON.stringify({source:'coinmarketcap',mode:cmcMode,error:'observation_unavailable',signing:false}));process.exitCode=1;}
+  }}catch(error){console.error(JSON.stringify({source:'coinmarketcap',mode:cmcMode,error:'observation_unavailable',reason:reasonOf(error),signing:false}));process.exitCode=1;}
  }
  if(process.argv.includes('--follow')&&!stop.signal.aborted){const wait=300000-(Date.now()%300000)+5000;await sleep(wait,undefined,{signal:stop.signal}).catch(()=>{});}
  }while(process.argv.includes('--follow')&&!stop.signal.aborted);
- }catch{console.error('price_collection_failed');process.exitCode=1;}finally{await pool?.end();}
+ }catch(error){console.error(JSON.stringify({error:'price_collection_failed',reason:reasonOf(error)}));process.exitCode=1;}finally{await pool?.end();}
 }

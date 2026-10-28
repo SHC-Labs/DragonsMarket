@@ -71,6 +71,10 @@ export function normalizeNeardata(input: unknown): ObservedBlock {
   return { header, previousHeight, shardIds: [...seenShards].sort(), receipts };
 }
 
+const MAX_REQUESTS_PER_CYCLE = 32;
+const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
+const MAX_BYTES_PER_CYCLE = 128 * 1024 * 1024;
+
 /** Fixed mainnet host, no keys, no write methods, finite requests and bounded memory. */
 export class NeardataReader {
   readonly origin = 'https://mainnet.neardata.xyz';
@@ -81,11 +85,13 @@ export class NeardataReader {
     if(!Number.isInteger(intervalMs)||intervalMs<400||intervalMs>60000)throw new IngestionError('invalid_source_interval');
   }
   resetBudget() { this.requests = 0; this.bytes = 0; }
+  /** True while a following block still fits in this cycle's request and byte budget. A batch stops here and the next cycle carries on. */
+  hasBudget() { return this.requests <= MAX_REQUESTS_PER_CYCLE - 2 && this.bytes <= MAX_BYTES_PER_CYCLE - MAX_DOCUMENT_BYTES; }
   async document(path: string): Promise<unknown> {
     if (!/^\/v0\/(last_block\/final|block\/[0-9]+)$/.test(path)) throw new IngestionError('invalid_neardata_path');
     let url = new URL(path, this.origin);
     for (let redirects = 0; redirects <= 3; redirects++) {
-      if (++this.requests > 32) throw new IngestionError('neardata_request_budget');
+      if (++this.requests > MAX_REQUESTS_PER_CYCLE) throw new IngestionError('neardata_request_budget');
       await this.pause(Math.max(0, this.nextAt - Date.now()));
       this.nextAt = Date.now() + this.intervalMs;
       try {
@@ -107,7 +113,7 @@ export class NeardataReader {
         let length = 0;
         for await (const chunk of response.body) {
           length += chunk.length; this.bytes += chunk.length;
-          if (length > 32 * 1024 * 1024 || this.bytes > 128 * 1024 * 1024) throw new IngestionError('neardata_size_limit');
+          if (length > MAX_DOCUMENT_BYTES || this.bytes > MAX_BYTES_PER_CYCLE) throw new IngestionError('neardata_size_limit');
           chunks.push(chunk);
         }
         return parseNeardata(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));

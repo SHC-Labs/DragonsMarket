@@ -2,6 +2,10 @@ import {createHash,randomBytes,randomUUID,createPublicKey,verify} from 'node:cry
 import type pg from 'pg';
 import type {Config} from './config.js';
 import {account} from './ingestion/neardata.js';
+// Challenges live five minutes, so this bounds the table however many addresses a client rotates through.
+const MAX_PENDING_CHALLENGES=20000;
+const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const isUuid=(s:string)=>UUID.test(s);
 export const tokenHash=(s:string)=>createHash('sha256').update(s).digest('hex');
 const alphabet='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 export function decodeKey(s:string){
@@ -19,6 +23,8 @@ export function messageHash(message:string,nonce:string,recipient:string,callbac
 }
 export async function challenge(pool:pg.Pool,config:Config,accountId:string){
  if(!account(accountId)||(config.network==='mainnet'&&accountId.endsWith('.testnet'))||(config.network==='testnet'&&accountId.endsWith('.near')))throw new Error('invalid_account');
+ const pending=await pool.query('SELECT count(*)::int AS n FROM wallet_challenges WHERE expires_at>now() AND consumed_at IS NULL');
+ if(pending.rows[0].n>=MAX_PENDING_CHALLENGES)throw new Error('challenge_capacity');
  const id=randomUUID(),nonce=randomBytes(32).toString('base64'),browser=randomBytes(32).toString('base64url');
  const expires=new Date(Date.now()+300000);
  const message=`Sign in to Dragons Market\nAccount: ${accountId}\nNetwork: ${config.network}\nOrigin: ${config.webOrigin}\nChallenge: ${id}\nExpires: ${expires.toISOString()}\nThis creates a website session. It does not authorize transactions.`;
@@ -27,11 +33,16 @@ export async function challenge(pool:pg.Pool,config:Config,accountId:string){
 }
 export type CheckAccessKey=(accountId:string,publicKey:string)=>Promise<boolean>;
 export async function login(pool:pg.Pool,config:Config,id:string,publicKey:string,signature:string,browser:string,checkKey:CheckAccessKey){
- if(!/^[a-f0-9-]{36}$/.test(id)||!browser||!/^([A-Za-z0-9+/]{86}==)$/.test(signature))throw new Error('invalid_login');
+ if(!UUID.test(id)||!browser||!/^([A-Za-z0-9+/]{86}==)$/.test(signature))throw new Error('invalid_login');
  const row=(await pool.query('SELECT * FROM wallet_challenges WHERE id=$1 AND consumed_at IS NULL AND expires_at>now()',[id])).rows[0];
  if(!row||row.origin!==config.webOrigin||row.network!==config.network||row.browser_hash!==tokenHash(browser))throw new Error('invalid_login');
  const key=createPublicKey({key:Buffer.concat([Buffer.from('302a300506032b6570032100','hex'),decodeKey(publicKey)]),format:'der',type:'spki'});
- if(!verify(null,messageHash(row.message,row.nonce,row.origin,row.origin),key,Buffer.from(signature,'base64'))||!await checkKey(row.account_id,publicKey))throw new Error('invalid_login');
+ // A definitive rejection spends the challenge, so one challenge cannot be replayed against the RPC. A failing RPC is not a rejection and leaves it usable.
+ const signed=verify(null,messageHash(row.message,row.nonce,row.origin,row.origin),key,Buffer.from(signature,'base64'));
+ if(!signed||!await checkKey(row.account_id,publicKey)){
+  await pool.query('UPDATE wallet_challenges SET consumed_at=now() WHERE id=$1 AND consumed_at IS NULL',[id]);
+  throw new Error('invalid_login');
+ }
  const c=await pool.connect(),token=randomBytes(32).toString('base64url');
  try{
  await c.query('BEGIN');
@@ -47,10 +58,18 @@ export async function session(pool:pg.Pool,config:Config,token:string){
 }
 
 /** Bounded housekeeping for expired credentials only. Legal acknowledgements and signing decisions are retained. */
+const CLEANUP_BATCH=1000;
+const CLEANUP_MAX_BATCHES=50;
+async function deleteExpired(pool:pg.Pool,table:'wallet_challenges'|'wallet_sessions',key:'id'|'token_hash'){
+ let total=0;
+ for(let i=0;i<CLEANUP_MAX_BATCHES;i++){
+  const result=await pool.query(`WITH old AS (SELECT ${key} FROM ${table} WHERE expires_at<now()-interval '1 hour' ORDER BY expires_at LIMIT ${CLEANUP_BATCH})
+   DELETE FROM ${table} t USING old WHERE t.${key}=old.${key}`);
+  total+=result.rowCount??0;
+  if((result.rowCount??0)<CLEANUP_BATCH)break;
+ }
+ return total;
+}
 export async function cleanupExpiredAuth(pool:pg.Pool){
- const challenges=await pool.query(`WITH old AS (SELECT id FROM wallet_challenges WHERE expires_at<now()-interval '24 hours' ORDER BY expires_at LIMIT 1000)
- DELETE FROM wallet_challenges c USING old WHERE c.id=old.id`);
- const sessions=await pool.query(`WITH old AS (SELECT token_hash FROM wallet_sessions WHERE expires_at<now()-interval '24 hours' ORDER BY expires_at LIMIT 1000)
- DELETE FROM wallet_sessions s USING old WHERE s.token_hash=old.token_hash`);
- return {challenges:challenges.rowCount,sessions:sessions.rowCount};
+ return {challenges:await deleteExpired(pool,'wallet_challenges','id'),sessions:await deleteExpired(pool,'wallet_sessions','token_hash')};
 }
