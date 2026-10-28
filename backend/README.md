@@ -202,6 +202,16 @@ Source normalization is in `src/ingestion/neardata.ts`; verification persistence
 
 Contracts are **not deployed** and their trading interfaces are still being finalized. Keep deployment fields empty. The following commands provide tested infrastructure; they do not enable financial execution.
 
+### Running against mainnet
+
+Nothing runs until the contracts are deployed. When they are:
+
+1. Put the real values in `.env`: `NETWORK=mainnet`, `DEPLOYMENT_ID`, `DEPLOYMENT_START_BLOCK` (the block of the earliest contract deployment), the `MARKET_`, `ROUNDS_`, `ORACLE_`, `COUNCIL_` and `VERIFIER_CONTRACT_ID` accounts, `COLLATERAL_TOKEN_ID` (native USDC is `nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`), `RPC_URL` and its bearer token, `WEB_ORIGIN`, and `TRUSTED_PROXY_HOPS`/`TRUSTED_PROXY_ADDRESSES` if a proxy fronts the API.
+2. `docker compose up -d postgres migrate roles`, then register the deployment as the database owner: `docker compose run --rm -e DATABASE_URL=postgresql://dragons:<owner password>@postgres:5432/dragons_market api node dist/src/ingestion/cli.js register`.
+3. `npm run preflight`. It reads the chain and writes nothing, and checks that the RPC is on mainnet and fresh, NEAR Data matches the RPC head, every configured account has code, each contract's verifier and collateral match the configuration, none is paused or mid-upgrade, the oracle, Council and market allow-lists name each other, the books are solvent at one finalized block, the database is current and the deployment matches, and the start block is behind the head (with a warning if catching up will take more than a day). It exits 1 if anything fails. Do not start the workers until it prints `ready`.
+4. `docker compose --profile indexing up --build -d`, then watch `GET /v1/health/services`. `indexer_lagging` is expected while catching up. `reconciliation_stale` and `chain_integrity_stale` clear after the first pass of each worker. Any other alert, or `chain_integrity_failed`, means stop and read the worker logs.
+5. To stop, `docker compose --profile indexing down`. The checkpoint is in Postgres, so a restart continues from the last committed block.
+
 ### Mainnet follower and keeper feed
 
 ```sh
@@ -278,7 +288,7 @@ Reconciliation subtracts what a contract has already sent out but not yet booked
 
 `GET /v1/health/services` raises `indexer_lagging` when the follower is more than 1,000 blocks behind the source head and `reconciliation_stale` when no solvency report is newer than 15 minutes.
 
-`GET /v1/events` rows carry `settlement` (`{kind, phase: request|terminal}`) for market withdrawals and Council claims, the pairs whose events are final, and `GET /v1/settlements/pending` lists requests with no later terminal event for the same key. A request event is never settlement; other flows are not classified until their events are final.
+`GET /v1/events` rows carry `settlement` (`{kind, phase: request|terminal}`) for market and rounds withdrawals, oracle bond payouts and Council claims, the pairs whose events are final, and `GET /v1/settlements/pending` lists requests with no later terminal event for the same key. A request event is never settlement; other flows are not classified until their events are final.
 
 `npm run verify:chain` (a `verify-chain` Compose service, every 6 hours) checks the stored history against itself: each block names the previous stored block as its parent, the checkpoint is the last block, and the events kept equal the events the blocks declare. Results go to `chain_integrity_reports`; `/v1/health/services` raises `chain_integrity_failed` or `chain_integrity_stale`. Entity-level gap repair waits for the financial read model.
 

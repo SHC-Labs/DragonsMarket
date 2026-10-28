@@ -3,14 +3,14 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readConfig, type Config } from './config.js';
 import { ReadRpcClient } from './providers.js';
-import { object, parseJson } from './ingestion/block.js';
+import { object } from './ingestion/block.js';
+import { finalizedHead, viewAt, type View } from './chain-view.js';
 import { createPool, verifyDatabase } from './database.js';
 import { U128_MAX } from './validate.js';
 const amount = (v: unknown) => {
   if (typeof v !== 'string' || !/^\d{1,39}$/.test(v) || BigInt(v) > U128_MAX) throw new Error('invalid_liability_amount');
   return BigInt(v);
 };
-type View = (contract: string, method: string, args: unknown) => Promise<unknown>;
 // A payout leaves the verifier before the contract's callback books it, so what is in flight is still owed but already gone.
 async function pendingOut(view: View, role: 'market' | 'rounds' | 'oracle', receiver: string) {
   const [method, field] =
@@ -21,34 +21,9 @@ async function pendingOut(view: View, role: 'market' | 'rounds' | 'oracle', rece
 }
 export async function reconcile(config: Config, rpc: Pick<ReadRpcClient, 'call'>) {
   if (!config.deployment) throw new Error('deployment_not_configured');
-  const status = await rpc.call('status', {});
-  if (
-    !object(status) ||
-    typeof status.chain_id !== 'string' ||
-    (config.network === 'sandbox' ? ['testnet', 'mainnet'].includes(status.chain_id) : status.chain_id !== config.network)
-  )
-    throw new Error('network_mismatch');
-  const block = await rpc.call('block', { finality: 'final' });
-  if (!object(block) || !object(block.header) || typeof block.header.hash !== 'string') throw new Error('invalid_finalized_head');
-  const hash = block.header.hash;
-  const view = async (contract: string, method: string, args: unknown) => {
-    const result = await rpc.call('query', {
-      request_type: 'call_function',
-      block_id: hash,
-      account_id: contract,
-      method_name: method,
-      args_base64: Buffer.from(JSON.stringify(args)).toString('base64'),
-    });
-    if (
-      !object(result) ||
-      result.block_hash !== hash ||
-      !Array.isArray(result.result) ||
-      result.result.length > 1024 * 1024 ||
-      result.result.some(b => !Number.isInteger(b) || b < 0 || b > 255)
-    )
-      throw new Error('invalid_finalized_view');
-    return parseJson(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(result.result)));
-  };
+  const head = await finalizedHead(config, rpc);
+  const hash = head.hash;
+  const view = viewAt(rpc, hash);
   const d = config.deployment,
     contracts = [];
   for (const role of ['market', 'rounds', 'oracle', 'council'] as const) {
@@ -79,7 +54,7 @@ export async function reconcile(config: Config, rpc: Pick<ReadRpcClient, 'call'>
   }
   return {
     blockHash: hash,
-    height: String(block.header.height),
+    height: head.height,
     collateralTokenId: d.collateralTokenId,
     solvent: contracts.every(c => c.shortfall === '0'),
     contracts,

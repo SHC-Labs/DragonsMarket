@@ -12,6 +12,7 @@ import { registerDeployment, ingestionStatus } from '../src/ingestion/store.js';
 import { ingest } from '../src/ingestion/engine.js';
 import { FixtureSource, type BlockSource } from '../src/ingestion/source.js';
 import { checkChain } from '../src/verify-chain.js';
+import { runPreflight } from '../src/preflight.js';
 
 async function setup(work: (pool: pg.Pool, root: string, read: ReturnType<typeof createReadApi>) => Promise<void>) {
   const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -157,13 +158,16 @@ test('pending settlements: requests stay listed until their own terminal event l
   await add('market', 'withdraw', 101, { id: '1', account: 'a.near', amount: '5' });
   await add('market', 'withdraw', 101, { id: '2', account: 'b.near', amount: '7' });
   await add('market', 'withdraw_confirmed', 102, { id: '1', account: 'a.near', amount: '5' });
+  await add('rounds', 'withdraw', 101, { id: '5', account: 'd.near', amount: '9' });
+  await add('oracle', 'bond_payout_requested', 101, { id: '7', account: 'e.near', amount: '3' });
+  await add('oracle', 'bond_paid', 102, { id: '7', account: 'e.near', amount: '3' });
   const claim = { quarter: 3, token_id: '9', owner: 'c.near', amount: '4' };
   await add('council', 'claim_requested', 101, claim);
   await add('council', 'claim_failed', 102, claim);
   await add('council', 'claim_requested', 103, claim);
   const pending = await get(root, '/v1/settlements/pending');
-  assert.deepEqual(pending.data.map((r: any) => [r.kind, r.event, r.payload.id ?? r.payload.token_id]), [['withdrawal', 'withdraw', '2'], ['claim', 'claim_requested', '9']]);
-  assert.equal(pending.data[1].block_height, '103', 'a retried claim is pending again after an earlier failure');
+  assert.deepEqual(pending.data.map((r: any) => [r.kind, r.event, r.payload.id ?? r.payload.token_id]), [['withdrawal', 'withdraw', '2'], ['withdrawal', 'withdraw', '5'], ['claim', 'claim_requested', '9']]);
+  assert.equal(pending.data[2].block_height, '103', 'a retried claim is pending again after an earlier failure');
   assert.equal(pending.truncated, false);
   const events = await get(root, '/v1/events?standard=market');
   assert.deepEqual(events.data.map((e: any) => e.settlement), [{ kind: 'withdrawal', phase: 'request' }, { kind: 'withdrawal', phase: 'request' }, { kind: 'withdrawal', phase: 'terminal' }]);
@@ -181,4 +185,28 @@ test('chain integrity check passes on a clean history and names what tampering b
   const broken = await checkChain(pool, config);
   assert.equal(broken.ok, false);
   assert.deepEqual(broken.problems.sort(), ['broken_parent_links', 'event_count_mismatch']);
+}));
+
+test('preflight passes on a consistent chain and names what is wrong on an inconsistent one', async () => setup(async (pool) => {
+  const config = readConfig({ DATABASE_URL: process.env.TEST_DATABASE_URL, DEPLOYMENT_ID: 'reads', DEPLOYMENT_START_BLOCK: '100', ROUNDS_CONTRACT_ID: 'rounds.fixture.near', VERIFIER_CONTRACT_ID: 'verifier.fixture.near', COLLATERAL_TOKEN_ID: 'nep141:usdc.fixture.near' });
+  const hash = '2'.repeat(32);
+  const chain = (opts: { code?: string; verifier?: string } = {}) => ({
+    async call(method: string, params: object) {
+      const p = params as { request_type?: string; method_name?: string; block_id?: string };
+      if (method === 'status') return { chain_id: 'localnet' };
+      if (method === 'block') return { header: { hash, height: 1000, timestamp_nanosec: String(BigInt(Date.now()) * 1_000_000n) } };
+      if (p.request_type === 'view_account') return { code_hash: opts.code ?? 'CodeHash1111' };
+      const values: Record<string, unknown> = {
+        config: { verifier: opts.verifier ?? 'verifier.fixture.near', collateral_token_id: 'nep141:usdc.fixture.near', paused: false, state_version: 6, owner: 'owner.near' },
+        total_owed: '0', owed_breakdown: { pending_withdrawals: '0' }, mt_balance_of: '0',
+      };
+      return { block_hash: p.block_id, result: [...Buffer.from(JSON.stringify(values[p.method_name!]))] };
+    },
+  });
+  const good = await runPreflight(config, chain(), pool, null);
+  assert.deepEqual(good.filter(c => c.status !== 'pass' && !['network', 'links'].includes(c.name)), [], JSON.stringify(good));
+  const bad = await runPreflight(config, chain({ code: '1'.repeat(32), verifier: 'someone.else.near' }), pool, null);
+  assert.ok(bad.some(c => c.name === 'contract:rounds' && c.status === 'fail' && /no contract deployed/.test(c.detail)));
+  const wrongVerifier = await runPreflight(config, chain({ verifier: 'someone.else.near' }), pool, null);
+  assert.ok(wrongVerifier.some(c => c.name === 'contract:rounds' && c.status === 'fail' && /verifier is someone.else.near/.test(c.detail)));
 }));

@@ -21,6 +21,7 @@
     "test:backup": "npm run build && node --env-file-if-exists=.env --test dist/test/backup-restore.test.js",
     "backup": "bash scripts/backup.sh",
     "verify:chain": "npm run build && node --env-file-if-exists=.env dist/src/verify-chain.js",
+    "preflight": "npm run build && node --env-file-if-exists=.env dist/src/preflight.js",
     "reconcile": "npm run build && node --env-file-if-exists=.env dist/src/reconcile.js",
     "prices:collect": "npm run build && node --env-file-if-exists=.env dist/src/prices.js",
     "indexer:follow": "npm run build && node --env-file-if-exists=.env dist/src/ingestion/follow.js",
