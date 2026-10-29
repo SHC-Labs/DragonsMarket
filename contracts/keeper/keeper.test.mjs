@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import {
-  accessKeyReport, advanceCursor, councilFloor, daoReport, describeOutcome, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options,
+  accessKeyReport, advanceCursor, councilFloor, daoReport, describeOutcome, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options, wiringProblems,
   quarterEnd, quarterOf, readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, tokenProblems, verifierProblems,
   writeCursor, refuseRetiredController, releaseReport, validateActionKeys,
 } from "./keeper.mjs";
@@ -520,4 +520,19 @@ test("a batch validates every key scope before dispatch and caches shared key re
   await assert.rejects(validateActionKeys(opts,{default:key},actions.slice(0,1)),/exhausted/);
   permission.FunctionCall.allowance = null;
   await validateActionKeys(opts,{default:key},actions.slice(0,1));
+});
+
+test("wiring check passes when every contract names the same oracle, Council, verifier and token", () => {
+  const shared = { verifier: "v.near", collateral_token_id: "nep141:usdc.near" };
+  const configs = {
+    market: { ...shared, oracle: "o.near", revenue_pool: "c.near" },
+    oracle: { ...shared, council: "c.near" },
+    council: { ...shared, oracle: "o.near" },
+    rounds: { ...shared },
+  };
+  const ids = { oracle: "o.near", council: "c.near" };
+  assert.deepEqual(wiringProblems(configs, ids), []);
+  assert.deepEqual(wiringProblems({ ...configs, council: { ...shared, oracle: "x.near" } }, ids), ["the Council's oracle is x.near, expected o.near"]);
+  assert.deepEqual(wiringProblems({ ...configs, market: { ...configs.market, revenue_pool: null } }, ids), ["the market's revenue_pool is unset, expected c.near"]);
+  assert.deepEqual(wiringProblems({ ...configs, rounds: { ...shared, collateral_token_id: "nep141:other.near" } }, ids), ["the rounds's collateral token is nep141:other.near, expected nep141:usdc.near"]);
 });

@@ -9,7 +9,7 @@
 //   node keeper.mjs run   --rpc URL --market ID --oracle ID --council ID --account ID [--dry-run]
 //                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH] [--council-key-file PATH]
 //                         --state-file PATH [--events-file PATH] [--workers 2] [--job-batch 50] [--min-sweep UNITS]
-//   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID [--treasury ID] [--min-margin NEAR] [--release FILE|-]
+//   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID --rounds ID [--treasury ID] [--min-margin NEAR] [--release FILE|-]
 //                         [--expect-sealed] [--watch-dao] [--runway-config PATH]
 //
 // `run` needs an account with a little NEAR for gas. The calls it makes move no money of the keeper's own, and none
@@ -82,6 +82,8 @@ const ADVANCE_GAS_TGAS = 50;
 const MAX_QUARTER_STEPS = 8;
 const JURY_OPEN_REFUSAL = "a jury drawn in this quarter is still open";
 const CONTRACTS = ["market", "oracle", "council"];
+// `check` also covers the rounds contract: it holds stakes and fees in the verifier like the others, but the keeper never calls it.
+const CHECKED = [...CONTRACTS, "rounds"];
 // The verifier pauses transfers under this feature key, and a paused verifier refuses every mt_transfer and mt_transfer_call
 // (pause_and_lock_stop_payouts_but_not_receipts in intents_verifier.rs).
 const VERIFIER_PAUSE_KEY = "mt_transfer";
@@ -628,12 +630,35 @@ export function drawableHolders(stakes) {
   return new Set(stakes.filter((stake) => stake.unlock_requested_at == null && stake.serving == null).map((stake) => stake.owner));
 }
 
-// What the market and the oracle have sent out and not yet booked. The Council has none: its claims in flight are already
-// taken off its floor.
+// What the market, rounds and the oracle have sent out and not yet booked. The Council has none: its claims in flight are
+// already taken off its floor. A fee leg whose result the market lost stays in total_owed, but the Council may already hold
+// the money, so it counts as in flight too.
 async function inFlightAmount(opts, name, at) {
-  if (name === "market") return BigInt((await view(opts.rpc, opts.market, "in_flight", {}, at)).withdrawals);
+  if (name === "market") {
+    const withdrawals = BigInt((await view(opts.rpc, opts.market, "in_flight", {}, at)).withdrawals);
+    return withdrawals + BigInt((await view(opts.rpc, opts.market, "owed_breakdown", {}, at)).unresolved);
+  }
+  if (name === "rounds") return BigInt((await view(opts.rpc, opts.rounds, "owed_breakdown", {}, at)).pending_withdrawals);
   if (name === "oracle") return BigInt((await view(opts.rpc, opts.oracle, "bond_totals", {}, at)).pending_payouts);
   return 0n;
+}
+
+// The accounts and the token the contracts were deployed with must point at each other. Each link is fixed at `new`, so a
+// wrong one cannot be repaired without an upgrade: fees refused by the Council pile up in the market for good.
+export function wiringProblems(configs, ids) {
+  const problems = [];
+  const expect = (label, actual, wanted) => {
+    if (actual !== wanted) problems.push(`${label} is ${actual ?? "unset"}, expected ${wanted}`);
+  };
+  expect("the market's oracle", configs.market.oracle, ids.oracle);
+  expect("the market's revenue_pool", configs.market.revenue_pool, ids.council);
+  expect("the oracle's council", configs.oracle.council, ids.council);
+  expect("the Council's oracle", configs.council.oracle, ids.oracle);
+  for (const name of Object.keys(configs)) {
+    expect(`the ${name}'s verifier`, configs[name].verifier, configs.market.verifier);
+    expect(`the ${name}'s collateral token`, configs[name].collateral_token_id, configs.market.collateral_token_id);
+  }
+  return problems;
 }
 
 // The floor at one block, and the owners of the drawable seats.
@@ -679,17 +704,19 @@ async function check(opts) {
   const expectedRelease = opts.release === undefined ? null : parseReleaseHashes(readReleaseList(opts.release));
   const block = await rpc(opts.rpc, "block", { finality: "final" });
   const at = block.header.height;
+  const names = opts.rounds ? CHECKED : CONTRACTS;
   const configs = {};
-  for (const name of CONTRACTS) configs[name] = await view(opts.rpc, opts[name], "config", {}, at);
+  for (const name of names) configs[name] = await view(opts.rpc, opts[name], "config", {}, at);
   const oracle = configs.oracle;
-  const problems = [];
+  const problems = opts.rounds ? [] : ["--rounds is missing: the rounds contract's stakes, fees and keys are not being checked"];
+  problems.push(...wiringProblems(configs, opts));
   for (const name of ["oracle", "council"]) {
     if (!configs[name].markets.includes(opts.market)) problems.push(`${opts.market} is not in the ${name}'s market allow-list (${configs[name].markets.join(", ") || "empty"}): it will refuse this market`);
   }
 
   const books = {};
   let owners;
-  for (const name of CONTRACTS) {
+  for (const name of names) {
     const read = async () => {
       const height = await finalHeight(opts.rpc);
       const council = name === "council" ? await councilBooks(opts, height) : null;
@@ -705,14 +732,14 @@ async function check(opts) {
   problems.push(...juryProblems({ jurySize: oracle.jury_size, holders: owners.size }));
   if (oracle.publishers.length < oracle.price_threshold) problems.push(`${oracle.publishers.length} price publishers but ${oracle.price_threshold} must sign: no price market can open`);
   console.log(`jury size ${oracle.jury_size} then ${secondJurySize(oracle.jury_size)}, ${owners.size} drawable seat holders, ${oracle.publishers.length} publishers (${oracle.price_threshold} must sign)`);
-  for (const name of CONTRACTS) {
+  for (const name of names) {
     console.log(books[name].line);
     if (books[name].problem) problems.push(books[name].problem);
   }
 
-  const verifiers = new Set(CONTRACTS.map((name) => configs[name].verifier));
+  const verifiers = new Set(names.map((name) => configs[name].verifier));
   const trouble = [];
-  for (const name of CONTRACTS) {
+  for (const name of names) {
     const args = { account_id: opts[name] };
     const read = (method) => view(opts.rpc, configs[name].verifier, method, args, at);
     trouble.push(...verifierProblems({
@@ -724,7 +751,7 @@ async function check(opts) {
       trouble.push(`the verifier ${verifier} has ${VERIFIER_PAUSE_KEY} paused: every payout and every transfer call to the contracts fails`);
     }
   }
-  if (!trouble.length) console.log(`verifier ${[...verifiers].join(", ")}: no keys registered, predecessor authentication on, not locked and ${VERIFIER_PAUSE_KEY} running for the market, oracle and council`);
+  if (!trouble.length) console.log(`verifier ${[...verifiers].join(", ")}: no keys registered, predecessor authentication on, not locked and ${VERIFIER_PAUSE_KEY} running for ${names.join(", ")}`);
   problems.push(...trouble);
 
   const token = configs.market.collateral_token_id.slice(NEP141_PREFIX.length);
@@ -736,7 +763,7 @@ async function check(opts) {
   problems.push(...tokenTrouble);
 
   const keyCounts = [];
-  for (const name of CONTRACTS) {
+  for (const name of names) {
     const { keys } = await rpc(opts.rpc, "query", { request_type: "view_access_key_list", block_id: at, account_id: opts[name] });
     keyCounts.push({ name, id: opts[name], count: keys.length });
   }
@@ -744,7 +771,7 @@ async function check(opts) {
   console.log(keys.line);
   problems.push(...keys.problems);
 
-  const named = CONTRACTS.map((name) => [name, opts[name]]);
+  const named = names.map((name) => [name, opts[name]]);
   if (opts.treasury) named.push(["treasury", opts.treasury]);
   const accounts = [];
   for (const [name, id] of named) {

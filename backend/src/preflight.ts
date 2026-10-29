@@ -79,6 +79,9 @@ async function checkLinks(config: Config, view: View): Promise<Check[]> {
       checks.push(fail('link:oracle-allowlist', `oracle does not allow market ${c.market}`));
   }
   if (c.council && c.oracle) {
+    const oracle = await view(c.oracle, 'config', {});
+    if (object(oracle) && oracle.council !== c.council)
+      checks.push(fail('link:oracle-council', `oracle points at ${String(oracle.council)}, configured Council ${c.council}`));
     const council = await view(c.council, 'config', {});
     if (object(council) && council.oracle !== c.oracle)
       checks.push(fail('link:council-oracle', `council points at ${String(council.oracle)}, configured ${c.oracle}`));
