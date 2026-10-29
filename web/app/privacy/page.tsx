@@ -16,7 +16,7 @@ const sections: LegalSection[] = [
       <p>You can read public markets without connecting a wallet. Connecting one lets the site use your public address to show account-related information.</p>
       <ul>
       <li><strong>Wallet and market records.</strong> The site reads public balances, positions, transactions, market results and Council records. These can include addresses, submitted evidence, votes and explanations.</li>
-      <li><strong>Saved choices.</strong> Your browser stores your theme, saved markets and policy acknowledgement. The acknowledgement includes the wallet address, network, document versions and a timestamp from your device.</li>
+      <li><strong>Saved choices.</strong> Your browser stores your theme, saved markets and policy acknowledgement. The acknowledgement includes the wallet address, network, document versions and a timestamp from your device. If you sign in with your wallet, your saved markets are also stored on our servers with your wallet address.</li>
       <li><strong>Connection details.</strong> Hosts and network providers receive requests needed to load pages and retrieve records. Requests can reveal your IP address, browser headers and the account or contract being queried. Providers may retain security and operational logs.</li>
       <li><strong>Messages and submissions.</strong> We receive information you choose to send us, such as a question or supporting evidence.</li>
       </ul>
@@ -42,7 +42,8 @@ const sections: LegalSection[] = [
     id: "storage-and-tracking",
     title: "What stays in your browser",
     content: <>
-      <p>Your saved markets, theme and policy acknowledgement stay in that browser. They do not currently sync through a Dragons Market account database. The acknowledgement is a local record, not a wallet signature.</p>
+      <p>Your theme and policy acknowledgement stay in that browser. The acknowledgement is a local record, not a wallet signature.</p>
+      <p>Your saved markets are kept in that browser. If you sign in to Dragons Market with your wallet, they are also stored on our servers against your wallet address, so they appear on your other devices. Signing in asks your wallet to sign one message that proves you own the address. It does not move money and does not give us access to your wallet. Signing in sets a cookie that keeps you signed in for up to 24 hours and is removed when you disconnect.</p>
       <p>Clear this site’s data in your browser to remove those records. Your saved markets and theme will reset, and you will be asked to review the policies again. Disconnecting a wallet does not clear them.</p>
       <p>The website currently has no advertising pixels or third-party audience analytics. Wallets and linked services may use their own cookies or storage. We will explain new tracking before introducing it and ask permission where required.</p>
     </>,

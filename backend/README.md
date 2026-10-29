@@ -202,6 +202,24 @@ Source normalization is in `src/ingestion/neardata.ts`; verification persistence
 
 Contracts are **not deployed** and their trading interfaces are still being finalized. Keep deployment fields empty. The following commands provide tested infrastructure; they do not enable financial execution.
 
+### Round price publisher
+
+`src/round-publisher.ts` (a `publisher` Compose service in the `publishing` profile) signs the start price of each round of every rounds series it can price: assets named `btc-usd`, `eth-usd` or `near-usd`, with the first start and interval on five-minute boundaries. For a round whose moment has settled (20 seconds after the boundary, up to 30 seconds before its price window closes) it reads the closed one-minute USD candle ending at the boundary from Coinbase, Kraken and Bitstamp, keeps every response as evidence, takes the median at the series' decimals only if all three answer and agree within the spread, so that every publisher signs the same price, and signs `round-price:v1:<rounds>:<network>:<asset>:<moment ns>:<price>:<decimals>`. It records the decision before signing, so a second, different price for a signed round is refused even after a restart. An unsigned reservation (a crash between the two steps) is replaced.
+
+It refuses to start unless `PUBLISH_ROUND_PRICES=approved` and `PRICE_MAX_DEVIATION_BPS` are set (the source rules are the owner's decision, so there is no default spread), the key file is readable only by its owner, and its key is a publisher on the rounds contract. `GET /v1/price-signatures?seriesId=N&round=R` serves the signatures it holds, each with the message it signed. Signed decisions are write-once in the database (migration 010), and the publisher has a login of its own (`dm_publisher_login`) that no other service shares.
+
+Recording is open to anyone: `node contracts/keeper/round-prices.mjs run --rpc URL --rounds ID --account ID --publishers URL,URL --key-file PATH` fetches the entries from each publisher's backend, keeps only signatures from keys the contract lists over one agreed price, and calls `record_price` when at least `price_threshold` agree (`--dry-run` only reports). A test deploys the unchanged rounds WASM in a sandbox and shows it accepts a price signed by this publisher key and rejects the same signature over another price.
+
+### Running against mainnet
+
+Nothing runs until the contracts are deployed. When they are:
+
+1. Put the real values in `.env`: `NETWORK=mainnet`, `DEPLOYMENT_ID`, `DEPLOYMENT_START_BLOCK` (the block of the earliest contract deployment), the `MARKET_`, `ROUNDS_`, `ORACLE_`, `COUNCIL_` and `VERIFIER_CONTRACT_ID` accounts, `COLLATERAL_TOKEN_ID` (native USDC is `nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`), `RPC_URL` and its bearer token, `WEB_ORIGIN`, and `TRUSTED_PROXY_HOPS`/`TRUSTED_PROXY_ADDRESSES` if a proxy fronts the API.
+2. `docker compose up -d postgres migrate roles`, then register the deployment as the database owner: `docker compose run --rm -e DATABASE_URL=postgresql://dragons:<owner password>@postgres:5432/dragons_market api node dist/src/ingestion/cli.js register`.
+3. `npm run preflight`. It reads the chain and writes nothing, and checks that the RPC is on mainnet and fresh, NEAR Data matches the RPC head, every configured account has code, each contract's verifier and collateral match the configuration, none is paused or mid-upgrade, the oracle, Council and market allow-lists name each other, the books are solvent at one finalized block, the database is current and the deployment matches, and the start block is behind the head (with a warning if catching up will take more than a day). It exits 1 if anything fails. Do not start the workers until it prints `ready`.
+4. `docker compose --profile indexing up --build -d`, then watch `GET /v1/health/services`. `indexer_lagging` is expected while catching up. `reconciliation_stale` and `chain_integrity_stale` clear after the first pass of each worker. Any other alert, or `chain_integrity_failed`, means stop and read the worker logs.
+5. To stop, `docker compose --profile indexing down`. The checkpoint is in Postgres, so a restart continues from the last committed block.
+
 ### Mainnet follower and keeper feed
 
 ```sh
@@ -219,14 +237,6 @@ All configured receivers, including the verifier, retain receipt outcomes and av
 `live` expires after thirty seconds without a fresh head/heartbeat; it reports recent observation rather than proving a process is still alive. The API retains last indexed data during source outages. Readiness checks database/schema/deployment consistency; use `/v1/indexer/status` and `/v1/health/services` for indexing and recovery health.
 
 The feed exporter writes committed JSONL under `backend/.local/feeds`, syncing bytes before acknowledging their offset in PostgreSQL. On restart it compares unacknowledged bytes against the committed journal, completing a matching partial line or acknowledging an already-complete append without duplicating it. Truncation, changed content and missing checkpoint evidence fail visibly. It checks the last acknowledged line; archive integrity still belongs in backup verification. Symlink destinations are refused. A stable relative-path lock coordinates host/container exporters sharing the same database and feed mount. Do not edit feed files manually or share a destination across unrelated databases. The existing contract-team keeper consumes this file through its `--events-file` option. Starting its signing process and giving it restricted operational keys is a separate deployment step.
-
-### Jobs, operations and publishers
-
-`src/services.ts` implements idempotent jobs, deadline checks, transactional leases, ownership tokens and bounded retries. Expired leases or unknown send outcomes enter reconciliation rather than being automatically resent. An old worker cannot finish an expired/reassigned lease. The queue has no activated financial handlers. `boundaries()` computes the independent UTC interval from its immutable origin and period.
-
-Operation records preserve account/deployment ownership, request hashes and transitions from preparation through signature/submission/confirmation or uncertainty. A confirmation needs evidence. This module is internal; the public API cannot submit arbitrary actions or mark a payment complete. It still needs the actual Intents/contract callbacks to establish what a terminal result means.
-
-`src/publisher.ts` creates the current documented `round-price:v1` payload and raw Ed25519 signature entry. It reserves one payload per publisher/contract/network/asset/boundary before signing, persists the signature, and refuses equivocation across retries. It requires explicit approval and a matching deployment. There is no enabled key-loading or price-submission worker. The serialization is checked against current contract source; an actual contract submission remains a release gate once the interface and source policy are approved.
 
 ### BTC, ETH and NEAR observations
 
@@ -248,14 +258,6 @@ The keyed adapter returned all three assets successfully on 2026-10-27. The keyl
 Raw evidence, response hash, source/retrieval time, quote, boundary and quality reason are persisted. Large decimal prices stay exact strings and scale with BigInt, with explicit refusal when required rounding is unspecified. The collector stores source observations; it does not write a price to a contract. In follow mode it runs at five-minute boundaries and shuts down on SIGTERM/SIGINT.
 
 USD, USDC and USDT are not interchangeable. USDT is not requested. Multiple Binance hosts are one provider. Binance-USDC boundary data plus CoinGecko/CoinMarketCap-USD latest data cannot form an exact independent quorum; the candidate validator rejects it. The three USD candles can, and are recorded as not yet approved for signing. Approval of semantics, quorum/deviation/precision and missing-data handling is still required. [Binance docs](https://developers.binance.com/en/docs/products/spot/rest-api), [CoinGecko docs](https://docs.coingecko.com/reference/simple-price).
-
-### NEAR and native-USDC funding preparation
-
-`src/funding.ts` contains an internal unsigned deposit planner for NEAR wallets. It pins `wrap.near` and Circle's native NEAR USDC contract, verifies token metadata and Intents token-storage registration, checks USDC balance, and adds sender storage registration/wrapping when required for NEAR. All read checks can be pinned to one finalized mainnet block through `fundingViews()`.
-
-The beneficiary is always the authenticated account supplied by the server; the planner has no arbitrary recipient input. Its simple `ft_transfer_call` deposits into that user's own Intents ledger balance. This does not fund a Dragons Market contract or create a prediction position. Plans are unsigned and carry `executionEnabled: false`; there is no public execution/relayer endpoint. Successful wrapping alone is not a completed deposit. Wallet signing, actual transfer/refund/credit evidence and funded tests remain pending.
-
-Addresses and action structure were checked against [Intents deposits](https://docs.near-intents.org/integration/verifier-contract/deposits-and-withdrawals/deposits), [NEAR wrapping](https://docs.near-intents.org/integration/verifier-contract/deposits-and-withdrawals/near-token) and [Circle's native-USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses). The optional 1Click token registry returned HTTP 403 from this environment, so no claim is made that its routes were verified. The direct planner uses the documented native token identities and still verifies on-chain metadata before use. A read-only mainnet check confirmed wNEAR (24 decimals), native USDC (6 decimals), and Intents registration for both at finalized block hash `7SwtUi4ZZR99SkaYqnNZZiDErzC4hEm9QDXuER6qP1Gt`; no transaction was prepared or sent.
 
 ### NEAR wallet sessions and private records
 
@@ -289,6 +291,20 @@ TEST_DATABASE_URL=postgresql://dragons:dragons_local_only@127.0.0.1:55432/dragon
 Reconciliation reads current contract liabilities and verifier holdings at one finalized block. It reports shortfall/surplus, preserves a report and never credits surplus or invokes an administrative action. Council's current floor is received minus paid minus pending claims. A reported deficit needs review/repeated evidence, especially while cross-contract operations are in flight. Actual deployed-interface and funded reconciliation tests remain pending; fixture tests establish the reader/accounting behavior only.
 
 `ops/roles.sql` is a DBA provisioning template for NOLOGIN API/indexer/worker/backup groups. Use separate credentialed users and a migration owner; no credentials are embedded. A rollback-only isolated permission test checks API/indexer boundaries and removes its test roles. These roles are not automatically provisioned or verified as a production deployment. Grant templates must be reviewed after future migrations. The local Compose database uses public development credentials and is bound to loopback.
+
+Reconciliation subtracts what a contract has already sent out but not yet booked (market `in_flight().withdrawals`, rounds `owed_breakdown().pending_withdrawals`, oracle `bond_totals().pending_payouts`) before it compares with what the verifier holds, so a pending withdrawal is not a shortfall. The report carries `inFlight` per contract.
+
+`GET /v1/health/services` raises `indexer_lagging` when the follower is more than 1,000 blocks behind the source head and `reconciliation_stale` when no solvency report is newer than 15 minutes.
+
+`GET /v1/events` rows carry `settlement` (`{kind, phase: request|terminal}`) for market and rounds withdrawals, oracle bond payouts and Council claims, the pairs whose events are final, and `GET /v1/settlements/pending` lists requests with no later terminal event for the same key. A request event is never settlement; other flows are not classified until their events are final.
+
+`npm run verify:chain` (a `verify-chain` Compose service, every 6 hours) checks the stored history against itself: each block names the previous stored block as its parent, the checkpoint is the last block, and the events kept equal the events the blocks declare. Results go to `chain_integrity_reports`; `/v1/health/services` raises `chain_integrity_failed` or `chain_integrity_stale`. Entity-level gap repair waits for the financial read model.
+
+Compose gives each service its own database login (`dm_api_login`, `dm_indexer_login`, `dm_worker_login`) with only the rights in `ops/roles.sql`. A `roles` service applies the file after migrations and sets the passwords from `API_DB_PASSWORD`, `INDEXER_DB_PASSWORD` and `WORKER_DB_PASSWORD`; running it again rotates them. Migrations and deployment registration still use the database owner.
+
+Behind a reverse proxy set `TRUSTED_PROXY_HOPS` to the number of proxies and `TRUSTED_PROXY_ADDRESSES` to the addresses (or CIDR ranges) they connect from. `X-Forwarded-For` is read only from those addresses, and only the entry the nearest proxy appended. Without both, every client is limited by its socket address, which behind a proxy means one shared limit. IPv6 clients are limited per /64.
+
+`npm run backup` needs `PGHOST`, `PGPORT`, `PGDATABASE` and `PGUSER` set explicitly (it refuses to guess a local default server) and keeps the newest `BACKUP_KEEP` archives (default 14).
 
 The backup command writes a custom-format pg_dump archive with a SHA-256 file under ignored `.local/backups` and checks that pg_restore can list it. Never copy the live PostgreSQL data directory. `test:backup` dumps/restores an isolated full backend schema, verifies migration checksums/deployment identity, indexed events/checkpoint, unknown operation state and exact amounts. Production restore drills with the actual deployment and feed files, off-host backup storage, retention, alert routing and operational ownership remain deployment work. The website/contracts are not changed by these backend commands.
 

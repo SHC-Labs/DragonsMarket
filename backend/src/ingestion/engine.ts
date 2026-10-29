@@ -4,6 +4,7 @@ import type { BlockSource } from './source.js';
 import { prepareBlock, IngestionError } from './block.js';
 import { LiveNeardataSource } from './live-source.js';
 import { assertDeployment, commitBlock } from './store.js';
+import { LOCK } from '../locks.js';
 
 export async function ingest(pool: pg.Pool, config: Config, source: BlockSource) {
   if (!config.deployment) throw new IngestionError('deployment_required');
@@ -18,7 +19,7 @@ export async function ingest(pool: pg.Pool, config: Config, source: BlockSource)
   const onConnectionError = () => { destroy = true; };
   client.on('error', onConnectionError);
   try {
-    const lock = await client.query('SELECT pg_try_advisory_lock(704346942, hashtext($1)) AS acquired', [d.id]);
+    const lock = await client.query(`SELECT pg_try_advisory_lock(${LOCK.ingest}, hashtext($1)) AS acquired`, [d.id]);
     if (!lock.rows[0].acquired) throw new IngestionError('indexer_already_running');
     locked = true;
     await client.query('BEGIN');
@@ -39,11 +40,12 @@ export async function ingest(pool: pg.Pool, config: Config, source: BlockSource)
     return { committed, replayed, mode: source.mode, live: false };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
-    if (started) await client.query("UPDATE indexer_status SET state='error', last_error_code=$2, last_error_at=now(), updated_at=now() WHERE deployment_id=$1", [d.id, error instanceof IngestionError ? error.code : 'database_or_worker_error']).catch(() => {});
+    // A shutdown stops the batch between blocks. That is not a failure and must not raise indexer_not_live.
+    if (started && !(error instanceof Error && error.name === 'AbortError')) await client.query("UPDATE indexer_status SET state='error', last_error_code=$2, last_error_at=now(), updated_at=now() WHERE deployment_id=$1", [d.id, error instanceof IngestionError ? error.code : 'database_or_worker_error']).catch(() => {});
     throw error instanceof IngestionError ? error : new IngestionError('database_or_worker_error');
   } finally {
     if (locked) {
-      try { await client.query('SELECT pg_advisory_unlock(704346942, hashtext($1))', [d.id]); }
+      try { await client.query(`SELECT pg_advisory_unlock(${LOCK.ingest}, hashtext($1))`, [d.id]); }
       catch { destroy = true; }
     }
     client.removeListener('error', onConnectionError);

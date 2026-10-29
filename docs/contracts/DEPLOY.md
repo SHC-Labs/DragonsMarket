@@ -165,7 +165,7 @@ order.
    with the tag message before approving.
 5. After an upgrade, run the keeper check against the tag (it also confirms the market is on the oracle's and the Council's allow-list). Save the tag message
    (`git tag -l --format='%(contents)' <tag name>`) and pass it with `--release <file>`, or `-` for
-   stdin, as in `node keeper/keeper.mjs check --rpc <url> --market <id> --oracle <id> --council <id> --release <file>`. A match prints `release: live code matches the release hash list`. Any contract whose live code hash differs from the tag is reported and the check exits 1.
+   stdin, as in `node keeper/keeper.mjs check --rpc <url> --market <id> --oracle <id> --council <id> --rounds <id> --release <file>`. Without `--rounds` the check reports a problem, because the rounds contract's stakes, fees and keys would go unchecked. A match prints `release: live code matches the release hash list`. Any contract whose live code hash differs from the tag is reported and the check exits 1.
 6. Refuse to deploy a build whose embedded build info is empty. A wasm from `./build.sh` has
    `build_info` null and `verify-build.mjs` rejects it. Only a build from `./build.sh --reproducible`
    passes.

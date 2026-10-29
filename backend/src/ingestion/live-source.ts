@@ -13,7 +13,7 @@ export class LiveNeardataSource implements BlockSource {
     let height = this.checkpoint ? BigInt(this.checkpoint.height)+1n : BigInt(this.start);
     let previous = this.checkpoint;
     let requests = 0;
-    while (height <= BigInt(this.head.header.height) && requests++ < 20) {
+    while (height <= BigInt(this.head.header.height) && requests++ < 20 && (!previous || previous === this.checkpoint || this.reader.hasBudget())) {
       this.signal?.throwIfAborted();
       const raw = height.toString() === this.head.header.height ? this.head : await this.reader.document(`/v0/block/${height}`);
       // Null slots are not committed. A later block must prove it directly follows the last committed hash.

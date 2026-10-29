@@ -11,6 +11,12 @@ import { verifyDatabase } from '../src/database.js';
 import { registerDeployment, ingestionStatus } from '../src/ingestion/store.js';
 import { ingest } from '../src/ingestion/engine.js';
 import { FixtureSource, type BlockSource } from '../src/ingestion/source.js';
+import { checkChain } from '../src/verify-chain.js';
+import { runPreflight } from '../src/preflight.js';
+import { generateKeyPairSync } from 'node:crypto';
+import { base58Encode } from '../src/base58.js';
+import { loadPublisherKey, publishOnce, reserveDecision, roundPriceMessage } from '../src/round-publisher.js';
+import { createHash } from 'node:crypto';
 
 async function setup(work: (pool: pg.Pool, root: string, read: ReturnType<typeof createReadApi>) => Promise<void>) {
   const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -123,7 +129,7 @@ test('invalid input is rejected, SQL failures are sanitized and unconfigured dep
   }
   const config = readConfig({ DATABASE_URL: process.env.TEST_DATABASE_URL! });
   const unconfigured = createReadApi(pool, config);
-  assert.deepEqual((await unconfigured(new URL('http://localhost/v1/deployments')) as any).data, []);
+  assert.deepEqual((await unconfigured(new URL('http://localhost/v1/deployments')) as { data: unknown[] }).data, []);
   await assert.rejects(unconfigured(new URL('http://localhost/v1/events')), /deployment_not_configured/);
   await pool.query('ALTER TABLE raw_events RENAME TO private_secret_table');
   const response = await fetch(root + '/v1/events');
@@ -139,11 +145,150 @@ test('receipt migration backfills existing journals without changing block check
   await pool.query('DROP TRIGGER deployments_immutable ON deployments');
   await pool.query('DROP FUNCTION refuse_deployment_change()');
   await pool.query('DROP TABLE indexed_receipts');
-  await pool.query('DROP TABLE source_heads,feed_exports,backend_jobs,user_operations,price_evidence,signing_decisions,reconciliation_reports,wallet_challenges,wallet_sessions,wallet_watchlist,policy_acknowledgements');
+  await pool.query('DROP TABLE chain_integrity_reports,source_heads,feed_exports,backend_jobs,user_operations,price_evidence,signing_decisions,reconciliation_reports,wallet_challenges,wallet_sessions,wallet_watchlist,policy_acknowledgements');
   await pool.query('DROP INDEX raw_events_read_page');
   await pool.query("DELETE FROM schema_migrations WHERE version >= '004_receipt_reads.sql'");
-  assert.equal(await migrate(pool), 4);
+  assert.equal(await migrate(pool), 7);
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM indexed_receipts')).rows[0].n, 3);
   assert.deepEqual((await pool.query('SELECT * FROM indexer_checkpoints')).rows, before);
-  assert.equal((await migrationFiles()).length, 7);
+  assert.equal((await migrationFiles()).length, 10);
+}));
+
+test('pending settlements: requests stay listed until their own terminal event lands', async () => setup(async (pool, root) => {
+  let n = 0;
+  const add = (standard: string, event: string, block: number, payload: object, receiver = `${standard}.fixture.near`) => pool.query(
+    `INSERT INTO raw_events (network, receipt_id, log_index, data_index, deployment_id, receiver_id, block_height, block_hash, block_timestamp_ns, standard, version, event, raw_log, payload)
+     VALUES ('sandbox', $1, 0, 0, 'reads', $2, $3, 'h', $3, $4, '1.0.0', $5, 'EVENT_JSON:{}', $6)`, [`r${++n}`.padEnd(32, 'x'), receiver, block, standard, event, JSON.stringify(payload)]);
+  await add('market', 'withdraw', 101, { id: '1', account: 'a.near', amount: '5' });
+  await add('market', 'withdraw', 101, { id: '2', account: 'b.near', amount: '7' });
+  await add('market', 'withdraw_confirmed', 102, { id: '1', account: 'a.near', amount: '5' });
+  await add('rounds', 'withdraw', 101, { id: '5', account: 'd.near', amount: '9' });
+  await add('oracle', 'bond_payout_requested', 101, { id: '7', account: 'e.near', amount: '3' });
+  await add('oracle', 'bond_paid', 102, { id: '7', account: 'e.near', amount: '3' });
+  const claim = { quarter: 3, token_id: '9', owner: 'c.near', amount: '4' };
+  await add('council', 'claim_requested', 101, claim);
+  await add('council', 'claim_failed', 102, claim);
+  await add('council', 'claim_requested', 103, claim);
+  const pending = await get(root, '/v1/settlements/pending');
+  assert.deepEqual(pending.data.map((r: any) => [r.kind, r.event, r.payload.id ?? r.payload.token_id]), [['withdrawal', 'withdraw', '2'], ['withdrawal', 'withdraw', '5'], ['claim', 'claim_requested', '9']]);
+  assert.equal(pending.data[2].block_height, '103', 'a retried claim is pending again after an earlier failure');
+  assert.equal(pending.truncated, false);
+  const mine = await get(root, '/v1/settlements/pending?account=d.near');
+  assert.deepEqual(mine.data.map((r: any) => r.payload.id), ['5'], 'only the named account\'s items');
+  assert.equal((await fetch(root + '/v1/settlements/pending?account=Bad Account')).status, 400);
+  const events = await get(root, '/v1/events?standard=market');
+  assert.deepEqual(events.data.map((e: any) => e.settlement), [{ kind: 'withdrawal', phase: 'request' }, { kind: 'withdrawal', phase: 'request' }, { kind: 'withdrawal', phase: 'terminal' }]);
+  assert.match(events.note, /not settlement/);
+  assert.equal((await fetch(root + '/v1/settlements/pending?cursor=x')).status, 400);
+}));
+
+test('chain integrity check passes on a clean history and names what tampering broke', async () => setup(async (pool) => {
+  const config = readConfig({ DATABASE_URL: process.env.TEST_DATABASE_URL, DEPLOYMENT_ID: 'reads', DEPLOYMENT_START_BLOCK: '100', ROUNDS_CONTRACT_ID: 'rounds.fixture.near', VERIFIER_CONTRACT_ID: 'verifier.fixture.near', COLLATERAL_TOKEN_ID: 'nep141:usdc.fixture.near' });
+  const clean = await checkChain(pool, config);
+  assert.equal(clean.ok, true, JSON.stringify(clean));
+  assert.equal(clean.lastHeight, '103');
+  await pool.query("UPDATE indexed_blocks SET prev_hash = 'tampered' WHERE block_height = 101");
+  await pool.query('DELETE FROM raw_events WHERE ctid IN (SELECT ctid FROM raw_events LIMIT 1)');
+  const broken = await checkChain(pool, config);
+  assert.equal(broken.ok, false);
+  assert.deepEqual(broken.problems.sort(), ['broken_parent_links', 'event_count_mismatch']);
+}));
+
+test('preflight passes on a consistent chain and names what is wrong on an inconsistent one', async () => setup(async (pool) => {
+  const config = readConfig({ DATABASE_URL: process.env.TEST_DATABASE_URL, DEPLOYMENT_ID: 'reads', DEPLOYMENT_START_BLOCK: '100', ROUNDS_CONTRACT_ID: 'rounds.fixture.near', VERIFIER_CONTRACT_ID: 'verifier.fixture.near', COLLATERAL_TOKEN_ID: 'nep141:usdc.fixture.near' });
+  const hash = '2'.repeat(32);
+  const chain = (opts: { code?: string; verifier?: string } = {}) => ({
+    async call(method: string, params: object) {
+      const p = params as { request_type?: string; method_name?: string; block_id?: string };
+      if (method === 'status') return { chain_id: 'localnet' };
+      if (method === 'block') return { header: { hash, height: 1000, timestamp_nanosec: String(BigInt(Date.now()) * 1_000_000n) } };
+      if (p.request_type === 'view_account') return { code_hash: opts.code ?? 'CodeHash1111' };
+      const values: Record<string, unknown> = {
+        config: { verifier: opts.verifier ?? 'verifier.fixture.near', collateral_token_id: 'nep141:usdc.fixture.near', paused: false, state_version: 6, owner: 'owner.near', publishers: ['ed25519:a', 'ed25519:b', 'ed25519:c'], price_threshold: 2, series: 1, network: 'sandbox' },
+        get_series: { asset: 'btc-usd', decimals: 8, first_start: '0', interval: '300000000000', price_window: '600000000000', close_before: '30000000000' },
+        total_owed: '0', owed_breakdown: { pending_withdrawals: '0' }, mt_balance_of: '0',
+      };
+      return { block_hash: p.block_id, result: [...Buffer.from(JSON.stringify(values[p.method_name!]))] };
+    },
+  });
+  const good = await runPreflight(config, chain(), pool, null);
+  assert.deepEqual(good.filter(c => c.status !== 'pass' && !['network', 'links'].includes(c.name)), [], JSON.stringify(good));
+  const bad = await runPreflight(config, chain({ code: '1'.repeat(32), verifier: 'someone.else.near' }), pool, null);
+  assert.ok(bad.some(c => c.name === 'contract:rounds' && c.status === 'fail' && /no contract deployed/.test(c.detail)));
+  const wrongVerifier = await runPreflight(config, chain({ verifier: 'someone.else.near' }), pool, null);
+  assert.ok(wrongVerifier.some(c => c.name === 'contract:rounds' && c.status === 'fail' && /verifier is someone.else.near/.test(c.detail)));
+}));
+
+test('round publisher signs one price per round from an exchange quorum, serves it, and refuses a conflicting second price', async () => setup(async (pool, root) => {
+  const config = readConfig({ DATABASE_URL: process.env.TEST_DATABASE_URL, DEPLOYMENT_ID: 'reads', DEPLOYMENT_START_BLOCK: '100', ROUNDS_CONTRACT_ID: 'rounds.fixture.near', VERIFIER_CONTRACT_ID: 'verifier.fixture.near', COLLATERAL_TOKEN_ID: 'nep141:usdc.fixture.near' });
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const seed = privateKey.export({ format: 'der', type: 'pkcs8' }).subarray(-32), pub = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+  const key = loadPublisherKey(`ed25519:${base58Encode(Buffer.concat([seed, pub]))}`);
+  const boundary = BigInt(Math.floor((Date.now() - 120000) / 300000) * 300) * 1_000_000_000n;
+  const series = { asset: 'btc-usd', decimals: 8, first_start: boundary.toString(), interval: '300000000000', price_window: '600000000000', close_before: '30000000000' };
+  const view = async (_c: string, method: string) => ({
+    config: { publishers: [key.publicKey], network: 'mainnet', series: 1 }, get_series: series, get_price: null,
+  } as Record<string, unknown>)[method];
+  let prices: Record<string, string> = { coinbase: '80809.12345678', kraken: '80813.9', bitstamp: '80809.44' };
+  const exchange: typeof fetch = async input => {
+    const url = new URL(String(input));
+    const source = url.hostname.includes('coinbase') ? 'coinbase' : url.hostname.includes('kraken') ? 'kraken' : 'bitstamp';
+    const start = source === 'coinbase' ? String(Date.parse(url.searchParams.get('start')!) / 1000) : source === 'kraken' ? url.searchParams.get('since')! : url.searchParams.get('start')!;
+    const close = prices[source]!;
+    if (source === 'coinbase') return new Response(`[[${start},1,2,3,${close},0.5]]`);
+    if (source === 'kraken') return new Response(`{"error":[],"result":{"XXBTZUSD":[[${start},"1","2","3","${close}","4","0.2",9]],"last":${start}}}`);
+    return new Response(`{"data":{"pair":"BTC/USD","ohlc":[{"timestamp":"${start}","open":"1","high":"2","low":"3","close":"${close}","volume":"0.3"}]}}`);
+  };
+  const policy = { minimumSources: 3, maxDeviationBps: 50 };
+  const ctx = { config, pool, view, key, policy, nowNs: BigInt(Date.now()) * 1_000_000n, transport: exchange };
+  const first = await publishOnce(ctx);
+  assert.ok(first.length >= 1, 'signed the round that just settled');
+  assert.equal(first[0]!.round, '0');
+  assert.equal(first[0]!.price, '8080944000000', 'the median of the three closes, at the series decimals');
+  const served = await get(root, '/v1/price-signatures?seriesId=0&round=0');
+  assert.equal(served.quotes.length, 1);
+  const quote = served.quotes[0];
+  assert.equal(quote.message, roundPriceMessage('rounds.fixture.near', 'mainnet', 'btc-usd', boundary.toString(), '8080944000000', 8));
+  assert.equal(quote.price, '8080944000000');
+  const [entryKey, signature] = quote.entry.split('.');
+  assert.equal(entryKey, key.publicKey);
+  assert.equal(signature, key.sign(quote.message));
+  assert.equal((await publishOnce(ctx)).filter(s => s.round === '0').length, 0, 'a round already signed is not signed twice');
+  prices = { coinbase: '81000.00000000', kraken: '81000.00000000', bitstamp: '81000.00000000' };
+  assert.equal((await publishOnce(ctx)).filter(s => s.round === '0').length, 0, 'a different price for a signed round is refused');
+  assert.equal((await get(root, '/v1/price-signatures?seriesId=0&round=0')).quotes[0].message, quote.message);
+  assert.equal((await fetch(root + '/v1/price-signatures?seriesId=9&round=9')).status, 404);
+  assert.equal((await fetch(root + '/v1/price-signatures?seriesId=x&round=0')).status, 400);
+  const rows = (await pool.query("SELECT count(*)::int AS n FROM price_evidence WHERE boundary_ns=$1", [boundary.toString()])).rows[0].n;
+  assert.ok(rows >= 3, 'every exchange response is kept as evidence');
+}));
+
+test('round publisher does not sign when the exchanges disagree or too few answer', async () => setup(async (pool) => {
+  const config = readConfig({ DATABASE_URL: process.env.TEST_DATABASE_URL, DEPLOYMENT_ID: 'reads', DEPLOYMENT_START_BLOCK: '100', ROUNDS_CONTRACT_ID: 'rounds.fixture.near', VERIFIER_CONTRACT_ID: 'verifier.fixture.near', COLLATERAL_TOKEN_ID: 'nep141:usdc.fixture.near' });
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const key = loadPublisherKey(`ed25519:${base58Encode(Buffer.concat([privateKey.export({ format: 'der', type: 'pkcs8' }).subarray(-32), publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)]))}`);
+  const boundary = BigInt(Math.floor((Date.now() - 120000) / 300000) * 300) * 1_000_000_000n;
+  const view = async (_c: string, method: string) => ({
+    config: { publishers: [key.publicKey], network: 'mainnet', series: 1 },
+    get_series: { asset: 'btc-usd', decimals: 8, first_start: boundary.toString(), interval: '300000000000', price_window: '600000000000', close_before: '30000000000' }, get_price: null,
+  } as Record<string, unknown>)[method];
+  const down: typeof fetch = async () => new Response('nope', { status: 500 });
+  const ctx = { config, pool, view, key, policy: { minimumSources: 3, maxDeviationBps: 50 }, nowNs: BigInt(Date.now()) * 1_000_000n, transport: down };
+  assert.deepEqual(await publishOnce(ctx), []);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM signing_decisions')).rows[0].n, 0);
+  const notPublisher = { ...ctx, view: async (c: string, m: string) => (m === 'config' ? { publishers: ['ed25519:someoneelse'], network: 'mainnet', series: 1 } : view(c, m)) };
+  await assert.rejects(publishOnce(notPublisher), /is not a publisher/);
+}));
+
+test('a signed decision is write-once in the database, and a replaced reservation cannot be signed over', async () => setup(async pool => {
+  const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+  await reserveDecision(pool, 'reads', 'ed25519:k', 'round:0:1', 'P1');
+  assert.equal((await reserveDecision(pool, 'reads', 'ed25519:k', 'round:0:1', 'P2')).conflict, false, 'an unsigned reservation can be replaced');
+  const stale = await pool.query('UPDATE signing_decisions SET signature=$4 WHERE deployment_id=$1 AND publisher_key=$2 AND boundary_key=$3 AND payload_hash=$5 AND signature IS NULL', ['reads', 'ed25519:k', 'round:0:1', 'sig-of-P1', hash('P1')]);
+  assert.equal(stale.rowCount, 0, 'a signature over the replaced payload is not stored');
+  await pool.query("UPDATE signing_decisions SET signature='sig-of-P2' WHERE boundary_key='round:0:1'");
+  assert.equal((await reserveDecision(pool, 'reads', 'ed25519:k', 'round:0:1', 'P3')).conflict, true, 'a different price for a signed round is refused');
+  await assert.rejects(pool.query("UPDATE signing_decisions SET signature=NULL WHERE boundary_key='round:0:1'"), /signed decision cannot be changed/);
+  await assert.rejects(pool.query("UPDATE signing_decisions SET payload='P9' WHERE boundary_key='round:0:1'"), /signed decision cannot be changed/);
+  await assert.rejects(pool.query("DELETE FROM signing_decisions WHERE boundary_key='round:0:1'"), /signed decision cannot be changed/);
 }));

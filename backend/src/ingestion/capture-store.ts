@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { IngestionError } from './block.js';
-import { account, type ScopedCaptureBlock } from './neardata.js';
+import { type ScopedCaptureBlock } from './neardata.js';
+import { isAccount as account } from '../validate.js';
 
 /** Verification-only tables in an explicitly created temporary schema. Never app deployment data. */
 export async function initializeCapture(client: pg.PoolClient, schema: string, receiver: string, startHeight: string) {

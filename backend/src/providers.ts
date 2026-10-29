@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Network } from './config.js';
+import { isHash } from './validate.js';
 
 export interface RpcSettings {
   primaryUrl: string;
@@ -15,9 +16,14 @@ const defaults = {
   mainnet: { primary: 'https://free.rpc.fastnear.com', archive: 'https://archival-rpc.mainnet.near.org' },
 } as const;
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+const MAX_RPC_RESPONSE_BYTES = 16 * 1024 * 1024;
+
 function endpoint(value: string, name: string) {
   let parsed: URL;
   try { parsed = new URL(value); } catch { throw new Error(`Invalid ${name}`); }
+  // Plain http would let anyone on the path forge view results, so it is allowed only for a local node.
+  if (parsed.protocol === 'http:' && !LOOPBACK_HOSTS.has(parsed.hostname)) throw new Error(`Invalid ${name}: use https unless the node is on this machine`);
   if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error(`Invalid ${name}: use a URL without credentials or query parameters`);
   return parsed.href;
 }
@@ -36,6 +42,18 @@ export function readRpcSettings(env: NodeJS.ProcessEnv, network: Network): RpcSe
     timeoutMs: bounded(env.RPC_TIMEOUT_MS || '10000', 'RPC_TIMEOUT_MS', 100, 60000),
     intervalMs: bounded(env.RPC_INTERVAL_MS || '1000', 'RPC_INTERVAL_MS', 1000, 60000),
   };
+}
+
+/** Reads a response body but gives up past `max` bytes, so a provider cannot make the process hold an unbounded body. */
+async function readCapped(response: Response, max: number): Promise<string> {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for await (const chunk of response.body ?? []) {
+    size += chunk.length;
+    if (size > max) throw new Error('response_too_large');
+    chunks.push(chunk);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 export class RpcError extends Error {
@@ -69,7 +87,7 @@ export class ReadRpcClient {
       } catch { throw new RpcError('transport_or_timeout'); }
       // nearcore can return JSON-RPC errors with HTTP 400, including method-not-found.
       let body: unknown;
-      try { body = await response.json(); } catch { throw new RpcError(`http_${response.status}_invalid_json`); }
+      try { body = JSON.parse(await readCapped(response, MAX_RPC_RESPONSE_BYTES)); } catch { throw new RpcError(`http_${response.status}_invalid_json`); }
       if (!isObject(body) || body.id !== id || body.jsonrpc !== '2.0') throw new RpcError('invalid_envelope');
       if (isObject(body.error) && typeof body.error.code === 'number') throw new RpcError(body.error.code);
       if (!response.ok) throw new RpcError(`http_${response.status}`);
@@ -101,7 +119,7 @@ export async function checkProvider(client: ReadRpcClient, network: Network, rol
     report.networkVerified = true;
     const block = await client.call('block', { finality: 'final' });
     const header = isObject(block) && isObject(block.header) ? block.header : null;
-    if (!header || typeof header.hash !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(header.hash)) throw new RpcError('invalid_header');
+    if (!header || typeof header.hash !== 'string' || !isHash(header.hash)) throw new RpcError('invalid_header');
     const height = header.height;
     if (!(typeof height === 'number' && Number.isSafeInteger(height) && height >= 0) && !(typeof height === 'string' && /^(0|[1-9]\d*)$/.test(height))) throw new RpcError('invalid_height');
     if (BigInt(height as string | number) > 18446744073709551615n) throw new RpcError('invalid_height');

@@ -8,6 +8,7 @@ import { MarketIcon } from "@/components/MarketIcon";
 import { Embers } from "@/components/Embers";
 import { Award, Lock, Wallet } from "@/components/icons";
 import { useWallet } from "@/components/WalletProvider";
+import { backendEnabled, pendingFor, pendingLabel } from "@/lib/backend";
 import { config } from "@/lib/config";
 import { formatMoney, formatShares } from "@/lib/format";
 import { usePoll } from "@/lib/hooks";
@@ -60,6 +61,10 @@ export default function Portfolio() {
     6000,
   );
 
+  // Money a contract has started to send you and has not yet confirmed. It comes from the backend, which is optional, so a
+  // failed or disabled lookup shows nothing rather than an error.
+  const pending = usePoll(async () => (account && backendEnabled() ? pendingFor(account) : []), [account], 15000);
+
   if (!account) {
     return (
       <div className="page-content">
@@ -104,6 +109,17 @@ export default function Portfolio() {
             </Balance>
           </dl>
           <p id="portfolio-integration" className="portfolio-note">You can view your positions here. Withdrawals and redemptions are not open yet.</p>
+          {pending.data && pending.data.length > 0 && (
+            <Notice>
+              <ul aria-label="Payments waiting for confirmation">
+                {pending.data.map(item => (
+                  <li key={`${item.receiptId}:${item.event}`}>
+                    {pendingLabel(item.kind)}{item.amount === null ? "" : ` of ${formatMoney(item.amount)} ${config.tokenSymbol}`} is waiting for the contract to confirm it.
+                  </li>
+                ))}
+              </ul>
+            </Notice>
+          )}
 
           <h2 className="section-title portfolio-positions-title">Positions</h2>
           {data.positions.length === 0 ? (

@@ -64,7 +64,22 @@ export async function commitBlock(client: pg.PoolClient, config: Config, prepare
   } catch (error) { await client.query('ROLLBACK'); throw error; }
 }
 
-export async function ingestionStatus(pool: Pick<pg.Pool, 'query'>, config: Config) {
+export interface IngestionStatus {
+  state: string;
+  live: boolean;
+  lagBlocks: string | null;
+  deploymentId?: string;
+  source?: { id: string; mode: string } | null;
+  blocksCommitted?: string;
+  eventsCommitted?: string;
+  checkpoint?: { height: string; hash: string; timestampNs: string; committedAt: unknown } | null;
+  lastError?: { code: string; at: unknown } | null;
+  reportedAt?: unknown;
+  sourceHead?: { height: string; hash: string; timestampNs: string; observedAt: unknown } | null;
+  lagMeaning?: string;
+}
+
+export async function ingestionStatus(pool: Pick<pg.Pool, 'query'>, config: Config): Promise<IngestionStatus> {
   if (!config.deployment) return { state: 'unconfigured', live: false, lagBlocks: null };
   const { rows } = await pool.query(`SELECT s.source_id, s.source_mode, s.state, s.blocks_committed::text, s.events_committed::text,
     s.last_error_code, s.last_error_at, s.updated_at, h.height::text AS head_height, h.hash AS head_hash, h.timestamp_ns::text AS head_timestamp_ns, h.observed_at, h.heartbeat_at, c.block_height::text, c.block_hash, c.block_timestamp_ns::text, c.updated_at AS checkpoint_updated_at

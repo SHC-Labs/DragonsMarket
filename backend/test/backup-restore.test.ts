@@ -10,7 +10,6 @@ import {verifyDatabase} from '../src/database.js';
 import {registerDeployment} from '../src/ingestion/store.js';
 import {ingest} from '../src/ingestion/engine.js';
 import {FixtureSource} from '../src/ingestion/source.js';
-import {prepareOperation} from '../src/services.js';
 import {mkdir,rm} from 'node:fs/promises';
 const exec=promisify(execFile);
 test('pg_dump/pg_restore recover exact database values in an isolated schema',async()=>{
@@ -21,8 +20,8 @@ test('pg_dump/pg_restore recover exact database values in an isolated schema',as
  try{
   await mkdir('.local/backups',{recursive:true});await pool.query(`CREATE SCHEMA ${schema}`);
   await migrate(scoped);await registerDeployment(scoped,config);await ingest(scoped,config,new FixtureSource('test/fixtures/blocks.jsonl'));
-  const operation=await prepareOperation(scoped,'restore-test','alice.near','withdraw','restore-op',{amount:'9007199254740993'});
-  await scoped.query("UPDATE user_operations SET state='unknown' WHERE id=$1",[operation.id]);
+  const operation={id:randomUUID()};
+  await scoped.query("INSERT INTO user_operations(id,deployment_id,account_id,kind,idempotency_key,request_hash,request,state) VALUES($1,'restore-test','alice.near','withdraw','restore-op',repeat('a',64),'{\"amount\":\"9007199254740993\"}','unknown')",[operation.id]);
   await pool.query(`CREATE TABLE ${schema}.evidence(id text PRIMARY KEY,amount numeric(38,0),payload jsonb)`);
   await pool.query(`INSERT INTO ${schema}.evidence VALUES ('receipt',900719925474099301,'{"state":"unknown"}')`);
   await exec('pg_dump',['--format=custom','--no-owner','--no-acl',`--schema=${schema}`,`--file=${archive}`],{env});

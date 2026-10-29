@@ -13,7 +13,7 @@ function raw(height = 100, parent = 99) {
 }
 
 test('NEAR Data normalization retains exact integers, transaction provenance and failure outcomes', () => {
-  const large = parseNeardata('{"timestamp":1793138919331894540,"amount":"9007199254740993"}') as any;
+  const large = parseNeardata('{"timestamp":1793138919331894540,"amount":"9007199254740993"}') as { timestamp: string; amount: string };
   assert.equal(large.timestamp, '1793138919331894540');
   assert.equal(large.amount, '9007199254740993');
   assert.throws(() => parseNeardata('{"n":1e999}'), /invalid_neardata_json/);
@@ -25,7 +25,7 @@ test('NEAR Data normalization retains exact integers, transaction provenance and
   const selected = scopeCapture(block, 'intents.near');
   assert.equal(selected.receipts.length, 2);
   assert.equal(selected.events.length, 1, 'Failed receipt logs must not become events');
-  assert.equal((selected.events[0]!.envelope as any).data[0].amount, '9007199254740993');
+  assert.equal((selected.events[0]!.envelope as { data: { amount: string }[] }).data[0]!.amount, '9007199254740993');
   assert.equal(scopeCapture(block, 'another.near').receipts.length, 0);
   const malformed = structuredClone(block);
   malformed.receipts[0]!.logs = ['EVENT_JSON:broken'];
@@ -75,4 +75,13 @@ test('transport enforces redirect origin/path, response bounds and safe rate-lim
   assert.equal((await redirected.capture(1))[0]!.header.height, '100');
   const missing = new NeardataReader(async () => new Response('null'), async () => {});
   await assert.rejects(missing.capture(1), /invalid_neardata_block/);
+});
+
+test('a cycle stops asking for blocks before its request budget runs out, so the next cycle carries on', async () => {
+  const reader = new NeardataReader(async () => new Response('null'), async () => {}, 400);
+  assert.equal(reader.hasBudget(), true);
+  for (let i = 0; i < 31; i++) await reader.document(`/v0/block/${i}`);
+  assert.equal(reader.hasBudget(), false);
+  reader.resetBudget();
+  assert.equal(reader.hasBudget(), true);
 });
