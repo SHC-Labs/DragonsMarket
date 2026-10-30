@@ -11,13 +11,13 @@ fi
 command -v docker >/dev/null || { echo "docker is needed for a reproducible build" >&2; exit 1; }
 
 ./build.sh --reproducible >&2
-node verify-build.mjs target/near/market/market.wasm target/near/oracle/oracle.wasm target/near/council/council.wasm >&2
+node verify-build.mjs target/near/market/market.wasm target/near/oracle/oracle.wasm target/near/council/council.wasm target/near/rounds/rounds.wasm >&2
 
 commit=$(git rev-parse HEAD)
 toolchain=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
 message="Release hashes
 
-$(for c in market oracle council; do echo "$c sha256:$(sha256sum "target/near/$c/$c.wasm" | cut -d' ' -f1)"; done)
+$(for c in market oracle council rounds; do echo "$c sha256:$(sha256sum "target/near/$c/$c.wasm" | cut -d' ' -f1)"; done)
 commit $commit
 toolchain $toolchain"
 

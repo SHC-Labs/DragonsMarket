@@ -55,6 +55,7 @@ const SAMPLES = {
   market: {
     upgrade: { code_hash: HASH },
     seal: { public_key: ED_KEY },
+    remove_verifier_key: { public_key: ED_KEY },
     propose_owner: { new_owner: DAO },
     accept_owner: {},
     set_operator: { operator_id: "keeper.example.near" },
@@ -63,6 +64,7 @@ const SAMPLES = {
     set_min_sweep: { min_sweep: "1000000" },
     set_next_sweep_id: { next_sweep_id: "50" },
     set_fee_rate_bps: { fee_rate_bps: 150 },
+    set_max_market_locked: { max_market_locked: "100000000000" },
     set_storage_policy: { market_storage_deposit: MARKET_STORAGE_DEPOSIT, reserve: "1000000000000000000000000" },
     set_registration_fee: { registration_fee: "250000" },
     reconcile_leg: { sweep_id: "3", leg: "council", arrived: true },
@@ -74,6 +76,7 @@ const SAMPLES = {
     set_max_positions: { max_positions: 20 },
     set_fee_limits: { max_fee_rate_bps: 500, min_revenue_share_bps: 1000, max_revenue_share_bps: 5000, max_min_sweep: "100000000" },
     halt: { market_id: "3", reason: "the source is down" },
+    set_market_cap: { market_id: "3", cap: "5000000000" },
     resume: { market_id: "3" },
     claim_residual: { market_id: "3" },
     retry_register: { market_id: "3" },
@@ -86,6 +89,7 @@ const SAMPLES = {
   oracle: {
     upgrade: { code_hash: HASH },
     seal: { public_key: SECP_KEY },
+    remove_verifier_key: { public_key: ED_KEY },
     propose_owner: { new_owner: DAO },
     accept_owner: {},
     set_operator: { operator_id: "keeper.example.near" },
@@ -112,6 +116,7 @@ const SAMPLES = {
   council: {
     upgrade: { code_hash: HASH },
     seal: { public_key: ED_KEY },
+    remove_verifier_key: { public_key: ED_KEY },
     propose_owner: { new_owner: DAO },
     accept_owner: {},
     set_cooldown_ns: { cooldown_ns: "172800000000000" },

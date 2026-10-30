@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { b58encode } from "./chain.mjs";
 import { VENUES } from "./prices.mjs";
 import { priceMessage, publisherKey, quoter, server, SETTLE_NS, signerOf } from "./publisher.mjs";
@@ -14,7 +17,8 @@ function secretOf(seed) {
   return "ed25519:" + b58encode(Buffer.concat([Buffer.alloc(32, seed), publicKey]));
 }
 
-function chain({ now = OBSERVATION + SETTLE_NS, publishers, markets = ["market.near"], priceRule = { observation_time: String(OBSERVATION), strike: "8000000", decimals: 2, above: true }, source = "Median of BTC-USD one minute closes on Coinbase, Kraken and Bitstamp" }) {
+function chain(options) {
+  const { publishers, markets = ["market.near"], priceRule = { observation_time: String(OBSERVATION), strike: "8000000", decimals: 2, above: true }, source = "Median of BTC-USD one minute closes on Coinbase, Kraken and Bitstamp" } = options;
   const views = {
     config: () => ({ markets, publishers, network: "mainnet" }),
     get_market_info: () => (priceRule === null ? { price_rule: null } : { price_rule: priceRule }),
@@ -26,7 +30,7 @@ function chain({ now = OBSERVATION + SETTLE_NS, publishers, markets = ["market.n
     req.on("end", () => {
       const { method, params } = JSON.parse(body);
       const result = method === "block"
-        ? { header: { timestamp_nanosec: String(now), height: 10, hash: "11111111111111111111111111111111" } }
+        ? { header: { timestamp_nanosec: String(options.now ?? OBSERVATION + SETTLE_NS), height: 10, hash: "11111111111111111111111111111111" } }
         : { result: [...Buffer.from(JSON.stringify(views[params.method_name]()))] };
       res.end(JSON.stringify({ jsonrpc: "2.0", id: "keeper", result }));
     });
@@ -101,14 +105,67 @@ test("a settled price market is priced from the exchanges, signed over the oracl
   });
 });
 
-test("a price from fewer than all exchanges is signed but asked again next time", async () => {
-  const venues = exchanges({ ...CLOSES, kraken: null });
+test("one market gets one signature, even when the exchanges move or only some answered the first time", async () => {
+  let venues = exchanges({ ...CLOSES, kraken: null });
+  await withChain({ publishers: [key.publicKey] }, async (rpcUrl) => {
+    const quote = quoter({ rpcUrl, oracle: "oracle.near", key, venues: VENUES, fetch: (url) => venues.fetch(url) });
+    const first = await quote("market.near", "7");
+    assert.equal(first.sources, 2);
+    venues = exchanges({ coinbase: 90000, kraken: "90010", bitstamp: "90020" });
+    assert.deepEqual(await quote("market.near", "7"), first);
+    assert.equal((await quote("market.near", "7")).signature, first.signature);
+  });
+});
+
+const tempPriceFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "publisher-")), "prices.json");
+
+test("a restarted publisher returns the signature it saved, even after prices changed", async () => {
+  const priceFile = tempPriceFile();
+  await withChain({ publishers: [key.publicKey] }, async (rpcUrl) => {
+    const before = quoter({ rpcUrl, oracle: "oracle.near", key, venues: VENUES, fetch: exchanges(CLOSES).fetch, priceFile });
+    const first = await before("market.near", "7");
+    const moved = exchanges({ coinbase: 90000, kraken: "90010", bitstamp: "90020" });
+    const after = quoter({ rpcUrl, oracle: "oracle.near", key, venues: VENUES, fetch: moved.fetch, priceFile });
+    assert.deepEqual(await after("market.near", "7"), first);
+    assert.equal(moved.calls(), 0);
+    assert.equal(fs.existsSync(`${priceFile}.tmp`), false);
+  });
+});
+
+test("a corrupt or unreadable price file stops the publisher instead of signing again", () => {
+  const priceFile = tempPriceFile();
+  const make = () => quoter({ rpcUrl: "http://127.0.0.1:1", oracle: "oracle.near", key, venues: VENUES, fetch: exchanges(CLOSES).fetch, priceFile });
+  for (const content of ["{not json", "[]", JSON.stringify({ "market.near:7": { market: "market.near", market_id: "8", price: "1", signature: "x" } })]) {
+    fs.writeFileSync(priceFile, content);
+    assert.throws(make, /is not a publisher price file/);
+  }
+  fs.rmSync(priceFile);
+  fs.mkdirSync(priceFile);
+  assert.throws(make, /EISDIR/);
+});
+
+test("two requests arriving together share one signing", async () => {
+  const venues = exchanges(CLOSES);
   await withChain({ publishers: [key.publicKey] }, async (rpcUrl) => {
     const quote = quoter({ rpcUrl, oracle: "oracle.near", key, venues: VENUES, fetch: venues.fetch });
-    assert.equal((await quote("market.near", "7")).sources, 2);
-    await quote("market.near", "7");
-    assert.equal(venues.calls(), 6);
+    const [a, b] = await Promise.all([quote("market.near", "7"), quote("market.near", "7")]);
+    assert.equal(a.signature, b.signature);
+    assert.equal(venues.calls(), 3);
   });
+});
+
+test("a refused request is not kept, so the next one can sign", async () => {
+  const state = { publishers: [key.publicKey], now: OBSERVATION + SETTLE_NS - 1n };
+  const rpcServer = chain(state);
+  await new Promise((resolve) => rpcServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const quote = quoter({ rpcUrl: `http://127.0.0.1:${rpcServer.address().port}`, oracle: "oracle.near", key, venues: VENUES, fetch: exchanges(CLOSES).fetch });
+    await assert.rejects(quote("market.near", "7"), (e) => e.status === 425);
+    state.now = OBSERVATION + SETTLE_NS;
+    assert.equal((await quote("market.near", "7")).sources, 3);
+  } finally {
+    rpcServer.close();
+  }
 });
 
 test("the publisher refuses what it cannot or must not sign, each with its own status", async () => {

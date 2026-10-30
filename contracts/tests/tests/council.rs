@@ -25,8 +25,8 @@ fn ids(accounts: &[Account]) -> Vec<String> {
 async fn the_drawn_panel_never_includes_the_proposer_or_the_challenger() -> anyhow::Result<()> {
     let w = setup().await?;
     let j = &w.jurors;
-    // Carol and Dave stake seats too. Without them only two seats are eligible, one short of a jury.
-    leave(&w, &[&j[2], &j[3], &j[4]]).await?;
+    // Carol and Dave stake seats too. Without the two that leave, only three seats are eligible, two short of a jury.
+    leave(&w, &[&j[3], &j[4]]).await?;
     for who in [&w.carol, &w.dave] {
         mint_nft(&w, who, who.id().as_str()).await?;
         stake(&w, who, who.id().as_str()).await?;
@@ -36,12 +36,14 @@ async fn the_drawn_panel_never_includes_the_proposer_or_the_challenger() -> anyh
     assert_eq!(event_names(&resolve_draw(&w, id).await?), vec!["draw_failed"]);
     assert_eq!(case_json(&w, id).await["panel"], json!([]));
 
-    stake(&w, &j[2], j[2].id().as_str()).await?;
+    stake(&w, &j[3], j[3].id().as_str()).await?;
+    assert_eq!(event_names(&resolve_draw(&w, id).await?), vec!["draw_failed"]);
+    stake(&w, &j[4], j[4].id().as_str()).await?;
     assert_eq!(
         event_names(&resolve_draw(&w, id).await?),
         vec!["jury_drawn", "jury_drawn"]
     );
-    assert_eq!(ids(&panel(&w, id).await), ids(&j[..3]));
+    assert_eq!(ids(&panel(&w, id).await), ids(j));
     Ok(())
 }
 
@@ -65,7 +67,7 @@ async fn a_jury_is_drawn_only_after_the_delay_and_only_once() -> anyhow::Result<
     let drawn = case_json(&w, id).await["panel"].clone();
     refused(resolve_draw(&w, id).await, "the jury is already drawn");
     assert_eq!(case_json(&w, id).await["panel"], drawn);
-    assert_eq!(jury.len(), 3);
+    assert_eq!(jury.len(), JURY as usize);
     Ok(())
 }
 
@@ -73,7 +75,7 @@ async fn a_jury_is_drawn_only_after_the_delay_and_only_once() -> anyhow::Result<
 async fn not_enough_seats_fails_the_draw_and_a_retry_works_after_a_seat_is_staked() -> anyhow::Result<()> {
     let w = setup().await?;
     let j = &w.jurors;
-    leave(&w, &[&j[0], &j[1], &j[2]]).await?;
+    leave(&w, &[&j[0]]).await?;
     let id = disputed(&w).await?;
     wait_for_draw(&w, id).await;
     assert_eq!(event_names(&resolve_draw(&w, id).await?), vec!["draw_failed"]);
@@ -84,10 +86,7 @@ async fn not_enough_seats_fails_the_draw_and_a_retry_works_after_a_seat_is_stake
         event_names(&resolve_draw(&w, id).await?),
         vec!["jury_drawn", "jury_drawn"]
     );
-    assert_eq!(
-        ids(&panel(&w, id).await),
-        ids(&[j[0].clone(), j[3].clone(), j[4].clone()])
-    );
+    assert_eq!(ids(&panel(&w, id).await), ids(j));
     Ok(())
 }
 
@@ -132,7 +131,8 @@ async fn two_draws_in_flight_end_with_one_jury() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn only_the_panel_commits_once_and_only_during_the_commit_phase() -> anyhow::Result<()> {
-    let w = setup().await?;
+    let mut w = setup().await?;
+    add_jurors(&mut w, 1).await?;
     let id = disputed(&w).await?;
     let jury = draw_jury(&w, id).await?;
     let outsider = w
@@ -230,12 +230,14 @@ async fn revealed_votes_settle_early_and_a_silent_juror_does_not_block() -> anyh
     let jury = draw_jury(&w, id).await?;
     commit(&w, &jury[0], id, "no", "a").await?;
     commit(&w, &jury[1], id, "no", "b").await?;
-    commit(&w, &jury[2], id, "yes", "c").await?;
+    commit(&w, &jury[2], id, "no", "c").await?;
+    commit(&w, &jury[3], id, "yes", "d").await?;
     to_reveal_phase(&w, id).await;
 
     reveal(&w, &jury[0], id, "no", "a", "The source says no.").await?;
-    assert_eq!(case_json(&w, id).await["stage"], "disputed");
     reveal(&w, &jury[1], id, "no", "b", "No advisory was issued.").await?;
+    assert_eq!(case_json(&w, id).await["stage"], "disputed");
+    reveal(&w, &jury[2], id, "no", "c", "The source agrees.").await?;
     let case = case_json(&w, id).await;
     let deadline: u64 = case["panel_deadline"].as_str().unwrap().parse()?;
     assert!(now(&w.worker).await < deadline, "settled before the deadline");
@@ -243,61 +245,83 @@ async fn revealed_votes_settle_early_and_a_silent_juror_does_not_block() -> anyh
     assert_eq!(case["final_outcome"], "no");
     assert_eq!(case["applied"], true);
     assert_eq!(market_json(&w, id).await["outcome"], "no");
-    // Dave won, so Carol's bond is the loser's: a quarter is split between the two jurors who revealed No, and Dave
+    // Dave won, so Carol's bond is the loser's: a quarter is split between the three jurors who revealed No, and Dave
     // keeps his own bond and the rest.
-    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND - BOND / 4);
+    let each = JUROR_PAY;
+    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND - each * 3);
     assert_eq!(
-        (claimable(&w, jury[0].id()).await, claimable(&w, jury[1].id()).await),
-        (BOND / 8, BOND / 8)
+        (
+            claimable(&w, jury[0].id()).await,
+            claimable(&w, jury[1].id()).await,
+            claimable(&w, jury[2].id()).await
+        ),
+        (each, each, each)
     );
-    assert_eq!(claimable(&w, jury[2].id()).await, 0);
+    assert_eq!(claimable(&w, jury[3].id()).await, 0);
     assert_eq!(
         case["delinquent"],
-        serde_json::json!([]),
-        "the third juror committed and was given no chance to reveal"
+        serde_json::json!([jury[4].id()]),
+        "the juror who committed was given no chance to reveal; only the one who never committed is at fault"
     );
 
-    // The third juror never revealed. The case is closed to them now.
+    // The fourth juror never revealed. The case is closed to them now.
     refused(
-        reveal(&w, &jury[2], id, "yes", "c", "Too late.").await,
+        reveal(&w, &jury[3], id, "yes", "d", "Too late.").await,
         "no open dispute",
     );
     Ok(())
 }
 
-// Nobody draws the first jury before draw_by, so it counts as a jury that did not decide and a second one is called for.
-// Only five accounts hold seats, which is too few for a jury of seven, so the second draw fails too and the case ends
-// with no decision. No jury was ever seated, so the system failed and not the challenger: each side gets its own bond back
-// and the no-decision recipient (the treasury in these tests) is paid nothing.
+// The longest a test waits for seats before it calls the wait endless.
+const MAX_WAITS: usize = 40;
+
+// Nobody draws the first jury before draw_by. Seats may be busy on other cases, so a case nobody could draw for waits window by
+// window instead of ruling, for as long as a jury seated at the end of the wait would still have time to finish before
+// resolve_by. This market leaves the least the oracle accepts, so the wait ends in a few hours and the case ends with no decision.
+// No jury was ever seated, so the system failed and not the challenger: each side gets its own bond back and the no-decision
+// recipient (the treasury in these tests) is paid nothing.
 #[tokio::test]
-async fn a_case_whose_jury_is_never_drawn_is_a_no_decision_twice_and_ends_void() -> anyhow::Result<()> {
+async fn a_case_whose_jury_is_never_drawn_waits_for_seats_and_ends_void_with_both_bonds_back() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = disputed(&w).await?;
+    let id = create_market(&w, 120, MIN_RESOLVE_GAP_SECS).await?;
+    skip_secs(&w.worker, 130).await;
+    propose(&w, &w.carol, id, "yes").await?;
+    challenge(&w, &w.dave, id).await?;
     refused(finalize(&w, id).await, "the panel still has time");
 
     let draw_by: u64 = case_json(&w, id).await["draw_by"].as_str().unwrap().parse()?;
     skip_until(&w, draw_by + 1).await;
     refused(resolve_draw(&w, id).await, "too late to draw a jury");
-    finalize(&w, id).await?;
-    let case = case_json(&w, id).await;
-    assert_eq!(
-        (&case["stage"], &case["round"], &case["jury_size"]),
-        (&json!("disputed"), &json!(1), &json!(7))
-    );
-
-    wait_for_draw(&w, id).await;
-    assert_eq!(
-        event_names(&resolve_draw(&w, id).await?),
-        vec!["draw_failed"],
-        "five seat holders cannot make a jury of seven"
-    );
-    let draw_by: u64 = case_json(&w, id).await["draw_by"].as_str().unwrap().parse()?;
-    skip_until(&w, draw_by + 1).await;
-    finalize(&w, id).await?;
+    let mut waits = 0;
+    loop {
+        finalize(&w, id).await?;
+        let case = case_json(&w, id).await;
+        if case["stage"] == "final" {
+            break;
+        }
+        assert_eq!(
+            (&case["stage"], &case["round"], &case["jury_size"]),
+            (&json!("disputed"), &json!(0), &json!(JURY)),
+            "the case waits for seats in its first round"
+        );
+        waits += 1;
+        assert!(waits < MAX_WAITS, "the wait for seats never ended");
+        let draw_by: u64 = case["draw_by"].as_str().unwrap().parse()?;
+        skip_until(&w, draw_by + 1).await;
+    }
+    assert!(waits >= 1, "the case waited at least one extra window");
     assert_eq!(market_json(&w, id).await["outcome"], "void");
     assert_eq!(claimable(&w, w.carol.id()).await, BOND);
-    assert_eq!(claimable(&w, w.dave.id()).await, BOND);
-    assert_eq!(claimable(&w, w.treasury.id()).await, 0);
+    assert_eq!(
+        claimable(&w, w.dave.id()).await,
+        BOND,
+        "no jury sat, so the challenger is not charged"
+    );
+    assert_eq!(
+        claimable(&w, w.treasury.id()).await,
+        0,
+        "and the no-decision recipient holds nothing"
+    );
     assert_eq!(claimable(&w, w.owner.id()).await, 0, "the owner is not paid");
 
     assert_eq!(oracle_total_owed(&w).await, 2 * BOND);

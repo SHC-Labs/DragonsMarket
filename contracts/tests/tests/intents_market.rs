@@ -82,7 +82,7 @@ async fn a_full_journey_keeps_total_owed_equal_to_the_verifiers_balance() -> any
 
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, id).await?;
     assert_eq!(market_json(&w, id).await["outcome"], "yes");
 
@@ -494,7 +494,7 @@ async fn redeeming_works_inside_the_market_while_the_verifier_refuses_payouts() 
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, id).await?;
 
     lock_account(&w, w.market.id()).await?;

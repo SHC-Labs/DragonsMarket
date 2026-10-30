@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import {
-  accessKeyReport, advanceCursor, councilFloor, daoReport, describeOutcome, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options, wiringProblems,
+  accessKeyReport, advanceCursor, councilFloor, daoReport, describeOutcome, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options, wiringProblems, driftProblems, bondRatioWarning,
   quarterEnd, quarterOf, readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, tokenProblems, verifierProblems,
   writeCursor, refuseRetiredController, releaseReport, validateActionKeys,
 } from "./keeper.mjs";
@@ -279,10 +279,12 @@ test("the DAO report lists the open proposals that name the contracts and flags 
     `DAO proposal 8 (InProgress, by alice.near): oracle.upgrade {"code_hash":"${staged}"}`,
     "4 other open DAO proposals (FunctionCall, Transfer, Vote, ChangePolicy)",
   ]);
-  assert.equal(report.problems.length, 3);
-  assert.equal(report.problems[0], "DAO proposal 5 names market.near and is not on the allow-list: market.settle_leg is not on the allow-list");
-  assert.match(report.problems[1], /^DAO proposal 6 names council\.near and is not on the allow-list: cooldown_ns must be/);
-  assert.match(report.problems[2], /^DAO proposal 7 names oracle\.near and is not on the allow-list: no code with the hash .* is staged on oracle\.near/);
+  assert.equal(report.problems.length, 5);
+  assert.match(report.problems[0], /^DAO proposal 4 calls oracle\.set_bond, which changes control/);
+  assert.equal(report.problems[1], "DAO proposal 5 names market.near and is not on the allow-list: market.settle_leg is not on the allow-list");
+  assert.match(report.problems[2], /^DAO proposal 6 names council\.near and is not on the allow-list: cooldown_ns must be/);
+  assert.match(report.problems[3], /^DAO proposal 7 names oracle\.near and is not on the allow-list: no code with the hash .* is staged on oracle\.near/);
+  assert.match(report.problems[4], /^DAO proposal 8 calls oracle\.upgrade, which changes control/);
   assert.ok(asked.every(([account, method]) => account === CONTRACTS.oracle && method === "is_staged"), "it only reads");
   assert.deepEqual((await daoReport({ proposals: [], treasuryId: DAO, contracts: CONTRACTS, view })).lines, ["no open DAO proposals"]);
 });
@@ -528,11 +530,69 @@ test("wiring check passes when every contract names the same oracle, Council, ve
     market: { ...shared, oracle: "o.near", revenue_pool: "c.near" },
     oracle: { ...shared, council: "c.near" },
     council: { ...shared, oracle: "o.near" },
-    rounds: { ...shared },
+    rounds: { ...shared, treasury: "t.near" },
   };
+  configs.market.treasury = "t.near";
   const ids = { oracle: "o.near", council: "c.near" };
   assert.deepEqual(wiringProblems(configs, ids), []);
   assert.deepEqual(wiringProblems({ ...configs, council: { ...shared, oracle: "x.near" } }, ids), ["the Council's oracle is x.near, expected o.near"]);
   assert.deepEqual(wiringProblems({ ...configs, market: { ...configs.market, revenue_pool: null } }, ids), ["the market's revenue_pool is unset, expected c.near"]);
-  assert.deepEqual(wiringProblems({ ...configs, rounds: { ...shared, collateral_token_id: "nep141:other.near" } }, ids), ["the rounds's collateral token is nep141:other.near, expected nep141:usdc.near"]);
+  assert.deepEqual(wiringProblems({ ...configs, rounds: { ...configs.rounds, treasury: null } }, ids), ["the rounds contract's treasury is unset, expected t.near"]);
+  assert.deepEqual(wiringProblems({ ...configs, rounds: { ...configs.rounds, collateral_token_id: "nep141:other.near" } }, ids), ["the rounds's collateral token is nep141:other.near, expected nep141:usdc.near"]);
+});
+
+test("daoReport turns an upgrade whose hash is not in the release list into a problem", async () => {
+  const release = parseReleaseHashes(RELEASE_LIST);
+  const upgrade = (id, code_hash) => ({
+    id, status: "InProgress", proposer: "alice.near",
+    kind: { FunctionCall: { receiver_id: "oracle.near", actions: [{ method_name: "upgrade", args: Buffer.from(JSON.stringify({ code_hash })).toString("base64"), deposit: "0", gas: "1" }] } },
+  });
+  const report = await daoReport({
+    proposals: [upgrade(1, hexToBase58(HASHES.oracle)), upgrade(2, hexToBase58("99".repeat(32)))],
+    treasuryId: "dao.near", contracts: { market: "market.near", oracle: "oracle.near", council: "council.near" }, view: async () => null, release,
+  });
+  const notListed = report.problems.filter((p) => p.includes("not in the --release list"));
+  assert.equal(notListed.length, 1);
+  assert.match(notListed[0], /^DAO proposal 2 upgrades oracle/);
+});
+
+test("a proposal that names the verifier, the collection or one of our accounts in another kind is flagged for a person", async () => {
+  const proposal = (id, kind) => ({ id, status: "InProgress", proposer: "alice.near", kind });
+  const call = (receiver_id) => ({ FunctionCall: { receiver_id, actions: [] } });
+  const contracts = { market: "market.near", oracle: "oracle.near", council: "council.near" };
+  const report = await daoReport({
+    proposals: [proposal(1, call("intents.near")), proposal(2, call("nft.near")), proposal(3, { UpgradeRemote: { receiver_id: "market.near", method_name: "x" } }), proposal(4, call("other.near"))],
+    treasuryId: "dao.near",
+    contracts,
+    view: async () => null,
+    watch: ["intents.near", "nft.near"],
+  });
+  assert.equal(report.problems.length, 3);
+  assert.match(report.problems[0], /^DAO proposal 1 calls intents\.near/);
+  assert.match(report.problems[1], /^DAO proposal 2 calls nft\.near/);
+  assert.match(report.problems[2], /^DAO proposal 3 of kind UpgradeRemote names one of our accounts/);
+});
+
+test("drift check names an owner, a pending owner or a destination that is not the DAO", () => {
+  const dao = "dao.near";
+  const configs = {
+    market: { owner: dao, pending_owner: null, operator: "op.near", treasury: dao },
+    oracle: { owner: dao, pending_owner: null, operator: "op.near", no_decision_recipient: dao },
+    council: { owner: dao, pending_owner: null },
+    rounds: { owner: dao, pending_owner: null, operator: "op.near", treasury: dao },
+  };
+  assert.deepEqual(driftProblems(configs, { dao, operator: "op.near" }), []);
+  const bad = { ...configs, market: { ...configs.market, owner: "evil.near", treasury: "evil.near" }, council: { ...configs.council, pending_owner: "evil.near" } };
+  assert.deepEqual(driftProblems(bad, { dao, operator: "op.near" }), [
+    "the market's owner is evil.near, expected dao.near",
+    "the council's pending owner is evil.near, expected null",
+    "the market's treasury is evil.near, expected dao.near",
+  ]);
+  assert.deepEqual(driftProblems({ ...configs, oracle: { ...configs.oracle, operator: "x.near" } }, { dao, operator: "op.near" }), ["the oracle's operator is x.near, expected op.near"]);
+});
+
+test("the bond ratio warning names a ceiling that is far above the bond and stays quiet within it", () => {
+  assert.equal(bondRatioWarning({ max_market_locked: "500000000" }, { bond: "5000000" }), null);
+  assert.match(bondRatioWarning({ max_market_locked: "100000000000" }, { bond: "5000000" }), /is 20000 times the oracle bond 5000000/);
+  assert.equal(bondRatioWarning({ max_market_locked: "100000000000" }, { bond: "0" }), null);
 });

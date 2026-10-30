@@ -251,14 +251,14 @@ async fn a_retry_with_exactly_the_floor_frees_a_seat_a_failed_unlock_left_held()
     propose(&w, &w.carol, id, "yes").await?;
     challenge(&w, &w.dave, id).await?;
     let jury = draw_jury(&w, id).await?;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(&w, j, id, "no", "s").await?;
     }
     to_reveal_phase(&w, id).await;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         reveal(&w, j, id, "no", "s", "The source says no.").await?;
     }
-    let token = jury[2].id().to_string();
+    let token = jury[MAJORITY].id().to_string();
     relock_seat(&w, &token, id).await?;
     let retry = |tgas: u64| {
         w.dave
@@ -436,8 +436,8 @@ async fn settling_a_lost_leg_and_finalizing_a_quarter_take_the_gas_they_reserve(
 #[tokio::test]
 async fn the_deadline_answer_refuses_less_than_the_settling_floor() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_market(&w, 120, 600).await?;
-    skip_secs(&w.worker, 120 + 600 + 10).await;
+    let id = create_market(&w, 120, MARKET_GAP_SECS).await?;
+    skip_secs(&w.worker, 120 + MARKET_GAP_SECS + 10).await;
     let call = |tgas: u64| {
         w.dave
             .call(w.oracle.id(), "resolve_by_deadline")
@@ -464,7 +464,7 @@ async fn a_bond_withdrawal_refuses_less_than_its_floor_and_works_with_exactly_th
     let id = new_market(&w, 120).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, id).await?;
     assert_eq!(claimable(&w, w.carol.id()).await, BOND);
 
@@ -514,14 +514,14 @@ async fn a_bond_withdrawal_refuses_less_than_its_floor_and_works_with_exactly_th
 async fn a_bond_gets_through_the_verifier_into_the_oracle_with_what_a_wallet_attaches() -> anyhow::Result<()> {
     const WALLET_TGAS: u64 = 100;
     let gases = [20u64, 21, 22, 23, 24, 25, 26, 28, 30, 35, 40, 60, WALLET_TGAS];
-    let w = setup_with(600_000, PANEL_MS, DRAW_DELAY_BLOCKS).await?;
+    let w = setup().await?;
     for who in [&w.carol, &w.dave] {
         mint(&w, who.id(), 500 * USD).await?;
         deposit_to_intents(&w, who, who.id(), 200 * USD).await?;
     }
     let mut markets = vec![];
     for _ in gases {
-        markets.push(create_market(&w, 150, 3_600).await?);
+        markets.push(create_market(&w, 150, MARKET_GAP_SECS).await?);
     }
     let last_close = u(&market_json(&w, *markets.last().unwrap()).await["close_at"]);
     skip_until(&w, (last_close + 1_000_000_000) as u64).await;

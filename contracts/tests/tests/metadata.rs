@@ -4,7 +4,7 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 
-const REPOSITORY: &str = "https://github.com/SHC-Labs/Council-PM";
+const REPOSITORY: &str = "https://github.com/SHC-Labs/Dragons-Market";
 
 async fn metadata(contract: &near_workspaces::Contract) -> Value {
     contract.view("contract_source_metadata").await.unwrap().json().unwrap()

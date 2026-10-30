@@ -17,8 +17,10 @@ const MIGRATE_METHOD: &str = "migrate";
 pub const GAS_MIGRATE: Gas = Gas::from_tgas(30);
 // What upgrade needs attached: the deploy of a wasm of the size the contracts build to (the market is about 340 KB), the
 // migrate gas above and a margin. The sandbox upgrade test deploys each contract's real build at exactly this amount, so a
-// larger build that no longer fits fails that test. See contracts/AUDIT.md.
+// larger build that no longer fits fails that test.
 pub const GAS_UPGRADE: Gas = Gas::from_tgas(100);
+// The callback that clears `upgrade_in_flight` when the deploy batch fails.
+pub const GAS_UPGRADE_DONE: Gas = Gas::from_tgas(5);
 
 pub struct Staged {
     pub code_hash: Base58CryptoHash,

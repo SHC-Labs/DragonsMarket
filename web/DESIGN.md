@@ -220,8 +220,7 @@ components:
 # Dragons Market design
 
 Agent-facing summary of the brand for building UI in `web/`. The front matter above is generated
-from `design/tokens.json` by `npm run tokens`; edit the JSON, never the front matter. Reasoning and
-voice live in [design/BRAND.md](../design/BRAND.md). See every token and component live at `/brand`.
+from `design/tokens.json` by `npm run tokens`; edit the JSON, never the front matter. See every token and component live at `/brand`.
 
 ## Overview
 
@@ -323,7 +322,7 @@ its area's file. Use Tailwind utilities only for one-off layout.
 - Do give every price its unit and tabular figures.
 - Do keep the rule and result source one step from any price.
 - Do design every state: loading, empty, error, disabled, closed, final, coming soon.
-- Do check 390px and 1440px in both themes before calling UI done (`.claude/skills/verify`).
+- Do check 390px and 1440px in both themes before calling UI done.
 - Don't use a hex, rgb or oklch value outside `design/tokens.json`. `npm run check:brand` fails.
 - Don't use a font other than the two brand stacks, or set paragraphs in the display face.
 - Don't use stock Tailwind colours such as `bg-purple-500`. They do not exist here.

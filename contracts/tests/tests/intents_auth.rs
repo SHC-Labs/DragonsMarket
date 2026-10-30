@@ -110,7 +110,7 @@ async fn a_signer_with_no_near_trades_and_exits_by_signed_intents() -> anyhow::R
 
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, id).await?;
     let r = relay(&w, signed(&w, &key, market_action(&w, &format!("redeem:{id}")), 4)).await?;
     assert_clean(&w, "signed redeem", &r);

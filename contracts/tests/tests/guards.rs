@@ -16,9 +16,8 @@ const CONTRACTS: [&str; 7] = [
 // The verifier methods that change who may act, what the verifier holds, or how it is run. No contract of ours may call
 // any of them as itself: its balance is moved only by mt_transfer and mt_transfer_call, and only the verifier's own roles
 // change the rest. The list is the verifier's exported methods less the ones that are views or the receiver hooks.
-const FORBIDDEN_VERIFIER_CALLS: [&str; 28] = [
+const FORBIDDEN_VERIFIER_CALLS: [&str; 27] = [
     "add_public_key",
-    "remove_public_key",
     "add_full_access_key",
     "add_relayer_key",
     "delete_relayer_key",
@@ -50,14 +49,18 @@ const FORBIDDEN_VERIFIER_CALLS: [&str; 28] = [
 // Every cross-contract interface a contract declares, and the methods it declares on each. A new target or a new method
 // fails here until it is added on purpose.
 const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 11] = [
-    ("market", "ext_verifier", &["mt_transfer", "mt_transfer_call"]),
+    (
+        "market",
+        "ext_verifier",
+        &["mt_transfer", "mt_transfer_call", "remove_public_key"],
+    ),
     ("market", "ext_oracle", &["register_market"]),
     ("market", "ext_council", &["received_of"]),
-    ("council", "ext_verifier", &["mt_transfer"]),
-    ("oracle", "ext_verifier", &["mt_transfer"]),
+    ("council", "ext_verifier", &["mt_transfer", "remove_public_key"]),
+    ("oracle", "ext_verifier", &["mt_transfer", "remove_public_key"]),
     ("oracle", "ext_market", &["set_outcome"]),
     ("oracle", "ext_council", &["draw", "unlock_case"]),
-    ("rounds", "ext_verifier", &["mt_transfer"]),
+    ("rounds", "ext_verifier", &["mt_transfer", "remove_public_key"]),
     ("dpm", "", &[]),
     ("price-signatures", "", &[]),
     ("upgrade", "", &[]),
@@ -266,12 +269,14 @@ fn the_cross_contract_interfaces_are_exactly_the_expected_ones() {
 }
 
 #[test]
-fn the_verifier_is_only_ever_asked_to_transfer() {
+fn the_verifier_is_only_ever_asked_to_transfer_or_to_drop_a_key() {
     for (contract, interface, methods) in EXPECTED_EXTERNAL_INTERFACES {
         if interface == "ext_verifier" {
             assert!(
-                methods.iter().all(|m| m.starts_with("mt_transfer")),
-                "{contract} asks the verifier for more than a transfer: {methods:?}"
+                methods
+                    .iter()
+                    .all(|m| m.starts_with("mt_transfer") || *m == "remove_public_key"),
+                "{contract} asks the verifier for more than a transfer or dropping a key: {methods:?}"
             );
         }
     }

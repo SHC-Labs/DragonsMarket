@@ -1,7 +1,7 @@
 // Run with: node --test keeper/
 import test from "node:test";
 import assert from "node:assert/strict";
-import { base58ToHex, compareCodeHashes, describeRelease, hexToBase58, liveCodeHashes, parseReleaseHashes } from "./release-check.mjs";
+import { base58ToHex, compareCodeHashes, describeRelease, hexToBase58, liveCodeHashes, parseReleaseHashes, upgradeProposalProblems } from "./release-check.mjs";
 
 const HEX = { market: "11".repeat(32), oracle: "22".repeat(32), council: "33".repeat(32) };
 const COMMIT = "c".repeat(40);
@@ -69,4 +69,46 @@ test("liveCodeHashes reads view_account at final for each account", async (t) =>
   const live = await liveCodeHashes("http://rpc.invalid", accounts);
   assert.deepEqual(live, { market: "hash-of-m.near", oracle: "hash-of-o.near", council: "hash-of-c.near" });
   assert.ok(seen.every((p) => p.request_type === "view_account" && p.finality === "final"));
+});
+
+const ROUNDS_HEX = "55".repeat(32);
+const withRounds = MESSAGE.replace(`commit ${COMMIT}`, `rounds sha256:${ROUNDS_HEX}\ncommit ${COMMIT}`);
+
+test("a rounds line is read when present and optional when not", () => {
+  assert.equal(parseReleaseHashes(withRounds).rounds, ROUNDS_HEX);
+  assert.equal(parseReleaseHashes(MESSAGE).rounds, undefined);
+});
+
+test("a deployed rounds contract needs a rounds line in the list", () => {
+  const live = { ...liveOf(HEX), rounds: hexToBase58(ROUNDS_HEX) };
+  assert.deepEqual(compareCodeHashes({ expected: parseReleaseHashes(withRounds), live }), []);
+  const problems = compareCodeHashes({ expected: parseReleaseHashes(MESSAGE), live });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /^rounds: the release list has no rounds line/);
+});
+
+const ACCOUNTS = { market: "market.near", oracle: "oracle.near", council: "council.near", rounds: "rounds.near" };
+const upgradeProposal = (id, receiver_id, code_hash) => ({
+  id,
+  kind: { FunctionCall: { receiver_id, actions: [{ method_name: "upgrade", args: Buffer.from(JSON.stringify({ code_hash })).toString("base64"), deposit: "0", gas: "1" }] } },
+});
+
+test("an upgrade proposal must carry the released hash of its contract", () => {
+  const release = parseReleaseHashes(withRounds);
+  const proposals = [
+    upgradeProposal(1, "oracle.near", hexToBase58(HEX.oracle)),
+    upgradeProposal(2, "council.near", hexToBase58(HEX.oracle)),
+    upgradeProposal(3, "rounds.near", hexToBase58("66".repeat(32))),
+    upgradeProposal(4, "rounds.near", hexToBase58(ROUNDS_HEX)),
+    { id: 5, kind: "Vote" },
+  ];
+  const problems = upgradeProposalProblems({ proposals, contracts: ACCOUNTS, release });
+  assert.equal(problems.length, 2);
+  assert.match(problems[0], /^DAO proposal 2 upgrades council to .* which is not in the --release list/);
+  assert.match(problems[1], /^DAO proposal 3 upgrades rounds to /);
+});
+
+test("an upgrade of a contract the list does not cover is refused", () => {
+  const problems = upgradeProposalProblems({ proposals: [upgradeProposal(9, "rounds.near", hexToBase58(ROUNDS_HEX))], contracts: ACCOUNTS, release: parseReleaseHashes(MESSAGE) });
+  assert.match(problems[0], /no rounds line/);
 });

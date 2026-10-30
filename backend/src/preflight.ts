@@ -93,6 +93,11 @@ async function checkLinks(config: Config, view: View): Promise<Check[]> {
     if (object(market) && market.revenue_pool !== c.council)
       checks.push(fail('link:fee-destination', `market sends the Council's share of fees to ${String(market.revenue_pool)}, configured Council ${c.council}`));
   }
+  if (c.market && c.rounds) {
+    const [market, rounds] = [await view(c.market, 'config', {}), await view(c.rounds, 'config', {})];
+    if (object(market) && object(rounds) && rounds.treasury !== market.treasury)
+      checks.push(fail('link:rounds-treasury', `rounds sweeps its fees to ${String(rounds.treasury)}, the market's treasury is ${String(market.treasury)}`));
+  }
   if (c.council) {
     const council = await view(c.council, 'config', {});
     if (object(council) && !council.nft_contract) checks.push(fail('link:council-nft', 'the Council has no NFT contract set, so nobody can stake a seat'));

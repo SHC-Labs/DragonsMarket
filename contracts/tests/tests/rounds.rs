@@ -8,16 +8,6 @@ fn tok(a: &near_workspaces::Account) -> &str {
     a.id().as_str()
 }
 
-async fn set_jury_size(w: &World, size: u32) -> anyhow::Result<()> {
-    w.owner
-        .call(w.oracle.id(), "set_jury_size")
-        .args_json(json!({ "jury_size": size }))
-        .transact()
-        .await?
-        .into_result()?;
-    Ok(())
-}
-
 async fn case_time(w: &World, id: u64, field: &str) -> u64 {
     case_json(w, id).await[field].as_str().unwrap().parse().unwrap()
 }
@@ -56,7 +46,7 @@ async fn a_challenge_must_name_a_different_answer_and_the_case_records_it() -> a
             &case["round"],
             &case["jury_size"]
         ),
-        (&json!("disputed"), &json!("void"), &json!(0), &json!(3))
+        (&json!("disputed"), &json!("void"), &json!(0), &json!(JURY))
     );
     assert_eq!(
         (&case["commit_ends_at"], &case["panel_deadline"]),
@@ -87,16 +77,16 @@ async fn jurors_can_only_vote_for_the_proposed_answer_or_the_challengers() -> an
     Ok(())
 }
 
-// A jury of one that says nothing is no decision. One second jury of three, none of them from the first, decides it.
+// A jury of five that says nothing is no decision. One second jury of eleven, none of them from the first, decides it.
 #[tokio::test]
 async fn a_first_jury_that_does_not_decide_is_followed_by_one_larger_disjoint_jury_that_does() -> anyhow::Result<()> {
-    let w = setup().await?;
-    set_jury_size(&w, 1).await?;
+    let mut w = setup().await?;
+    add_jurors(&mut w, SECOND_JURY).await?;
     let id = proposed(&w).await?;
     buy(&w, &w.bob, id, "no", 10 * USD).await?;
     challenge(&w, &w.dave, id).await?;
     let first = draw_jury(&w, id).await?;
-    assert_eq!(first.len(), 1);
+    assert_eq!(first.len(), JURY as usize);
 
     let deadline = case_time(&w, id, "panel_deadline").await;
     skip_until(&w, deadline + 1).await;
@@ -104,9 +94,12 @@ async fn a_first_jury_that_does_not_decide_is_followed_by_one_larger_disjoint_ju
     let case = case_json(&w, id).await;
     assert_eq!(
         (&case["stage"], &case["round"], &case["jury_size"]),
-        (&json!("disputed"), &json!(1), &json!(3))
+        (&json!("disputed"), &json!(1), &json!(SECOND_JURY))
     );
-    assert_eq!(case["first_panel"], json!([first[0].id()]));
+    assert_eq!(
+        case["first_panel"],
+        json!(first.iter().map(|j| j.id()).collect::<Vec<_>>())
+    );
     assert_eq!(case["panel"], json!([]));
     // The first jury was seated under the case's own id; the second round's key only differs by its top bit.
     assert!(
@@ -115,16 +108,16 @@ async fn a_first_jury_that_does_not_decide_is_followed_by_one_larger_disjoint_ju
     );
 
     let second = draw_jury(&w, id).await?;
-    assert_eq!(second.len(), 3);
+    assert_eq!(second.len(), SECOND_JURY);
     assert!(
-        second.iter().all(|j| j.id() != first[0].id()),
+        second.iter().all(|j| first.iter().all(|f| f.id() != j.id())),
         "the second jury is other accounts"
     );
-    for j in &second[..2] {
+    for j in &second[..SECOND_MAJORITY] {
         commit(&w, j, id, "no", "a-long-random-salt").await?;
     }
     to_reveal_phase(&w, id).await;
-    for j in &second[..2] {
+    for j in &second[..SECOND_MAJORITY] {
         reveal(&w, j, id, "no", "a-long-random-salt", "The source says no.").await?;
     }
     let case = case_json(&w, id).await;
@@ -134,16 +127,20 @@ async fn a_first_jury_that_does_not_decide_is_followed_by_one_larger_disjoint_ju
     );
     assert_eq!(market_json(&w, id).await["outcome"], "no");
 
-    // Dave was right. A quarter of Carol's bond is split by the two who revealed No, and Dave keeps the rest.
-    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND - BOND / 4);
+    // Dave was right. A quarter of Carol's bond is split by the six who revealed No, and Dave keeps the rest.
+    let each = BOND / 4 / SECOND_MAJORITY as u128;
     assert_eq!(
-        (claimable(&w, second[0].id()).await, claimable(&w, second[1].id()).await),
-        (BOND / 8, BOND / 8)
+        claimable(&w, w.dave.id()).await,
+        2 * BOND - each * SECOND_MAJORITY as u128
     );
+    for j in &second[..SECOND_MAJORITY] {
+        assert_eq!(claimable(&w, j.id()).await, each);
+    }
     assert_eq!(claimable(&w, w.carol.id()).await, 0);
 
-    // The silent first juror and the second jury's third juror never voted. Every seat of both juries is released.
-    assert_eq!(case["delinquent"], json!([first[0].id(), second[2].id()]));
+    // The silent first jury and the five silent jurors of the second never voted. Every seat of both juries is released.
+    let silent: Vec<_> = first.iter().chain(&second[SECOND_MAJORITY..]).map(|j| j.id()).collect();
+    assert_eq!(case["delinquent"], json!(silent));
     for j in first.iter().chain(&second) {
         assert!(
             stake_of(&w, tok(j)).await["serving"].is_null(),
@@ -177,21 +174,21 @@ async fn a_jury_drawn_at_the_last_allowed_moment_still_gets_the_full_commit_peri
     );
     assert!(deadline >= seated + 2 * half - 5_000_000_000);
 
-    // The two who vote do so, and the third, who never committed, is the only one at fault. Nobody is marked delinquent
+    // The three who vote do so, and the two who never committed are the only ones at fault. Nobody is marked delinquent
     // for time they never had.
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(&w, j, id, "no", "a-long-random-salt").await?;
     }
     to_reveal_phase(&w, id).await;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         reveal(&w, j, id, "no", "a-long-random-salt", "The source says no.").await?;
     }
     let case = case_json(&w, id).await;
     assert_eq!(case["stage"], "final");
     assert_eq!(
         case["delinquent"],
-        json!([jury[2].id()]),
-        "only the juror who never committed is at fault"
+        json!(jury[MAJORITY..].iter().map(|j| j.id()).collect::<Vec<_>>()),
+        "only the jurors who never committed are at fault"
     );
     Ok(())
 }
@@ -202,9 +199,14 @@ async fn a_jury_size_change_after_the_challenge_does_not_change_the_case() -> an
     let w = setup().await?;
     let id = proposed(&w).await?;
     challenge(&w, &w.dave, id).await?;
-    set_jury_size(&w, 5).await?;
+    w.owner
+        .call(w.oracle.id(), "set_jury_size")
+        .args_json(json!({ "jury_size": JURY + 2 }))
+        .transact()
+        .await?
+        .into_result()?;
     let jury = draw_jury(&w, id).await?;
-    assert_eq!(jury.len(), 3, "the case was challenged with a jury of three");
-    assert_eq!(case_json(&w, id).await["jury_size"], 3);
+    assert_eq!(jury.len(), JURY as usize, "the case was challenged with a jury of five");
+    assert_eq!(case_json(&w, id).await["jury_size"], JURY);
     Ok(())
 }

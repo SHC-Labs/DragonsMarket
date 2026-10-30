@@ -130,7 +130,7 @@ async fn btc_price_market(w: &World) -> anyhow::Result<u64> {
             "resolution_source": "Median of BTC-USD one minute closes on Coinbase, Kraken and Bitstamp",
             "void_policy": "Fewer than two exchanges publish a price.",
             "category": "crypto", "subcategory": "bitcoin", "close_at": close_at.to_string(),
-            "resolve_by": (close_at + 3_600_000_000_000u64).to_string(),
+            "resolve_by": (close_at + MARKET_GAP_SECS * 1_000_000_000).to_string(),
             "price_rule": { "observation_time": close_at.to_string(), "strike": STRIKE.to_string(), "decimals": DECIMALS, "above": true }
         }))
         .gas(Gas::from_tgas(100))
@@ -204,7 +204,7 @@ async fn publishers_sign_the_exchange_median_and_the_resolver_answers_the_price_
         "a market with a case is left alone: {out}"
     );
 
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, id).await?;
     assert_eq!(market_json(&w, id).await["outcome"], "yes");
     assert_eq!(claimable(&w, w.carol.id()).await, BOND, "the bond comes back");
@@ -261,7 +261,7 @@ async fn an_operator_answers_an_event_market_through_the_resolver_with_its_bond(
     let (out, _) = resolver(&w, &["pending"]).await;
     assert!(!out.contains(&format!("event market {id},")), "{out}");
 
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, id).await?;
     assert_eq!(market_json(&w, id).await["outcome"], "yes");
     Ok(())

@@ -92,7 +92,7 @@ async fn funded_maximum_text_growth_keeps_withdrawals_open_at_the_reserve_floor(
             .args_json(
                 json!({"title":"t".repeat(200),"rule_text":"r".repeat(2000),"resolution_source":"s".repeat(300),
                 "void_policy":"v".repeat(500),"category":"c".repeat(32),"subcategory":"s".repeat(32),
-                "close_at":close.to_string(),"resolve_by":(close + 3_600_000_000_000).to_string()}),
+                "close_at":close.to_string(),"resolve_by":(close + MARKET_GAP_SECS * 1_000_000_000).to_string()}),
             )
             .gas(Gas::from_tgas(100))
             .transact()
@@ -119,7 +119,7 @@ async fn funded_maximum_text_growth_keeps_withdrawals_open_at_the_reserve_floor(
     let close = now(&w.worker).await + 86_400_000_000_000;
     let refused = w.owner.call(w.market.id(), "create_market").deposit(NearToken::from_yoctonear(PAID_STORAGE))
         .args_json(json!({"title":"x","rule_text":"x","resolution_source":"x","void_policy":"x", "category":"world","subcategory":"science",
-            "close_at":close.to_string(),"resolve_by":(close + 3_600_000_000_000).to_string()}))
+            "close_at":close.to_string(),"resolve_by":(close + MARKET_GAP_SECS * 1_000_000_000).to_string()}))
         .gas(Gas::from_tgas(100)).transact().await?;
     assert!(format!("{:?}", refused.failures()).contains("storage reserve reached"));
     assert_eq!(config(&w.market).await["markets"], "12");
@@ -141,7 +141,7 @@ async fn funded_maximum_text_growth_keeps_withdrawals_open_at_the_reserve_floor(
 #[tokio::test]
 async fn pruning_clears_text_but_keeps_short_records_and_money() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_market(&w, 120, 3_600).await?;
+    let id = create_market(&w, 120, MARKET_GAP_SECS).await?;
     buy(&w, &w.owner, id, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 125).await;
     propose(&w, &w.carol, id, "yes").await?;

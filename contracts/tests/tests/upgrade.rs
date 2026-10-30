@@ -128,14 +128,14 @@ fn governed_contracts(w: &World) -> Vec<(&'static str, &'static str, &Contract)>
     ]
 }
 
-// Market layout 6, Council layout 3 and oracle layout 2.
+// Market layout 7, Council layout 4 and oracle layout 2.
 fn state_version_of(label: &str) -> u32 {
     if label == "oracle" {
-        2
-    } else if label == "market" {
-        6
-    } else {
         3
+    } else if label == "market" {
+        8
+    } else {
+        5
     }
 }
 
@@ -224,7 +224,7 @@ async fn an_upgrade_that_cannot_finish_leaves_the_old_code_in_place_and_the_stat
         let no_migrate = wasm("mock_ft");
         let hash = stage(&w.bob, target.id(), &no_migrate).await?;
         let (p, logs) = owner_execute(&admin, upgrade_call(target, &hash, UPGRADE_CALL_TGAS)).await?;
-        assert_eq!(event_names(&logs), vec!["upgrade_sent",], "{label}");
+        assert_eq!(event_names(&logs), vec!["upgrade_sent", "upgrade_failed"], "{label}");
         assert!(!p, "owner action failed");
         assert_eq!(deployed_hash(target).await, old, "{label} still runs its old code");
         assert!(
@@ -234,8 +234,8 @@ async fn an_upgrade_that_cannot_finish_leaves_the_old_code_in_place_and_the_stat
         let c = config(target).await;
         assert_eq!(
             (&c["upgrade_proven"], &c["upgrade_in_flight"]),
-            (&json!(false), &json!(true)),
-            "{label}: the old code keeps the mark of the batch that failed"
+            (&json!(false), &json!(false)),
+            "{label}: the failed batch is cleared so the path can be tried again"
         );
 
         // Too little gas is refused at the top, before the staged copy is touched.
@@ -414,7 +414,7 @@ async fn the_version_five_build_upgrades_to_this_one_before_any_market_and_keeps
         .await?
         .into_result()?;
     let c = config(&w.market).await;
-    assert_eq!((&c["state_version"], &c["upgrade_proven"]), (&json!(6), &json!(true)));
+    assert_eq!((&c["state_version"], &c["upgrade_proven"]), (&json!(8), &json!(true)));
     assert_eq!(
         account_records(&w).await,
         before,
@@ -434,7 +434,7 @@ async fn the_version_five_build_upgrades_to_this_one_before_any_market_and_keeps
 async fn a_version_five_build_that_has_created_a_market_refuses_the_upgrade_and_keeps_its_code() -> anyhow::Result<()> {
     let base = setup().await?;
     let w = version_five_world(&base).await?;
-    create_market(&w, 600, 3_600).await?;
+    create_market(&w, 600, MARKET_GAP_SECS).await?;
     let old = deployed_hash(&w.market).await;
     let hash = stage(&w.bob, w.market.id(), &wasm("market")).await?;
     let r = w

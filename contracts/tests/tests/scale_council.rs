@@ -343,7 +343,7 @@ async fn jury_draw_gas_by_seat_count() -> anyhow::Result<()> {
 
     // The whole draw through the oracle at the largest size, as a challenged case runs it.
     let seats = reached;
-    let id = create_market(&w, CLOSE_SECS, 3_600).await?;
+    let id = create_market(&w, CLOSE_SECS, MARKET_GAP_SECS).await?;
     skip_secs(&w.worker, PAST_CLOSE_SECS).await;
     propose(&w, &w.carol, id, "yes").await?;
     challenge(&w, &w.dave, id).await?;

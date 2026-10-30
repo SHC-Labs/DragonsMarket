@@ -45,7 +45,7 @@ The binary the tests use is the reproducible docker build. Its sha256 is
 the RPC on 2026-10-20). So the sandbox runs the same bytes as mainnet.
 
 ```
-SCRATCH=/tmp/claude-1000/-home-nameless/fe7b3dde-ceac-4ddc-84cf-34fe46083888/scratchpad
+SCRATCH=$(mktemp -d)
 git clone https://github.com/near/intents $SCRATCH/intents-src
 git -C $SCRATCH/intents-src checkout 16d04f6ec4401263f8914638710260da50bb46b0
 cd $SCRATCH/intents-src/contracts/defuse
