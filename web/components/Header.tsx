@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Brand } from "./Brand";
 import { HowItWorksDialog } from "./HowItWorksDialog";
 import { ThemeToggle } from "./ThemeToggle";
@@ -12,7 +12,8 @@ import { Button } from "./ui";
 import { shortAccount } from "@/lib/format";
 
 export function Header() {
-  const { account, walletAvailable, openConnect, disconnect } = useWallet();
+  const { account, walletAvailable, openConnect, disconnect, backendAccount, signOutOnAllDevices } = useWallet();
+  const [signOutFailed, setSignOutFailed] = useState(false);
   const pathname = usePathname();
   const desktopNav = useRef<HTMLElement>(null);
   const mobileNav = useRef<HTMLElement>(null);
@@ -45,6 +46,11 @@ export function Header() {
         <div className="site-header-actions">
           <HowItWorksDialog />
           <ThemeToggle />
+          {backendAccount && (
+            <button type="button" className="how-it-works-trigger" onClick={() => { setSignOutFailed(false); signOutOnAllDevices().catch(() => setSignOutFailed(true)); }}>
+              {signOutFailed ? "Could not sign out, try again" : "Sign out on all devices"}
+            </button>
+          )}
           {account ? (
             <button type="button" className="wallet-pill" onClick={disconnect} aria-label={`Connected as ${account}. Disconnect`}>
               <span aria-hidden="true" className="wallet-dot" />

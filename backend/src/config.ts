@@ -10,6 +10,9 @@ export interface Config {
   webOrigin: string;
   trustedProxyHops: number;
   trustedProxyAddresses: string[];
+  operatorToken: string | null;
+  sessionAbsoluteSeconds: number;
+  sessionIdleSeconds: number;
   network: Network;
   rpc: RpcSettings;
   deployment: null | {
@@ -20,6 +23,12 @@ export interface Config {
     collateralDecimals: number;
   };
 }
+
+const DEFAULT_SESSION_ABSOLUTE_SECONDS = 7 * 24 * 3600;
+const DEFAULT_SESSION_IDLE_SECONDS = 12 * 3600;
+const MIN_SESSION_SECONDS = 300;
+const MAX_SESSION_SECONDS = 30 * 24 * 3600;
+const MIN_OPERATOR_TOKEN_LENGTH = 32;
 
 function integer(value: string, name: string, min: number, max: number): number {
   if (!/^\d+$/.test(value) || Number(value) < min || Number(value) > max) throw new Error(`Invalid ${name}`);
@@ -80,7 +89,12 @@ export function readConfig(env: NodeJS.ProcessEnv): Config {
     if (!version || (prefix !== undefined && (!/^\d+$/.test(prefix) || Number(prefix) > (version === 6 ? 128 : 32)))) throw new Error('Invalid TRUSTED_PROXY_ADDRESSES');
   }
   if (trustedProxyHops > 0 && !trustedProxyAddresses.length) throw new Error('TRUSTED_PROXY_HOPS needs TRUSTED_PROXY_ADDRESSES: the addresses the proxy connects from');
-  return { databaseUrl, network, rpc, host, port, webOrigin, trustedProxyHops, trustedProxyAddresses, deployment };
+  const operatorToken = env.OPERATOR_TOKEN || null;
+  if (operatorToken !== null && operatorToken.length < MIN_OPERATOR_TOKEN_LENGTH) throw new Error('OPERATOR_TOKEN must be at least 32 characters');
+  const sessionAbsoluteSeconds = integer(env.SESSION_ABSOLUTE_SECONDS || String(DEFAULT_SESSION_ABSOLUTE_SECONDS), 'SESSION_ABSOLUTE_SECONDS', MIN_SESSION_SECONDS, MAX_SESSION_SECONDS);
+  const sessionIdleSeconds = integer(env.SESSION_IDLE_SECONDS || String(DEFAULT_SESSION_IDLE_SECONDS), 'SESSION_IDLE_SECONDS', MIN_SESSION_SECONDS, MAX_SESSION_SECONDS);
+  if (sessionIdleSeconds > sessionAbsoluteSeconds) throw new Error('SESSION_IDLE_SECONDS cannot exceed SESSION_ABSOLUTE_SECONDS');
+  return { databaseUrl, network, rpc, host, port, webOrigin, trustedProxyHops, trustedProxyAddresses, operatorToken, sessionAbsoluteSeconds, sessionIdleSeconds, deployment };
 }
 
 // Deliberate allowlist: never spread process.env or expose database credentials.

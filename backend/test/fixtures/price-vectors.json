@@ -1,0 +1,12 @@
+[
+  { "name": "odd count takes the middle close", "closes": ["100", "101", "100.5"], "decimals": 2, "price": "10050" },
+  { "name": "even count averages the middle pair", "closes": ["100", "100.5"], "decimals": 2, "price": "10025" },
+  { "name": "exact half rounds up", "closes": ["105.005", "105.005"], "decimals": 2, "price": "10501" },
+  { "name": "just under half rounds down", "closes": ["105.0049", "105.0049"], "decimals": 2, "price": "10500" },
+  { "name": "the even-count mean is rounded afterwards, half up", "closes": ["100.004", "100.006"], "decimals": 2, "price": "10001" },
+  { "name": "the mean drops the half unit at twelve digits", "closes": ["100.000000000001", "100.000000000002"], "decimals": 12, "price": "100000000000001" },
+  { "name": "zero decimals rounds the mean half up", "closes": ["80652.6", "80652.4"], "decimals": 0, "price": "80653" },
+  { "name": "more decimals than twelve pads with zeros", "closes": ["1.5", "1.5"], "decimals": 18, "price": "1500000000000000000" },
+  { "name": "digits past the twelfth are cut, not rounded", "closes": ["100.1234567890129", "100.1234567890129"], "decimals": 18, "price": "100123456789012000000" },
+  { "name": "eight decimals from three closes with a longer one", "closes": ["80652.12345678", "80652.12345679", "80652.123456781"], "decimals": 8, "price": "8065212345678" }
+]

@@ -21,7 +21,6 @@ const routes = new Set([
   '/v1/blocks',
   '/v1/events',
   '/v1/receipts',
-  '/v1/health/services',
   '/v1/settlements/pending',
   '/v1/price-signatures',
 ]);
@@ -37,7 +36,7 @@ function invalid(): never {
 /** Public chain evidence only. Each request and each cursor walk has a fixed upper block. */
 export function createReadApi(pool: pg.Pool, config: Config): ReadHandler {
   return async url => {
-    if (!isReadRoute(url.pathname) || url.pathname === '/v1/health/services') throw new ReadError(404, 'not_found');
+    if (!isReadRoute(url.pathname)) throw new ReadError(404, 'not_found');
     const transactionHash = /^\/v1\/transactions\/([^/]+)\/receipts$/.exec(url.pathname)?.[1];
     if (transactionHash && !hash(transactionHash)) invalid();
     const detail = url.pathname.startsWith('/v1/receipts/');
