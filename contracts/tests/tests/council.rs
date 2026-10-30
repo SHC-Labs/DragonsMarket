@@ -278,7 +278,19 @@ async fn a_case_whose_jury_is_never_drawn_is_a_no_decision_twice_and_ends_void()
     let draw_by: u64 = case_json(&w, id).await["draw_by"].as_str().unwrap().parse()?;
     skip_until(&w, draw_by + 1).await;
     refused(resolve_draw(&w, id).await, "too late to draw a jury");
-    finalize(&w, id).await?;
+    // Seats may be busy on other cases, so a case nobody could draw for waits a few draw windows before it rules.
+    let mut waits = 0;
+    loop {
+        finalize(&w, id).await?;
+        if case_json(&w, id).await["round"] == 1 {
+            break;
+        }
+        waits += 1;
+        assert!(waits < 40, "the wait for seats never ended");
+        let draw_by: u64 = case_json(&w, id).await["draw_by"].as_str().unwrap().parse()?;
+        skip_until(&w, draw_by + 1).await;
+    }
+    assert!(waits >= 1, "the case waited at least one extra window");
     let case = case_json(&w, id).await;
     assert_eq!(
         (&case["stage"], &case["round"], &case["jury_size"]),
@@ -296,16 +308,24 @@ async fn a_case_whose_jury_is_never_drawn_is_a_no_decision_twice_and_ends_void()
     finalize(&w, id).await?;
     assert_eq!(market_json(&w, id).await["outcome"], "void");
     assert_eq!(claimable(&w, w.carol.id()).await, BOND);
-    assert_eq!(claimable(&w, w.dave.id()).await, BOND);
-    assert_eq!(claimable(&w, w.treasury.id()).await, 0);
+    assert_eq!(
+        claimable(&w, w.dave.id()).await,
+        BOND / 2,
+        "the challenger pays the no-decision share"
+    );
+    assert_eq!(
+        claimable(&w, w.treasury.id()).await,
+        BOND / 2,
+        "and the no-decision recipient holds it"
+    );
     assert_eq!(claimable(&w, w.owner.id()).await, 0, "the owner is not paid");
 
     assert_eq!(oracle_total_owed(&w).await, 2 * BOND);
     assert_oracle_reconciled(&w).await;
     let before = intents_balance(&w, w.dave.id()).await;
     withdraw_bond(&w, &w.dave).await?;
-    assert_eq!(intents_balance(&w, w.dave.id()).await - before, BOND);
-    assert_eq!(oracle_total_owed(&w).await, BOND);
+    assert_eq!(intents_balance(&w, w.dave.id()).await - before, BOND / 2);
+    assert_eq!(oracle_total_owed(&w).await, BOND + BOND / 2);
     assert_oracle_reconciled(&w).await;
     Ok(())
 }

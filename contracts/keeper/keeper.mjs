@@ -10,7 +10,7 @@
 //                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH] [--council-key-file PATH]
 //                         --state-file PATH [--events-file PATH] [--workers 2] [--job-batch 50] [--min-sweep UNITS]
 //   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID --rounds ID [--treasury ID] [--min-margin NEAR] [--release FILE|-]
-//                         [--expect-sealed] [--watch-dao] [--runway-config PATH]
+//                         [--expect-sealed] [--watch-dao] [--runway-config PATH] [--operator ID] [--collection-code-hash HASH]
 //
 // `run` needs an account with a little NEAR for gas. The calls it makes move no money of the keeper's own, and none
 // of them attach a deposit, so a function call access key is enough. `check` reads only. It reports whether the
@@ -580,21 +580,47 @@ const brief = (value) => {
 
 // Lists the open DAO proposals that name one of the three contracts, and a problem for each the treasury helper would refuse
 // to approve. Other open proposals are counted by kind, so a policy or membership change does not go unseen. Nothing is voted.
-export async function daoReport({ proposals, treasuryId, contracts, view: read }) {
+// Methods that hand over control, redirect money or weaken a dispute. A proposal that calls one never passes quietly, even when
+// its arguments are inside the allow-list: a person reads it before the vote closes.
+const REVIEW_BY_HAND = new Set([
+  "upgrade", "propose_owner", "accept_owner", "seal", "set_operator", "allow_market", "add_publisher", "set_nft_contract",
+  "set_treasury", "set_price_threshold", "set_fee_recipients", "set_no_decision_recipient", "set_jury_size", "set_bond",
+  "set_window_ms", "set_panel_deadline_ms", "set_draw_window_ms", "set_min_proposal_ms", "set_draw_delay_blocks",
+]);
+
+const needsReview = (method) => REVIEW_BY_HAND.has(method) || method.startsWith("reconcile_");
+
+// `watch` lists the other accounts whose settings or code decide what ours can do: the verifier and the NFT collection.
+export async function daoReport({ proposals, treasuryId, contracts, view: read, watch = [] }) {
   const lines = [];
   const problems = [];
   const others = [];
   const ours = new Set(Object.values(contracts));
+  const watched = new Set(watch.filter(Boolean));
+  const named = [...ours, ...watched];
   for (const proposal of proposals) {
     const receiver = proposal.kind?.FunctionCall?.receiver_id;
-    if (!ours.has(receiver)) {
-      others.push(typeof proposal.kind === "string" ? proposal.kind : Object.keys(proposal.kind ?? {})[0]);
+    const who = `DAO proposal ${proposal.id} (${proposal.status}, by ${proposal.proposer})`;
+    if (watched.has(receiver)) {
+      lines.push(`${who} names ${receiver}`);
+      problems.push(`DAO proposal ${proposal.id} calls ${receiver}, which decides what our contracts can do: review it by hand`);
       continue;
     }
-    const who = `DAO proposal ${proposal.id} (${proposal.status}, by ${proposal.proposer})`;
+    if (!ours.has(receiver)) {
+      const kind = typeof proposal.kind === "string" ? proposal.kind : Object.keys(proposal.kind ?? {})[0];
+      const text = JSON.stringify(proposal.kind ?? "");
+      if (receiver === undefined && named.some((account) => text.includes(account))) {
+        lines.push(`${who} (${kind}) names one of our accounts`);
+        problems.push(`DAO proposal ${proposal.id} of kind ${kind} names one of our accounts and is not a reviewed function call: review it by hand`);
+      } else others.push(kind);
+      continue;
+    }
     try {
       const reviewed = await reviewKind(proposal.kind, { treasuryId, contracts, view: read });
       lines.push(`${who}: ${reviewed.target}.${reviewed.method} ${brief(reviewed.args)}`);
+      if (needsReview(reviewed.method)) {
+        problems.push(`DAO proposal ${proposal.id} calls ${reviewed.target}.${reviewed.method}, which changes control, money or dispute security: review it by hand`);
+      }
     } catch (e) {
       lines.push(`${who} names ${receiver}`);
       problems.push(`DAO proposal ${proposal.id} names ${receiver} and is not on the allow-list: ${e.message}`);
@@ -603,6 +629,36 @@ export async function daoReport({ proposals, treasuryId, contracts, view: read }
   if (others.length) lines.push(`${others.length} other open DAO proposals (${[...new Set(others)].join(", ")})`);
   if (!lines.length) lines.push("no open DAO proposals");
   return { lines, problems };
+}
+
+// How much one market may hold against the oracle's bond. A wrong answer that nobody challenges pays the whole pool for the price
+// of one bond, so the ceiling should stay within a few dozen bonds. It is a warning, not a problem: the right ratio is the
+// owner's call.
+export const MAX_POOL_TO_BOND = 100n;
+
+export function bondRatioWarning(marketConfig, oracleConfig) {
+  const cap = BigInt(marketConfig.max_market_locked ?? 0);
+  const bond = BigInt(oracleConfig.bond ?? 0);
+  if (bond === 0n || cap <= bond * MAX_POOL_TO_BOND) return null;
+  return `the market ceiling ${cap} is ${cap / bond} times the oracle bond ${bond}: a wrong answer nobody challenges pays the whole pool for one bond, so keep the ceiling within ${MAX_POOL_TO_BOND} bonds or lower it per market`;
+}
+
+// Who owns each contract, who the money goes to, and nothing pending. Every one is fixed by the DAO's own decisions, so a
+// difference means a control change that nobody announced. `operator` is checked only when it is given.
+export function driftProblems(configs, { dao, operator }) {
+  const problems = [];
+  const expect = (label, actual, wanted) => {
+    if (actual !== wanted) problems.push(`${label} is ${actual ?? "unset"}, expected ${wanted}`);
+  };
+  for (const [name, config] of Object.entries(configs)) {
+    expect(`the ${name}'s owner`, config.owner, dao);
+    expect(`the ${name}'s pending owner`, config.pending_owner ?? null, null);
+    if (operator && name !== "council") expect(`the ${name}'s operator`, config.operator, operator);
+  }
+  if (configs.market) expect("the market's treasury", configs.market.treasury, dao);
+  if (configs.oracle) expect("the oracle's no-decision recipient", configs.oracle.no_decision_recipient, dao);
+  if (configs.rounds) expect("the rounds contract's treasury", configs.rounds.treasury, dao);
+  return problems;
 }
 
 async function finalHeight(url) {
@@ -699,6 +755,8 @@ export async function releaseReport(opts, expected) {
   return { lines: describeRelease(problems), differs: problems.length > 0 };
 }
 
+const listed = (names) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0]);
+
 async function check(opts) {
   const minMargin = nearToYocto(opts["min-margin"] ?? DEFAULT_MIN_MARGIN_NEAR);
   if (opts["watch-dao"] && !opts.treasury) throw new Error("--watch-dao needs --treasury, the DAO whose proposals to list");
@@ -709,7 +767,8 @@ async function check(opts) {
   const configs = {};
   for (const name of names) configs[name] = await view(opts.rpc, opts[name], "config", {}, at);
   const oracle = configs.oracle;
-  const problems = opts.rounds ? [] : ["--rounds is missing: the rounds contract's stakes, fees and keys are not being checked"];
+  const problems = [];
+  if (!opts.rounds) console.log("rounds: not checked, pass --rounds to cover its stakes, fees and keys");
   problems.push(...wiringProblems(configs, opts));
   for (const name of ["oracle", "council"]) {
     if (!configs[name].markets.includes(opts.market)) problems.push(`${opts.market} is not in the ${name}'s market allow-list (${configs[name].markets.join(", ") || "empty"}): it will refuse this market`);
@@ -752,7 +811,7 @@ async function check(opts) {
       trouble.push(`the verifier ${verifier} has ${VERIFIER_PAUSE_KEY} paused: every payout and every transfer call to the contracts fails`);
     }
   }
-  if (!trouble.length) console.log(`verifier ${[...verifiers].join(", ")}: no keys registered, predecessor authentication on, not locked and ${VERIFIER_PAUSE_KEY} running for ${names.join(", ")}`);
+  if (!trouble.length) console.log(`verifier ${[...verifiers].join(", ")}: no keys registered, predecessor authentication on, not locked and ${VERIFIER_PAUSE_KEY} running for the ${listed(names)}`);
   problems.push(...trouble);
 
   const token = configs.market.collateral_token_id.slice(NEP141_PREFIX.length);
@@ -768,9 +827,25 @@ async function check(opts) {
     const { keys } = await rpc(opts.rpc, "query", { request_type: "view_access_key_list", block_id: at, account_id: opts[name] });
     keyCounts.push({ name, id: opts[name], count: keys.length });
   }
+  // The NFT collection decides who holds a seat, so its keys and its code matter as much as ours. A key on it can seat anyone.
+  const collection = configs.council.nft_contract;
+  let collectionReport = { line: null, problems: [] };
+  if (collection) {
+    const { keys } = await rpc(opts.rpc, "query", { request_type: "view_access_key_list", block_id: at, account_id: collection });
+    const report = accessKeyReport([{ name: "collection", id: collection, count: keys.length }], opts["expect-sealed"] === true);
+    collectionReport = report;
+    if (opts["collection-code-hash"]) {
+      const account = await rpc(opts.rpc, "query", { request_type: "view_account", block_id: at, account_id: collection });
+      if (account.code_hash !== opts["collection-code-hash"]) {
+        problems.push(`the NFT collection ${collection} runs code ${account.code_hash}, not the pinned ${opts["collection-code-hash"]}`);
+      }
+    }
+  }
   const keys = accessKeyReport(keyCounts, opts["expect-sealed"] === true);
   console.log(keys.line);
   problems.push(...keys.problems);
+  if (collectionReport.line) console.log(collectionReport.line);
+  problems.push(...collectionReport.problems);
 
   const named = names.map((name) => [name, opts[name]]);
   if (opts.treasury) named.push(["treasury", opts.treasury]);
@@ -793,14 +868,18 @@ async function check(opts) {
     }
   } else console.log("Storage runway not configured; --runway-config is required before operating a live deployment");
 
+  const ratio = bondRatioWarning(configs.market, configs.oracle);
+  if (ratio) console.log(`WARNING: ${ratio}`);
+  if (opts.treasury) problems.push(...driftProblems(configs, { dao: opts.treasury, operator: opts.operator }));
   if (opts["watch-dao"]) {
     const read = viewer(opts.rpc, at);
     const now = BigInt(block.header.timestamp_nanosec);
     const dao = await daoReport({
       proposals: await openProposals(opts, read, now),
       treasuryId: opts.treasury,
-      contracts: Object.fromEntries(CONTRACTS.map((name) => [name, opts[name]])),
+      contracts: Object.fromEntries(names.map((name) => [name, opts[name]])),
       view: read,
+      watch: [configs.market.verifier, configs.council.nft_contract],
     });
     for (const line of dao.lines) console.log(line);
     problems.push(...dao.problems);

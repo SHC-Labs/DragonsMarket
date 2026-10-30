@@ -137,6 +137,8 @@ an NFT. Earnings and returns must not be guaranteed.
 
 Set the market caps against the oracle bond before opening the venue: `set_max_market_locked` (owner) is the most any market can hold, and `set_market_cap` (operator or owner) lowers it for one market. A wrong answer costs the bond, so a market should not hold much more than that bond can answer for. Rounds series set their own `close_before` (at least a minute) when they are added.
 
+Two checks before an owner call that settles something by hand. `reconcile_leg` with `arrived=false` on a Council leg puts the amount back into `revenue_due` without asking the Council, so read the Council's `received_of` for that sweep first: if it holds a record, the money arrived. Do not upgrade the Council while an unstake is waiting for its NFT transfer, because the new version starts its in-flight count at zero.
+
 Do not open the venue until `keeper.mjs check` shows enough drawable seat holders (jury size
 + second jury + 2; a seat that is serving or asked to leave does not count). After the contracts
 are sealed, `keeper.mjs check --expect-sealed` is the release gate.
@@ -167,7 +169,7 @@ order.
    with the tag message before approving.
 5. After an upgrade, run the keeper check against the tag (it also confirms the market is on the oracle's and the Council's allow-list). Save the tag message
    (`git tag -l --format='%(contents)' <tag name>`) and pass it with `--release <file>`, or `-` for
-   stdin, as in `node keeper/keeper.mjs check --rpc <url> --market <id> --oracle <id> --council <id> --rounds <id> --release <file>`. Without `--rounds` the check reports a problem, because the rounds contract's stakes, fees and keys would go unchecked. A match prints `release: live code matches the release hash list`. Any contract whose live code hash differs from the tag is reported and the check exits 1.
+   stdin, as in `node keeper/keeper.mjs check --rpc <url> --market <id> --oracle <id> --council <id> --rounds <id> --release <file>`. Without `--rounds` the check prints that rounds was not checked, so always pass it for a deployment that includes rounds. A match prints `release: live code matches the release hash list`. Any contract whose live code hash differs from the tag is reported and the check exits 1.
 6. Refuse to deploy a build whose embedded build info is empty. A wasm from `./build.sh` has
    `build_info` null and `verify-build.mjs` rejects it. Only a build from `./build.sh --reproducible`
    passes.

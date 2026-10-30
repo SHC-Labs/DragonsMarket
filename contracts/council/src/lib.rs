@@ -50,6 +50,7 @@ const GAS_NFT_TRANSFER: Gas = Gas::from_tgas(15);
 // The verifier burned 3.8 TGas for a payout from a contract in the sandbox (INTENTS-PROOF.md), so this is a wide margin.
 const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+const GAS_REMOVE_VERIFIER_KEY: Gas = Gas::from_tgas(15);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
 // The gas floors. An unstake sends the NFT and a claim sends the payout, each with a callback, and each burns about 3 TGas
 // itself and neither depends on how many seats are staked.
@@ -66,6 +67,7 @@ const REVENUE_PREFIX: &str = "revenue:";
 // The NEAR Intents verifier. Revenue arrives in this contract's account there, and claims are paid out of it.
 #[ext_contract(ext_verifier)]
 pub trait Verifier {
+    fn remove_public_key(&mut self, public_key: PublicKey);
     fn mt_transfer(
         &mut self,
         receiver_id: AccountId,
@@ -672,7 +674,21 @@ impl CouncilContract {
         let code = upgrade::take_staged(code_hash);
         self.upgrade_in_flight = true;
         emit("upgrade_sent", json!({ "code_hash": code_hash }));
-        upgrade::deploy_and_migrate(code)
+        upgrade::deploy_and_migrate(code).then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(upgrade::GAS_UPGRADE_DONE)
+                .on_upgrade_done(),
+        )
+    }
+
+    // A batch that fails leaves the old code and the flag `upgrade` set. Cleared here, so nobody can call migrate by hand to
+    // fake the proof that lets the owner seal a contract whose upgrade path never worked.
+    #[private]
+    pub fn on_upgrade_done(&mut self, #[callback_result] result: Result<(), PromiseError>) {
+        if result.is_err() {
+            self.upgrade_in_flight = false;
+            emit("upgrade_failed", json!({}));
+        }
     }
 
     // Runs in the new code, in the same batch as the deploy. It reads the one layout it was written for. A later version
@@ -700,6 +716,17 @@ impl CouncilContract {
         require!(self.upgrade_proven, "prove the upgrade path before deleting keys");
         emit("seal_sent", json!({ "public_key": public_key }));
         upgrade::delete_key(public_key)
+    }
+
+    // Seal deletes NEAR access keys only. A key registered for this account in the Intents verifier can still move everything it
+    // holds, so the owner removes one here, as this account, the way the verifier requires.
+    pub fn remove_verifier_key(&mut self, public_key: PublicKey) -> Promise {
+        self.only_owner();
+        emit("verifier_key_removal_sent", json!({ "public_key": public_key }));
+        ext_verifier::ext(self.verifier.clone())
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(GAS_REMOVE_VERIFIER_KEY)
+            .remove_public_key(public_key)
     }
 
     // Two steps, so a mistyped account cannot lock the owner out: nothing changes until the new owner accepts.
@@ -861,18 +888,40 @@ impl CouncilContract {
         if let Some(tokens) = self.juries.get(&case_key.0) {
             return tokens.iter().map(|t| self.stakes[t].owner.clone()).collect();
         }
-        let candidates = self
+        let now = env::block_timestamp();
+        let eligible: Vec<(TokenId, AccountId, bool)> = self
             .staked
             .iter()
             .filter_map(|t| {
                 let s = &self.stakes[t];
                 // A seat on its way out is not available to serve, so it cannot be drawn and then be stuck waiting.
-                (s.serving.is_none() && s.unlock_requested_at.is_none() && !exclude.contains(&s.owner))
-                    .then(|| (t.clone(), s.owner.clone()))
+                (s.serving.is_none() && s.unlock_requested_at.is_none() && !exclude.contains(&s.owner)).then(|| {
+                    (
+                        t.clone(),
+                        s.owner.clone(),
+                        now >= s.staked_at.0.saturating_add(self.cooldown_ns),
+                    )
+                })
             })
             .collect();
+        // Seats staked within the last cooldown are set aside, so nobody can load the pool after seeing a challenge. When the
+        // older seats cannot make a jury on their own, all of them are drawn from and a thin Council still works.
+        let aged: Vec<(TokenId, AccountId)> = eligible
+            .iter()
+            .filter(|c| c.2)
+            .map(|c| (c.0.clone(), c.1.clone()))
+            .collect();
+        let aged_owners = aged
+            .iter()
+            .map(|c| &c.1)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        let candidates = if aged_owners >= n as usize {
+            aged
+        } else {
+            eligible.into_iter().map(|c| (c.0, c.1)).collect()
+        };
         let jury = pick(candidates, &env::random_seed_array(), case_key.0, n);
-        let now = env::block_timestamp();
         for (t, _) in &jury {
             let stake = self.stakes.get_mut(t).unwrap();
             stake.serving = Some(case_key);
@@ -2063,6 +2112,42 @@ mod tests {
         }
         act_as(ORACLE);
         c.draw(U64(0), 3, vec![acct("c.near")]);
+    }
+
+    #[test]
+    fn a_seat_staked_within_the_last_cooldown_is_not_drawn_while_older_seats_can_make_a_jury() {
+        for case in 0..10 {
+            let mut c = council();
+            for i in 0..3 {
+                stake(&mut c, &format!("old{i}"), &format!("old{i}.near"));
+            }
+            set_time(now() + COOLDOWN_NS + 1);
+            for i in 0..5 {
+                stake(&mut c, &format!("new{i}"), &format!("new{i}.near"));
+            }
+            act_as(ORACLE);
+            let jury = c.draw(U64(case), 3, vec![]);
+            assert!(
+                jury.iter().all(|o| o.as_str().starts_with("old")),
+                "case {case}: {jury:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn when_the_older_seats_cannot_make_a_jury_the_newer_ones_fill_it() {
+        let mut c = council();
+        for i in 0..2 {
+            stake(&mut c, &format!("old{i}"), &format!("old{i}.near"));
+        }
+        set_time(now() + COOLDOWN_NS + 1);
+        for i in 0..3 {
+            stake(&mut c, &format!("new{i}"), &format!("new{i}.near"));
+        }
+        act_as(ORACLE);
+        let jury = c.draw(U64(0), 3, vec![]);
+        assert_eq!(jury.len(), 3);
+        assert!(jury.iter().any(|o| o.as_str().starts_with("new")));
     }
 
     #[test]
@@ -3966,6 +4051,16 @@ mod tests {
         let mut c = council();
         act_as(OWNER);
         c.set_cooldown_ns(U64(0));
+    }
+
+    #[test]
+    fn a_failed_upgrade_batch_clears_the_in_flight_flag_and_a_good_one_leaves_it() {
+        let mut c = council();
+        c.upgrade_in_flight = true;
+        c.on_upgrade_done(Ok(()));
+        assert!(c.upgrade_in_flight);
+        c.on_upgrade_done(Err(PromiseError::Failed));
+        assert!(!c.upgrade_in_flight);
     }
 
     #[test]

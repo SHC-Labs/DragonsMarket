@@ -16,6 +16,7 @@ use near_sdk::{
 };
 
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+const GAS_REMOVE_VERIFIER_KEY: Gas = Gas::from_tgas(15);
 // The verifier burned 3.8 TGas for a payout from a contract in the sandbox (INTENTS-PROOF.md), so this is a wide margin.
 const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
 const GAS_APPLY: Gas = Gas::from_tgas(20);
@@ -54,6 +55,9 @@ const NS_PER_MS: u64 = 1_000_000;
 // every draw past its limit.
 const MAX_WINDOW_MS: u64 = 365 * 86_400_000;
 const MAX_DRAW_DELAY_BLOCKS: u64 = 100_000;
+// A first draw that finds too few free seats is retried, up to this many draw windows after the challenge. The market's own
+// deadline usually ends the wait sooner.
+const MAX_DRAW_QUEUE_WINDOWS: u64 = 32;
 const NS_PER_SEC: u64 = 1_000_000_000;
 // The layout of the state below. migrate reads exactly this one and refuses any other.
 const STATE_VERSION: u16 = 2;
@@ -355,6 +359,7 @@ versioned!(VersionedPayout, StoredPayout, Payout);
 // The NEAR Intents verifier. Bonds arrive in this contract's account there, and payouts are sent out of it.
 #[ext_contract(ext_verifier)]
 pub trait Verifier {
+    fn remove_public_key(&mut self, public_key: PublicKey);
     fn mt_transfer(
         &mut self,
         receiver_id: AccountId,
@@ -674,7 +679,21 @@ impl OracleContract {
         let code = upgrade::take_staged(code_hash);
         self.upgrade_in_flight = true;
         emit("upgrade_sent", json!({ "code_hash": code_hash }));
-        upgrade::deploy_and_migrate(code)
+        upgrade::deploy_and_migrate(code).then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(upgrade::GAS_UPGRADE_DONE)
+                .on_upgrade_done(),
+        )
+    }
+
+    // A batch that fails leaves the old code and the flag `upgrade` set. Cleared here, so nobody can call migrate by hand to
+    // fake the proof that lets the owner seal a contract whose upgrade path never worked.
+    #[private]
+    pub fn on_upgrade_done(&mut self, #[callback_result] result: Result<(), PromiseError>) {
+        if result.is_err() {
+            self.upgrade_in_flight = false;
+            emit("upgrade_failed", json!({}));
+        }
     }
 
     // Runs in the new code, in the same batch as the deploy. It reads the one layout it was written for. A later version
@@ -685,6 +704,12 @@ impl OracleContract {
         upgrade::require_state_version(STATE_VERSION);
         let mut state: Self = env::state_read().unwrap_or_else(|| env::panic_str("there is no state to migrate"));
         require!(state.upgrade_in_flight, "migrate runs only inside an upgrade");
+        // An older build allowed a threshold that two separate groups of publishers could both reach. The upgrade stops until
+        // the owner fixes it in the old code.
+        require!(
+            2 * state.price_threshold as usize > state.publishers.len(),
+            MAJORITY_NEEDED
+        );
         state.upgrade_in_flight = false;
         state.upgrade_proven = true;
         emit("migrated", json!({ "state_version": state.state_version }));
@@ -697,6 +722,17 @@ impl OracleContract {
         require!(self.upgrade_proven, "prove the upgrade path before deleting keys");
         emit("seal_sent", json!({ "public_key": public_key }));
         upgrade::delete_key(public_key)
+    }
+
+    // Seal deletes NEAR access keys only. A key registered for this account in the Intents verifier can still move everything it
+    // holds, so the owner removes one here, as this account, the way the verifier requires.
+    pub fn remove_verifier_key(&mut self, public_key: PublicKey) -> Promise {
+        self.only_owner();
+        emit("verifier_key_removal_sent", json!({ "public_key": public_key }));
+        ext_verifier::ext(self.verifier.clone())
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(GAS_REMOVE_VERIFIER_KEY)
+            .remove_public_key(public_key)
     }
 
     // Applies to cases proposed from now on. A case already proposed keeps the bond it was proposed with.
@@ -1696,6 +1732,25 @@ impl OracleContract {
         let info = self.market_info(market, id);
         let now = env::block_timestamp();
         let round_ns = info.draw_window_ns.0 + info.panel_deadline_ns.0;
+        // The first draw found too few free seats, possibly because other cases hold them. Wait for the seats instead of ruling,
+        // for as long as a jury seated at the end of the wait still has time to decide. A case that already seated a jury
+        // does not wait: its seats would only stay busy longer.
+        if case.round == 0
+            && case.panel.is_empty()
+            && !case.seated
+            && now + info.draw_window_ns.0 <= case.challenged_at.0 + MAX_DRAW_QUEUE_WINDOWS * info.draw_window_ns.0
+            && now + round_ns + info.apply_buffer_ns.0 <= info.resolve_by.0
+        {
+            case.draw_by = U64(now + info.draw_window_ns.0);
+            case.draw_after_height = U64(env::block_height());
+            emit(
+                "draw_extended",
+                json!({ "market": market, "market_id": id.to_string(), "round": case.round,
+                        "draw_by": case.draw_by.0.to_string() }),
+            );
+            self.put_case(market, id, case);
+            return;
+        }
         if case.round == 0 && now + round_ns + info.apply_buffer_ns.0 <= info.resolve_by.0 {
             case.round = 1;
             case.jury_size = (2 * case.jury_size + 1).min(MAX_PANEL as u32);
@@ -2108,6 +2163,8 @@ mod tests {
     const MARKET_DEADLINE: u64 = 1_000_000 * SECOND;
     const CHALLENGED_AT: u64 = 2 * SECOND;
     const DRAW_BY: u64 = CHALLENGED_AT + DRAW_WINDOW;
+    // The first moment a finalize no longer waits for seats: the draw queue runs for MAX_DRAW_QUEUE_WINDOWS windows.
+    const QUEUE_OVER: u64 = CHALLENGED_AT + (MAX_DRAW_QUEUE_WINDOWS - 1) * DRAW_WINDOW + 1;
 
     // Market 0 closed at 0. Carol proposes `proposed` a second later and Dave challenges naming `answer` the second after.
     fn challenged(proposed: Outcome, answer: Outcome) -> OracleContract {
@@ -2766,11 +2823,11 @@ mod tests {
         act_as("anyone.near", DRAW_BY);
         let early = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| o.finalize(acct(MARKET), U64(0))));
         assert!(early.is_err(), "a jury can still be drawn at draw_by");
-        act_at_height("anyone.near", DRAW_BY + 1, 20);
+        act_at_height("anyone.near", QUEUE_OVER, 20);
         o.finalize(acct(MARKET), U64(0));
         let case = o.case(&acct(MARKET), 0);
         assert_eq!((case.stage, case.round, case.jury_size), (Stage::Disputed, 1, 7));
-        assert_eq!(case.draw_by.0, DRAW_BY + 1 + DRAW_WINDOW);
+        assert_eq!(case.draw_by.0, QUEUE_OVER + DRAW_WINDOW);
         assert_eq!(case.draw_after_height.0, 22);
         assert!(case.first_panel.is_empty() && case.panel.is_empty());
     }
@@ -2868,7 +2925,7 @@ mod tests {
                     ..o.case(&acct(MARKET), 0)
                 },
             );
-            act_as("anyone.near", DRAW_BY + 1);
+            act_as("anyone.near", QUEUE_OVER);
             o.finalize(acct(MARKET), U64(0));
             assert_eq!(o.case(&acct(MARKET), 0).jury_size, second, "from {first}");
         }
@@ -2953,7 +3010,7 @@ mod tests {
             let mut case = o.case(&acct(MARKET), 0);
             case.round = 1;
             o.put_case(&acct(MARKET), 0, case);
-            act_as("anyone.near", DRAW_BY + 1);
+            act_as("anyone.near", QUEUE_OVER);
             o.finalize(acct(MARKET), U64(0));
             assert_eq!(o.case(&acct(MARKET), 0).final_outcome, Some(expected));
             let applied = calls_to("set_outcome");
@@ -3030,7 +3087,7 @@ mod tests {
         let mut case = o.case(&acct(MARKET), 0);
         case.round = 1;
         o.put_case(&acct(MARKET), 0, case);
-        act_as("anyone.near", DRAW_BY + 1);
+        act_as("anyone.near", QUEUE_OVER);
         o.finalize(acct(MARKET), U64(0));
         act_as("stranger.near", DRAW_BY + 2);
         let _ = o.retry_unlock(acct(MARKET), U64(0));
@@ -4202,10 +4259,10 @@ mod tests {
         act_unpaid(OWNER, 3);
         o.set_draw_window_ms(U64(600_000));
         o.set_panel_deadline_ms(U64(1_200_000));
-        act_as("anyone.near", DRAW_BY + 1);
+        act_as("anyone.near", QUEUE_OVER);
         o.finalize(acct(MARKET), U64(0));
         let case = o.case(&acct(MARKET), 0);
-        assert_eq!((case.round, case.draw_by.0), (1, DRAW_BY + 1 + DRAW_WINDOW));
+        assert_eq!((case.round, case.draw_by.0), (1, QUEUE_OVER + DRAW_WINDOW));
     }
 
     // ---- the bond ---------------------------------------------------------------------------------------
@@ -4795,9 +4852,9 @@ mod tests {
     #[test]
     fn two_payouts_in_flight_settle_independently() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        act_as("anyone.near", DRAW_BY + 1);
+        act_as("anyone.near", QUEUE_OVER);
         o.finalize(acct(MARKET), U64(0));
-        act_as("anyone.near", DRAW_BY + 1 + PANEL + DRAW_WINDOW + PANEL);
+        act_as("anyone.near", QUEUE_OVER + PANEL + DRAW_WINDOW + PANEL);
         o.finalize(acct(MARKET), U64(0));
         for who in ["carol.near", "dave.near"] {
             act_as(who, 10 * DEADLINE);
@@ -4912,9 +4969,9 @@ mod tests {
     #[test]
     fn two_accounts_with_a_balance_each_withdraw_only_their_own() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        act_as("anyone.near", DRAW_BY + 1);
+        act_as("anyone.near", QUEUE_OVER);
         o.finalize(acct(MARKET), U64(0));
-        act_as("anyone.near", DRAW_BY + 1 + PANEL + DRAW_WINDOW + PANEL);
+        act_as("anyone.near", QUEUE_OVER + PANEL + DRAW_WINDOW + PANEL);
         o.finalize(acct(MARKET), U64(0));
         let (carol, dave) = (owed(&o, "carol.near"), owed(&o, "dave.near"));
         assert_eq!(
@@ -4939,10 +4996,10 @@ mod tests {
     #[test]
     fn when_no_jury_could_be_drawn_the_proposer_is_made_whole_and_the_challenger_pays_the_no_decision_share() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        act_as("anyone.near", DRAW_BY + 1);
+        act_as("anyone.near", QUEUE_OVER);
         o.finalize(acct(MARKET), U64(0));
         assert!(!o.case(&acct(MARKET), 0).seated);
-        act_as("anyone.near", DRAW_BY + 1 + PANEL + DRAW_WINDOW + PANEL);
+        act_as("anyone.near", QUEUE_OVER + PANEL + DRAW_WINDOW + PANEL);
         o.finalize(acct(MARKET), U64(0));
         let case = o.case(&acct(MARKET), 0);
         assert_eq!((case.stage, case.final_outcome), (Stage::Final, Some(Outcome::Void)));
@@ -4957,6 +5014,52 @@ mod tests {
                 "juror_pay_each": "0", "paid_jurors": [], "delinquent": [] })
             ]
         );
+    }
+
+    // Seats held by other cases are a shortage that passes. The case waits and draws again instead of ruling.
+    #[test]
+    fn a_draw_that_found_too_few_free_seats_is_retried_in_a_longer_window_and_can_still_seat_a_jury() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        let retry_at = DRAW_BY + 1;
+        act_as("anyone.near", retry_at);
+        o.finalize(acct(MARKET), U64(0));
+        let case = o.case(&acct(MARKET), 0);
+        assert_eq!(
+            (case.stage, case.round, case.draw_by.0),
+            (Stage::Disputed, 0, retry_at + DRAW_WINDOW)
+        );
+        assert_eq!(logged("draw_extended").len(), 1);
+        assert_eq!(
+            (owed(&o, "carol.near"), owed(&o, "dave.near"), owed(&o, RECIPIENT)),
+            (0, 0, 0)
+        );
+
+        act_at_height("anyone.near", retry_at + 5, 50);
+        let _ = o.resolve_draw(acct(MARKET), U64(0));
+        act_as(COUNCIL, retry_at + 6);
+        let jury: Vec<AccountId> = JURORS.iter().map(|j| acct(j)).collect();
+        o.on_drawn(acct(MARKET), U64(0), 0, Ok(jury));
+        let case = o.case(&acct(MARKET), 0);
+        assert!(case.seated && case.stage == Stage::Disputed);
+    }
+
+    // The wait is bounded: after the last window the old rules apply, a second jury or no jury.
+    #[test]
+    fn the_wait_for_seats_ends_after_a_few_windows() {
+        let mut o = challenged(Outcome::Yes, Outcome::No);
+        let mut at = DRAW_BY + 1;
+        let mut waits = 0;
+        loop {
+            act_as("anyone.near", at);
+            o.finalize(acct(MARKET), U64(0));
+            if o.case(&acct(MARKET), 0).round == 1 {
+                break;
+            }
+            waits += 1;
+            assert!(waits < MAX_DRAW_QUEUE_WINDOWS, "the wait never ends");
+            at = o.case(&acct(MARKET), 0).draw_by.0 + 1;
+        }
+        assert!(waits >= 1, "it waited at least once before the second round");
     }
 
     // A jury that sat and never revealed is a dispute nobody decided, not a failed draw: the old split stays.
@@ -4983,9 +5086,9 @@ mod tests {
     #[test]
     fn a_jury_seated_only_in_the_second_round_keeps_the_no_decision_split() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        act_as("anyone.near", DRAW_BY + 1);
+        act_as("anyone.near", QUEUE_OVER);
         o.finalize(acct(MARKET), U64(0));
-        let seated_at = DRAW_BY + 1 + SECOND;
+        let seated_at = QUEUE_OVER + SECOND;
         seat(&mut o, seated_at, &names(7, "k"));
         assert!(o.case(&acct(MARKET), 0).seated);
         act_as("anyone.near", o.case(&acct(MARKET), 0).panel_deadline.0 + 1);
@@ -5136,9 +5239,9 @@ mod tests {
         act_as(VERIFIER, CHALLENGED_AT);
         deliver(&mut o, "dave.near", BOND, "challenge:market.near:0:no");
         check(&o, 2 * BOND, 0, 0);
-        act_as("anyone.near", DRAW_BY + 1);
+        act_as("anyone.near", QUEUE_OVER);
         o.finalize(acct(MARKET), U64(0));
-        seat(&mut o, DRAW_BY + 1 + SECOND, &names(7, "k"));
+        seat(&mut o, QUEUE_OVER + SECOND, &names(7, "k"));
         act_as("anyone.near", o.case(&acct(MARKET), 0).panel_deadline.0 + 1);
         o.finalize(acct(MARKET), U64(0));
         assert_eq!(o.case(&acct(MARKET), 0).stage, Stage::Final);
@@ -5520,6 +5623,16 @@ mod tests {
         let message = refusal(|| o.set_draw_delay_blocks(U64(MAX_DRAW_DELAY_BLOCKS + 1)));
         assert!(message.contains("at most 100000 blocks"), "{message}");
         o.set_draw_delay_blocks(U64(MAX_DRAW_DELAY_BLOCKS));
+    }
+
+    #[test]
+    fn a_failed_upgrade_batch_clears_the_in_flight_flag_and_a_good_one_leaves_it() {
+        let mut c = fresh_oracle();
+        c.upgrade_in_flight = true;
+        c.on_upgrade_done(Ok(()));
+        assert!(c.upgrade_in_flight);
+        c.on_upgrade_done(Err(PromiseError::Failed));
+        assert!(!c.upgrade_in_flight);
     }
 
     #[test]

@@ -19,6 +19,7 @@ use near_sdk::{
 // (about 100 bytes each at 1 NEAR per 100 KB), so spam accounts cannot drain the contract's storage.
 const STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(50);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+const GAS_REMOVE_VERIFIER_KEY: Gas = Gas::from_tgas(15);
 // ponytail: flat 0.05 NEAR deposit and a position cap instead of per-byte storage accounting; revisit if users need more positions.
 // The cap starts at this and the owner can move it within the hard range. The deposit above covers 30 entries for the longest
 // account id, so the range stops there, and 5 keeps an account able to hold a few markets.
@@ -440,6 +441,7 @@ pub struct CouncilReceipt {
 // The NEAR Intents verifier. All the backing sits in this contract's own account there, and it pays out by calling these.
 #[ext_contract(ext_verifier)]
 pub trait Verifier {
+    fn remove_public_key(&mut self, public_key: PublicKey);
     fn mt_transfer(
         &mut self,
         receiver_id: AccountId,
@@ -990,7 +992,21 @@ impl MarketContract {
         let code = upgrade::take_staged(code_hash);
         self.upgrade_in_flight = true;
         emit("upgrade_sent", json!({ "code_hash": code_hash }));
-        upgrade::deploy_and_migrate(code)
+        upgrade::deploy_and_migrate(code).then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(upgrade::GAS_UPGRADE_DONE)
+                .on_upgrade_done(),
+        )
+    }
+
+    // A batch that fails leaves the old code and the flag `upgrade` set. Cleared here, so nobody can call migrate by hand to
+    // fake the proof that lets the owner seal a contract whose upgrade path never worked.
+    #[private]
+    pub fn on_upgrade_done(&mut self, #[callback_result] result: Result<(), PromiseError>) {
+        if result.is_err() {
+            self.upgrade_in_flight = false;
+            emit("upgrade_failed", json!({}));
+        }
     }
 
     // Runs in the new code, in the same batch as the deploy. Previous roots have explicit structs and conversions;
@@ -1020,6 +1036,17 @@ impl MarketContract {
         require!(self.upgrade_proven, "prove the upgrade path before deleting keys");
         emit("seal_sent", json!({ "public_key": public_key }));
         upgrade::delete_key(public_key)
+    }
+
+    // Seal deletes NEAR access keys only. A key registered for this account in the Intents verifier can still move everything it
+    // holds, so the owner removes one here, as this account, the way the verifier requires.
+    pub fn remove_verifier_key(&mut self, public_key: PublicKey) -> Promise {
+        self.only_owner();
+        emit("verifier_key_removal_sent", json!({ "public_key": public_key }));
+        ext_verifier::ext(self.verifier.clone())
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(GAS_REMOVE_VERIFIER_KEY)
+            .remove_public_key(public_key)
     }
 
     // Two steps, so a mistyped account cannot lock the owner out: nothing changes until the new owner accepts.
@@ -2356,7 +2383,9 @@ impl StorageManagement for MarketContract {
             paid.saturating_sub(STORAGE_DEPOSIT)
         };
         if !refund.is_zero() {
-            let _ = Promise::new(payer).transfer(refund);
+            // A deposit the verifier relays on behalf of a signer goes back to the account it was for, not to the verifier.
+            let to = if payer == self.verifier { who } else { payer };
+            let _ = Promise::new(to).transfer(refund);
         }
         Self::registered_balance()
     }
@@ -4319,6 +4348,16 @@ mod tests {
         m.registered = true;
         c.store_market(id.0, m);
         id.0
+    }
+
+    #[test]
+    fn a_failed_upgrade_batch_clears_the_in_flight_flag_and_a_good_one_leaves_it() {
+        let (mut c, _) = world();
+        c.upgrade_in_flight = true;
+        c.on_upgrade_done(Ok(()));
+        assert!(c.upgrade_in_flight);
+        c.on_upgrade_done(Err(PromiseError::Failed));
+        assert!(!c.upgrade_in_flight);
     }
 
     #[test]

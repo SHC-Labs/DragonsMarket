@@ -232,8 +232,8 @@ async fn a_keeper_outage_through_a_dispute_ends_in_a_void_at_the_deadline_not_in
         (Some("void"), Some("resolved"))
     );
     assert_eq!(claimable(&w, w.carol.id()).await, BOND);
-    assert_eq!(claimable(&w, w.dave.id()).await, BOND);
-    assert_eq!(claimable(&w, w.treasury.id()).await, 0);
+    assert_eq!(claimable(&w, w.dave.id()).await, BOND / 2);
+    assert_eq!(claimable(&w, w.treasury.id()).await, BOND / 2);
     assert_eq!(claimable(&w, w.owner.id()).await, 0);
     assert!(invariant(&w, id).await);
     Ok(())

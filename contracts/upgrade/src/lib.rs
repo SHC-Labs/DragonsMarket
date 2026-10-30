@@ -19,6 +19,8 @@ pub const GAS_MIGRATE: Gas = Gas::from_tgas(30);
 // migrate gas above and a margin. The sandbox upgrade test deploys each contract's real build at exactly this amount, so a
 // larger build that no longer fits fails that test. See contracts/AUDIT.md.
 pub const GAS_UPGRADE: Gas = Gas::from_tgas(100);
+// The callback that clears `upgrade_in_flight` when the deploy batch fails.
+pub const GAS_UPGRADE_DONE: Gas = Gas::from_tgas(5);
 
 pub struct Staged {
     pub code_hash: Base58CryptoHash,

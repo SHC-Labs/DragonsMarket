@@ -43,9 +43,9 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
         contract.call("new").args_json(&args).transact().await?.into_result()?;
         let config: serde_json::Value = contract.view("config").await?.json()?;
         let version = match name {
-            "market" => 6,
+            "market" => 7,
             "oracle" => 2,
-            _ => 3,
+            _ => 4,
         };
         assert_eq!(
             config["state_version"], version,

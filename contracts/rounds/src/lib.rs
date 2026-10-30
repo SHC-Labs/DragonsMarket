@@ -13,6 +13,7 @@ use near_sdk::{
 };
 
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+const GAS_REMOVE_VERIFIER_KEY: Gas = Gas::from_tgas(15);
 const NEP141_PREFIX: &str = "nep141:";
 // Two disjoint groups of publishers must never both reach the threshold, or two prices could win for one moment.
 const MAJORITY_NEEDED: &str = "the threshold must be more than half of the publishers";
@@ -185,6 +186,7 @@ pub struct OwedView {
 
 #[ext_contract(ext_verifier)]
 pub trait Verifier {
+    fn remove_public_key(&mut self, public_key: PublicKey);
     fn mt_transfer(
         &mut self,
         receiver_id: AccountId,
@@ -543,7 +545,21 @@ impl RoundsContract {
         let code = upgrade::take_staged(code_hash);
         self.upgrade_in_flight = true;
         emit("upgrade_sent", json!({ "code_hash": code_hash }));
-        upgrade::deploy_and_migrate(code)
+        upgrade::deploy_and_migrate(code).then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(upgrade::GAS_UPGRADE_DONE)
+                .on_upgrade_done(),
+        )
+    }
+
+    // A batch that fails leaves the old code and the flag `upgrade` set. Cleared here, so nobody can call migrate by hand to
+    // fake the proof that lets the owner seal a contract whose upgrade path never worked.
+    #[private]
+    pub fn on_upgrade_done(&mut self, #[callback_result] result: Result<(), PromiseError>) {
+        if result.is_err() {
+            self.upgrade_in_flight = false;
+            emit("upgrade_failed", json!({}));
+        }
     }
 
     #[private]
@@ -557,6 +573,12 @@ impl RoundsContract {
             _ => env::panic_str("unsupported state version"),
         };
         require!(state.upgrade_in_flight, "migrate runs only inside an upgrade");
+        // An older build allowed a threshold that two separate groups of publishers could both reach. The upgrade stops until
+        // the owner fixes it in the old code.
+        require!(
+            2 * state.price_threshold as usize > state.publishers.len(),
+            MAJORITY_NEEDED
+        );
         state.upgrade_in_flight = false;
         state.upgrade_proven = true;
         emit("migrated", json!({ "state_version": state.state_version }));
@@ -568,6 +590,17 @@ impl RoundsContract {
         require!(self.upgrade_proven, "prove the upgrade path before deleting keys");
         emit("seal_sent", json!({ "public_key": public_key }));
         upgrade::delete_key(public_key)
+    }
+
+    // Seal deletes NEAR access keys only. A key registered for this account in the Intents verifier can still move everything it
+    // holds, so the owner removes one here, as this account, the way the verifier requires.
+    pub fn remove_verifier_key(&mut self, public_key: PublicKey) -> Promise {
+        self.only_owner();
+        emit("verifier_key_removal_sent", json!({ "public_key": public_key }));
+        ext_verifier::ext(self.verifier.clone())
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(GAS_REMOVE_VERIFIER_KEY)
+            .remove_public_key(public_key)
     }
 
     pub fn propose_owner(&mut self, new_owner: AccountId) {
@@ -758,9 +791,10 @@ impl RoundsContract {
             signers.len() >= self.price_threshold as usize,
             "not enough valid publisher signatures"
         );
+        // No reserve check here: a missing price turns the round into a refund, so recording one must not be refused just because
+        // registrations and stakes used up the free balance. A price is a small fixed record.
         self.prices.insert(key, price);
         self.prices.flush();
-        self.assert_storage_reserve();
         emit(
             "price_recorded",
             json!({ "series_id": series_id, "round": round, "at": at.to_string(), "price": price, "signers": signers }),
@@ -2008,6 +2042,16 @@ mod tests {
         );
         assert!(migrated.treasury.is_none());
         assert!(migrated.upgrade_proven && !migrated.upgrade_in_flight);
+    }
+
+    #[test]
+    fn a_failed_upgrade_batch_clears_the_in_flight_flag_and_a_good_one_leaves_it() {
+        let (mut c, _) = world();
+        c.upgrade_in_flight = true;
+        c.on_upgrade_done(Ok(()));
+        assert!(c.upgrade_in_flight);
+        c.on_upgrade_done(Err(PromiseError::Failed));
+        assert!(!c.upgrade_in_flight);
     }
 
     #[test]

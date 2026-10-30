@@ -1024,8 +1024,9 @@ const QUARTERS_KEY: u8 = 5;
 const SEAT_WEIGHT_KEY: u8 = 6;
 const FORFEITS_KEY: u8 = 7;
 const RECEIVED_KEY: u8 = 9;
-// The five maps and six totals that follow `next_to_finalize` in the Council's state: five 5-byte map prefixes and six u128.
-const STATE_AFTER_NEXT_TO_FINALIZE: usize = 5 * 5 + 6 * 16;
+// What follows `next_to_finalize` in the Council's state: five 5-byte map prefixes, six u128 totals and the u32 count of
+// unstakes in flight.
+const STATE_AFTER_NEXT_TO_FINALIZE: usize = 5 * 5 + 6 * 16 + 4;
 
 // ACCELERATED. The sandbox cannot reach the end of a real quarter, which is about two months of blocks away. A test that needs a
 // finished quarter has the Council's books for the quarter it is in filed under the quarter two before it instead, and points

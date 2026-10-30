@@ -43,6 +43,8 @@ const MAX_DECIMALS = 18;
 const WASM_MAGIC = Buffer.from("\0asm", "latin1");
 
 export const TARGETS = ["market", "oracle", "council"];
+// The most one market can hold, which the pricing math in the dpm crate also enforces (MAX_LOCKED).
+const DPM_MAX_LOCKED = 1_000_000_000_000n;
 
 // The ceilings the contracts enforce, by the names the contract source gives them. A test reads the source and fails when
 // one of these differs.
@@ -65,6 +67,7 @@ export const CONTRACT_LIMITS = {
     HARD_MAX_STORAGE_RESERVE: 100_000_000_000_000_000_000_000_000n,
     HARD_MIN_REGISTRATION_FEE: 10_000n,
     HARD_MAX_REGISTRATION_FEE: 2_000_000n,
+    HARD_MIN_MARKET_LOCKED: 1_000_000n,
     MAX_TITLE: 200,
     MAX_RULE: 2000,
     MAX_SOURCE: 300,
@@ -197,6 +200,7 @@ const windowMs = u64(1n, U64_MAX / NS_PER_MS);
 const upgradePath = {
   upgrade: call({ code_hash: hash32 }, { gas: UPGRADE_GAS, needs: "staged" }),
   seal: call({ public_key: anyKey }, { needs: "upgrade_proven" }),
+  remove_verifier_key: call({ public_key: anyKey }),
   propose_owner: call({ new_owner: account }),
   accept_owner: call({}),
 };
@@ -214,6 +218,7 @@ export const ALLOWED = {
     set_min_sweep: call({ min_sweep: u128(1n, LIMIT_MARKET.HARD_MAX_MIN_SWEEP) }),
     set_next_sweep_id: call({ next_sweep_id: u64(1n) }, { needs: "sweep_id_forward" }),
     set_fee_rate_bps: call({ fee_rate_bps: integer(LIMIT_MARKET.HARD_MAX_FEE_RATE_BPS) }),
+    set_max_market_locked: call({ max_market_locked: u128(LIMIT_MARKET.HARD_MIN_MARKET_LOCKED, DPM_MAX_LOCKED) }),
     set_storage_policy: call({
       market_storage_deposit: u128(LIMIT_MARKET.HARD_MIN_MARKET_STORAGE_DEPOSIT, LIMIT_MARKET.HARD_MAX_MARKET_STORAGE_DEPOSIT),
       reserve: u128(LIMIT_MARKET.HARD_MIN_STORAGE_RESERVE, LIMIT_MARKET.HARD_MAX_STORAGE_RESERVE),
@@ -245,6 +250,7 @@ export const ALLOWED = {
       { check: ordered("min_revenue_share_bps", "max_revenue_share_bps") },
     ),
     halt: call({ market_id: u64(), reason: text(REASON_MAX) }),
+    set_market_cap: call({ market_id: u64(), cap: u128(LIMIT_MARKET.HARD_MIN_MARKET_LOCKED, DPM_MAX_LOCKED) }),
     resume: call({ market_id: u64() }),
     claim_residual: call({ market_id: u64() }),
     retry_register: calling({ market_id: u64() }),
