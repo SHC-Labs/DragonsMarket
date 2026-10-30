@@ -528,11 +528,13 @@ test("wiring check passes when every contract names the same oracle, Council, ve
     market: { ...shared, oracle: "o.near", revenue_pool: "c.near" },
     oracle: { ...shared, council: "c.near" },
     council: { ...shared, oracle: "o.near" },
-    rounds: { ...shared },
+    rounds: { ...shared, treasury: "t.near" },
   };
+  configs.market.treasury = "t.near";
   const ids = { oracle: "o.near", council: "c.near" };
   assert.deepEqual(wiringProblems(configs, ids), []);
   assert.deepEqual(wiringProblems({ ...configs, council: { ...shared, oracle: "x.near" } }, ids), ["the Council's oracle is x.near, expected o.near"]);
   assert.deepEqual(wiringProblems({ ...configs, market: { ...configs.market, revenue_pool: null } }, ids), ["the market's revenue_pool is unset, expected c.near"]);
-  assert.deepEqual(wiringProblems({ ...configs, rounds: { ...shared, collateral_token_id: "nep141:other.near" } }, ids), ["the rounds's collateral token is nep141:other.near, expected nep141:usdc.near"]);
+  assert.deepEqual(wiringProblems({ ...configs, rounds: { ...configs.rounds, treasury: null } }, ids), ["the rounds contract's treasury is unset, expected t.near"]);
+  assert.deepEqual(wiringProblems({ ...configs, rounds: { ...configs.rounds, collateral_token_id: "nep141:other.near" } }, ids), ["the rounds's collateral token is nep141:other.near, expected nep141:usdc.near"]);
 });

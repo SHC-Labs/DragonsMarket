@@ -165,13 +165,13 @@ test('pending settlements: requests stay listed until their own terminal event l
   await add('rounds', 'withdraw', 101, { id: '5', account: 'd.near', amount: '9' });
   await add('oracle', 'bond_payout_requested', 101, { id: '7', account: 'e.near', amount: '3' });
   await add('oracle', 'bond_paid', 102, { id: '7', account: 'e.near', amount: '3' });
-  const claim = { quarter: 3, token_id: '9', owner: 'c.near', amount: '4' };
+  const claim = { quarter: 3, token_id: '9', owner: 'c.near', amount: '4', requested_at: '1' };
   await add('council', 'claim_requested', 101, claim);
   await add('council', 'claim_failed', 102, claim);
-  await add('council', 'claim_requested', 103, claim);
+  await add('council', 'claim_requested', 102, { ...claim, requested_at: '2' });
   const pending = await get(root, '/v1/settlements/pending');
   assert.deepEqual(pending.data.map((r: any) => [r.kind, r.event, r.payload.id ?? r.payload.token_id]), [['withdrawal', 'withdraw', '2'], ['withdrawal', 'withdraw', '5'], ['claim', 'claim_requested', '9']]);
-  assert.equal(pending.data[2].block_height, '103', 'a retried claim is pending again after an earlier failure');
+  assert.equal(pending.data[2].payload.requested_at, '2', 'a retry in the same block as the earlier failure is still pending');
   assert.equal(pending.truncated, false);
   const mine = await get(root, '/v1/settlements/pending?account=d.near');
   assert.deepEqual(mine.data.map((r: any) => r.payload.id), ['5'], 'only the named account\'s items');

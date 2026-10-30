@@ -135,6 +135,8 @@ The project owner sets initial market exposure and user limits after security an
 Publish mint participation terms, reward eligibility and claim rules before asking users to buy
 an NFT. Earnings and returns must not be guaranteed.
 
+Set the market caps against the oracle bond before opening the venue: `set_max_market_locked` (owner) is the most any market can hold, and `set_market_cap` (operator or owner) lowers it for one market. A wrong answer costs the bond, so a market should not hold much more than that bond can answer for. Rounds series set their own `close_before` (at least a minute) when they are added.
+
 Do not open the venue until `keeper.mjs check` shows enough drawable seat holders (jury size
 + second jury + 2; a seat that is serving or asked to leave does not count). After the contracts
 are sealed, `keeper.mjs check --expect-sealed` is the release gate.

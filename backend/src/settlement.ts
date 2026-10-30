@@ -25,7 +25,7 @@ const PAIRS = [
     standards: ['council'],
     request: ['claim_requested'],
     terminal: ['claim_paid', 'claim_failed', 'claim_reconciled'],
-    key: ['quarter', 'token_id', 'owner'],
+    key: ['quarter', 'token_id', 'owner', 'requested_at'],
   },
 ] as const;
 
@@ -58,7 +58,7 @@ export async function pendingSettlements(
   const accountParam = 3 + PAIRS.length * 3;
   const branches = PAIRS.map((pair, i) => {
     const base = i * 3;
-    const sameKey = pair.key.map(field => `t.payload->>'${field}' = r.payload->>'${field}'`).join(' AND ');
+    const sameKey = pair.key.map(field => `t.payload->>'${field}' IS NOT DISTINCT FROM r.payload->>'${field}'`).join(' AND ');
     return `(SELECT r.block_height, r.receipt_id, r.log_index, r.data_index, r.receiver_id, r.event, r.payload, '${pair.kind}' AS kind
       FROM raw_events r WHERE r.deployment_id = $1 AND r.standard = ANY($${base + 3}) AND r.event = ANY($${base + 4}) AND r.block_height <= $2
       AND ($${accountParam}::text IS NULL OR r.payload->>'account' = $${accountParam} OR r.payload->>'owner' = $${accountParam})

@@ -35,6 +35,8 @@ const MAX_RECONCILE_WAIT_NS: u64 = 7 * NS_PER_DAY;
 const DEFAULT_CLOSE_GRACE_NS: u64 = 7 * NS_PER_DAY;
 const MIN_CLOSE_GRACE_NS: u64 = NS_PER_DAY;
 const MAX_CLOSE_GRACE_NS: u64 = 30 * NS_PER_DAY;
+// A longer cooldown overflows nothing, but it locks every seat for as long as it runs.
+const MAX_COOLDOWN_NS: u64 = 365 * NS_PER_DAY;
 // Quarters one call moves seat time or a seat's weight across. A longer idle stretch needs advance_quarters or book_seat_time
 // first, in as many calls as it takes.
 const MAX_QUARTER_STEPS: u32 = 8;
@@ -56,7 +58,7 @@ const GAS_UNSTAKE_FLOOR: Gas = Gas::from_gas(GAS_NFT_TRANSFER.as_gas() + GAS_CAL
 const GAS_CLAIM_FLOOR: Gas = Gas::from_gas(GAS_MT_TRANSFER.as_gas() + GAS_CALLBACK.as_gas() + GAS_OWN_WORK.as_gas());
 // The layout of the state below. migrate reads exactly this one and refuses any other. Version 2 is the quarterly books.
 // Version 3 keys received sweeps by market account and stores every map record behind a version tag.
-const STATE_VERSION: u16 = 3;
+const STATE_VERSION: u16 = 4;
 // Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
 const NEP141_PREFIX: &str = "nep141:";
 const REVENUE_PREFIX: &str = "revenue:";
@@ -454,6 +456,96 @@ pub struct CouncilContract {
     open_pool: u128,
     final_pool: u128,
     rolled_total: u128,
+    // Seats taken out of `staked` whose NFT transfer has not been answered yet. The collection cannot change while one is out,
+    // or a failed transfer would restore the seat under another collection.
+    unstakes_in_flight: u32,
+}
+
+// Exact layout of state version 3, which did not count unstakes in flight.
+#[near(serializers=[borsh])]
+struct StateV3 {
+    state_version: u16,
+    upgrade_proven: bool,
+    upgrade_in_flight: bool,
+    owner: AccountId,
+    pending_owner: Option<AccountId>,
+    oracle: AccountId,
+    nft_contract: Option<AccountId>,
+    allowed_markets: Vec<AccountId>,
+    verifier: AccountId,
+    collateral_token_id: String,
+    cooldown_ns: u64,
+    max_seats_per_account: u32,
+    allowlist_enabled: bool,
+    allowed_tokens: LookupSet<(AccountId, TokenId)>,
+    allowed_range: Option<(AccountId, u64, u64)>,
+    staked: Vector<TokenId>,
+    stakes: LookupMap<TokenId, VersionedStake>,
+    seats_of: LookupMap<AccountId, u32>,
+    tokens_of: LookupMap<AccountId, Vec<TokenId>>,
+    juries: LookupMap<u64, Vec<TokenId>>,
+    open_juries: BTreeMap<u64, u32>,
+    earning: u32,
+    close_grace_ns: u64,
+    reconcile_wait_ns: u64,
+    last_tick: u64,
+    next_to_finalize: u32,
+    quarters: LookupMap<u32, VersionedQuarterBook>,
+    seat_weight: LookupMap<(u32, TokenId, AccountId), u64>,
+    forfeits: LookupMap<(u32, TokenId, AccountId), u64>,
+    claims: LookupMap<(u32, TokenId, AccountId), VersionedClaim>,
+    received: LookupMap<(AccountId, u64), VersionedReceived>,
+    total_received: u128,
+    total_paid: u128,
+    pending_total: u128,
+    open_pool: u128,
+    final_pool: u128,
+    rolled_total: u128,
+}
+
+impl From<StateV3> for CouncilContract {
+    fn from(old: StateV3) -> Self {
+        Self {
+            state_version: STATE_VERSION,
+            upgrade_proven: old.upgrade_proven,
+            upgrade_in_flight: old.upgrade_in_flight,
+            owner: old.owner,
+            pending_owner: old.pending_owner,
+            oracle: old.oracle,
+            nft_contract: old.nft_contract,
+            allowed_markets: old.allowed_markets,
+            verifier: old.verifier,
+            collateral_token_id: old.collateral_token_id,
+            cooldown_ns: old.cooldown_ns,
+            max_seats_per_account: old.max_seats_per_account,
+            allowlist_enabled: old.allowlist_enabled,
+            allowed_tokens: old.allowed_tokens,
+            allowed_range: old.allowed_range,
+            staked: old.staked,
+            stakes: old.stakes,
+            seats_of: old.seats_of,
+            tokens_of: old.tokens_of,
+            juries: old.juries,
+            open_juries: old.open_juries,
+            earning: old.earning,
+            close_grace_ns: old.close_grace_ns,
+            reconcile_wait_ns: old.reconcile_wait_ns,
+            last_tick: old.last_tick,
+            next_to_finalize: old.next_to_finalize,
+            quarters: old.quarters,
+            seat_weight: old.seat_weight,
+            forfeits: old.forfeits,
+            claims: old.claims,
+            received: old.received,
+            total_received: old.total_received,
+            total_paid: old.total_paid,
+            pending_total: old.pending_total,
+            open_pool: old.open_pool,
+            final_pool: old.final_pool,
+            rolled_total: old.rolled_total,
+            unstakes_in_flight: 0,
+        }
+    }
 }
 
 fn emit(event: &str, data: near_sdk::serde_json::Value) {
@@ -555,6 +647,7 @@ impl CouncilContract {
             open_pool: 0,
             final_pool: 0,
             rolled_total: 0,
+            unstakes_in_flight: 0,
         }
     }
 
@@ -587,8 +680,13 @@ impl CouncilContract {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        upgrade::require_state_version(STATE_VERSION);
-        let mut state: Self = env::state_read().unwrap_or_else(|| env::panic_str("there is no state to migrate"));
+        let bytes = env::storage_read(b"STATE").unwrap_or_else(|| env::panic_str("there is no state to migrate"));
+        require!(bytes.len() >= 2, "invalid state");
+        let mut state: Self = match u16::from_le_bytes([bytes[0], bytes[1]]) {
+            STATE_VERSION => env::state_read().unwrap_or_else(|| env::panic_str("invalid current state")),
+            3 => Self::from(env::state_read::<StateV3>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
+            _ => env::panic_str("unsupported state version"),
+        };
         require!(state.upgrade_in_flight, "migrate runs only inside an upgrade");
         state.upgrade_in_flight = false;
         state.upgrade_proven = true;
@@ -622,7 +720,10 @@ impl CouncilContract {
     // Applies to every unstake from now on, including ones already requested, which wait out the new length.
     pub fn set_cooldown_ns(&mut self, cooldown_ns: U64) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
-        require!(cooldown_ns.0 > 0, "the cooldown must be positive");
+        require!(
+            (1..=MAX_COOLDOWN_NS).contains(&cooldown_ns.0),
+            "the cooldown must be positive and at most a year"
+        );
         emit("cooldown_set", json!({ "cooldown_ns": cooldown_ns.0.to_string() }));
         self.cooldown_ns = cooldown_ns.0;
     }
@@ -701,6 +802,10 @@ impl CouncilContract {
         require!(
             self.staked.is_empty(),
             "unstake every seat before changing the NFT contract"
+        );
+        require!(
+            self.unstakes_in_flight == 0,
+            "an unstake is still waiting for its NFT transfer"
         );
         emit("nft_contract_set", json!({ "nft_contract": nft_contract }));
         self.nft_contract = Some(nft_contract);
@@ -847,6 +952,7 @@ impl CouncilContract {
         require!(stake.serving.is_none(), "this seat is serving on an open case");
         // Remove it before the transfer; restore it in a callback if the transfer fails.
         let stake = self.remove_stake(&token_id);
+        self.unstakes_in_flight += 1;
         self.return_nft(token_id, stake)
     }
 
@@ -858,6 +964,7 @@ impl CouncilContract {
         #[callback_result] result: Result<(), PromiseError>,
     ) {
         let data = json!({ "token_id": token_id, "owner": stake.owner });
+        self.unstakes_in_flight = self.unstakes_in_flight.saturating_sub(1);
         if result.is_ok() {
             emit("unstaked", data);
         } else {
@@ -980,7 +1087,8 @@ impl CouncilContract {
         self.put_book(quarter, book);
         emit(
             "claim_requested",
-            json!({ "quarter": quarter, "token_id": token_id, "owner": who, "amount": amount.to_string() }),
+            json!({ "quarter": quarter, "token_id": token_id, "owner": who, "amount": amount.to_string(),
+                    "requested_at": now.to_string() }),
         );
         self.pay(&who, amount).then(
             Self::ext(env::current_account_id())
@@ -1051,8 +1159,8 @@ impl CouncilContract {
         let mut book = self.book(quarter);
         book.pending -= claim.amount;
         self.pending_total -= claim.amount;
-        let data =
-            json!({ "quarter": quarter, "token_id": token_id, "owner": owner, "amount": claim.amount.to_string() });
+        let data = json!({ "quarter": quarter, "token_id": token_id, "owner": owner, "amount": claim.amount.to_string(),
+                           "requested_at": claim.requested_at.to_string() });
         if paid {
             book.paid += claim.amount;
             self.total_paid += claim.amount;
@@ -1084,10 +1192,13 @@ impl CouncilContract {
         amounts: Vec<U128>,
         msg: String,
     ) -> Vec<U128> {
-        let _ = previous_owner_ids;
         require!(
             env::predecessor_account_id() == self.verifier,
             "only the verifier can deliver money"
+        );
+        require!(
+            previous_owner_ids.as_slice() == [sender_id.clone()],
+            "the money must come from the sender's own balance"
         );
         require!(
             token_ids.len() == 1 && amounts.len() == 1,
@@ -1856,6 +1967,74 @@ mod tests {
     }
 
     #[test]
+    fn the_collection_cannot_change_while_an_unstake_waits_for_its_nft_transfer() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        let before = c.stake_of("1".into()).unwrap();
+        leave(&mut c, "1", "a.near");
+        assert_eq!((c.seat_count(), c.unstakes_in_flight), (0, 1));
+        act_as(OWNER);
+        let message = refusal(|| c.set_nft_contract(acct("other-nft.near")));
+        assert!(message.contains("still waiting for its NFT transfer"), "{message}");
+        act_as("council.near");
+        c.on_unstaked("1".into(), before, Ok(()));
+        assert_eq!(c.unstakes_in_flight, 0);
+        act_as(OWNER);
+        c.set_nft_contract(acct("other-nft.near"));
+    }
+
+    #[test]
+    fn migrate_moves_version_three_state_to_four_with_nothing_in_flight() {
+        let mut c = council();
+        stake(&mut c, "7", "o0.near");
+        let old = StateV3 {
+            state_version: 3,
+            upgrade_proven: c.upgrade_proven,
+            upgrade_in_flight: true,
+            owner: c.owner,
+            pending_owner: c.pending_owner,
+            oracle: c.oracle,
+            nft_contract: c.nft_contract,
+            allowed_markets: c.allowed_markets,
+            verifier: c.verifier,
+            collateral_token_id: c.collateral_token_id,
+            cooldown_ns: c.cooldown_ns,
+            max_seats_per_account: c.max_seats_per_account,
+            allowlist_enabled: c.allowlist_enabled,
+            allowed_tokens: c.allowed_tokens,
+            allowed_range: c.allowed_range,
+            staked: c.staked,
+            stakes: c.stakes,
+            seats_of: c.seats_of,
+            tokens_of: c.tokens_of,
+            juries: c.juries,
+            open_juries: c.open_juries,
+            earning: c.earning,
+            close_grace_ns: c.close_grace_ns,
+            reconcile_wait_ns: c.reconcile_wait_ns,
+            last_tick: c.last_tick,
+            next_to_finalize: c.next_to_finalize,
+            quarters: c.quarters,
+            seat_weight: c.seat_weight,
+            forfeits: c.forfeits,
+            claims: c.claims,
+            received: c.received,
+            total_received: c.total_received,
+            total_paid: c.total_paid,
+            pending_total: c.pending_total,
+            open_pool: c.open_pool,
+            final_pool: c.final_pool,
+            rolled_total: c.rolled_total,
+        };
+        env::state_write(&old);
+        testing_env!(context("alice.near").build());
+        let migrated = CouncilContract::migrate();
+        assert_eq!(migrated.state_version, STATE_VERSION);
+        assert_eq!((migrated.unstakes_in_flight, migrated.seat_count()), (0, 1));
+        assert!(migrated.upgrade_proven && !migrated.upgrade_in_flight);
+    }
+
+    #[test]
     #[should_panic(expected = "unstake every seat before changing the NFT contract")]
     fn the_collection_cannot_change_under_staked_seats() {
         let mut c = council();
@@ -2344,6 +2523,11 @@ mod tests {
             Err(PromiseError::Failed),
         );
         assert_eq!(last_event()["event"], "claim_failed");
+        assert_eq!(
+            last_event()["data"]["requested_at"],
+            first.0.to_string(),
+            "the terminal event names its request"
+        );
         assert_eq!((c.reward_totals().pending_claims.0, c.total_paid), (0, 0));
         assert_eq!(
             c.get_entitlement(Q4_2026, "1".into(), acct("seat1.near"))
@@ -2353,6 +2537,8 @@ mod tests {
         );
         assert_eq!(claim(&mut c, Q4_2026, "1", "seat1.near"), 871_005);
         assert_eq!(last_event()["event"], "claim_paid");
+        let second = requested_at(&c, Q4_2026, "1", "seat1.near");
+        assert_eq!(last_event()["data"]["requested_at"], second.0.to_string());
         act_paid("seat1.near");
         assert_eq!(
             refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
@@ -3124,7 +3310,7 @@ mod tests {
         assert_eq!(config["markets"], near_sdk::serde_json::json!([MARKET]));
         assert_eq!(config["nft_contract"], NFT);
         assert_eq!(config["close_grace_ns"], DEFAULT_CLOSE_GRACE_NS.to_string());
-        assert_eq!(config["state_version"], 3);
+        assert_eq!(config["state_version"], 4);
         assert_eq!(config["next_to_finalize"], Q4_2026);
         assert_eq!(config["last_tick"], START.to_string());
     }
@@ -3783,6 +3969,30 @@ mod tests {
     }
 
     #[test]
+    fn a_cooldown_longer_than_a_year_is_refused() {
+        let mut c = council();
+        act_as(OWNER);
+        assert!(refusal(|| c.set_cooldown_ns(U64(MAX_COOLDOWN_NS + 1))).contains("at most a year"));
+        c.set_cooldown_ns(U64(MAX_COOLDOWN_NS));
+    }
+
+    #[test]
+    fn revenue_must_come_from_the_senders_own_balance() {
+        let mut c = council();
+        act_as(VERIFIER);
+        let message = refusal(|| {
+            drop(c.mt_on_transfer(
+                acct(MARKET),
+                vec![acct("someone.else.near")],
+                vec![COLLATERAL_ID.to_string()],
+                vec![U128(900)],
+                format!("{REVENUE_PREFIX}1"),
+            ))
+        });
+        assert!(message.contains("the sender's own balance"), "{message}");
+    }
+
+    #[test]
     #[should_panic(expected = "the collateral token id must look like nep141:<token>")]
     fn a_collateral_id_without_the_nep141_prefix_is_refused_at_init() {
         near_sdk::mock::with_mocked_blockchain(|b| {
@@ -4315,10 +4525,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "migrate expects version 3")]
+    #[should_panic(expected = "unsupported state version")]
     fn migrate_refuses_state_written_by_another_version() {
         let mut c = council();
-        c.state_version = STATE_VERSION - 1;
+        c.state_version = STATE_VERSION + 1;
         env::state_write(&c);
         drop(c);
         testing_env!(context("alice.near").build());
@@ -4624,6 +4834,6 @@ mod tests {
     #[test]
     fn a_new_council_starts_at_the_current_state_version() {
         assert_eq!(council().state_version, STATE_VERSION);
-        assert_eq!(STATE_VERSION, 3);
+        assert_eq!(STATE_VERSION, 4);
     }
 }

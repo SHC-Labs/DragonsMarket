@@ -16,8 +16,8 @@ The upgrade path is the shared `upgrade/src/lib.rs`.
 
 A **series** is one asset cut into rounds of one interval: `asset` (a short lowercase name such as `btc-usd`),
 `decimals` of the price, `first_start`, `interval`, `price_window` and `close_before`, all fixed when it is added. Round
-`r` starts at `first_start + r * interval` and ends where round `r + 1` starts. `close_before` is at least a second and
-at most half the interval.
+`r` starts at `first_start + r * interval` and ends where round `r + 1` starts. `close_before` is at least a minute and
+at most half the interval, and each series sets its own, so a slower market can close earlier.
 
 - **Stakes.** Round `r` takes stakes from its start until `close_before` ahead of its end, so stakes come in while the
   price moves and stop before the last seconds decide it. Between that close and the end no round of the series takes

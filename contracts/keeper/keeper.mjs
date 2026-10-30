@@ -654,6 +654,7 @@ export function wiringProblems(configs, ids) {
   expect("the market's revenue_pool", configs.market.revenue_pool, ids.council);
   expect("the oracle's council", configs.oracle.council, ids.council);
   expect("the Council's oracle", configs.council.oracle, ids.oracle);
+  if (configs.rounds) expect("the rounds contract's treasury", configs.rounds.treasury, configs.market.treasury);
   for (const name of Object.keys(configs)) {
     expect(`the ${name}'s verifier`, configs[name].verifier, configs.market.verifier);
     expect(`the ${name}'s collateral token`, configs[name].collateral_token_id, configs.market.collateral_token_id);

@@ -14,7 +14,9 @@ use near_sdk::{
 
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 const NEP141_PREFIX: &str = "nep141:";
-const STATE_VERSION: u16 = 1;
+// Two disjoint groups of publishers must never both reach the threshold, or two prices could win for one moment.
+const MAJORITY_NEEDED: &str = "the threshold must be more than half of the publishers";
+const STATE_VERSION: u16 = 2;
 const BPS_DENOMINATOR: u128 = 10_000;
 // Taken from what the losing side paid, and capped so a winner never gets back less than the stake.
 const DEFAULT_FEE_BPS: u32 = 300;
@@ -31,7 +33,8 @@ const MAX_DECIMALS: u8 = 18;
 const NS_PER_SECOND: u64 = 1_000_000_000;
 const NS_PER_MINUTE: u64 = 60 * NS_PER_SECOND;
 const NS_PER_DAY: u64 = 1_440 * NS_PER_MINUTE;
-const HARD_MIN_CLOSE_BEFORE_NS: u64 = NS_PER_SECOND;
+// Stakes close at least a minute before the end, so nobody can wait for the price and then stake on the side that already won.
+const HARD_MIN_CLOSE_BEFORE_NS: u64 = NS_PER_MINUTE;
 const HARD_MIN_INTERVAL_NS: u64 = NS_PER_MINUTE;
 const HARD_MAX_INTERVAL_NS: u64 = NS_PER_DAY;
 const HARD_MIN_PRICE_WINDOW_NS: u64 = NS_PER_MINUTE;
@@ -39,6 +42,7 @@ const HARD_MAX_PRICE_WINDOW_NS: u64 = NS_PER_DAY;
 const RECONCILE_WAIT_NS: u64 = 60 * NS_PER_MINUTE;
 const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
+const SWEEP_GAS: Gas = Gas::from_tgas(60);
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
@@ -225,6 +229,77 @@ pub struct RoundsContract {
     withdrawals: LookupMap<u64, Withdrawal>,
     pending_withdrawals_total: u128,
     pending_by_account: LookupMap<AccountId, u128>,
+    // Where sweep_fees sends the fees. Unset until the owner names it.
+    treasury: Option<AccountId>,
+}
+
+// Exact layout of state version 1, which had no treasury.
+#[near(serializers=[borsh])]
+struct StateV1 {
+    state_version: u16,
+    upgrade_proven: bool,
+    upgrade_in_flight: bool,
+    owner: AccountId,
+    pending_owner: Option<AccountId>,
+    operator: AccountId,
+    verifier: AccountId,
+    collateral_token_id: String,
+    network: String,
+    paused: bool,
+    fee_bps: u32,
+    registration_fee: u128,
+    publishers: Vec<PublicKey>,
+    price_threshold: u32,
+    next_series_id: u32,
+    series: LookupMap<u32, VersionedSeries>,
+    rounds: LookupMap<(u32, u64), VersionedRound>,
+    prices: LookupMap<(u32, u64), U128>,
+    stakes: LookupMap<(u32, u64, AccountId), Stake>,
+    accounts: LookupMap<AccountId, u32>,
+    balances: LookupMap<AccountId, u128>,
+    balances_total: u128,
+    locked_total: u128,
+    fees: u128,
+    next_withdrawal_id: u64,
+    withdrawals: LookupMap<u64, Withdrawal>,
+    pending_withdrawals_total: u128,
+    pending_by_account: LookupMap<AccountId, u128>,
+}
+
+impl From<StateV1> for RoundsContract {
+    fn from(old: StateV1) -> Self {
+        Self {
+            state_version: STATE_VERSION,
+            upgrade_proven: old.upgrade_proven,
+            upgrade_in_flight: old.upgrade_in_flight,
+            owner: old.owner,
+            pending_owner: old.pending_owner,
+            operator: old.operator,
+            verifier: old.verifier,
+            collateral_token_id: old.collateral_token_id,
+            network: old.network,
+            paused: old.paused,
+            fee_bps: old.fee_bps,
+            registration_fee: old.registration_fee,
+            publishers: old.publishers,
+            price_threshold: old.price_threshold,
+            next_series_id: old.next_series_id,
+            series: old.series,
+            rounds: old.rounds,
+            prices: old.prices,
+            stakes: old.stakes,
+            accounts: old.accounts,
+            balances: old.balances,
+            balances_total: old.balances_total,
+            locked_total: old.locked_total,
+            fees: old.fees,
+            next_withdrawal_id: old.next_withdrawal_id,
+            withdrawals: old.withdrawals,
+            pending_withdrawals_total: old.pending_withdrawals_total,
+            pending_by_account: old.pending_by_account,
+            treasury: None,
+        }
+    }
 }
 
 impl Side {
@@ -448,6 +523,7 @@ impl RoundsContract {
             withdrawals: LookupMap::new(Key::Withdrawals),
             pending_withdrawals_total: 0,
             pending_by_account: LookupMap::new(Key::PendingByAccount),
+            treasury: None,
         }
     }
 
@@ -473,8 +549,13 @@ impl RoundsContract {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        upgrade::require_state_version(STATE_VERSION);
-        let mut state: Self = env::state_read().unwrap_or_else(|| env::panic_str("invalid current state"));
+        let bytes = env::storage_read(b"STATE").unwrap_or_else(|| env::panic_str("there is no state to migrate"));
+        require!(bytes.len() >= 2, "invalid state");
+        let mut state: Self = match u16::from_le_bytes([bytes[0], bytes[1]]) {
+            STATE_VERSION => env::state_read().unwrap_or_else(|| env::panic_str("invalid current state")),
+            1 => Self::from(env::state_read::<StateV1>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
+            _ => env::panic_str("unsupported state version"),
+        };
         require!(state.upgrade_in_flight, "migrate runs only inside an upgrade");
         state.upgrade_in_flight = false;
         state.upgrade_proven = true;
@@ -533,6 +614,35 @@ impl RoundsContract {
         self.registration_fee = registration_fee.0;
     }
 
+    pub fn set_treasury(&mut self, treasury: AccountId) {
+        self.only_owner();
+        emit("treasury_set", json!({ "treasury": treasury }));
+        self.treasury = Some(treasury);
+    }
+
+    // Anyone can call it: the fees can only go to the treasury. They move to the treasury's balance here and leave as an
+    // ordinary withdrawal, so a failure or a lost callback is handled the way every withdrawal is, and a failed sweep leaves the
+    // money on the treasury's balance for the next one. Needs the gas for the transfer and its callback.
+    pub fn sweep_fees(&mut self) -> Promise {
+        require!(
+            env::prepaid_gas() >= SWEEP_GAS,
+            "attach at least 60 TGas so the callback can run"
+        );
+        let treasury = self
+            .treasury
+            .clone()
+            .unwrap_or_else(|| env::panic_str("the owner has not named a treasury"));
+        let fees = std::mem::take(&mut self.fees);
+        self.credit(&treasury, fees);
+        let amount = self.balances.get(&treasury).copied().unwrap_or(0);
+        require!(amount > 0, "no fees to sweep");
+        emit(
+            "fees_swept",
+            json!({ "treasury": treasury, "fees": fees.to_string(), "amount": amount.to_string() }),
+        );
+        self.withdraw_for(treasury, amount)
+    }
+
     pub fn add_publisher(&mut self, key: PublicKey) {
         self.only_owner();
         require!(key.curve_type() == CurveType::ED25519, "publishers use ed25519 keys");
@@ -540,6 +650,10 @@ impl RoundsContract {
         require!(
             self.publishers.len() < MAX_PUBLISHERS,
             &format!("there can be at most {MAX_PUBLISHERS} publishers")
+        );
+        require!(
+            2 * self.price_threshold as usize > self.publishers.len() + 1,
+            MAJORITY_NEEDED
         );
         emit("publisher_added", json!({ "key": key }));
         self.publishers.push(key);
@@ -570,6 +684,7 @@ impl RoundsContract {
             threshold > 0 && threshold as usize <= self.publishers.len(),
             "the threshold must be between 1 and the number of publishers"
         );
+        require!(2 * threshold as usize > self.publishers.len(), MAJORITY_NEEDED);
         emit("price_threshold_set", json!({ "threshold": threshold }));
         self.price_threshold = threshold;
     }
@@ -599,7 +714,7 @@ impl RoundsContract {
         );
         require!(
             (HARD_MIN_CLOSE_BEFORE_NS..=interval.0 / 2).contains(&close_before.0),
-            "stakes must close between a second and half the interval before the end"
+            "stakes must close between a minute and half the interval before the end"
         );
         let id = self.next_series_id;
         self.next_series_id += 1;
@@ -816,6 +931,7 @@ impl RoundsContract {
                 "network": self.network, "paused": self.paused, "fee_bps": self.fee_bps,
                 "registration_fee": self.registration_fee.to_string(), "min_stake": MIN_STAKE.to_string(),
                 "max_open_stakes": MAX_OPEN_STAKES, "publishers": self.publishers, "price_threshold": self.price_threshold,
+                "treasury": self.treasury,
                 "series": self.next_series_id })
     }
 
@@ -1129,7 +1245,7 @@ mod tests {
     const START: u64 = 1_000 * NS_PER_MINUTE;
     const INTERVAL: u64 = 5 * NS_PER_MINUTE;
     const WINDOW: u64 = 2 * NS_PER_MINUTE;
-    const CLOSE_BEFORE: u64 = 15 * NS_PER_SECOND;
+    const CLOSE_BEFORE: u64 = NS_PER_MINUTE;
     const BETTING: u64 = START + NS_PER_MINUTE;
     const END: u64 = START + INTERVAL;
     const CLOSE: u64 = END - CLOSE_BEFORE;
@@ -1777,6 +1893,137 @@ mod tests {
         act_as(OWNER, RECONCILE_WAIT_NS + 1);
         c.reconcile_withdrawal(U64(1), true);
         assert_eq!(c.total_owed().0, RECEIVED - USD);
+    }
+
+    const TREASURY: &str = "treasury.near";
+
+    #[test]
+    fn the_fees_leave_for_the_treasury_as_a_withdrawal_and_come_back_if_it_fails() {
+        let (mut c, _) = world();
+        let fees = c.fees;
+        assert!(fees > 0);
+        act_as(OWNER, 1);
+        assert!(refused(|| c.sweep_fees()), "no treasury is named yet");
+        c.set_treasury(acct(TREASURY));
+        assert_eq!(c.config()["treasury"], TREASURY);
+        act_as("anyone.near", 2);
+        let _ = c.sweep_fees();
+        assert_eq!((c.fees, c.pending_withdrawals_total), (0, fees));
+        assert_eq!(
+            c.total_owed().0,
+            RECEIVED,
+            "nothing is created or lost while it is in flight"
+        );
+        assert!(get_logs().iter().any(|l| l.contains("fees_swept")));
+        act_as(CONTRACT, 3);
+        c.on_withdraw(U64(1), Err(PromiseError::Failed));
+        assert_eq!((c.fees, c.pending_withdrawals_total), (0, 0));
+        assert_eq!(
+            balance(&c, TREASURY),
+            fees,
+            "a failed sweep leaves the money on the treasury's balance"
+        );
+        assert_eq!(c.total_owed().0, RECEIVED);
+
+        act_as("anyone.near", 4);
+        let _ = c.sweep_fees();
+        act_as(CONTRACT, 5);
+        c.on_withdraw(U64(2), Ok(()));
+        assert_eq!((balance(&c, TREASURY), c.pending_withdrawals_total), (0, 0));
+        assert_eq!(
+            c.total_owed().0,
+            RECEIVED - fees,
+            "the fees are gone from what the verifier must hold"
+        );
+        act_as("anyone.near", 6);
+        assert!(refused(|| c.sweep_fees()), "nothing left to sweep");
+    }
+
+    #[test]
+    fn a_sweep_needs_the_gas_for_its_callback() {
+        let (mut c, _) = world();
+        act_as(OWNER, 1);
+        c.set_treasury(acct(TREASURY));
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(acct(CONTRACT))
+            .predecessor_account_id(acct("anyone.near"))
+            .prepaid_gas(Gas::from_tgas(30))
+            .build());
+        assert!(refused(|| c.sweep_fees()));
+        assert!(c.fees > 0, "a refused sweep changes nothing");
+    }
+
+    #[test]
+    fn only_the_owner_names_the_treasury() {
+        let (mut c, _) = world();
+        act_as("anyone.near", 1);
+        assert!(refused(|| c.set_treasury(acct(TREASURY))));
+    }
+
+    #[test]
+    fn migrate_moves_version_one_state_to_two_with_no_treasury() {
+        let (c, _) = world();
+        let old = StateV1 {
+            state_version: 1,
+            upgrade_proven: false,
+            upgrade_in_flight: true,
+            owner: acct(OWNER),
+            pending_owner: None,
+            operator: acct(OWNER),
+            verifier: acct(VERIFIER),
+            collateral_token_id: COLLATERAL_ID.to_string(),
+            network: NETWORK.to_string(),
+            paused: false,
+            fee_bps: DEFAULT_FEE_BPS,
+            registration_fee: DEFAULT_REGISTRATION_FEE,
+            publishers: c.publishers.clone(),
+            price_threshold: 2,
+            next_series_id: 1,
+            series: LookupMap::new(Key::Series),
+            rounds: LookupMap::new(Key::Rounds),
+            prices: LookupMap::new(Key::Prices),
+            stakes: LookupMap::new(Key::Stakes),
+            accounts: LookupMap::new(Key::Accounts),
+            balances: LookupMap::new(Key::Balances),
+            balances_total: 7,
+            locked_total: 8,
+            fees: 9,
+            next_withdrawal_id: 4,
+            withdrawals: LookupMap::new(Key::Withdrawals),
+            pending_withdrawals_total: 5,
+            pending_by_account: LookupMap::new(Key::PendingByAccount),
+        };
+        env::state_write(&old);
+        drop(c);
+        act_as(CONTRACT, 5);
+        let migrated = RoundsContract::migrate();
+        assert_eq!(migrated.state_version, STATE_VERSION);
+        assert_eq!(
+            (migrated.balances_total, migrated.locked_total, migrated.fees),
+            (7, 8, 9)
+        );
+        assert_eq!(
+            (migrated.pending_withdrawals_total, migrated.next_withdrawal_id),
+            (5, 4)
+        );
+        assert!(migrated.treasury.is_none());
+        assert!(migrated.upgrade_proven && !migrated.upgrade_in_flight);
+    }
+
+    #[test]
+    fn the_threshold_must_stay_above_half_of_the_publishers() {
+        let (mut c, _) = world();
+        act_as(OWNER, 1);
+        assert!(
+            refused(|| c.add_publisher(public(&signing_key(40)))),
+            "2 of 4 would let two prices win"
+        );
+        c.set_price_threshold(3);
+        c.add_publisher(public(&signing_key(40)));
+        assert!(refused(|| c.set_price_threshold(2)), "2 of 4 again");
+        c.remove_publisher(public(&signing_key(40)));
+        c.set_price_threshold(2);
+        assert_eq!(c.config()["price_threshold"], 2);
     }
 
     #[test]

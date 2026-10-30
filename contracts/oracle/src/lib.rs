@@ -50,11 +50,17 @@ const GAS_WITHDRAW_FLOOR: Gas =
     Gas::from_gas(GAS_MT_TRANSFER.as_gas() + GAS_CALLBACK.as_gas() + GAS_WITHDRAW_OVERHEAD.as_gas());
 const SETTLE_REASON: &str = "a call that settles a case sends the answer to the market and releases the juries";
 const NS_PER_MS: u64 = 1_000_000;
+// The owner windows and the draw delay stop at a year and a day of blocks. A larger value overflows a deadline or pushes
+// every draw past its limit.
+const MAX_WINDOW_MS: u64 = 365 * 86_400_000;
+const MAX_DRAW_DELAY_BLOCKS: u64 = 100_000;
 const NS_PER_SEC: u64 = 1_000_000_000;
 // The layout of the state below. migrate reads exactly this one and refuses any other.
 const STATE_VERSION: u16 = 2;
 // Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
 const NEP141_PREFIX: &str = "nep141:";
+// Two disjoint groups of publishers must never both reach the threshold, or two prices could win for one moment.
+const MAJORITY_NEEDED: &str = "the threshold must be more than half of the publishers";
 // Settling a case still takes one more cross-contract hop (apply) to reach the market. This keeps a case that used
 // its full allotted time clear of resolve_by, after which anyone can send the market its deadline answer. The owner can
 // change it within the range below, for markets registered afterwards. Under 5 seconds the hop could miss the room it
@@ -387,8 +393,8 @@ pub struct OracleContract {
     // The fast key for protective changes: it can remove a price publisher at once. Adding one, and changing how many
     // must agree, stay with the owner, which is the DAO.
     operator: AccountId,
-    // The market accounts that may register markets and take new proposals and challenges. A market taken off the list
-    // keeps its open cases: they finish as before.
+    // The market accounts that may register markets and take new proposals. A market taken off the list keeps its open
+    // cases: they can still be challenged and finish as before.
     allowed_markets: Vec<AccountId>,
     // The Intents verifier that holds every bond, and the exact id of the collateral in it, "nep141:<token>".
     verifier: AccountId,
@@ -599,8 +605,14 @@ impl OracleContract {
         );
         require!(price_threshold > 0, "at least one publisher must sign a price");
         require!(
-            window_ms.0 > 0 && panel_deadline_ms.0 > 0 && draw_window_ms.0 > 0 && min_proposal_ms.0 > 0,
-            "windows must be positive"
+            [window_ms.0, panel_deadline_ms.0, draw_window_ms.0, min_proposal_ms.0]
+                .iter()
+                .all(|ms| (1..=MAX_WINDOW_MS).contains(ms)),
+            "windows must be positive and at most a year"
+        );
+        require!(
+            draw_delay_blocks.0 <= MAX_DRAW_DELAY_BLOCKS,
+            "the draw delay must be at most 100000 blocks"
         );
         require!(valid_jury_size(jury_size), "jury size must be odd and at most 21");
         Self {
@@ -699,28 +711,40 @@ impl OracleContract {
     // registered with, and min_proposal_ms only matters at registration.
     pub fn set_window_ms(&mut self, window_ms: U64) {
         self.only_owner();
-        require!(window_ms.0 > 0, "windows must be positive");
+        require!(
+            (window_ms.0 > 0) && window_ms.0 <= MAX_WINDOW_MS,
+            "windows must be positive and at most a year"
+        );
         emit("window_set", json!({ "window_ms": window_ms }));
         self.window_ns = window_ms.0 * NS_PER_MS;
     }
 
     pub fn set_panel_deadline_ms(&mut self, panel_deadline_ms: U64) {
         self.only_owner();
-        require!(panel_deadline_ms.0 > 0, "windows must be positive");
+        require!(
+            (panel_deadline_ms.0 > 0) && panel_deadline_ms.0 <= MAX_WINDOW_MS,
+            "windows must be positive and at most a year"
+        );
         emit("panel_deadline_set", json!({ "panel_deadline_ms": panel_deadline_ms }));
         self.panel_deadline_ns = panel_deadline_ms.0 * NS_PER_MS;
     }
 
     pub fn set_min_proposal_ms(&mut self, min_proposal_ms: U64) {
         self.only_owner();
-        require!(min_proposal_ms.0 > 0, "windows must be positive");
+        require!(
+            (min_proposal_ms.0 > 0) && min_proposal_ms.0 <= MAX_WINDOW_MS,
+            "windows must be positive and at most a year"
+        );
         emit("min_proposal_set", json!({ "min_proposal_ms": min_proposal_ms }));
         self.min_proposal_ns = min_proposal_ms.0 * NS_PER_MS;
     }
 
     pub fn set_draw_window_ms(&mut self, draw_window_ms: U64) {
         self.only_owner();
-        require!(draw_window_ms.0 > 0, "windows must be positive");
+        require!(
+            (draw_window_ms.0 > 0) && draw_window_ms.0 <= MAX_WINDOW_MS,
+            "windows must be positive and at most a year"
+        );
         emit("draw_window_set", json!({ "draw_window_ms": draw_window_ms }));
         self.draw_window_ns = draw_window_ms.0 * NS_PER_MS;
     }
@@ -728,6 +752,10 @@ impl OracleContract {
     // Counted from each challenge and each second round from now on, in blocks.
     pub fn set_draw_delay_blocks(&mut self, draw_delay_blocks: U64) {
         self.only_owner();
+        require!(
+            draw_delay_blocks.0 <= MAX_DRAW_DELAY_BLOCKS,
+            "the draw delay must be at most 100000 blocks"
+        );
         emit("draw_delay_set", json!({ "draw_delay_blocks": draw_delay_blocks }));
         self.draw_delay_blocks = draw_delay_blocks.0;
     }
@@ -858,6 +886,10 @@ impl OracleContract {
             self.publishers.len() < self.max_publishers as usize,
             &format!("there can be at most {} publishers", self.max_publishers)
         );
+        require!(
+            2 * self.price_threshold as usize > self.publishers.len() + 1,
+            MAJORITY_NEEDED
+        );
         emit("publisher_added", json!({ "key": key }));
         self.publishers.push(key);
     }
@@ -886,6 +918,7 @@ impl OracleContract {
             threshold > 0 && threshold as usize <= self.publishers.len(),
             "the threshold must be between 1 and the number of publishers"
         );
+        require!(2 * threshold as usize > self.publishers.len(), MAJORITY_NEEDED);
         emit("price_threshold_set", json!({ "threshold": threshold }));
         self.price_threshold = threshold;
     }
@@ -983,11 +1016,15 @@ impl OracleContract {
             .next()
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| env::panic_str("bad market account"));
-        self.require_allowed(&market);
         let id: u64 = parts
             .next()
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| env::panic_str("bad market id"));
+        // A market taken off the list takes nothing new, but a case it already has stays open to a challenge: otherwise a
+        // wrong answer would finalize with nobody able to dispute it.
+        if !(action == "challenge" && self.get_case_of(&market, id).is_some()) {
+            self.require_allowed(&market);
+        }
         // A challenge matches the bond its case was proposed with, which may not be today's.
         let due = match action {
             "challenge" => self.get_case_of(&market, id).map_or(self.bond, |case| case.bond.0),
@@ -1754,9 +1791,14 @@ impl OracleContract {
                 paid = revealed;
             }
             (Some(c), Ruling::NoJury) => {
-                // The draw failed, which is no fault of either party: each gets their own bond back.
+                // No jury could be seated, so nobody ruled on the challenge. The proposer gets their bond back. The
+                // challenger gets theirs back less the no-decision share, which the no-decision recipient holds: without a
+                // price on it, a challenge that cannot be answered would void an event market for free.
+                let fee = bond * no_decision_share_bps / 10_000;
                 self.add_claimable(&proposer, bond);
-                self.add_claimable(&c, bond);
+                self.add_claimable(&c, bond - fee);
+                let recipient = self.no_decision_recipient.clone();
+                self.add_claimable(&recipient, fee);
             }
             _ => self.add_claimable(&proposer, bond),
         }
@@ -3432,6 +3474,15 @@ mod tests {
         (o, keys)
     }
 
+    // The threshold has to stay above half the publishers, so it is raised before each key that would break that.
+    fn add_publisher_keeping_majority(o: &mut OracleContract, key: PublicKey) {
+        let needed = ((o.publishers.len() + 1) / 2 + 1) as u32;
+        if needed > o.price_threshold {
+            o.set_price_threshold(needed);
+        }
+        o.add_publisher(key);
+    }
+
     fn submit(o: &mut OracleContract, at: u64, price: u128, entries: &[String]) {
         act_as(VERIFIER, at);
         deliver(
@@ -3772,7 +3823,7 @@ mod tests {
         let (mut o, _) = price_oracle(true);
         act_as(OWNER, 1);
         for seed in 10..20 {
-            o.add_publisher(public(&signing_key(seed)));
+            add_publisher_keeping_majority(&mut o, public(&signing_key(seed)));
         }
     }
 
@@ -4754,15 +4805,17 @@ mod tests {
         }
         assert_eq!(
             (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
-            (2 * BOND, 0, 2 * BOND)
+            (BOND + BOND / 2, BOND / 2, 2 * BOND)
         );
         settle(&mut o, 2, false);
-        assert_eq!(logged("bond_payout_failed"), vec![payout_json("dave.near", 2)]);
+        let mut failed = payout_json("dave.near", 2);
+        failed["amount"] = (BOND / 2).to_string().into();
+        assert_eq!(logged("bond_payout_failed"), vec![failed]);
         assert_eq!(
             (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
             (BOND, BOND, 2 * BOND)
         );
-        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (0, BOND));
+        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (0, BOND / 2));
         assert!(o.get_payout(1).is_some() && o.get_payout(2).is_none());
         settle(&mut o, 1, true);
         assert_eq!(
@@ -4866,8 +4919,8 @@ mod tests {
         let (carol, dave) = (owed(&o, "carol.near"), owed(&o, "dave.near"));
         assert_eq!(
             (carol, dave),
-            (BOND, BOND),
-            "no jury was ever seated, so each is owed their own bond"
+            (BOND, BOND / 2),
+            "no jury was ever seated: the proposer is owed their bond, the challenger theirs less the no-decision share"
         );
         act_as("carol.near", 10 * DEADLINE);
         let _ = o.withdraw_bond();
@@ -4881,9 +4934,10 @@ mod tests {
         assert_eq!(o.total_owed().0, 2 * BOND - carol);
     }
 
-    // The draw could never happen. The system failed, so neither party pays for it.
+    // The draw could never happen. The proposer is made whole. The challenger pays the no-decision share, so a challenge that
+    // cannot be answered is not a free way to void an event market.
     #[test]
-    fn when_no_jury_could_be_drawn_in_either_round_each_party_gets_their_own_bond_back() {
+    fn when_no_jury_could_be_drawn_the_proposer_is_made_whole_and_the_challenger_pays_the_no_decision_share() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
         act_as("anyone.near", DRAW_BY + 1);
         o.finalize(acct(MARKET), U64(0));
@@ -4892,8 +4946,8 @@ mod tests {
         o.finalize(acct(MARKET), U64(0));
         let case = o.case(&acct(MARKET), 0);
         assert_eq!((case.stage, case.final_outcome), (Stage::Final, Some(Outcome::Void)));
-        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (BOND, BOND));
-        assert_eq!((owed(&o, RECIPIENT), owed(&o, OWNER)), (0, 0));
+        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (BOND, BOND / 2));
+        assert_eq!((owed(&o, RECIPIENT), owed(&o, OWNER)), (BOND / 2, 0));
         assert_eq!(o.total_owed().0, 2 * BOND, "every unit is still owed to someone");
         assert_eq!(o.bonds_held, 0);
         assert_eq!(
@@ -5432,7 +5486,7 @@ mod tests {
         let message = refusal(|| o.add_publisher(public(&signing_key(40))));
         assert!(message.contains("there can be at most 2 publishers"), "{message}");
         o.set_max_publishers(4);
-        o.add_publisher(public(&signing_key(40)));
+        add_publisher_keeping_majority(&mut o, public(&signing_key(40)));
         assert_eq!(o.config()["publishers"].as_array().unwrap().len(), 4);
         let message = refusal(|| o.add_publisher(public(&signing_key(41))));
         assert!(message.contains("there can be at most 4 publishers"), "{message}");
@@ -5444,9 +5498,45 @@ mod tests {
         act_unpaid(OWNER, 5);
         o.set_max_publishers(25);
         for seed in 10..32 {
-            o.add_publisher(public(&signing_key(seed)));
+            add_publisher_keeping_majority(&mut o, public(&signing_key(seed)));
         }
         assert_eq!(o.config()["publishers"].as_array().unwrap().len(), 25);
+    }
+
+    #[test]
+    fn the_owner_windows_and_the_draw_delay_have_upper_bounds() {
+        let mut o = fresh_oracle();
+        act_as(OWNER, 1);
+        for setter in [
+            |o: &mut OracleContract, v: U64| o.set_window_ms(v),
+            |o: &mut OracleContract, v: U64| o.set_panel_deadline_ms(v),
+            |o: &mut OracleContract, v: U64| o.set_min_proposal_ms(v),
+            |o: &mut OracleContract, v: U64| o.set_draw_window_ms(v),
+        ] {
+            let message = refusal(|| setter(&mut o, U64(MAX_WINDOW_MS + 1)));
+            assert!(message.contains("at most a year"), "{message}");
+            setter(&mut o, U64(MAX_WINDOW_MS));
+        }
+        let message = refusal(|| o.set_draw_delay_blocks(U64(MAX_DRAW_DELAY_BLOCKS + 1)));
+        assert!(message.contains("at most 100000 blocks"), "{message}");
+        o.set_draw_delay_blocks(U64(MAX_DRAW_DELAY_BLOCKS));
+    }
+
+    #[test]
+    fn the_threshold_must_stay_above_half_of_the_publishers() {
+        let (mut o, _) = price_oracle(true);
+        act_as(OWNER, 1);
+        assert_eq!(o.config()["price_threshold"], 2);
+        let message = refusal(|| o.add_publisher(public(&signing_key(40))));
+        assert!(message.contains("more than half of the publishers"), "{message}");
+        o.set_price_threshold(3);
+        o.add_publisher(public(&signing_key(40)));
+        let message = refusal(|| o.set_price_threshold(2));
+        assert!(message.contains("more than half of the publishers"), "{message}");
+        act_as(OWNER, 1);
+        o.remove_publisher(public(&signing_key(40)));
+        o.set_price_threshold(2);
+        assert_eq!(o.config()["price_threshold"], 2);
     }
 
     // ---- two market accounts, the allow-list and the case uid ------------------------------------------------------
@@ -5578,10 +5668,6 @@ mod tests {
 
         act_as(VERIFIER, 2 * SECOND);
         let message = refusal(|| {
-            deliver(&mut o, "dave.near", BOND, "challenge:market2.near:0:yes");
-        });
-        assert!(message.contains("that market contract is not allowed"), "{message}");
-        let message = refusal(|| {
             deliver(&mut o, "carol.near", BOND, "propose:market2.near:1:yes:https://x");
         });
         assert!(message.contains("that market contract is not allowed"), "{message}");
@@ -5598,6 +5684,22 @@ mod tests {
         let _ = o.withdraw_bond();
         o.on_applied(acct(MARKET2), U64(0), Ok(()));
         assert!(o.case(&acct(MARKET2), 0).applied);
+    }
+
+    #[test]
+    fn a_disallowed_markets_open_case_can_still_be_challenged_but_a_case_that_does_not_exist_cannot() {
+        let mut o = two_markets();
+        propose_on(&mut o, MARKET2, 0, "erin.near", Outcome::No);
+        act_as(OWNER, 0);
+        o.disallow_market(acct(MARKET2));
+
+        act_as(VERIFIER, 2 * SECOND);
+        let message = refusal(|| {
+            deliver(&mut o, "dave.near", BOND, "challenge:market2.near:7:yes");
+        });
+        assert!(message.contains("that market contract is not allowed"), "{message}");
+        deliver(&mut o, "dave.near", BOND, "challenge:market2.near:0:yes");
+        assert_eq!(o.case(&acct(MARKET2), 0).stage, Stage::Disputed);
     }
 
     #[test]
