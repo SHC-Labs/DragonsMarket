@@ -49,7 +49,11 @@ const FORBIDDEN_VERIFIER_CALLS: [&str; 27] = [
 // Every cross-contract interface a contract declares, and the methods it declares on each. A new target or a new method
 // fails here until it is added on purpose.
 const EXPECTED_EXTERNAL_INTERFACES: [(&str, &str, &[&str]); 11] = [
-    ("market", "ext_verifier", &["mt_transfer", "mt_transfer_call", "remove_public_key"]),
+    (
+        "market",
+        "ext_verifier",
+        &["mt_transfer", "mt_transfer_call", "remove_public_key"],
+    ),
     ("market", "ext_oracle", &["register_market"]),
     ("market", "ext_council", &["received_of"]),
     ("council", "ext_verifier", &["mt_transfer", "remove_public_key"]),
@@ -269,7 +273,9 @@ fn the_verifier_is_only_ever_asked_to_transfer_or_to_drop_a_key() {
     for (contract, interface, methods) in EXPECTED_EXTERNAL_INTERFACES {
         if interface == "ext_verifier" {
             assert!(
-                methods.iter().all(|m| m.starts_with("mt_transfer") || *m == "remove_public_key"),
+                methods
+                    .iter()
+                    .all(|m| m.starts_with("mt_transfer") || *m == "remove_public_key"),
                 "{contract} asks the verifier for more than a transfer or dropping a key: {methods:?}"
             );
         }

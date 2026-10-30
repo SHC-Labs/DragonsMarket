@@ -653,7 +653,7 @@ twice, and the weights of a finished quarter add up to its seat time less its fo
 
 A stranger cannot upgrade or seal, an unknown hash and too little gas or deposit are refused, `seal`
 waits for `upgrade_proven`, `migrate` refuses another state version, and the seats survive an
-upgrade unchanged. See `AUDIT.md`.
+upgrade unchanged.
 
 ---
 
@@ -671,4 +671,4 @@ upgrade unchanged. See `AUDIT.md`.
 | The seat cap limits revenue concentration only | A jury is made of distinct accounts, so the best setup for an attacker is one seat in each of many wallets, and a per-account cap does nothing against that. An account is not a person. Identity checks or a buyer cap at sale time are needed. `spec.md` section 9 says the same.         |
 | Unstaked NFTs earn nothing                     | Only staked seats earn and can be drawn.                                                                                                                                                                                                                                                    |
 | Keys                                           | Until `seal` has run, the deploy key can replace this code outside every vote. After it, only an owner upgrade can. A sealed contract with a broken upgrade path cannot be fixed, so prove one upgrade first.                                                                           |
-| No outside audit                               | The only review is the self-review in `AUDIT.md`.                                                                                                                                                                                                                                           |
+| No outside audit                               | The only review so far is internal.                                                                                                                                                                                                                                           |

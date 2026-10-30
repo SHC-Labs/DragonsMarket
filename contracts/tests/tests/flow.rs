@@ -191,7 +191,7 @@ async fn unchallenged_answer_becomes_final_and_pays_out_with_no_deadline() -> an
         .await?;
     assert!(r.is_failure());
 
-    skip_secs(&w.worker, 70).await; // past the 60 s window
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await; // past the hour window
     w.oracle
         .call("finalize")
         .args_json(json!({ "market": w.market.id(), "market_id": id.to_string() }))
@@ -277,14 +277,14 @@ async fn a_challenge_goes_to_the_panel_and_the_majority_decides() -> anyhow::Res
     assert_eq!(case_json(&w, id).await["stage"], "disputed");
 
     let jury = draw_jury(&w, id).await?;
-    assert_eq!(jury.len(), 3);
+    assert_eq!(jury.len(), JURY as usize);
 
     // Someone off the panel cannot vote. Voting needs a reason.
     refused(
         commit(&w, &w.alice, id, "no", "s").await,
         "not on the panel for this case",
     );
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(&w, j, id, "no", "salt-for-no").await?;
     }
     to_reveal_phase(&w, id).await;
@@ -292,7 +292,7 @@ async fn a_challenge_goes_to_the_panel_and_the_majority_decides() -> anyhow::Res
         reveal(&w, &jury[0], id, "no", "salt-for-no", " ").await,
         "a reason is required",
     );
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         reveal(&w, j, id, "no", "salt-for-no", "The source says no.").await?;
     }
     let case = case_json(&w, id).await;
@@ -301,15 +301,17 @@ async fn a_challenge_goes_to_the_panel_and_the_majority_decides() -> anyhow::Res
     assert_eq!(case["applied"], true);
     assert_eq!(market_json(&w, id).await["outcome"], "no");
 
-    // The challenger was right. The proposer loses their bond: a quarter is split between the two jurors who revealed
+    // The challenger was right. The proposer loses their bond: a quarter is split between the three jurors who revealed
     // with the majority, and the challenger takes their own bond back and the rest.
-    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND - BOND / 4);
+    let each = JUROR_PAY;
+    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND - each * MAJORITY as u128);
     assert_eq!(claimable(&w, w.carol.id()).await, 0);
-    assert_eq!(
-        (claimable(&w, jury[0].id()).await, claimable(&w, jury[1].id()).await),
-        (BOND / 8, BOND / 8)
-    );
-    assert_eq!(claimable(&w, jury[2].id()).await, 0);
+    for j in &jury[..MAJORITY] {
+        assert_eq!(claimable(&w, j.id()).await, each);
+    }
+    for j in &jury[MAJORITY..] {
+        assert_eq!(claimable(&w, j.id()).await, 0);
+    }
 
     let pool = u(&market_json(&w, id).await["locked"]);
     w.bob
@@ -327,18 +329,13 @@ async fn a_challenge_goes_to_the_panel_and_the_majority_decides() -> anyhow::Res
     Ok(())
 }
 
-// A jury of one that stays silent is no decision. A second jury of three is called for, and one of them votes. That is
-// not a majority of three either, so the market is Void. The proposer gets their bond back and the challenger's bond
+// A jury of five that stays silent is no decision. A second jury of eleven is called for, and one of them votes. That is
+// not a majority of eleven either, so the market is Void. The proposer gets their bond back and the challenger's bond
 // goes half to the one juror who revealed and half to the proposer.
 #[tokio::test]
 async fn a_dispute_no_jury_settles_resolves_void_and_pays_the_bonds_as_stated() -> anyhow::Result<()> {
-    let w = setup().await?;
-    w.owner
-        .call(w.oracle.id(), "set_jury_size")
-        .args_json(json!({ "jury_size": 1 }))
-        .transact()
-        .await?
-        .into_result()?;
+    let mut w = setup().await?;
+    add_jurors(&mut w, SECOND_JURY).await?;
     let id = new_market(&w, 120).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     buy(&w, &w.bob, id, "no", 10 * USD).await?;
@@ -346,7 +343,7 @@ async fn a_dispute_no_jury_settles_resolves_void_and_pays_the_bonds_as_stated() 
     propose(&w, &w.carol, id, "yes").await?;
     challenge(&w, &w.dave, id).await?;
     let first = draw_jury(&w, id).await?;
-    assert_eq!(first.len(), 1);
+    assert_eq!(first.len(), JURY as usize);
 
     // The first jury never votes. When its time is out, a second jury is called for, and only once.
     refused(finalize(&w, id).await, "the panel still has time");
@@ -356,14 +353,14 @@ async fn a_dispute_no_jury_settles_resolves_void_and_pays_the_bonds_as_stated() 
     let case = case_json(&w, id).await;
     assert_eq!(
         (&case["stage"], &case["round"], &case["jury_size"]),
-        (&json!("disputed"), &json!(1), &json!(3))
+        (&json!("disputed"), &json!(1), &json!(SECOND_JURY))
     );
     assert!(market_json(&w, id).await["outcome"].is_null());
 
     let second = draw_jury(&w, id).await?;
-    assert_eq!(second.len(), 3);
+    assert_eq!(second.len(), SECOND_JURY);
     assert!(
-        second.iter().all(|j| j.id() != first[0].id()),
+        second.iter().all(|j| first.iter().all(|f| f.id() != j.id())),
         "the second jury is other accounts than the first"
     );
     commit(&w, &second[0], id, "yes", "salt-for-yes-0123456789").await?;
@@ -372,7 +369,7 @@ async fn a_dispute_no_jury_settles_resolves_void_and_pays_the_bonds_as_stated() 
     assert_eq!(
         case_json(&w, id).await["stage"],
         "disputed",
-        "one vote is not a majority of three"
+        "one vote is not a majority of eleven"
     );
     let deadline: u64 = case_json(&w, id).await["panel_deadline"].as_str().unwrap().parse()?;
     skip_until(&w, deadline + 1).await;
@@ -383,8 +380,8 @@ async fn a_dispute_no_jury_settles_resolves_void_and_pays_the_bonds_as_stated() 
     assert_eq!(claimable(&w, second[0].id()).await, BOND / 2);
     assert_eq!(
         case_json(&w, id).await["delinquent"].as_array().unwrap().len(),
-        1 + 2,
-        "the silent first juror and the two silent second jurors"
+        first.len() + second.len() - 1,
+        "the silent first jury and the ten silent second jurors"
     );
 
     // Void: each holder gets back what they put in less the fee, whatever the price did, and the invariant covers it.
@@ -419,7 +416,7 @@ async fn a_loss_taken_by_selling_before_a_void_is_the_residual_and_goes_to_the_t
 
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "void").await?;
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, id).await?;
     assert_eq!(market_json(&w, id).await["outcome"], "void");
     w.bob
@@ -458,7 +455,7 @@ async fn a_loss_taken_by_selling_before_a_void_is_the_residual_and_goes_to_the_t
 #[tokio::test]
 async fn a_registered_market_is_open_at_even_odds_before_anyone_trades() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_market(&w, 600, 3_600).await?;
+    let id = create_market(&w, 600, MARKET_GAP_SECS).await?;
     let m = market_json(&w, id).await;
     assert_eq!(
         (&m["status"], &m["registered"], &m["price_yes"], &m["locked"]),

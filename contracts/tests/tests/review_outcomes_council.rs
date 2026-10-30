@@ -2,13 +2,11 @@
 mod common;
 use common::*;
 
-// A seat staked after the challenge cannot sit on that case's jury while the older seats can make one on their own. Three
-// seats are older than the cooldown, the jury needs three, and a fourth is staked after the challenge.
+// A seat staked after the challenge cannot sit on that case's jury while the older seats can make one on their own. Five
+// seats are older than the cooldown, the jury needs five, and a sixth is staked after the challenge.
 #[tokio::test]
 async fn a_seat_staked_after_the_challenge_cannot_sit_on_that_cases_jury() -> anyhow::Result<()> {
     let w = setup().await?;
-    let j = &w.jurors;
-    leave(&w, &[&j[3], &j[4]]).await?;
     skip_secs(&w.worker, COOLDOWN_SECS + 5).await;
 
     let id = new_market(&w, 1).await?;

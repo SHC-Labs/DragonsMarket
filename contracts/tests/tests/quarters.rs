@@ -298,3 +298,45 @@ async fn a_quarter_nobody_held_a_seat_in_rolls_its_pool_into_the_next_and_has_no
     );
     Ok(())
 }
+
+// The sandbox starts inside a quarter that began months ago, so the seats staked in it are late seats by the Council's rule.
+// The five jurors are filed as staked at the start of the quarter, the rule is switched on, and a sixth seat is staked now. The
+// next quarter, where the late seat earns in full, is out of the sandbox's reach: the Council's own tests cover it.
+#[tokio::test]
+async fn a_seat_staked_after_the_quarter_began_earns_nothing_from_it_while_the_early_seats_take_the_pool(
+) -> anyhow::Result<()> {
+    let w = setup().await?;
+    back_date_seats(&w).await?;
+    set_late_seat_rule_from(&w.worker, &w.council, 0).await?;
+    mint_nft(&w, &w.alice, "late-seat").await?;
+    stake(&w, &w.alice, "late-seat").await?;
+    skip_secs(&w.worker, 30).await;
+    mint(&w, w.owner.id(), 100 * USD).await?;
+    send_revenue(&w, 100 * USD).await?;
+
+    let running = current_quarter(&w).await["quarter"].as_u64().unwrap() as u32;
+    let estimate = entitlement(&w, running, "late-seat", w.alice.id()).await;
+    assert!(
+        estimate.is_null() || u(&estimate["amount"]) == 0,
+        "the late seat is estimated at nothing: {estimate}"
+    );
+    assert!(amount_of(&w, running, &w.jurors[0]).await > 0);
+
+    let aged = age_current_quarter(&w).await?;
+    finalize_quarter(&w, aged).await?;
+    let finished = entitlement(&w, aged, "late-seat", w.alice.id()).await;
+    assert!(
+        finished.is_null() || (u(&finished["amount"]) == 0 && u(&finished["weight_ns"]) == 0),
+        "the late seat earned nothing from the quarter it was staked in: {finished}"
+    );
+    refused(claim_quarter(&w, &w.alice, aged, "late-seat").await, "nothing to claim");
+    let mut early = 0;
+    for j in &w.jurors {
+        early += amount_of(&w, aged, j).await;
+    }
+    assert!(
+        early <= 100 * USD && 100 * USD - early < 10,
+        "the five early seats split the whole 100 USD: {early}"
+    );
+    Ok(())
+}

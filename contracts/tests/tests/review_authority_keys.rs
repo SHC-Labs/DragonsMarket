@@ -260,10 +260,10 @@ async fn the_owner_can_remove_an_intents_key_registered_for_the_market_and_the_c
     Ok(())
 }
 
-// Property 1. The operator hot key (w.owner here; admin is the owner) halts any open market indefinitely, which closes the
-// only exit before resolution (sell), and it cannot touch any destination, the owner-only pause on sells or the upgrade.
+// Property 1. The operator hot key (w.owner here; admin is the owner) can halt buys on an open market, but never the exit
+// (sell), and it cannot touch any destination, the owner-only pause on sells or the upgrade.
 #[tokio::test]
-async fn the_operator_can_freeze_exits_of_a_market_but_reaches_no_destination() -> anyhow::Result<()> {
+async fn the_operator_can_halt_buys_but_never_exits_and_reaches_no_destination() -> anyhow::Result<()> {
     let (w, _admin) = setup_admin_owned().await?;
     let operator = &w.owner;
     let id = new_market(&w, 600).await?;
@@ -276,7 +276,14 @@ async fn the_operator_can_freeze_exits_of_a_market_but_reaches_no_destination() 
         .transact()
         .await?
         .into_result()?;
-    refused(sell(&w, &w.alice, id, "yes", yes, 0).await, "market is halted");
+    sell(&w, &w.alice, id, "yes", yes, 0).await?;
+    let before = holdings(&w, w.bob.id()).await;
+    let _ = buy(&w, &w.bob, id, "no", USD).await;
+    assert_eq!(
+        holdings(&w, w.bob.id()).await,
+        before,
+        "a buy during the halt comes back"
+    );
 
     let owner_only = [
         (
@@ -321,16 +328,19 @@ async fn the_operator_can_freeze_exits_of_a_market_but_reaches_no_destination() 
         .transact()
         .await?
         .into_result()?;
-    sell(&w, &w.alice, id, "yes", yes, 0).await?;
+    buy(&w, &w.bob, id, "no", USD).await?;
+    assert!(
+        shares(&w, id, w.bob.id()).await.1 > 0,
+        "buying works again after the resume"
+    );
     Ok(())
 }
 
-// VIOLATION (property 4, nft contract link). The Council takes a stake on the word of whatever account is its NFT contract:
-// nft_on_transfer checks only the predecessor. Whoever holds a key of the collection account (its deployer, or its code
-// after an upgrade there) seats any account on any allowed token id without the token existing or moving, and seats decide
-// disputes and share Council revenue. Nothing in keeper check reads the collection's keys or code.
+// Property 4, nft contract link. The Council used to take a stake on the word of whatever account is its NFT contract, so whoever
+// held a key of the collection account seated anyone on any allowed token id without the token existing or moving. The Council now
+// asks the collection who owns the token before it counts a seat: a token that was never minted is sent back and seats nobody.
 #[tokio::test]
-async fn the_collection_account_key_seats_anyone_on_a_token_that_never_moved() -> anyhow::Result<()> {
+async fn the_collection_account_key_cannot_seat_anyone_on_a_token_that_never_moved() -> anyhow::Result<()> {
     let w = setup().await?;
     w.owner
         .call(w.council.id(), "allow_tokens")
@@ -347,15 +357,21 @@ async fn the_collection_account_key_seats_anyone_on_a_token_that_never_moved() -
     let sybil = w.dave.id();
     assert!(!is_seat(&w, sybil).await);
 
-    w.nft
+    let r = w
+        .nft
         .as_account()
         .call(w.council.id(), "nft_on_transfer")
         .args_json(
             json!({ "sender_id": sybil, "previous_owner_id": sybil, "token_id": "seat-never-minted", "msg": "" }),
         )
+        .gas(Gas::from_tgas(100))
         .transact()
         .await?
         .into_result()?;
-    assert!(is_seat(&w, sybil).await, "a seat with no token behind it");
+    assert!(
+        r.json::<bool>()?,
+        "the Council sends back a token the collection does not show it holding"
+    );
+    assert!(!is_seat(&w, sybil).await, "no seat without a token behind it");
     Ok(())
 }

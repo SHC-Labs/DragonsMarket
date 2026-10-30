@@ -42,13 +42,13 @@ async fn closed_market(w: &World) -> anyhow::Result<u64> {
 async fn unchallenged_and_final(w: &World) -> anyhow::Result<u64> {
     let id = closed_market(w).await?;
     propose(w, &w.carol, id, "yes").await?;
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(w, id).await?;
     assert_eq!(claimable(w, w.carol.id()).await, BOND);
     Ok(id)
 }
 
-// Carol proposes Yes, Dave challenges, and two of the three jurors reveal No: Dave wins. Returns the market id and the jury.
+// Carol proposes Yes, Dave challenges, and three of the five jurors reveal No: Dave wins. Returns the market id and the jury.
 async fn decided_for_the_challenger(w: &World) -> anyhow::Result<(u64, Vec<Account>)> {
     let id = closed_market(w).await?;
     propose(w, &w.carol, id, "yes").await?;
@@ -56,11 +56,11 @@ async fn decided_for_the_challenger(w: &World) -> anyhow::Result<(u64, Vec<Accou
     challenge(w, &w.dave, id).await?;
     assert_oracle_reconciled(w).await;
     let jury = draw_jury(w, id).await?;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(w, j, id, "no", "a-long-random-salt-0123456789").await?;
     }
     to_reveal_phase(w, id).await;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         reveal(w, j, id, "no", "a-long-random-salt-0123456789", "The source says no.").await?;
     }
     assert_eq!(case_json(w, id).await["stage"], "final");
@@ -437,7 +437,7 @@ async fn a_plain_deposit_to_the_oracle_is_surplus_with_no_callback_and_no_credit
     );
 
     propose(&w, &w.carol, id, "yes").await?;
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, id).await?;
     withdraw_bond(&w, &w.carol).await?;
     assert_eq!(
@@ -509,11 +509,8 @@ async fn a_full_dispute_keeps_total_owed_equal_to_the_verifiers_balance() -> any
     );
     assert_oracle_reconciled(&w).await;
 
-    let payees = [
-        (w.dave.clone(), 2 * BOND - 1_250_000),
-        (jury[0].clone(), 625_000),
-        (jury[1].clone(), 625_000),
-    ];
+    let mut payees = vec![(w.dave.clone(), 2 * BOND - MAJORITY as u128 * JUROR_PAY)];
+    payees.extend(jury[..MAJORITY].iter().map(|j| (j.clone(), JUROR_PAY)));
     let mut left = 2 * BOND;
     for (who, due) in payees {
         assert_eq!(claimable(&w, who.id()).await, due);
@@ -548,13 +545,8 @@ async fn a_full_dispute_keeps_total_owed_equal_to_the_verifiers_balance() -> any
 // holds through both of them withdrawing.
 #[tokio::test]
 async fn a_dispute_nobody_decided_pays_the_proposer_and_the_recipient_and_reconciles() -> anyhow::Result<()> {
-    let w = setup().await?;
-    w.owner
-        .call(w.oracle.id(), "set_jury_size")
-        .args_json(json!({ "jury_size": 1 }))
-        .transact()
-        .await?
-        .into_result()?;
+    let mut w = setup().await?;
+    add_jurors(&mut w, SECOND_JURY).await?;
     send_revenue(&w, 100 * USD).await?;
     let council_held = intents_balance(&w, w.council.id()).await;
     let id = closed_market(&w).await?;
@@ -607,7 +599,7 @@ async fn juror_pay_is_separate_from_holder_revenue() -> anyhow::Result<()> {
         council_held,
         "a settlement does not touch it"
     );
-    for who in [&jury[0], &jury[1], &w.dave] {
+    for who in jury[..MAJORITY].iter().chain([&w.dave]) {
         withdraw_bond(&w, who).await?;
     }
     assert_eq!(

@@ -71,7 +71,7 @@ The biggest gaps between documents, code and website:
 
 | Label | Meaning |
 | --- | --- |
-| DECIDED | An owner instruction. Treated as fixed. Matches "Owner choice" in [DOCUMENTATION-STYLE.md](../../DOCUMENTATION-STYLE.md#3-evidence-and-status) |
+| DECIDED | An owner instruction. Treated as fixed. |
 | PROPOSED | Proposed in these documents. Matches "Decision pending" |
 | OPEN | A choice nobody has made. Each has a recommended default in section 9 |
 | BUILT, PARTIAL, MISSING | Coverage of a requirement in the code today |
@@ -123,7 +123,7 @@ All DECIDED, from [docs/spec.md](../../spec.md#6-collateral-and-custody) section
 | Separation | Juror pay and dispute bonds stay separate from holder revenue |
 | NFT staking | NEP-171 stays |
 | Upgrades | `stage_code`, `upgrade`, `migrate`, `seal` and `upgrade_in_flight` stay |
-| Review fixes | C-01 to C-21 and N-01 to N-10 stay in force ([AUDIT.md](../AUDIT.md#every-finding-and-where-it-went)) |
+| Review fixes | C-01 to C-21 and N-01 to N-10 stay in force |
 
 **Resolved conflict with the product documents.** Until 2026-10-21, `docs/spec.md` and other product documents (finding F-02) required a minimum 72-hour enforced delay after approval and permitted a focused delay component. The owner decided on 2026-10-21 that the voting period is the only delay, and those documents were rewritten to match. No timelock account will be built. Every contract treats the owner as an `AccountId`, so nothing in this folder changed.
 
@@ -287,9 +287,8 @@ The code is right where it disagrees with a document. Each finding names the fix
 | F-04 | The website's buy builder sends `ft_transfer_call` to the token. The market has no `ft_on_transfer` | `web/lib/market.ts:126-132`, `:142-143`. `market lib.rs:715` | A buy would be a plain token transfer to the market account, which has no handler | Verifier `mt_transfer_call` builder ([website-abi.md](website-abi.md#5-market-calls-and-messages)) |
 | F-05 | The challenge message has no answer | `market.ts:172`. `oracle lib.rs:674` | The oracle panics `outcome must be yes, no or void` | Add `:<answer>` |
 | F-06 | The site reads free funds from the NEP-141 token and has no verifier, Council or collateral id in its configuration | `market.ts:100`. `config.ts:15-27`. `portfolio/page.tsx:77` | Wrong balance after the change. No way to reach the Council | [website-abi.md section 2](website-abi.md#2-configuration-the-site-needs) |
-| F-07 | The sweep gas floor is stale in two comments. The code is 87 and a test asserts 87. Comments and the audit say 95 | `market lib.rs:910-912` (comment), `:64-66` (code). `keeper.mjs:56`. `gas_floors.rs:296-306`. `AUDIT.md` Phase 3 | None, 100 TGas still clears it | Fixed in phase I3 |
+| F-07 | The sweep gas floor is stale in two comments. The code is 87 and a test asserts 87. Comments and the audit say 95 | `market lib.rs:910-912` (comment), `:64-66` (code). `keeper.mjs:56`. `gas_floors.rs:296-306` | None, 100 TGas still clears it | Fixed in phase I3 |
 | F-08 | The verifier proof says the keeper should read `is_account_locked` and stop advertising funding while the market is locked. The keeper has no such code | `INTENTS-PROOF.md:182-184`. `keeper.mjs` (no `is_account_locked`, `mt_balance_of` or `public_keys_of`) | A locked market keeps taking deposits it cannot pay out | Fixed 2026-10-21 for the lock check and the pause check; the status file that stops advertising deposits is not built: [owner-and-keeper.md section 9](owner-and-keeper.md#9-the-keeper) |
-| F-09 | `AUDIT.md` stops at phase I1. It cites moved paths (`contracts/INTENTS-PROOF.md`, `pm-*.md`, governance) and names a reviewer in its second review header. `AUDIT.md` also describes the verifier tests as skipping when the wasm is missing, while the harness now fails with the recipe (`INTENTS-PROOF.md:81` already says so) | `AUDIT.md:1729`, `:1902`, `:1911`. `common/mod.rs:53-70` | No dated entry records the I2 migration. A reader follows an old instruction | Add dated I2 and I3 entries when they land. Keep the review text unchanged |
 | F-10 | `claim_residual` credits the treasury's internal balance, and the oracle's no-decision share and juror pay wait in `claimable`. A DAO treasury must pass a proposal to collect either | `market lib.rs:651-669`. `oracle lib.rs:915-931` | Routine revenue depends on a vote | [market.md 7.3](market.md#73-residual-and-treasury-payments-r-03), [oracle.md 8.2](oracle.md#82-payouts-r-06) |
 | F-11 | `sell`, `redeem` and `withdraw` use the NEAR caller. A user who funds from another chain and has only an Intents account has no NEAR account to call them from | `market lib.rs:796`, `:839`, `:872` | R-01 identity binding works only for NEAR wallet users | OD-10 |
 | F-12 | Phase I2 is mid-edit. A length check was added at 09:11, a halt message flipped to `governance action` at 09:21 and back to `an owner action` at 09:37. The guard forbids the word in strings | `market lib.rs:594`, `:727-730`. `guards.rs:179-191` | The guard would have failed at 09:21 | I2 confirms the frozen build |
@@ -297,7 +296,7 @@ The code is right where it disagrees with a document. Each finding names the fix
 | F-14 | Several events fire before their transfer is known. `withdraw`, Council `revenue_claimed`. `set_nft_contract` and `set_jury_size` emit nothing | `market lib.rs:872-891`. `council lib.rs:596-599`, `:387-394`. `oracle lib.rs:532-536` | An indexer would show a payment that later failed | Rename or add confirm events |
 | F-15 | The website fans out one RPC per market | `portfolio/page.tsx:36-43`. `council/view.tsx:13-18` | RPC load grows with market count | `get_positions`, `list_cases` |
 | F-16 | The sandbox owner fixture is an ordinary account | `common/mod.rs:882-889` | R-07 has no test with a DAO | Sandbox with a real SputnikDAO build |
-| F-17 | The CI workflow is uncommitted and has never run on GitHub. It builds the verifier with Docker and checks its hash. It has no reproducible build job for the three contracts and no web job | `.github/workflows/ci.yml:100-108`. `AUDIT.md` C-21 row | The first push may fail for reasons nobody has seen | Run it once, add the missing jobs |
+| F-17 | The CI workflow is uncommitted and has never run on GitHub. It builds the verifier with Docker and checks its hash. It has no reproducible build job for the three contracts and no web job | `.github/workflows/ci.yml:100-108` | The first push may fail for reasons nobody has seen | Run it once, add the missing jobs |
 
 ---
 

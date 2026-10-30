@@ -6,7 +6,7 @@ Release requirements for Intents-backed settlement and Trezu/Sputnik administrat
 | --- | --- |
 | Updated | 21 October 2026 |
 | Status | Blocked on integration and review; not an executable deployment recipe |
-| Contract work | Claude |
+| Contract work | Contract team |
 | Financial deployment approval | Project owner |
 | Product authority | [Specification](../spec.md) |
 
@@ -17,8 +17,11 @@ Release requirements for Intents-backed settlement and Trezu/Sputnik administrat
 3. [Administration and upgrades](#3-administration-and-upgrades)
 4. [Website and operations](#4-website-and-operations)
 5. [Opening the venue](#5-opening-the-venue)
-6. [Release and verification](#release-and-verification)
-7. [View cost at scale](#view-cost-at-scale)
+6. [External trust](#external-trust)
+7. [Pre-launch monitoring](#pre-launch-monitoring)
+8. [Known limits and sizing](#known-limits-and-sizing)
+9. [Release and verification](#release-and-verification)
+10. [View cost at scale](#view-cost-at-scale)
 
 ---
 
@@ -51,7 +54,7 @@ example DAO names and sandbox keys are not production configuration.
 - [ ] Verify earned-fee allocation: 75% treasury and 25% Council-controlled rewards, with the real
       treasury account (see the configuration order below).
 - [x] Quarterly entitlement and claim rules, with repeat and cross-path claims refused (built
-      2026-10-21, sandbox and unit tests in [AUDIT.md](AUDIT.md#fee-split-and-quarterly-claims-2026-10-21)).
+      2026-10-21, sandbox and unit tests).
       A run against the real USDC contract and a real DAO is still open.
 - [ ] Run a testnet load test before adding any second market instance: parallel signers sending buys,
       recording the transactions included per block and the rejections, over the complete deposit,
@@ -84,8 +87,7 @@ which is above the contract's minimum, and never within an hour of the last swee
 and the Council's `advance_quarters` and `finalize_quarter`; its function call keys need those methods (see the header of `keeper.mjs`).
 
 Existing market and Council Intents code is part of this work. Its presence does not establish
-that the complete production journey has passed. The [verifier proof](INTENTS-PROOF.md) and
-[audit record](AUDIT.md) retain their original test scope.
+that the complete production journey has passed. The [verifier proof](INTENTS-PROOF.md) retains its original test scope.
 
 ---
 
@@ -147,6 +149,64 @@ Launch only against evidence for [R-01 through R-08](../spec.md#requirements-to-
 with the implemented limitations disclosed. Publishing, deployment and real-money testing need
 explicit authorisation. This document records requirements and does not perform those actions.
 
+## External trust
+
+Funds held in the Intents verifier (`intents.near`) depend on two parties outside this project:
+
+- The verifier has admin roles, such as `force_transfer`, that the DAO of the verifier controls.
+  That DAO can move balances out of any account inside the verifier, including the market,
+  oracle, Council and rounds contracts.
+- The USDC issuer can freeze balances of the token. A frozen balance cannot be withdrawn from
+  the verifier or paid out by the contracts.
+
+Neither is under our control and neither is visible in this repository. Users must be told
+before they deposit, in the terms and next to the deposit button. The keeper check lists open
+proposals that name the verifier (`--watch-dao`), which covers our own DAO only, not the
+verifier's.
+
+---
+
+## Pre-launch monitoring
+
+Set these up and see each alert fire in a test before opening the venue. Each row is a check
+and the condition that must page a person.
+
+| Check | How | Alert when |
+| --- | --- | --- |
+| DAO proposals on the owner account | `keeper.mjs check --treasury <dao> --watch-dao` | Any problem line: a proposal that changes control, money or dispute settings, names the verifier or the NFT collection, or is not on the allow-list |
+| Ownership and destination drift | `keeper.mjs check --treasury <dao> --operator <id>` | An owner, pending owner, treasury, fee recipient or no-decision recipient that is not the DAO, or an operator that is not the expected one |
+| Verifier keys | `keeper.mjs check` reads `public_keys_of` in the verifier for market, oracle, council and rounds | Any registered key for any of the four contracts, predecessor authentication off, account locked, or `mt_transfer` paused |
+| Access keys | `keeper.mjs check --expect-sealed` | Any access key left on a contract after sealing, or any new key on the NFT collection |
+| Code hash | `keeper.mjs check --release <file> --rounds <id> --treasury <dao>` | A live hash that differs from the release list, or an upgrade proposal whose hash is not in it |
+| Council seat ownership | `keeper.mjs check` (drawable seat holders against jury size) | Fewer drawable holders than jury size + second jury + 2, or the NFT collection's code differs from `--collection-code-hash` |
+| Keeper health | The keeper's state file and events file, and `keeper.mjs check` margins | The keeper's last finished run is older than twice the market's `min_sweep_interval_minutes` (the hard floor is 60 minutes, so 120 minutes at the floor), a job failing repeatedly, or an account below `--min-margin` |
+| Liveness of price publishing | `GET /price?market=<id>&id=<market id>` on every publisher for an open price market whose observation time passed more than two minutes ago | Fewer publishers answering than the oracle's price threshold, or a publisher key that is not in the oracle's publisher list |
+
+Each publisher keeps the one price it signed per market in a JSON file (`--price-file` or `PUBLISHER_PRICE_FILE`, default `publisher-prices.json` in its working directory). Back it up and keep it across restarts; a corrupt file stops the publisher from starting.
+
+Publishers: the operator can remove publishers down to the threshold. The owner should watch
+publisher changes (`add_publisher`, `remove_publisher`, `set_price_threshold`) and compare the
+oracle's `publishers` list with the expected keys on a schedule. A publisher list shortened to
+the threshold lets fewer keys decide every price market.
+
+---
+
+## Known limits and sizing
+
+- `market.buy_for` is a private method and is not bound to a recorded id. It is reachable only
+  by the market contract's own key, and the market has no access keys after `seal`. Before
+  seal that key can call it. This is accepted for the launch, which is why sealing is a launch
+  gate.
+- Market cap. The cap (`set_max_market_locked`) is 100 times the oracle bond. Recommended launch
+  values: bond 100 USDC (`100000000` units) and cap 10,000 USDC (`10000000000` units). The code
+  floors are a bond of at least 5 USDC, a jury size of at least 5 and every window at least 1
+  hour. The floors are enforced by the oracle and the owner cannot go below them. The keeper
+  check prints a warning when the cap is more than 100 times the bond.
+- Rounds. The interval is at least 5 minutes, and stakes close at least half the interval
+  before the end of a round.
+
+---
+
 ## Release and verification
 
 The wasm hashes of a release are what lets the DAO and the keeper agree on what runs. Do these in
@@ -155,8 +215,10 @@ order.
 1. Build reproducibly. From `contracts/`, with every change committed and docker running, run
    `./release.sh`. It runs `./build.sh --reproducible`, checks the three wasm files and prints the
    release message on stdout: `Release hashes`, a blank line, one `<contract> sha256:<hex>` line each
-   for market, oracle and council, then `commit <hash>` and `toolchain <version>`. Build on a second
-   machine and compare the hashes before going on.
+   for market, oracle and council, then `commit <hash>` and `toolchain <version>`. `release.sh` does
+   not print a rounds line yet. When rounds is deployed, add it by hand before the `commit` line, from
+   the same reproducible build: `rounds sha256:$(sha256sum target/near/rounds/rounds.wasm | cut -d' ' -f1)`.
+   Build on a second machine and compare the hashes before going on.
 2. Run the build check. `node verify-build.mjs target/near/market/market.wasm
    target/near/oracle/oracle.wasm target/near/council/council.wasm` (`release.sh` already does this).
    It reads the source metadata embedded in each wasm and prints the crate, the wasm sha256, the

@@ -28,7 +28,7 @@ const GAS_DRAWN: Gas = Gas::from_tgas(15);
 // (measured in the sandbox), so 15 leaves room.
 const GAS_UNLOCK: Gas = Gas::from_tgas(15);
 // The gas floors. Each is what the method reserves for the calls it sends plus a margin over what it burns itself, and
-// each was checked against the least that worked in the sandbox (see contracts/AUDIT.md). A call below its floor fails
+// each was checked against the least that worked in the sandbox. A call below its floor fails
 // part way through with a host error that names no amount, so these refuse it first and say how much to attach.
 //
 // A call that settles a case sends the answer to the market with its callback, then releases the first jury and, after a
@@ -55,12 +55,17 @@ const NS_PER_MS: u64 = 1_000_000;
 // every draw past its limit.
 const MAX_WINDOW_MS: u64 = 365 * 86_400_000;
 const MAX_DRAW_DELAY_BLOCKS: u64 = 100_000;
+// The owner cannot set a window shorter than an hour, a jury smaller than five or a bond under 5 USDC (6 decimals). Below
+// these a case is too quick to notice, too easy to capture or too cheap to bother with.
+const MIN_WINDOW_MS: u64 = 3_600_000;
+const MIN_JURY_SIZE: u32 = 5;
+const MIN_BOND: u128 = 5_000_000;
 // A first draw that finds too few free seats is retried, up to this many draw windows after the challenge. The market's own
 // deadline usually ends the wait sooner.
 const MAX_DRAW_QUEUE_WINDOWS: u64 = 32;
 const NS_PER_SEC: u64 = 1_000_000_000;
 // The layout of the state below. migrate reads exactly this one and refuses any other.
-const STATE_VERSION: u16 = 2;
+const STATE_VERSION: u16 = 3;
 // Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
 const NEP141_PREFIX: &str = "nep141:";
 // Two disjoint groups of publishers must never both reach the threshold, or two prices could win for one moment.
@@ -181,6 +186,71 @@ macro_rules! versioned {
     };
 }
 
+// Like the one above for a record whose layout changed once: the stored version 0 is the `$previous` layout, read through
+// its From impl, and the wrapper writes version 1.
+macro_rules! versioned_after {
+    ($name:ident, $stored:ident, $ty:ty, $previous:ty) => {
+        enum $stored {
+            V1($previous),
+            V2($ty),
+        }
+
+        impl $stored {
+            fn into_current(self) -> $ty {
+                match self {
+                    Self::V1(old) => old.into(),
+                    Self::V2(value) => value,
+                }
+            }
+        }
+
+        #[derive(Clone)]
+        struct $name($ty);
+
+        impl $name {
+            fn current(value: $ty) -> Self {
+                Self(value)
+            }
+
+            fn into_inner(self) -> $ty {
+                self.0
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = $ty;
+
+            fn deref(&self) -> &$ty {
+                &self.0
+            }
+        }
+
+        impl std::ops::DerefMut for $name {
+            fn deref_mut(&mut self) -> &mut $ty {
+                &mut self.0
+            }
+        }
+
+        impl BorshSerialize for $name {
+            fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+                1u8.serialize(writer)?;
+                self.0.serialize(writer)
+            }
+        }
+
+        impl BorshDeserialize for $name {
+            fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+                let stored = match u8::deserialize_reader(reader)? {
+                    0 => $stored::V1(<$previous>::deserialize_reader(reader)?),
+                    1 => $stored::V2(<$ty>::deserialize_reader(reader)?),
+                    _ => env::panic_str("a stored record has a newer version than this code can read"),
+                };
+                Ok(Self(stored.into_current()))
+            }
+        }
+    };
+}
+
 // A market is known by its account and the id that account gave it, so two market contracts can both have a market 1.
 type MarketKey = (AccountId, u64);
 
@@ -282,8 +352,9 @@ pub struct Case {
     challenger_answer: Option<Outcome>,
     // 0 for the first jury, 1 for the one jury that is drawn if the first did not decide.
     round: u8,
-    // How many jurors the current round draws. Fixed when the round starts, so changing the setting later never
-    // touches an open case.
+    // How many jurors the current round draws. Set when the answer is proposed and grown for the second round, so
+    // changing the setting later never touches an open case. 0 only on a case stored before it was kept at proposal,
+    // which takes the setting when it is challenged.
     jury_size: u32,
     // The last moment the current round's jury can be drawn. A round never drawn by then did not decide.
     draw_by: U64,
@@ -313,6 +384,75 @@ pub struct Case {
     // Set when a disputed case settles: the drawn jurors of either round who did not vote. The Council takes the
     // revenue their seats earned while serving. Kept on the case so retry_unlock sends the same list.
     delinquent: Vec<AccountId>,
+    // The blocks to wait before a draw, as set when the answer was proposed. A case stored before this field existed has
+    // none and takes old_case_draw_delay_blocks.
+    draw_delay_blocks: Option<U64>,
+}
+
+// Exact layout of a case before it kept its own draw delay.
+#[near(serializers=[borsh])]
+#[derive(Clone)]
+struct CaseV1 {
+    case_uid: U64,
+    stage: Stage,
+    proposer: AccountId,
+    proposed: Outcome,
+    bond: U128,
+    evidence: String,
+    window_ends_at: U64,
+    challenger: Option<AccountId>,
+    challenger_answer: Option<Outcome>,
+    round: u8,
+    jury_size: u32,
+    draw_by: U64,
+    draw_after_height: U64,
+    commit_ends_at: U64,
+    panel_deadline: U64,
+    panel: Vec<AccountId>,
+    first_panel: Vec<AccountId>,
+    seated: bool,
+    commits: Vec<Commit>,
+    votes: Vec<Vote>,
+    final_outcome: Option<Outcome>,
+    applied: bool,
+    challenged_at: U64,
+    juror_share_bps: u32,
+    no_decision_share_bps: u32,
+    delinquent: Vec<AccountId>,
+}
+
+impl From<CaseV1> for Case {
+    fn from(old: CaseV1) -> Self {
+        Self {
+            case_uid: old.case_uid,
+            stage: old.stage,
+            proposer: old.proposer,
+            proposed: old.proposed,
+            bond: old.bond,
+            evidence: old.evidence,
+            window_ends_at: old.window_ends_at,
+            challenger: old.challenger,
+            challenger_answer: old.challenger_answer,
+            round: old.round,
+            jury_size: old.jury_size,
+            draw_by: old.draw_by,
+            draw_after_height: old.draw_after_height,
+            commit_ends_at: old.commit_ends_at,
+            panel_deadline: old.panel_deadline,
+            panel: old.panel,
+            first_panel: old.first_panel,
+            seated: old.seated,
+            commits: old.commits,
+            votes: old.votes,
+            final_outcome: old.final_outcome,
+            applied: old.applied,
+            challenged_at: old.challenged_at,
+            juror_share_bps: old.juror_share_bps,
+            no_decision_share_bps: old.no_decision_share_bps,
+            delinquent: old.delinquent,
+            draw_delay_blocks: None,
+        }
+    }
 }
 
 // One row of list_cases: where a case stands, without the evidence, the panel or the vote text.
@@ -353,7 +493,7 @@ pub struct Payout {
     at: U64,
 }
 
-versioned!(VersionedCase, StoredCase, Case);
+versioned_after!(VersionedCase, StoredCase, Case, CaseV1);
 versioned!(VersionedPayout, StoredPayout, Payout);
 
 // The NEAR Intents verifier. Bonds arrive in this contract's account there, and payouts are sent out of it.
@@ -449,6 +589,93 @@ pub struct OracleContract {
     reconcile_wait_ns: u64,
     // The id the next payout gets. Starts at 1 and only goes up.
     last_payout_id: u64,
+    // The draw delay at the upgrade that began keeping it on each case. A case stored before that has no delay of its own
+    // and uses this one.
+    old_case_draw_delay_blocks: u64,
+}
+
+// Exact layout of state version 2, before cases kept their own draw delay.
+#[near(serializers=[borsh])]
+struct StateV2 {
+    state_version: u16,
+    upgrade_proven: bool,
+    upgrade_in_flight: bool,
+    owner: AccountId,
+    pending_owner: Option<AccountId>,
+    operator: AccountId,
+    allowed_markets: Vec<AccountId>,
+    verifier: AccountId,
+    collateral_token_id: String,
+    bond: u128,
+    window_ns: u64,
+    apply_buffer_ns: u64,
+    juror_share_bps: u32,
+    no_decision_share_bps: u32,
+    max_publishers: u32,
+    panel_deadline_ns: u64,
+    draw_window_ns: u64,
+    min_proposal_ns: u64,
+    council: AccountId,
+    jury_size: u32,
+    draw_delay_blocks: u64,
+    network: String,
+    publishers: Vec<PublicKey>,
+    price_threshold: u32,
+    no_decision_recipient: AccountId,
+    markets: LookupMap<MarketKey, VersionedMarketInfo>,
+    cases: LookupMap<MarketKey, VersionedCase>,
+    last_case_uid: u64,
+    claimable: LookupMap<AccountId, u128>,
+    claimable_total: u128,
+    bonds_held: u128,
+    payouts: LookupMap<u64, VersionedPayout>,
+    pending_payouts_total: u128,
+    reconcile_wait_ns: u64,
+    last_payout_id: u64,
+}
+
+impl From<StateV2> for OracleContract {
+    fn from(old: StateV2) -> Self {
+        let old_case_draw_delay_blocks = old.draw_delay_blocks;
+        Self {
+            state_version: STATE_VERSION,
+            upgrade_proven: old.upgrade_proven,
+            upgrade_in_flight: old.upgrade_in_flight,
+            owner: old.owner,
+            pending_owner: old.pending_owner,
+            operator: old.operator,
+            allowed_markets: old.allowed_markets,
+            verifier: old.verifier,
+            collateral_token_id: old.collateral_token_id,
+            bond: old.bond,
+            window_ns: old.window_ns,
+            apply_buffer_ns: old.apply_buffer_ns,
+            juror_share_bps: old.juror_share_bps,
+            no_decision_share_bps: old.no_decision_share_bps,
+            max_publishers: old.max_publishers,
+            panel_deadline_ns: old.panel_deadline_ns,
+            draw_window_ns: old.draw_window_ns,
+            min_proposal_ns: old.min_proposal_ns,
+            council: old.council,
+            jury_size: old.jury_size,
+            draw_delay_blocks: old.draw_delay_blocks,
+            network: old.network,
+            publishers: old.publishers,
+            price_threshold: old.price_threshold,
+            no_decision_recipient: old.no_decision_recipient,
+            markets: old.markets,
+            cases: old.cases,
+            last_case_uid: old.last_case_uid,
+            claimable: old.claimable,
+            claimable_total: old.claimable_total,
+            bonds_held: old.bonds_held,
+            payouts: old.payouts,
+            pending_payouts_total: old.pending_payouts_total,
+            reconcile_wait_ns: old.reconcile_wait_ns,
+            last_payout_id: old.last_payout_id,
+            old_case_draw_delay_blocks,
+        }
+    }
 }
 
 fn emit(event: &str, data: near_sdk::serde_json::Value) {
@@ -459,7 +686,22 @@ fn emit(event: &str, data: near_sdk::serde_json::Value) {
 }
 
 fn valid_jury_size(n: u32) -> bool {
-    n % 2 == 1 && n as usize <= MAX_PANEL
+    n % 2 == 1 && (MIN_JURY_SIZE..=MAX_PANEL as u32).contains(&n)
+}
+
+fn require_window_ms(ms: u64) {
+    require!(
+        (MIN_WINDOW_MS..=MAX_WINDOW_MS).contains(&ms),
+        "windows must be at least an hour and at most a year"
+    );
+}
+
+fn require_bond(bond: u128) {
+    require!(bond >= MIN_BOND, "the bond must be at least 5 USDC");
+}
+
+fn require_jury_size(n: u32) {
+    require!(valid_jury_size(n), "jury size must be odd, from 5 to 21");
 }
 
 // How long a case can take from its proposal: the challenge window, then two rounds, each a draw window and a full
@@ -603,23 +845,20 @@ impl OracleContract {
             collateral_token_id.starts_with(NEP141_PREFIX),
             "the collateral token id must look like nep141:<token>"
         );
-        require!(bond.0 > 0, "bond must be positive");
+        require_bond(bond.0);
         require!(
             !network.is_empty() && !network.contains(':'),
             "the network name must be a word without a colon"
         );
         require!(price_threshold > 0, "at least one publisher must sign a price");
-        require!(
-            [window_ms.0, panel_deadline_ms.0, draw_window_ms.0, min_proposal_ms.0]
-                .iter()
-                .all(|ms| (1..=MAX_WINDOW_MS).contains(ms)),
-            "windows must be positive and at most a year"
-        );
+        for ms in [window_ms.0, panel_deadline_ms.0, draw_window_ms.0, min_proposal_ms.0] {
+            require_window_ms(ms);
+        }
         require!(
             draw_delay_blocks.0 <= MAX_DRAW_DELAY_BLOCKS,
             "the draw delay must be at most 100000 blocks"
         );
-        require!(valid_jury_size(jury_size), "jury size must be odd and at most 21");
+        require_jury_size(jury_size);
         Self {
             state_version: STATE_VERSION,
             upgrade_proven: false,
@@ -656,6 +895,7 @@ impl OracleContract {
             pending_payouts_total: 0,
             reconcile_wait_ns: DEFAULT_RECONCILE_WAIT_NS,
             last_payout_id: 0,
+            old_case_draw_delay_blocks: draw_delay_blocks.0,
         }
     }
 
@@ -696,13 +936,19 @@ impl OracleContract {
         }
     }
 
-    // Runs in the new code, in the same batch as the deploy. It reads the one layout it was written for. A later version
-    // keeps a copy of this struct as StateV1, reads that, builds its own state from it and bumps state_version.
+    // Runs in the new code, in the same batch as the deploy. It reads the current layout or the one before it, which is
+    // StateV2. A later version keeps a copy of the current struct, reads that, builds its own state from it and bumps
+    // state_version.
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        upgrade::require_state_version(STATE_VERSION);
-        let mut state: Self = env::state_read().unwrap_or_else(|| env::panic_str("there is no state to migrate"));
+        let bytes = env::storage_read(b"STATE").unwrap_or_else(|| env::panic_str("there is no state to migrate"));
+        require!(bytes.len() >= 2, "invalid state");
+        let mut state: Self = match u16::from_le_bytes([bytes[0], bytes[1]]) {
+            STATE_VERSION => env::state_read().unwrap_or_else(|| env::panic_str("invalid current state")),
+            2 => Self::from(env::state_read::<StateV2>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
+            _ => env::panic_str("unsupported state version"),
+        };
         require!(state.upgrade_in_flight, "migrate runs only inside an upgrade");
         // An older build allowed a threshold that two separate groups of publishers could both reach. The upgrade stops until
         // the owner fixes it in the old code.
@@ -710,6 +956,17 @@ impl OracleContract {
             2 * state.price_threshold as usize > state.publishers.len(),
             MAJORITY_NEEDED
         );
+        // An older build allowed settings below the floors. The upgrade stops until the owner raises them in the old code.
+        require_bond(state.bond);
+        for ns in [
+            state.window_ns,
+            state.panel_deadline_ns,
+            state.draw_window_ns,
+            state.min_proposal_ns,
+        ] {
+            require_window_ms(ns / NS_PER_MS);
+        }
+        require_jury_size(state.jury_size);
         state.upgrade_in_flight = false;
         state.upgrade_proven = true;
         emit("migrated", json!({ "state_version": state.state_version }));
@@ -738,7 +995,7 @@ impl OracleContract {
     // Applies to cases proposed from now on. A case already proposed keeps the bond it was proposed with.
     pub fn set_bond(&mut self, bond: U128) {
         self.only_owner();
-        require!(bond.0 > 0, "bond must be positive");
+        require_bond(bond.0);
         emit("bond_set", json!({ "bond": bond }));
         self.bond = bond.0;
     }
@@ -747,45 +1004,33 @@ impl OracleContract {
     // registered with, and min_proposal_ms only matters at registration.
     pub fn set_window_ms(&mut self, window_ms: U64) {
         self.only_owner();
-        require!(
-            (window_ms.0 > 0) && window_ms.0 <= MAX_WINDOW_MS,
-            "windows must be positive and at most a year"
-        );
+        require_window_ms(window_ms.0);
         emit("window_set", json!({ "window_ms": window_ms }));
         self.window_ns = window_ms.0 * NS_PER_MS;
     }
 
     pub fn set_panel_deadline_ms(&mut self, panel_deadline_ms: U64) {
         self.only_owner();
-        require!(
-            (panel_deadline_ms.0 > 0) && panel_deadline_ms.0 <= MAX_WINDOW_MS,
-            "windows must be positive and at most a year"
-        );
+        require_window_ms(panel_deadline_ms.0);
         emit("panel_deadline_set", json!({ "panel_deadline_ms": panel_deadline_ms }));
         self.panel_deadline_ns = panel_deadline_ms.0 * NS_PER_MS;
     }
 
     pub fn set_min_proposal_ms(&mut self, min_proposal_ms: U64) {
         self.only_owner();
-        require!(
-            (min_proposal_ms.0 > 0) && min_proposal_ms.0 <= MAX_WINDOW_MS,
-            "windows must be positive and at most a year"
-        );
+        require_window_ms(min_proposal_ms.0);
         emit("min_proposal_set", json!({ "min_proposal_ms": min_proposal_ms }));
         self.min_proposal_ns = min_proposal_ms.0 * NS_PER_MS;
     }
 
     pub fn set_draw_window_ms(&mut self, draw_window_ms: U64) {
         self.only_owner();
-        require!(
-            (draw_window_ms.0 > 0) && draw_window_ms.0 <= MAX_WINDOW_MS,
-            "windows must be positive and at most a year"
-        );
+        require_window_ms(draw_window_ms.0);
         emit("draw_window_set", json!({ "draw_window_ms": draw_window_ms }));
         self.draw_window_ns = draw_window_ms.0 * NS_PER_MS;
     }
 
-    // Counted from each challenge and each second round from now on, in blocks.
+    // Applies to answers proposed from now on. A case already proposed keeps the delay it was proposed with, in blocks.
     pub fn set_draw_delay_blocks(&mut self, draw_delay_blocks: U64) {
         self.only_owner();
         require!(
@@ -871,10 +1116,10 @@ impl OracleContract {
         self.pending_owner = None;
     }
 
-    // Only juries drawn after this use the new size.
+    // Applies to answers proposed from now on. A case already proposed keeps the jury size it was proposed with.
     pub fn set_jury_size(&mut self, jury_size: u32) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
-        require!(valid_jury_size(jury_size), "jury size must be odd and at most 21");
+        require_jury_size(jury_size);
         emit("jury_size_set", json!({ "jury_size": jury_size }));
         self.jury_size = jury_size;
     }
@@ -1616,6 +1861,11 @@ impl OracleContract {
             .unwrap_or_else(|| env::panic_str("no case for that market"))
     }
 
+    fn draw_delay_of(&self, case: &Case) -> u64 {
+        case.draw_delay_blocks
+            .map_or(self.old_case_draw_delay_blocks, |delay| delay.0)
+    }
+
     fn market_info(&self, market: &AccountId, id: u64) -> MarketInfo {
         self.get_market_of(market, id)
             .unwrap_or_else(|| env::panic_str("market is not registered"))
@@ -1668,7 +1918,7 @@ impl OracleContract {
                 challenger: None,
                 challenger_answer: None,
                 round: 0,
-                jury_size: 0,
+                jury_size: self.jury_size,
                 draw_by: U64(0),
                 draw_after_height: U64(0),
                 commit_ends_at: U64(0),
@@ -1684,6 +1934,7 @@ impl OracleContract {
                 juror_share_bps: self.juror_share_bps,
                 no_decision_share_bps: self.no_decision_share_bps,
                 delinquent: vec![],
+                draw_delay_blocks: Some(U64(self.draw_delay_blocks)),
             },
         );
         emit(
@@ -1711,10 +1962,12 @@ impl OracleContract {
         case.stage = Stage::Disputed;
         case.challenger = Some(challenger.clone());
         case.challenger_answer = Some(answer);
-        case.jury_size = self.jury_size;
+        if case.jury_size == 0 {
+            case.jury_size = self.jury_size;
+        }
         case.challenged_at = U64(now);
         case.draw_by = U64(now + draw_window_ns);
-        case.draw_after_height = U64(env::block_height() + self.draw_delay_blocks);
+        case.draw_after_height = U64(env::block_height() + self.draw_delay_of(&case));
         let draw_by = case.draw_by.0;
         let bond = case.bond.0;
         self.put_case(market, id, case);
@@ -1755,7 +2008,7 @@ impl OracleContract {
             case.round = 1;
             case.jury_size = (2 * case.jury_size + 1).min(MAX_PANEL as u32);
             case.draw_by = U64(now + info.draw_window_ns.0);
-            case.draw_after_height = U64(env::block_height() + self.draw_delay_blocks);
+            case.draw_after_height = U64(env::block_height() + self.draw_delay_of(&case));
             case.commit_ends_at = U64(0);
             case.panel_deadline = U64(0);
             case.first_panel = std::mem::take(&mut case.panel);
@@ -1846,14 +2099,10 @@ impl OracleContract {
                 paid = revealed;
             }
             (Some(c), Ruling::NoJury) => {
-                // No jury could be seated, so nobody ruled on the challenge. The proposer gets their bond back. The
-                // challenger gets theirs back less the no-decision share, which the no-decision recipient holds: without a
-                // price on it, a challenge that cannot be answered would void an event market for free.
-                let fee = bond * no_decision_share_bps / 10_000;
+                // No jury could be seated, so nobody ruled on the challenge and neither side is at fault. Each gets their
+                // own bond back in full.
                 self.add_claimable(&proposer, bond);
-                self.add_claimable(&c, bond - fee);
-                let recipient = self.no_decision_recipient.clone();
-                self.add_claimable(&recipient, fee);
+                self.add_claimable(&c, bond);
             }
             _ => self.add_claimable(&proposer, bond),
         }
@@ -1963,7 +2212,7 @@ mod tests {
     }
 
     fn fresh_oracle() -> OracleContract {
-        oracle_with_bond(1)
+        oracle_with_bond(MIN_BOND)
     }
 
     fn oracle_with_bond(bond: u128) -> OracleContract {
@@ -1971,11 +2220,22 @@ mod tests {
     }
 
     const SECOND: u64 = 1_000_000_000;
-    // The oracle below is deployed with a 60 second window, a 60 second draw window and a 120 second panel deadline.
-    const WINDOW: u64 = 60 * SECOND;
-    const DRAW_WINDOW: u64 = 60 * SECOND;
-    const PANEL: u64 = 120 * SECOND;
-    const PROPOSAL_TIME: u64 = 60 * SECOND;
+    // The oracle below is deployed with the shortest window the floor allows for the window, the draw window and the
+    // proposal time, and twice that for the panel deadline.
+    const WINDOW_MS: u64 = MIN_WINDOW_MS;
+    const PANEL_MS: u64 = 2 * MIN_WINDOW_MS;
+    const WINDOW: u64 = WINDOW_MS * NS_PER_MS;
+    const DRAW_WINDOW: u64 = WINDOW;
+    const PANEL: u64 = PANEL_MS * NS_PER_MS;
+    const PROPOSAL_TIME: u64 = WINDOW;
+    const TEST_JURY_SIZE: u32 = MIN_JURY_SIZE;
+    const LARGER_JURY_SIZE: u32 = MIN_JURY_SIZE + 2;
+    const TEST_DRAW_DELAY_BLOCKS: u64 = 2;
+    const FIRST_JURORS: usize = TEST_JURY_SIZE as usize;
+    const SECOND_JURORS: usize = 2 * FIRST_JURORS + 1;
+    // The reveals that carry a jury of the second size.
+    const SECOND_MAJORITY: usize = SECOND_JURORS / 2 + 1;
+    const FIRST_MAJORITY: usize = FIRST_JURORS / 2 + 1;
 
     fn oracle_with(bond: u128, price_threshold: u32) -> OracleContract {
         oracle_on(COLLATERAL, bond, price_threshold)
@@ -1986,19 +2246,37 @@ mod tests {
             let _ = b.take_storage();
         });
         act_as(OWNER, 0);
+        new_oracle(
+            collateral_token_id,
+            bond,
+            [WINDOW_MS, PANEL_MS, WINDOW_MS, WINDOW_MS],
+            TEST_JURY_SIZE,
+            price_threshold,
+        )
+    }
+
+    // The windows are the challenge window, the panel deadline, the draw window and the minimum proposal time, in ms.
+    fn new_oracle(
+        collateral_token_id: &str,
+        bond: u128,
+        windows_ms: [u64; 4],
+        jury_size: u32,
+        price_threshold: u32,
+    ) -> OracleContract {
+        let [window, panel, draw, min_proposal] = windows_ms;
         OracleContract::new(
             acct(OWNER),
             acct(MARKET),
             acct(VERIFIER),
             collateral_token_id.to_string(),
             U128(bond),
-            U64(60_000),
-            U64(120_000),
-            U64(60_000),
+            U64(window),
+            U64(panel),
+            U64(draw),
             acct(COUNCIL),
-            3,
-            U64(2),
-            U64(60_000),
+            jury_size,
+            U64(TEST_DRAW_DELAY_BLOCKS),
+            U64(min_proposal),
             acct(OPERATOR),
             NETWORK.to_string(),
             price_threshold,
@@ -2006,7 +2284,7 @@ mod tests {
         )
     }
 
-    // A market closed at 0 with the oracle's test windows: 60 seconds each way, 120 for the panel.
+    // A market closed at 0 with the oracle's test windows.
     fn base_info() -> MarketInfo {
         MarketInfo {
             close_at: U64(0),
@@ -2040,7 +2318,7 @@ mod tests {
 
     // ---- what a settled dispute pays, and who is delinquent -------------------------------------------
 
-    const BOND: u128 = 5_000_000;
+    const BOND: u128 = MIN_BOND;
     const DEADLINE: u64 = 120 * SECOND;
     const JURORS: [&str; 3] = ["j0.near", "j1.near", "j2.near"];
 
@@ -2110,6 +2388,7 @@ mod tests {
                 juror_share_bps: DEFAULT_JUROR_SHARE_BPS,
                 no_decision_share_bps: DEFAULT_NO_DECISION_JUROR_SHARE_BPS,
                 delinquent: vec![],
+                draw_delay_blocks: Some(U64(TEST_DRAW_DELAY_BLOCKS)),
             },
         );
     }
@@ -2232,6 +2511,8 @@ mod tests {
 
     use proptest::prelude::*;
 
+    const PROPTEST_MAX_BOND: u128 = 10 * MIN_BOND;
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(400))]
 
@@ -2241,8 +2522,8 @@ mod tests {
         // if none did, the owner, and never the challenger. The delinquent are only jurors who did not vote.
         #[test]
         fn a_settled_dispute_pays_out_exactly_the_bonds_and_only_to_those_who_earned_it(
-            bond in 1u128..50_000_000,
-            jury_size in prop::sample::select(vec![1usize, 3, 5, 7, 11, 21]),
+            bond in MIN_BOND..PROPTEST_MAX_BOND,
+            jury_size in prop::sample::select(vec![5usize, 7, 11, 21]),
             behaviour in prop::collection::vec((0u8..3, any::<bool>()), 21),
             proposed in 0u8..3,
             after_deadline in any::<bool>(),
@@ -2317,7 +2598,7 @@ mod tests {
         // a majority, so a full binary ballot cannot stall.
         #[test]
         fn a_full_binary_ballot_always_settles(
-            jury_size in prop::sample::select(vec![1usize, 3, 5, 7, 11, 21]),
+            jury_size in prop::sample::select(vec![5usize, 7, 11, 21]),
             ballot in prop::collection::vec(any::<bool>(), 21),
         ) {
             let mut o = challenged(Outcome::Yes, Outcome::No);
@@ -2346,8 +2627,8 @@ mod tests {
         // whatever the jurors, in either round, do. Both rounds' jurors are other accounts than the pair.
         #[test]
         fn a_self_challenging_pair_ends_down_by_at_least_the_juror_share_whatever_the_jury_does(
-            bond in 400u128..50_000_000,
-            first_size in prop::sample::select(vec![1usize, 3, 5, 11]),
+            bond in MIN_BOND..PROPTEST_MAX_BOND,
+            first_size in prop::sample::select(vec![5usize, 7, 11]),
             first in prop::collection::vec((0u8..3, any::<bool>()), 11),
             second in prop::collection::vec((0u8..3, any::<bool>()), 21),
             two_rounds in any::<bool>(),
@@ -2441,15 +2722,15 @@ mod tests {
 
     #[test]
     fn rounding_stays_with_the_winner_so_both_bonds_are_paid_out_exactly() {
-        let bond = 1_000_003;
+        let bond = MIN_BOND + 3;
         let mut o = oracle_with_bond(bond);
         disputed_case(&mut o, Outcome::Yes, &JURORS, &JURORS.map(|j| (j, Outcome::No)));
         act_as(JURORS[2], 100);
         o.settle(&acct(MARKET), 0, Outcome::No, Ruling::Decided);
-        // A quarter is 250,000, three ways is 83,333 each and 1 over, which the winner keeps.
+        // A quarter rounds down to 1,250,000, three ways is 416,666 each and 2 over, which the winner keeps.
         assert_eq!(
             (owed(&o, "j0.near"), owed(&o, "j1.near"), owed(&o, "j2.near")),
-            (83_333, 83_333, 83_333)
+            (416_666, 416_666, 416_666)
         );
         let paid: u128 = ["j0.near", "j1.near", "j2.near", "carol.near", "dave.near"]
             .iter()
@@ -2664,10 +2945,10 @@ mod tests {
     }
 
     #[test]
-    fn a_challenge_records_the_answer_the_round_and_the_jury_size_at_that_moment() {
+    fn a_challenge_records_the_answer_the_round_and_the_jury_size_the_case_was_proposed_with() {
         let mut o = oracle_with_bond(BOND);
         act_as(OWNER, 0);
-        o.set_jury_size(5);
+        o.set_jury_size(LARGER_JURY_SIZE);
         o.put_market(
             0,
             MarketInfo {
@@ -2682,7 +2963,7 @@ mod tests {
         let case = o.case(&acct(MARKET), 0);
         assert_eq!(
             (case.stage, case.challenger_answer, case.round, case.jury_size),
-            (Stage::Disputed, Some(Outcome::Void), 0, 5)
+            (Stage::Disputed, Some(Outcome::Void), 0, LARGER_JURY_SIZE)
         );
         assert_eq!(
             (case.challenged_at.0, case.draw_by.0, case.draw_after_height.0),
@@ -2699,7 +2980,7 @@ mod tests {
     #[should_panic(expected = "vote for the proposed answer or the challenger's answer")]
     fn a_vote_for_a_third_outcome_is_refused() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        let jurors = names(3, "j");
+        let jurors = names(FIRST_JURORS, "j");
         seat(&mut o, DRAW_BY, &jurors);
         commit(&mut o, "j0.near", DRAW_BY + SECOND, Outcome::Void, "a-long-random-salt");
         reveal_when_open(&mut o, "j0.near", Outcome::Void, "a-long-random-salt");
@@ -2710,7 +2991,7 @@ mod tests {
     #[test]
     fn a_jury_drawn_at_the_last_allowed_moment_still_gets_the_full_commit_and_reveal_time() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        let jurors = names(3, "j");
+        let jurors = names(FIRST_JURORS, "j");
         act_at_height(OWNER, DRAW_BY, 5);
         let _ = o.resolve_draw(acct(MARKET), U64(0));
         seat(&mut o, DRAW_BY, &jurors);
@@ -2738,7 +3019,7 @@ mod tests {
     #[test]
     fn the_jury_clock_counts_from_when_the_jury_lands_not_from_the_challenge() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        seat(&mut o, CHALLENGED_AT + 17 * SECOND, &names(3, "j"));
+        seat(&mut o, CHALLENGED_AT + 17 * SECOND, &names(FIRST_JURORS, "j"));
         assert_eq!(
             o.case(&acct(MARKET), 0).panel_deadline.0,
             CHALLENGED_AT + 17 * SECOND + PANEL
@@ -2768,7 +3049,9 @@ mod tests {
         let sent = calls_to("draw");
         assert_eq!(
             sent,
-            vec![near_sdk::serde_json::json!({ "case_key": "1", "n": 3, "exclude": ["carol.near", "dave.near"] })]
+            vec![
+                near_sdk::serde_json::json!({ "case_key": "1", "n": TEST_JURY_SIZE, "exclude": ["carol.near", "dave.near"] })
+            ]
         );
     }
 
@@ -2777,21 +3060,21 @@ mod tests {
     fn a_jury_size_change_between_challenge_and_draw_does_not_strand_the_case() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
         act_as(OWNER, 3 * SECOND);
-        o.set_jury_size(5);
+        o.set_jury_size(TEST_JURY_SIZE + 2);
         act_at_height(OWNER, DRAW_BY, 5);
         let _ = o.resolve_draw(acct(MARKET), U64(0));
         assert_eq!(
             calls_to("draw")[0]["n"],
-            3,
+            TEST_JURY_SIZE,
             "the draw asks for the size the case was challenged with"
         );
-        seat(&mut o, DRAW_BY, &names(3, "j"));
+        seat(&mut o, DRAW_BY, &names(FIRST_JURORS, "j"));
         assert_eq!(
             o.case(&acct(MARKET), 0).panel.len(),
-            3,
-            "a jury of that size is accepted although the setting is 5 now"
+            FIRST_JURORS,
+            "a jury of that size is accepted although the setting is larger now"
         );
-        assert_eq!(o.get_case(acct(MARKET), U64(0)).unwrap().jury_size, 3);
+        assert_eq!(o.get_case(acct(MARKET), U64(0)).unwrap().jury_size, TEST_JURY_SIZE);
     }
 
     #[test]
@@ -2800,14 +3083,14 @@ mod tests {
         seat(&mut o, DRAW_BY, &names(2, "j"));
         assert!(
             o.case(&acct(MARKET), 0).panel.is_empty(),
-            "two jurors for a jury of three"
+            "two jurors for a jury of five"
         );
         act_as(COUNCIL, DRAW_BY);
         o.on_drawn(
             acct(MARKET),
             U64(0),
             1,
-            Ok(names(3, "j").iter().map(|j| acct(j)).collect()),
+            Ok(names(FIRST_JURORS, "j").iter().map(|j| acct(j)).collect()),
         );
         assert!(
             o.case(&acct(MARKET), 0).panel.is_empty(),
@@ -2826,7 +3109,10 @@ mod tests {
         act_at_height("anyone.near", QUEUE_OVER, 20);
         o.finalize(acct(MARKET), U64(0));
         let case = o.case(&acct(MARKET), 0);
-        assert_eq!((case.stage, case.round, case.jury_size), (Stage::Disputed, 1, 7));
+        assert_eq!(
+            (case.stage, case.round, case.jury_size),
+            (Stage::Disputed, 1, SECOND_JURORS as u32)
+        );
         assert_eq!(case.draw_by.0, QUEUE_OVER + DRAW_WINDOW);
         assert_eq!(case.draw_after_height.0, 22);
         assert!(case.first_panel.is_empty() && case.panel.is_empty());
@@ -2835,9 +3121,9 @@ mod tests {
     #[test]
     fn a_no_decision_escalates_exactly_once_to_a_larger_disjoint_jury() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        let first = names(3, "j");
+        let first = names(FIRST_JURORS, "j");
         let over = first_round_that_does_nothing(&mut o, &first);
-        // One juror commits and reveals, which is not a majority of three.
+        // One juror commits and reveals, which is not a majority of five.
         let case = o.case(&acct(MARKET), 0);
         commit(&mut o, "j0.near", DRAW_BY + SECOND, Outcome::No, "a-long-random-salt");
         reveal(
@@ -2852,7 +3138,7 @@ mod tests {
         let case = o.case(&acct(MARKET), 0);
         assert_eq!(
             (case.stage, case.round, case.jury_size),
-            (Stage::Disputed, 1, 7),
+            (Stage::Disputed, 1, SECOND_JURORS as u32),
             "it called for a larger jury"
         );
         assert_eq!(case.first_panel, first.iter().map(|j| acct(j)).collect::<Vec<_>>());
@@ -2866,13 +3152,13 @@ mod tests {
         assert_eq!(
             sent,
             vec![near_sdk::serde_json::json!({
-                "case_key": (SECOND_ROUND_KEY | 1).to_string(), "n": 7,
-                "exclude": ["carol.near", "dave.near", "j0.near", "j1.near", "j2.near"]
+                "case_key": (SECOND_ROUND_KEY | 1).to_string(), "n": SECOND_JURORS,
+                "exclude": ["carol.near", "dave.near", "j0.near", "j1.near", "j2.near", "j3.near", "j4.near"]
             })]
         );
 
         // The second jury sits and does nothing. Its deadline passing settles the case, and it does not escalate again.
-        let second = names(7, "k");
+        let second = names(SECOND_JURORS, "k");
         seat(&mut o, over + 2 * SECOND, &second);
         let over_again = o.case(&acct(MARKET), 0).panel_deadline.0 + 1;
         act_as("anyone.near", over_again);
@@ -2893,8 +3179,8 @@ mod tests {
         assert_eq!(unlocks[0]["delinquent"], unlocks[1]["delinquent"]);
         assert_eq!(
             unlocks[0]["delinquent"].as_array().unwrap().len(),
-            2 + 7,
-            "j1 and j2 and all seven second jurors never voted"
+            (FIRST_JURORS - 1) + SECOND_JURORS,
+            "the first jurors but j0 and all the second jurors never voted"
         );
     }
 
@@ -2908,14 +3194,14 @@ mod tests {
             acct(MARKET),
             U64(0),
             0,
-            Ok(names(7, "k").iter().map(|j| acct(j)).collect()),
+            Ok(names(SECOND_JURORS, "k").iter().map(|j| acct(j)).collect()),
         );
         assert!(o.case(&acct(MARKET), 0).panel.is_empty());
     }
 
     #[test]
     fn the_second_jury_is_twice_the_first_plus_one_and_never_more_than_21() {
-        for (first, second) in [(1u32, 3u32), (3, 7), (7, 15), (9, 19), (11, 21), (21, 21)] {
+        for (first, second) in [(5u32, 11u32), (7, 15), (9, 19), (11, 21), (21, 21)] {
             let mut o = challenged(Outcome::Yes, Outcome::No);
             o.put_case(
                 &acct(MARKET),
@@ -2956,13 +3242,13 @@ mod tests {
     #[test]
     fn a_second_no_decision_pays_the_proposer_and_every_juror_who_revealed() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        let first = names(3, "j");
+        let first = names(FIRST_JURORS, "j");
         let over = first_round_that_does_nothing(&mut o, &first);
         commit(&mut o, "j0.near", DRAW_BY + SECOND, Outcome::Yes, "a-long-random-salt");
         reveal_when_open(&mut o, "j0.near", Outcome::Yes, "a-long-random-salt");
         act_at_height("anyone.near", over, 30);
         o.finalize(acct(MARKET), U64(0));
-        let second = names(7, "k");
+        let second = names(SECOND_JURORS, "k");
         seat(&mut o, over + SECOND, &second);
         let case = o.case(&acct(MARKET), 0);
         for (juror, outcome) in [("k0.near", Outcome::No), ("k1.near", Outcome::Yes)] {
@@ -3025,30 +3311,30 @@ mod tests {
     #[should_panic(expected = "not on the panel for this case")]
     fn a_juror_of_the_first_jury_cannot_reveal_in_the_second_round() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        let first = names(3, "j");
+        let first = names(FIRST_JURORS, "j");
         let over = first_round_that_does_nothing(&mut o, &first);
         commit(&mut o, "j0.near", DRAW_BY + SECOND, Outcome::No, "a-long-random-salt");
         act_as("anyone.near", over);
         o.finalize(acct(MARKET), U64(0));
-        seat(&mut o, over + SECOND, &names(7, "k"));
+        seat(&mut o, over + SECOND, &names(SECOND_JURORS, "k"));
         reveal_when_open(&mut o, "j0.near", Outcome::No, "a-long-random-salt");
     }
 
-    // Round one: j0 revealed No, j1 committed and never revealed, j2 never committed. Round two of seven: k0 to k3
-    // reveal No and decide it, k4 committed and has time left, k5 and k6 never committed.
+    // Round one of five: j0 revealed No, j1 committed and never revealed, j2 to j4 never committed. Round two of eleven: k0
+    // to k5 reveal No and decide it, k6 committed and has time left, k7 to k10 never committed.
     #[test]
     fn jurors_who_never_voted_in_either_round_are_delinquent_and_every_revealer_with_the_outcome_is_paid() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        let first = names(3, "j");
+        let first = names(FIRST_JURORS, "j");
         let over = first_round_that_does_nothing(&mut o, &first);
         commit(&mut o, "j0.near", DRAW_BY + SECOND, Outcome::No, "a-long-random-salt");
         commit(&mut o, "j1.near", DRAW_BY + SECOND, Outcome::No, "a-long-random-salt");
         reveal_when_open(&mut o, "j0.near", Outcome::No, "a-long-random-salt");
         act_at_height("anyone.near", over, 30);
         o.finalize(acct(MARKET), U64(0));
-        seat(&mut o, over + SECOND, &names(7, "k"));
+        seat(&mut o, over + SECOND, &names(SECOND_JURORS, "k"));
         let case = o.case(&acct(MARKET), 0);
-        for i in 0..5 {
+        for i in 0..=SECOND_MAJORITY {
             commit(
                 &mut o,
                 &format!("k{i}.near"),
@@ -3057,7 +3343,7 @@ mod tests {
                 "a-long-random-salt",
             );
         }
-        for i in 0..4 {
+        for i in 0..SECOND_MAJORITY {
             reveal(
                 &mut o,
                 &format!("k{i}.near"),
@@ -3070,14 +3356,21 @@ mod tests {
         assert_eq!((case.stage, case.final_outcome), (Stage::Final, Some(Outcome::No)));
         assert_eq!(
             case.delinquent,
-            vec![acct("j1.near"), acct("j2.near"), acct("k5.near"), acct("k6.near")],
+            ["j1", "j2", "j3", "j4", "k7", "k8", "k9", "k10"]
+                .map(|j| acct(&format!("{j}.near")))
+                .to_vec(),
             "the first jury's non-voters, and the second jury's who never committed"
         );
-        // Carol proposed Yes and lost. A quarter of her bond is split by the five who revealed No, across both rounds.
-        for juror in ["j0.near", "k0.near", "k1.near", "k2.near", "k3.near"] {
-            assert_eq!(owed(&o, juror), 250_000, "{juror}");
+        // Carol proposed Yes and lost. A quarter of her bond is split by those who revealed No, across both rounds.
+        let revealers = 1 + SECOND_MAJORITY as u128;
+        let each = BOND * JUROR_SHARE_BPS / 10_000 / revealers;
+        let revealed = ["j0".to_string()]
+            .into_iter()
+            .chain((0..SECOND_MAJORITY).map(|i| format!("k{i}")));
+        for juror in revealed {
+            assert_eq!(owed(&o, &format!("{juror}.near")), each, "{juror}");
         }
-        assert_eq!(owed(&o, "dave.near"), 2 * BOND - 1_250_000);
+        assert_eq!(owed(&o, "dave.near"), 2 * BOND - each * revealers);
         assert_eq!(owed(&o, "carol.near"), 0);
     }
 
@@ -3334,7 +3627,7 @@ mod tests {
     #[test]
     fn a_dispute_whose_jury_still_has_time_at_the_deadline_is_refused_not_voided() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        seat(&mut o, DRAW_BY, &names(3, "j"));
+        seat(&mut o, DRAW_BY, &names(FIRST_JURORS, "j"));
         let panel_deadline = o.case(&acct(MARKET), 0).panel_deadline.0;
         o.put_market(
             0,
@@ -3469,7 +3762,7 @@ mod tests {
     #[test]
     fn the_minimum_gap_counts_the_proposal_time_the_window_both_rounds_and_the_apply_buffer() {
         let o = fresh_oracle();
-        let expected = 60 * SECOND + WINDOW + 2 * (DRAW_WINDOW + PANEL) + APPLY_BUFFER_NS;
+        let expected = PROPOSAL_TIME + WINDOW + 2 * (DRAW_WINDOW + PANEL) + APPLY_BUFFER_NS;
         assert_eq!(o.config()["min_resolve_gap_ns"], expected.to_string());
         assert_eq!(o.config()["draw_window_ns"], DRAW_WINDOW.to_string());
     }
@@ -3533,7 +3826,7 @@ mod tests {
 
     // The threshold has to stay above half the publishers, so it is raised before each key that would break that.
     fn add_publisher_keeping_majority(o: &mut OracleContract, key: PublicKey) {
-        let needed = ((o.publishers.len() + 1) / 2 + 1) as u32;
+        let needed = (o.publishers.len().div_ceil(2) + 1) as u32;
         if needed > o.price_threshold {
             o.set_price_threshold(needed);
         }
@@ -3926,14 +4219,14 @@ mod tests {
     fn a_proposal_is_refused_with_exactly_zero_slack_for_apply_to_land() {
         let mut o = oracle_with_resolve_by(CASE_SPAN);
         act_as(VERIFIER, 0);
-        deliver(&mut o, "carol.near", 1, "propose:market.near:0:yes:https://x");
+        deliver(&mut o, "carol.near", BOND, "propose:market.near:0:yes:https://x");
     }
 
     #[test]
     fn a_proposal_is_accepted_with_exactly_apply_buffer_of_slack() {
         let mut o = oracle_with_resolve_by(CASE_SPAN + APPLY_BUFFER_NS);
         act_as(VERIFIER, 0);
-        deliver(&mut o, "carol.near", 1, "propose:market.near:0:yes:https://x");
+        deliver(&mut o, "carol.near", BOND, "propose:market.near:0:yes:https://x");
         assert_eq!(
             o.case(&acct(MARKET), 0).stage,
             Stage::Proposed,
@@ -3946,7 +4239,7 @@ mod tests {
     fn a_proposal_is_refused_one_nanosecond_short_of_the_buffer() {
         let mut o = oracle_with_resolve_by(CASE_SPAN + APPLY_BUFFER_NS - 1);
         act_as(VERIFIER, 0);
-        deliver(&mut o, "carol.near", 1, "propose:market.near:0:yes:https://x");
+        deliver(&mut o, "carol.near", BOND, "propose:market.near:0:yes:https://x");
     }
 
     // ---- code: staging, upgrade, migrate and seal ---------------------------------------------------------
@@ -4077,7 +4370,7 @@ mod tests {
                 migrated.upgrade_in_flight,
                 migrated.state_version
             ),
-            (true, false, 2)
+            (true, false, STATE_VERSION)
         );
         assert_eq!(migrated.case(&acct(MARKET), 0).stage, Stage::Disputed);
         assert_eq!(migrated.config()["upgrade_proven"], true);
@@ -4110,7 +4403,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "migrate expects version 2")]
+    #[should_panic(expected = "unsupported state version")]
     fn migrate_refuses_state_written_by_another_version() {
         let mut o = fresh_oracle();
         o.state_version = 1;
@@ -4120,48 +4413,200 @@ mod tests {
         OracleContract::migrate();
     }
 
+    // The state a version-2 contract wrote, with the draw delay it had when the upgrade came.
+    const DELAY_AT_MIGRATION: u64 = 9;
+
+    fn state_v2_of(o: &OracleContract) -> StateV2 {
+        StateV2 {
+            state_version: 2,
+            upgrade_proven: false,
+            upgrade_in_flight: true,
+            owner: o.owner.clone(),
+            pending_owner: None,
+            operator: o.operator.clone(),
+            allowed_markets: o.allowed_markets.clone(),
+            verifier: o.verifier.clone(),
+            collateral_token_id: o.collateral_token_id.clone(),
+            bond: o.bond,
+            window_ns: o.window_ns,
+            apply_buffer_ns: o.apply_buffer_ns,
+            juror_share_bps: o.juror_share_bps,
+            no_decision_share_bps: o.no_decision_share_bps,
+            max_publishers: o.max_publishers,
+            panel_deadline_ns: o.panel_deadline_ns,
+            draw_window_ns: o.draw_window_ns,
+            min_proposal_ns: o.min_proposal_ns,
+            council: o.council.clone(),
+            jury_size: o.jury_size,
+            draw_delay_blocks: DELAY_AT_MIGRATION,
+            network: o.network.clone(),
+            publishers: o.publishers.clone(),
+            price_threshold: o.price_threshold,
+            no_decision_recipient: o.no_decision_recipient.clone(),
+            markets: LookupMap::new(Key::Markets),
+            cases: LookupMap::new(Key::Cases),
+            last_case_uid: 1,
+            claimable: LookupMap::new(Key::Claimable),
+            claimable_total: 0,
+            bonds_held: BOND,
+            payouts: LookupMap::new(Key::Payouts),
+            pending_payouts_total: 0,
+            reconcile_wait_ns: o.reconcile_wait_ns,
+            last_payout_id: 0,
+        }
+    }
+
+    fn migrate_old_state(old: StateV2) -> OracleContract {
+        env::state_write(&old);
+        act_unpaid(SELF, 5);
+        OracleContract::migrate()
+    }
+
+    #[test]
+    fn migrate_moves_version_two_state_to_three_and_old_cases_take_the_delay_at_migration() {
+        let case = proposed_case();
+        let o = oracle_with_resolve_by(MARKET_DEADLINE);
+        let mut key = current_bytes(&Key::Cases);
+        key.extend(current_bytes(&(acct(MARKET), 0u64)));
+        env::storage_write(&key, &old_case_bytes(&case));
+        let old = state_v2_of(&o);
+        drop(o);
+        let mut migrated = migrate_old_state(old);
+        assert_eq!(migrated.state_version, STATE_VERSION);
+        assert_eq!(migrated.old_case_draw_delay_blocks, DELAY_AT_MIGRATION);
+        assert_eq!((migrated.bond, migrated.jury_size), (BOND, TEST_JURY_SIZE));
+        assert!(migrated.upgrade_proven && !migrated.upgrade_in_flight);
+
+        let stored = migrated.case(&acct(MARKET), 0);
+        assert_eq!(stored.draw_delay_blocks, None);
+        assert_eq!(stored.jury_size, TEST_JURY_SIZE);
+        act_unpaid(OWNER, 6);
+        migrated.set_draw_delay_blocks(U64(1));
+        assert_eq!(
+            migrated.draw_delay_of(&stored),
+            DELAY_AT_MIGRATION,
+            "an owner change after the upgrade does not reach the old case"
+        );
+        act_as(VERIFIER, CHALLENGED_AT);
+        deliver(&mut migrated, "dave.near", BOND, "challenge:market.near:0:no");
+        assert_eq!(migrated.case(&acct(MARKET), 0).draw_after_height.0, DELAY_AT_MIGRATION);
+    }
+
+    #[test]
+    #[should_panic(expected = "the bond must be at least 5 USDC")]
+    fn migrate_refuses_a_version_two_state_with_a_bond_below_the_floor() {
+        let o = fresh_oracle();
+        let mut old = state_v2_of(&o);
+        old.bond = MIN_BOND - 1;
+        drop(o);
+        migrate_old_state(old);
+    }
+
+    #[test]
+    fn migrate_refuses_a_version_two_state_with_a_window_below_the_floor() {
+        for lower in [
+            |s: &mut StateV2| s.window_ns = MIN_WINDOW_MS * NS_PER_MS - 1,
+            |s: &mut StateV2| s.panel_deadline_ns = MIN_WINDOW_MS * NS_PER_MS - 1,
+            |s: &mut StateV2| s.draw_window_ns = MIN_WINDOW_MS * NS_PER_MS - 1,
+            |s: &mut StateV2| s.min_proposal_ns = MIN_WINDOW_MS * NS_PER_MS - 1,
+        ] {
+            let o = fresh_oracle();
+            let mut old = state_v2_of(&o);
+            drop(o);
+            lower(&mut old);
+            let message = refusal(|| drop(migrate_old_state(old)));
+            assert!(message.contains("windows must be at least an hour"), "{message}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "jury size must be odd, from 5 to 21")]
+    fn migrate_refuses_a_version_two_state_with_a_jury_below_the_floor() {
+        let o = fresh_oracle();
+        let mut old = state_v2_of(&o);
+        old.jury_size = MIN_JURY_SIZE - 2;
+        drop(o);
+        migrate_old_state(old);
+    }
+
+    #[test]
+    #[should_panic(expected = "the bond must be at least 5 USDC")]
+    fn migrate_refuses_a_current_state_below_the_floors_too() {
+        let mut o = fresh_oracle();
+        o.upgrade_in_flight = true;
+        o.bond = MIN_BOND - 1;
+        env::state_write(&o);
+        drop(o);
+        act_unpaid(SELF, 5);
+        OracleContract::migrate();
+    }
+
     // ---- the owner's settings ---------------------------------------------------------------------------
 
     type Setter = fn(&mut OracleContract, u64);
-    // (name, setter, the config key it changes, the event it emits, the config value after setting 7)
-    const SETTERS: [(&str, Setter, &str, &str, &str); 6] = [
-        ("set_bond", |o, v| o.set_bond(U128(v as u128)), "bond", "bond_set", "7"),
+    // A value each setter takes that is not the default, and the delay's own.
+    const SETTER_WINDOW_MS: u64 = 2 * MIN_WINDOW_MS;
+    const SETTER_DELAY_BLOCKS: u64 = 7;
+    // (name, setter, the config key it changes, the event it emits, a value to set, the least value it takes)
+    const SETTERS: [(&str, Setter, &str, &str, u64, u64); 6] = [
+        (
+            "set_bond",
+            |o, v| o.set_bond(U128(v as u128)),
+            "bond",
+            "bond_set",
+            2 * MIN_BOND as u64,
+            MIN_BOND as u64,
+        ),
         (
             "set_window_ms",
             |o, v| o.set_window_ms(U64(v)),
             "window_ns",
             "window_set",
-            "7000000",
+            SETTER_WINDOW_MS,
+            MIN_WINDOW_MS,
         ),
         (
             "set_panel_deadline_ms",
             |o, v| o.set_panel_deadline_ms(U64(v)),
             "panel_deadline_ns",
             "panel_deadline_set",
-            "7000000",
+            SETTER_WINDOW_MS,
+            MIN_WINDOW_MS,
         ),
         (
             "set_min_proposal_ms",
             |o, v| o.set_min_proposal_ms(U64(v)),
             "min_proposal_ns",
             "min_proposal_set",
-            "7000000",
+            SETTER_WINDOW_MS,
+            MIN_WINDOW_MS,
         ),
         (
             "set_draw_window_ms",
             |o, v| o.set_draw_window_ms(U64(v)),
             "draw_window_ns",
             "draw_window_set",
-            "7000000",
+            SETTER_WINDOW_MS,
+            MIN_WINDOW_MS,
         ),
         (
             "set_draw_delay_blocks",
             |o, v| o.set_draw_delay_blocks(U64(v)),
             "draw_delay_blocks",
             "draw_delay_set",
-            "7",
+            SETTER_DELAY_BLOCKS,
+            0,
         ),
     ];
+
+    // The config value a setter shows after it took `value`: windows are shown in nanoseconds.
+    fn shown_after(key: &str, value: u64) -> String {
+        if key.ends_with("_ns") {
+            (value * NS_PER_MS).to_string()
+        } else {
+            value.to_string()
+        }
+    }
 
     fn refusal(f: impl FnOnce()) -> String {
         let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err("expected a refusal");
@@ -4175,30 +4620,42 @@ mod tests {
     fn every_setting_refuses_a_stranger_and_the_operator() {
         let mut o = fresh_oracle();
         for who in ["stranger.near", OPERATOR] {
-            for (name, set, ..) in SETTERS {
+            for (name, set, _, _, value, _) in SETTERS {
                 act_unpaid(who, 5);
-                assert!(refusal(|| set(&mut o, 7)).contains("owner only"), "{name} by {who}");
+                assert!(refusal(|| set(&mut o, value)).contains("owner only"), "{name} by {who}");
             }
         }
     }
 
     #[test]
-    fn every_setting_but_the_draw_delay_refuses_zero() {
+    fn every_setting_but_the_draw_delay_refuses_a_value_below_its_floor_and_takes_the_floor() {
         let mut o = fresh_oracle();
-        for (name, set, ..) in &SETTERS[..5] {
+        for (name, set, key, _, _, floor) in &SETTERS[..5] {
+            for below in [0, floor - 1] {
+                act_unpaid(OWNER, 5);
+                let message = refusal(|| set(&mut o, below));
+                assert!(message.contains("at least"), "{name} at {below}: {message}");
+            }
             act_unpaid(OWNER, 5);
-            let message = refusal(|| set(&mut o, 0));
-            assert!(message.contains("must be positive"), "{name}: {message}");
+            set(&mut o, *floor);
+            assert_eq!(o.config()[key], shown_after(key, *floor), "{name} takes its floor");
         }
+    }
+
+    #[test]
+    fn the_floors_are_an_hour_five_jurors_and_five_usdc() {
+        assert_eq!(MIN_WINDOW_MS, 3_600 * 1_000);
+        assert_eq!(MIN_JURY_SIZE, 5);
+        assert_eq!(MIN_BOND, 5 * 1_000_000);
     }
 
     #[test]
     fn every_setting_changes_its_value_and_emits_its_event() {
         let mut o = fresh_oracle();
-        for (name, set, key, event, shown) in SETTERS {
+        for (name, set, key, event, value, _) in SETTERS {
             act_unpaid(OWNER, 5);
-            set(&mut o, 7);
-            assert_eq!(o.config()[key], shown, "{name}");
+            set(&mut o, value);
+            assert_eq!(o.config()[key], shown_after(key, value), "{name}");
             assert!(
                 near_sdk::test_utils::get_logs().iter().any(|l| l.contains(event)),
                 "{name} emits {event}"
@@ -4212,9 +4669,9 @@ mod tests {
         act_as(MARKET, 0);
         o.register_market(U64(0), U64(1_000), U64(1_000 + MIN_GAP), "hash".to_string(), None);
         act_unpaid(OWNER, 1);
-        o.set_window_ms(U64(600_000));
-        o.set_panel_deadline_ms(U64(1_200_000));
-        o.set_draw_window_ms(U64(600_000));
+        o.set_window_ms(U64(10 * WINDOW_MS));
+        o.set_panel_deadline_ms(U64(10 * PANEL_MS));
+        o.set_draw_window_ms(U64(10 * WINDOW_MS));
         assert_ne!(
             o.config()["min_resolve_gap_ns"],
             MIN_GAP.to_string(),
@@ -4235,12 +4692,12 @@ mod tests {
 
         // The old market still fits a whole case in its time, and every deadline of the case is on the old windows.
         act_as(VERIFIER, 1_000);
-        deliver(&mut o, "carol.near", 1, "propose:market.near:0:yes:https://x");
+        deliver(&mut o, "carol.near", BOND, "propose:market.near:0:yes:https://x");
         assert_eq!(o.case(&acct(MARKET), 0).window_ends_at.0, 1_000 + WINDOW);
         act_as(VERIFIER, 1_001);
-        deliver(&mut o, "dave.near", 1, "challenge:market.near:0:no");
+        deliver(&mut o, "dave.near", BOND, "challenge:market.near:0:no");
         assert_eq!(o.case(&acct(MARKET), 0).draw_by.0, 1_001 + DRAW_WINDOW);
-        seat(&mut o, 1_002, &names(3, "j"));
+        seat(&mut o, 1_002, &names(FIRST_JURORS, "j"));
         let case = o.case(&acct(MARKET), 0);
         assert_eq!(
             (case.commit_ends_at.0, case.panel_deadline.0),
@@ -4249,7 +4706,7 @@ mod tests {
 
         // The new market runs on the new windows.
         act_as(VERIFIER, 1_000);
-        deliver(&mut o, "carol.near", 1, "propose:market.near:1:yes:https://x");
+        deliver(&mut o, "carol.near", BOND, "propose:market.near:1:yes:https://x");
         assert_eq!(o.case(&acct(MARKET), 1).window_ends_at.0, 1_000 + 10 * WINDOW);
     }
 
@@ -4257,8 +4714,8 @@ mod tests {
     fn a_round_two_draw_on_an_old_market_gets_the_old_draw_window() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
         act_unpaid(OWNER, 3);
-        o.set_draw_window_ms(U64(600_000));
-        o.set_panel_deadline_ms(U64(1_200_000));
+        o.set_draw_window_ms(U64(10 * WINDOW_MS));
+        o.set_panel_deadline_ms(U64(10 * PANEL_MS));
         act_as("anyone.near", QUEUE_OVER);
         o.finalize(acct(MARKET), U64(0));
         let case = o.case(&acct(MARKET), 0);
@@ -4266,6 +4723,8 @@ mod tests {
     }
 
     // ---- the bond ---------------------------------------------------------------------------------------
+
+    const NEW_BOND: u128 = 2 * MIN_BOND;
 
     #[test]
     fn a_new_bond_applies_to_new_cases_and_a_challenge_matches_the_bond_its_case_was_proposed_with() {
@@ -4285,26 +4744,26 @@ mod tests {
             },
         );
         act_as(VERIFIER, SECOND);
-        deliver(&mut o, "carol.near", 1, "propose:market.near:0:yes:https://x");
+        deliver(&mut o, "carol.near", BOND, "propose:market.near:0:yes:https://x");
         act_unpaid(OWNER, 2 * SECOND);
-        o.set_bond(U128(5));
-        assert_eq!(o.case(&acct(MARKET), 0).bond.0, 1, "the open case keeps its bond");
+        o.set_bond(U128(NEW_BOND));
+        assert_eq!(o.case(&acct(MARKET), 0).bond.0, BOND, "the open case keeps its bond");
 
         act_as(VERIFIER, 3 * SECOND);
         assert!(refusal(|| {
-            deliver(&mut o, "dave.near", 5, "challenge:market.near:0:no");
+            deliver(&mut o, "dave.near", NEW_BOND, "challenge:market.near:0:no");
         })
         .contains("send exactly the bond"));
-        deliver(&mut o, "dave.near", 1, "challenge:market.near:0:no");
+        deliver(&mut o, "dave.near", BOND, "challenge:market.near:0:no");
         assert_eq!(o.case(&acct(MARKET), 0).stage, Stage::Disputed);
 
         act_as(VERIFIER, 4 * SECOND);
         assert!(refusal(|| {
-            deliver(&mut o, "carol.near", 1, "propose:market.near:1:yes:https://x");
+            deliver(&mut o, "carol.near", BOND, "propose:market.near:1:yes:https://x");
         })
         .contains("send exactly the bond"));
-        deliver(&mut o, "carol.near", 5, "propose:market.near:1:yes:https://x");
-        assert_eq!(o.case(&acct(MARKET), 1).bond.0, 5);
+        deliver(&mut o, "carol.near", NEW_BOND, "propose:market.near:1:yes:https://x");
+        assert_eq!(o.case(&acct(MARKET), 1).bond.0, NEW_BOND);
     }
 
     #[test]
@@ -4318,12 +4777,12 @@ mod tests {
             },
         );
         act_as(VERIFIER, SECOND);
-        deliver(&mut o, "carol.near", 1, "propose:market.near:0:yes:https://x");
+        deliver(&mut o, "carol.near", BOND, "propose:market.near:0:yes:https://x");
         act_unpaid(OWNER, 2 * SECOND);
-        o.set_bond(U128(5));
+        o.set_bond(U128(NEW_BOND));
         act_as("anyone.near", SECOND + WINDOW);
         o.finalize(acct(MARKET), U64(0));
-        assert_eq!(owed(&o, "carol.near"), 1);
+        assert_eq!(owed(&o, "carol.near"), BOND);
     }
 
     // ---- money through the verifier ---------------------------------------------------------------------------
@@ -4420,7 +4879,7 @@ mod tests {
         for who in ["carol.near", COUNCIL, MARKET, OWNER, OPERATOR, "stranger.near"] {
             act_as(who, SECOND);
             let message = refusal(|| {
-                deliver(&mut o, "carol.near", 1, "propose:market.near:0:yes:https://x");
+                deliver(&mut o, "carol.near", BOND, "propose:market.near:0:yes:https://x");
             });
             assert_eq!(message, "only the verifier can deliver money", "{who}");
         }
@@ -4573,14 +5032,17 @@ mod tests {
     fn total_owed_follows_the_bonds_through_a_dispute_and_falls_only_as_payees_withdraw() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
         assert_eq!(o.total_owed().0, 2 * BOND, "both bonds are held while the case is open");
-        let jurors = names(3, "j");
+        let jurors = names(FIRST_JURORS, "j");
         seat(&mut o, DRAW_BY, &jurors);
-        for j in &jurors[..2] {
+        let majority = &jurors[..FIRST_MAJORITY];
+        for j in majority {
             commit(&mut o, j, DRAW_BY + SECOND, Outcome::No, "a-long-random-salt");
         }
-        reveal_when_open(&mut o, &jurors[0], Outcome::No, "a-long-random-salt");
+        for j in &majority[..FIRST_MAJORITY - 1] {
+            reveal_when_open(&mut o, j, Outcome::No, "a-long-random-salt");
+        }
         assert_eq!(o.total_owed().0, 2 * BOND, "a vote does not move money");
-        reveal_when_open(&mut o, &jurors[1], Outcome::No, "a-long-random-salt");
+        reveal_when_open(&mut o, &majority[FIRST_MAJORITY - 1], Outcome::No, "a-long-random-salt");
         assert_eq!(o.case(&acct(MARKET), 0).stage, Stage::Final);
         assert_eq!(
             (o.total_owed().0, o.bonds_held, o.claimable_total),
@@ -4588,7 +5050,9 @@ mod tests {
         );
 
         let mut left = 2 * BOND;
-        for (n, who) in ["dave.near", "j0.near", "j1.near"].into_iter().enumerate() {
+        let payees = ["dave.near".to_string()].into_iter().chain(majority.iter().cloned());
+        for (n, who) in payees.enumerate() {
+            let who = who.as_str();
             let due = owed(&o, who);
             assert!(due > 0, "{who} is owed something");
             act_as(who, 10 * DEADLINE);
@@ -4602,7 +5066,10 @@ mod tests {
             left -= due;
             assert_eq!(o.total_owed().0, left, "{who} took {due}");
         }
-        assert_eq!(left, 0, "two bonds, paid to three accounts, and nobody else is owed");
+        assert_eq!(
+            left, 0,
+            "two bonds, paid to the winner and the majority jurors, and nobody else is owed"
+        );
         assert_eq!(o.total_owed().0, 0);
     }
 
@@ -4862,17 +5329,16 @@ mod tests {
         }
         assert_eq!(
             (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
-            (BOND + BOND / 2, BOND / 2, 2 * BOND)
+            (2 * BOND, 0, 2 * BOND)
         );
         settle(&mut o, 2, false);
-        let mut failed = payout_json("dave.near", 2);
-        failed["amount"] = (BOND / 2).to_string().into();
+        let failed = payout_json("dave.near", 2);
         assert_eq!(logged("bond_payout_failed"), vec![failed]);
         assert_eq!(
             (o.pending_payouts_total, o.claimable_total, o.total_owed().0),
             (BOND, BOND, 2 * BOND)
         );
-        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (0, BOND / 2));
+        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (0, BOND));
         assert!(o.get_payout(1).is_some() && o.get_payout(2).is_none());
         settle(&mut o, 1, true);
         assert_eq!(
@@ -4976,8 +5442,8 @@ mod tests {
         let (carol, dave) = (owed(&o, "carol.near"), owed(&o, "dave.near"));
         assert_eq!(
             (carol, dave),
-            (BOND, BOND / 2),
-            "no jury was ever seated: the proposer is owed their bond, the challenger theirs less the no-decision share"
+            (BOND, BOND),
+            "no jury was ever seated: each side is owed their own bond in full"
         );
         act_as("carol.near", 10 * DEADLINE);
         let _ = o.withdraw_bond();
@@ -4991,10 +5457,9 @@ mod tests {
         assert_eq!(o.total_owed().0, 2 * BOND - carol);
     }
 
-    // The draw could never happen. The proposer is made whole. The challenger pays the no-decision share, so a challenge that
-    // cannot be answered is not a free way to void an event market.
+    // The draw could never happen, so nobody ruled and nobody is charged: both sides get their own bond back in full.
     #[test]
-    fn when_no_jury_could_be_drawn_the_proposer_is_made_whole_and_the_challenger_pays_the_no_decision_share() {
+    fn when_no_jury_could_be_drawn_both_sides_get_their_bond_back_and_nobody_is_charged() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
         act_as("anyone.near", QUEUE_OVER);
         o.finalize(acct(MARKET), U64(0));
@@ -5003,8 +5468,8 @@ mod tests {
         o.finalize(acct(MARKET), U64(0));
         let case = o.case(&acct(MARKET), 0);
         assert_eq!((case.stage, case.final_outcome), (Stage::Final, Some(Outcome::Void)));
-        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (BOND, BOND / 2));
-        assert_eq!((owed(&o, RECIPIENT), owed(&o, OWNER)), (BOND / 2, 0));
+        assert_eq!((owed(&o, "carol.near"), owed(&o, "dave.near")), (BOND, BOND));
+        assert_eq!((owed(&o, RECIPIENT), owed(&o, OWNER)), (0, 0));
         assert_eq!(o.total_owed().0, 2 * BOND, "every unit is still owed to someone");
         assert_eq!(o.bonds_held, 0);
         assert_eq!(
@@ -5037,7 +5502,7 @@ mod tests {
         act_at_height("anyone.near", retry_at + 5, 50);
         let _ = o.resolve_draw(acct(MARKET), U64(0));
         act_as(COUNCIL, retry_at + 6);
-        let jury: Vec<AccountId> = JURORS.iter().map(|j| acct(j)).collect();
+        let jury: Vec<AccountId> = names(FIRST_JURORS, "j").iter().map(|j| acct(j)).collect();
         o.on_drawn(acct(MARKET), U64(0), 0, Ok(jury));
         let case = o.case(&acct(MARKET), 0);
         assert!(case.seated && case.stage == Stage::Disputed);
@@ -5066,7 +5531,7 @@ mod tests {
     #[test]
     fn a_jury_that_was_seated_but_never_revealed_keeps_the_no_decision_split() {
         let mut o = challenged(Outcome::Yes, Outcome::No);
-        let over = first_round_that_does_nothing(&mut o, &names(3, "j"));
+        let over = first_round_that_does_nothing(&mut o, &names(FIRST_JURORS, "j"));
         assert!(o.case(&acct(MARKET), 0).seated);
         act_as("anyone.near", over);
         o.finalize(acct(MARKET), U64(0));
@@ -5089,7 +5554,7 @@ mod tests {
         act_as("anyone.near", QUEUE_OVER);
         o.finalize(acct(MARKET), U64(0));
         let seated_at = QUEUE_OVER + SECOND;
-        seat(&mut o, seated_at, &names(7, "k"));
+        seat(&mut o, seated_at, &names(SECOND_JURORS, "k"));
         assert!(o.case(&acct(MARKET), 0).seated);
         act_as("anyone.near", o.case(&acct(MARKET), 0).panel_deadline.0 + 1);
         o.finalize(acct(MARKET), U64(0));
@@ -5129,7 +5594,7 @@ mod tests {
     fn proposed_case() -> Case {
         let mut o = oracle_with_resolve_by(MARKET_DEADLINE);
         act_as(VERIFIER, SECOND);
-        deliver(&mut o, "carol.near", 1, "propose:market.near:0:yes:https://x");
+        deliver(&mut o, "carol.near", BOND, "propose:market.near:0:yes:https://x");
         o.case(&acct(MARKET), 0)
     }
 
@@ -5241,7 +5706,7 @@ mod tests {
         check(&o, 2 * BOND, 0, 0);
         act_as("anyone.near", QUEUE_OVER);
         o.finalize(acct(MARKET), U64(0));
-        seat(&mut o, QUEUE_OVER + SECOND, &names(7, "k"));
+        seat(&mut o, QUEUE_OVER + SECOND, &names(SECOND_JURORS, "k"));
         act_as("anyone.near", o.case(&acct(MARKET), 0).panel_deadline.0 + 1);
         o.finalize(acct(MARKET), U64(0));
         assert_eq!(o.case(&acct(MARKET), 0).stage, Stage::Final);
@@ -5552,11 +6017,11 @@ mod tests {
         assert_eq!(o.market_info(&acct(MARKET), 1).apply_buffer_ns.0, 60 * SECOND);
         // The old market still fits a case with its own 30 second buffer.
         act_as(VERIFIER, 1_000 + PROPOSAL_TIME);
-        deliver(&mut o, "carol.near", 1, "propose:market.near:0:yes:https://x");
+        deliver(&mut o, "carol.near", BOND, "propose:market.near:0:yes:https://x");
         // The new one does not fit the same moment with its 60 second buffer.
         act_as(VERIFIER, 1_000 + PROPOSAL_TIME + 30 * SECOND + 1);
         let late = refusal(|| {
-            deliver(&mut o, "carol.near", 1, "propose:market.near:1:yes:https://x");
+            deliver(&mut o, "carol.near", BOND, "propose:market.near:1:yes:https://x");
         });
         assert!(late.contains("too late to propose"), "{late}");
     }
@@ -5827,7 +6292,7 @@ mod tests {
         act_at_height("anyone.near", DRAW_BY, 5);
         let _ = o.resolve_draw(acct(MARKET2), U64(0));
         act_as(COUNCIL, DRAW_BY + SECOND);
-        let jury: Vec<AccountId> = JURORS.iter().map(|j| acct(j)).collect();
+        let jury: Vec<AccountId> = names(FIRST_JURORS, "j").iter().map(|j| acct(j)).collect();
         o.on_drawn(acct(MARKET2), U64(0), 0, Ok(jury));
         let uid = o.case(&acct(MARKET2), 0).case_uid;
         assert!(!o.case(&acct(MARKET2), 0).panel.is_empty());
@@ -5969,12 +6434,103 @@ mod tests {
     fn setting_the_jury_size_emits_it() {
         let mut o = fresh_oracle();
         act_as(OWNER, 0);
-        o.set_jury_size(5);
+        o.set_jury_size(LARGER_JURY_SIZE);
         assert_eq!(
             logged("jury_size_set"),
-            [near_sdk::serde_json::json!({ "jury_size": 5 })]
+            [near_sdk::serde_json::json!({ "jury_size": LARGER_JURY_SIZE })]
         );
-        assert_eq!(o.config()["jury_size"], 5);
+        assert_eq!(o.config()["jury_size"], LARGER_JURY_SIZE);
+    }
+
+    #[test]
+    fn the_jury_size_setting_refuses_even_sizes_sizes_below_the_floor_and_sizes_above_the_panel_cap() {
+        let mut o = fresh_oracle();
+        act_as(OWNER, 0);
+        for size in [0, 1, 3, MIN_JURY_SIZE + 1, MAX_PANEL as u32 + 1, MAX_PANEL as u32 + 2] {
+            let message = refusal(|| o.set_jury_size(size));
+            assert!(
+                message.contains("jury size must be odd, from 5 to 21"),
+                "{size}: {message}"
+            );
+        }
+        o.set_jury_size(MIN_JURY_SIZE);
+        o.set_jury_size(MAX_PANEL as u32);
+    }
+
+    #[test]
+    fn a_new_oracle_refuses_a_bond_a_window_or_a_jury_below_the_floors() {
+        let at_floor = [MIN_WINDOW_MS; 4];
+        near_sdk::mock::with_mocked_blockchain(|b| {
+            let _ = b.take_storage();
+        });
+        act_as(OWNER, 0);
+        drop(new_oracle(COLLATERAL, MIN_BOND, at_floor, MIN_JURY_SIZE, 2));
+        let message = refusal(|| drop(new_oracle(COLLATERAL, MIN_BOND - 1, at_floor, MIN_JURY_SIZE, 2)));
+        assert!(message.contains("the bond must be at least 5 USDC"), "{message}");
+        for which in 0..at_floor.len() {
+            let mut windows = at_floor;
+            windows[which] = MIN_WINDOW_MS - 1;
+            let message = refusal(|| drop(new_oracle(COLLATERAL, MIN_BOND, windows, MIN_JURY_SIZE, 2)));
+            assert!(
+                message.contains("windows must be at least an hour"),
+                "window {which}: {message}"
+            );
+        }
+        for size in [1, 3, MIN_JURY_SIZE + 1] {
+            let message = refusal(|| drop(new_oracle(COLLATERAL, MIN_BOND, at_floor, size, 2)));
+            assert!(
+                message.contains("jury size must be odd, from 5 to 21"),
+                "{size}: {message}"
+            );
+        }
+    }
+
+    // The jury size and the draw delay are copied onto the case when it is proposed.
+    #[test]
+    fn a_setting_change_after_the_proposal_changes_neither_the_jury_size_nor_the_draw_delay_of_the_case() {
+        let mut o = oracle_with_bond(BOND);
+        o.put_market(
+            0,
+            MarketInfo {
+                resolve_by: U64(MARKET_DEADLINE),
+                ..base_info()
+            },
+        );
+        act_as(VERIFIER, SECOND);
+        deliver(&mut o, "carol.near", BOND, "propose:market.near:0:yes:https://x");
+        let proposed = o.case(&acct(MARKET), 0);
+        assert_eq!(
+            (proposed.jury_size, proposed.draw_delay_blocks),
+            (TEST_JURY_SIZE, Some(U64(TEST_DRAW_DELAY_BLOCKS)))
+        );
+        act_as(OWNER, 2 * SECOND);
+        o.set_jury_size(LARGER_JURY_SIZE);
+        o.set_draw_delay_blocks(U64(TEST_DRAW_DELAY_BLOCKS + 30));
+
+        act_at_height(VERIFIER, CHALLENGED_AT, 10);
+        deliver(&mut o, "dave.near", BOND, "challenge:market.near:0:no");
+        let case = o.case(&acct(MARKET), 0);
+        assert_eq!(
+            case.jury_size, TEST_JURY_SIZE,
+            "the open case keeps the jury size it was proposed with"
+        );
+        assert_eq!(case.draw_after_height.0, 10 + TEST_DRAW_DELAY_BLOCKS);
+
+        act_at_height("anyone.near", DRAW_BY, 100);
+        let _ = o.resolve_draw(acct(MARKET), U64(0));
+        assert_eq!(calls_to("draw")[0]["n"], TEST_JURY_SIZE);
+
+        act_unpaid(OWNER, DRAW_BY);
+        o.set_draw_delay_blocks(U64(TEST_DRAW_DELAY_BLOCKS + 60));
+        act_at_height("anyone.near", QUEUE_OVER, 400);
+        o.finalize(acct(MARKET), U64(0));
+        let escalated = o.case(&acct(MARKET), 0);
+        assert_eq!(escalated.round, 1);
+        assert_eq!(
+            escalated.draw_after_height.0,
+            400 + TEST_DRAW_DELAY_BLOCKS,
+            "the second jury waits the case's own delay"
+        );
     }
 
     #[test]
@@ -5995,7 +6551,7 @@ mod tests {
             logged("draw_failed"),
             [near_sdk::serde_json::json!({ "market": MARKET, "market_id": "0", "round": 0 })]
         );
-        let jury: Vec<AccountId> = JURORS.iter().map(|j| acct(j)).collect();
+        let jury: Vec<AccountId> = names(FIRST_JURORS, "j").iter().map(|j| acct(j)).collect();
         o.on_drawn(acct(MARKET), U64(0), 0, Ok(jury));
         assert_eq!(logged("jury_drawn")[0]["market"], MARKET);
         act_as(JURORS[0], DRAW_BY + 1);
@@ -6009,11 +6565,63 @@ mod tests {
         near_sdk::borsh::to_vec(value).unwrap()
     }
 
+    // The case record a version-2 contract stored: version byte 0 and the layout before the draw delay.
+    const CASE_VERSION_TAG: u8 = 1;
+    const OLD_CASE_VERSION_TAG: u8 = 0;
+
+    fn case_v1_of(case: &Case) -> CaseV1 {
+        CaseV1 {
+            case_uid: case.case_uid,
+            stage: case.stage,
+            proposer: case.proposer.clone(),
+            proposed: case.proposed,
+            bond: case.bond,
+            evidence: case.evidence.clone(),
+            window_ends_at: case.window_ends_at,
+            challenger: case.challenger.clone(),
+            challenger_answer: case.challenger_answer,
+            round: case.round,
+            jury_size: case.jury_size,
+            draw_by: case.draw_by,
+            draw_after_height: case.draw_after_height,
+            commit_ends_at: case.commit_ends_at,
+            panel_deadline: case.panel_deadline,
+            panel: case.panel.clone(),
+            first_panel: case.first_panel.clone(),
+            seated: case.seated,
+            commits: case.commits.clone(),
+            votes: case.votes.clone(),
+            final_outcome: case.final_outcome,
+            applied: case.applied,
+            challenged_at: case.challenged_at,
+            juror_share_bps: case.juror_share_bps,
+            no_decision_share_bps: case.no_decision_share_bps,
+            delinquent: case.delinquent.clone(),
+        }
+    }
+
+    fn old_case_bytes(case: &Case) -> Vec<u8> {
+        let mut bytes = vec![OLD_CASE_VERSION_TAG];
+        bytes.extend(current_bytes(&case_v1_of(case)));
+        bytes
+    }
+
     #[test]
-    fn stored_records_start_with_version_byte_zero_and_round_trip() {
+    fn a_case_stored_before_the_draw_delay_was_kept_reads_back_without_one() {
+        let case = proposed_case();
+        let back = VersionedCase::try_from_slice(&old_case_bytes(&case))
+            .unwrap()
+            .into_inner();
+        assert_eq!(back.draw_delay_blocks, None);
+        assert_eq!(current_bytes(&case_v1_of(&back)), current_bytes(&case_v1_of(&case)));
+        assert_eq!(case.draw_delay_blocks, Some(U64(TEST_DRAW_DELAY_BLOCKS)));
+    }
+
+    #[test]
+    fn stored_records_start_with_their_version_byte_and_round_trip() {
         let case = proposed_case();
         let bytes = current_bytes(&VersionedCase::current(case.clone()));
-        assert_eq!(bytes[0], 0);
+        assert_eq!(bytes[0], CASE_VERSION_TAG);
         assert_eq!(&bytes[1..], current_bytes(&case).as_slice());
         let back = VersionedCase::try_from_slice(&bytes).unwrap();
         assert_eq!(current_bytes(&back), bytes);
@@ -6044,7 +6652,7 @@ mod tests {
         o.cases.flush();
         let stored = near_sdk::mock::with_mocked_blockchain(|b| b.take_storage());
         let case_bytes = current_bytes(&VersionedCase::current(o.case(&acct(MARKET), 0)));
-        assert_eq!(case_bytes[0], 0);
+        assert_eq!(case_bytes[0], CASE_VERSION_TAG);
         let found = stored.values().any(|v| *v == case_bytes);
         assert!(found, "the case is stored as the tagged bytes");
     }
@@ -6052,7 +6660,7 @@ mod tests {
     #[test]
     fn a_record_from_a_newer_version_is_refused_with_a_plain_message() {
         let mut bytes = current_bytes(&VersionedCase::current(proposed_case()));
-        bytes[0] = 1;
+        bytes[0] = CASE_VERSION_TAG + 1;
         let message = refusal(|| {
             let _ = VersionedCase::try_from_slice(&bytes);
         });
@@ -6070,6 +6678,6 @@ mod tests {
     #[test]
     fn a_new_oracle_starts_at_the_current_state_version() {
         assert_eq!(fresh_oracle().state_version, STATE_VERSION);
-        assert_eq!(STATE_VERSION, 2);
+        assert_eq!(STATE_VERSION, 3);
     }
 }

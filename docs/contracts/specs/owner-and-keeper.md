@@ -243,7 +243,7 @@ Facts that matter for building it:
 
 ## 5. The allow-list that replaces the deny-list
 
-Status: BUILT on 2026-10-21 in `contracts/keeper/treasury.mjs` (with `chain.mjs` for the reads). Evidence: 25 tests in `contracts/keeper/treasury.test.mjs`, named in 5.4, and 109 mutations of the node code and the contract sources, all caught (AUDIT.md, "Keeper and treasury helper rewrite, 2026-10-21"). Nothing was run against a real SputnikDAO.
+Status: BUILT on 2026-10-21 in `contracts/keeper/treasury.mjs` (with `chain.mjs` for the reads). Evidence: 25 tests in `contracts/keeper/treasury.test.mjs`, named in 5.4, and 109 mutations of the node code and the contract sources, all caught. Nothing was run against a real SputnikDAO.
 
 ### 5.1 Why the deny-list failed
 
@@ -407,7 +407,7 @@ PROPOSED. The numbers follow the threshold rule in 2.2 for a role of five member
 | `proposal_bond` | 1 NEAR or more | Limits spam if any role can still add proposals |
 | `Everyone` role | Remove `*:AddProposal` if the interface allows it | Only members propose |
 | Recompute on membership change | Each time a member is added or removed, recompute every `Ratio` | `Ratio(3, 5)` needs 4 of 5 members and still only 4 of 6, so the share of members who must approve falls as the role grows |
-| Majority floor | No vote policy may need fewer than a majority of the approver role, and the role never has one member | Review finding N-01 put this floor in the retired governance contract's code ([AUDIT.md](../AUDIT.md#every-finding-and-where-it-went)). Sputnik does not enforce it, so it is a policy rule here, and the proposed keeper DAO policy check (section 9.2) pages when it is broken. The retired contract's 72-hour timelock floor has no successor |
+| Majority floor | No vote policy may need fewer than a majority of the approver role, and the role never has one member | Review finding N-01 put this floor in the retired governance contract's code. Sputnik does not enforce it, so it is a policy rule here, and the proposed keeper DAO policy check (section 9.2) pages when it is broken. The retired contract's 72-hour timelock floor has no successor |
 
 ---
 

@@ -28,7 +28,10 @@ async fn a_seat_staked_after_the_revenue_arrived_still_takes_a_share_of_it() -> 
     // The cap of ten seats per account does not bind anything that matters: another wallet takes the next ten.
     mint_nft(&w, &w.alice, "extra").await?;
     let eleventh = stake(&w, &w.alice, "extra").await;
-    println!("eleventh seat for one account: {:?}", eleventh.as_ref().err().map(|e| e.to_string()));
+    println!(
+        "eleventh seat for one account: {:?}",
+        eleventh.as_ref().err().map(|e| e.to_string())
+    );
     assert!(eleventh.is_err(), "the per-account cap is ten seats");
     w.alice
         .call(w.nft.id(), "nft_transfer")
@@ -37,7 +40,10 @@ async fn a_seat_staked_after_the_revenue_arrived_still_takes_a_share_of_it() -> 
         .transact()
         .await?
         .into_result()?;
-    assert!(stake(&w, &w.bob, "extra").await.is_ok(), "the same NFT staked from a second wallet");
+    assert!(
+        stake(&w, &w.bob, "extra").await.is_ok(),
+        "the same NFT staked from a second wallet"
+    );
     skip_secs(&w.worker, HOLD_SECS).await;
     for t in &tokens {
         request_unstake(&w, &w.alice, t).await?;
@@ -62,8 +68,14 @@ async fn a_seat_staked_after_the_revenue_arrived_still_takes_a_share_of_it() -> 
         alice as f64 / USD as f64 / (LATE_SEATS as f64 * HOLD_SECS as f64 / 3600.0),
         u(&incumbent["amount"]) as f64 / USD as f64,
     );
-    assert!(alice > 0, "she took a share of money that was in the Council before she staked");
-    assert!(alice_weight * 100 / total >= 1, "a measurable share of the whole quarter");
+    assert!(
+        alice > 0,
+        "she took a share of money that was in the Council before she staked"
+    );
+    assert!(
+        alice_weight * 100 / total >= 1,
+        "a measurable share of the whole quarter"
+    );
 
     Ok(())
 }

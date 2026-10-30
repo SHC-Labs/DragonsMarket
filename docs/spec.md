@@ -6,8 +6,8 @@ The first release is a funded prediction-market journey with Dragon NFT juries a
 | --- | --- |
 | Updated | 21 October 2026 |
 | Status | Accepted direction; implementation incomplete |
-| Contract implementation | Claude |
-| Website and integration | Codex, against reviewed contract interfaces |
+| Contract implementation | Contract team |
+| Website and integration | Website team, against reviewed contract interfaces |
 | Product decisions | Project owner |
 
 ## Contents
@@ -192,7 +192,7 @@ The protections that do not depend on a delay:
   policy and DAO code changes, and a 72-hour voting period. The numbers are in
   [the owner model](contracts/specs/owner-and-keeper.md#7-recommended-dao-policy).
 
-Claude must prove the restricted methods, the owner handover, upgrades and access-key bypass
+The contract team must prove the restricted methods, the owner handover, upgrades and access-key bypass
 checks against a real SputnikDAO build.
 
 Treasury approvers cannot spend user backing or another holder's entitlement. Treasury membership
@@ -274,7 +274,7 @@ actual fees and eligible participation; no fixed return or payment amount is pro
 | R-08 | Expose reliable user, quarter and operation state | Views / events / services | UI distinguishes availability, commitments, accrual, claims and confirmed payments |
 
 The contract implementer records current coverage, missing methods/state, permissions, ABI,
-migration and tests for each requirement. Codex integrates the reviewed interface. Product
+migration and tests for each requirement. The website team integrates the reviewed interface. Product
 choices change only through the project owner.
 
 ---
@@ -293,7 +293,7 @@ Source inspection on 21 October 2026, without running or modifying contract code
 | Backend | Required operation and reconciliation responsibilities are defined | Choose and implement the actual service and persistence design |
 
 Source presence is not a production-readiness claim. Dated tests and findings remain in
-[the contract audit record](contracts/AUDIT.md) and [verifier proof](contracts/INTENTS-PROOF.md).
+[verifier proof](contracts/INTENTS-PROOF.md).
 They apply to their recorded builds.
 
 ---
@@ -321,9 +321,5 @@ service providers remain details to resolve. Perpetuals and an order book remain
 | --- | --- |
 | This specification | Accepted product behaviour and requirements |
 | [Intents architecture](intents-architecture.md) | Custody, control, accounting and recovery boundaries |
-| [Hackathon plan](hackathon-plan.md) | Delivery scope and evidence needed for a submission |
-| [Contract manuals](contracts/) | Current implementation and work for Claude |
-| [Website guide](web/README.md) | Frontend status, development and integration responsibilities |
-| [Pitch](../PITCH.md) | Product story and growth approach |
-| [Ecosystem reference](../NEAR-RESEARCH.md) | Reusable partner data, outside the application's specification |
+| [Contract manuals](contracts/) | Current implementation and open contract work |
 | Dated reviews, audits and policy copies | Historical evidence for the version reviewed or accepted |

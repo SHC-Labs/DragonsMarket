@@ -36,6 +36,109 @@ async fn staking_a_token_you_do_not_own_is_refused_by_the_collection() -> anyhow
     Ok(())
 }
 
+// The Council asks the collection who owns a token before it counts a seat. The collection here is an account the test controls, so
+// it can call nft_on_transfer on a token it never sent, as a lying collection would. A fresh Council with the real wasm is
+// pointed at it, because the world's Council has staked seats and cannot change collection.
+async fn council_with_collection(
+    w: &World,
+    collection: &near_workspaces::AccountId,
+) -> anyhow::Result<near_workspaces::Contract> {
+    let council = w.worker.dev_deploy(&wasm("council")).await?;
+    council
+        .call("new")
+        .args_json(json!({
+            "owner_id": w.owner.id(), "oracle_id": w.oracle.id(), "verifier_id": w.verifier.id(),
+            "collateral_token_id": token_id(w), "cooldown_ns": (COOLDOWN_SECS * 1_000_000_000).to_string(),
+            "max_seats_per_account": MAX_SEATS_PER_ACCOUNT, "allowlist_enabled": false
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    w.owner
+        .call(council.id(), "set_nft_contract")
+        .args_json(json!({ "nft_contract": collection }))
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(council)
+}
+
+async fn claim_to_stake(
+    collection: &Account,
+    council: &near_workspaces::Contract,
+    owner: &Account,
+    token: &str,
+) -> anyhow::Result<near_workspaces::result::ExecutionFinalResult> {
+    Ok(collection
+        .call(council.id(), "nft_on_transfer")
+        .args_json(json!({ "sender_id": owner.id(), "previous_owner_id": owner.id(), "token_id": token, "msg": "" }))
+        .gas(near_workspaces::types::Gas::from_tgas(100))
+        .transact()
+        .await?)
+}
+
+#[tokio::test]
+async fn the_council_counts_no_seat_for_a_token_it_does_not_really_hold_and_sends_it_back() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let collection = w.worker.dev_deploy(&wasm("mock_nft")).await?;
+    collection
+        .call("new")
+        .args_json(json!({ "owner_id": w.owner.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+    w.owner
+        .call(collection.id(), "nft_mint")
+        .args_json(json!({ "token_id": "ghost", "receiver_id": w.alice.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+    let council = council_with_collection(&w, collection.id()).await?;
+    let seat_count = || async { council.view("seat_count").await.unwrap().json::<u32>().unwrap() };
+
+    // The collection claims it sent "ghost" to the Council, but Alice still holds it: the Council asks the collection who owns it.
+    let r = claim_to_stake(collection.as_account(), &council, &w.alice, "ghost")
+        .await?
+        .into_result()?;
+    assert!(r.json::<bool>()?, "true tells the collection to return the token");
+    assert_eq!(
+        event_names(&r.logs().iter().map(|l| l.to_string()).collect::<Vec<_>>()),
+        vec!["stake_refused"]
+    );
+    assert_eq!(seat_count().await, 0);
+    let stake: serde_json::Value = council
+        .view("stake_of")
+        .args_json(json!({ "token_id": "ghost" }))
+        .await?
+        .json()?;
+    assert!(stake.is_null());
+
+    // A real transfer from the collection to this Council is counted: the check passes when the token is held.
+    let r = w
+        .alice
+        .call(collection.id(), "nft_transfer_call")
+        .args_json(json!({ "receiver_id": council.id(), "token_id": "ghost", "msg": "" }))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(near_workspaces::types::Gas::from_tgas(100))
+        .transact()
+        .await?
+        .into_result()?;
+    assert!(r.json::<bool>()?, "the collection kept the transfer: the seat stands");
+    assert_eq!(seat_count().await, 1);
+
+    // A collection that fails the ownership question is refused the same way. Dave is an account with no contract on it.
+    let broken = council_with_collection(&w, w.dave.id()).await?;
+    let r = claim_to_stake(&w.dave, &broken, &w.alice, "anything")
+        .await?
+        .into_result()?;
+    assert!(
+        r.json::<bool>()?,
+        "the token goes back when the collection cannot answer"
+    );
+    assert_eq!(broken.view("seat_count").await?.json::<u32>()?, 0);
+    Ok(())
+}
+
 #[tokio::test]
 async fn staking_makes_a_seat_and_the_council_holds_the_token() -> anyhow::Result<()> {
     let w = setup().await?;
@@ -185,7 +288,8 @@ async fn requesting_an_unstake_twice_is_refused() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn a_drawn_seat_cannot_leave_until_its_case_is_final() -> anyhow::Result<()> {
-    let w = setup().await?;
+    let mut w = setup().await?;
+    add_jurors(&mut w, 2).await?;
     let id = disputed(&w).await?;
     let jury = draw_jury(&w, id).await?;
     for j in &jury {
@@ -195,7 +299,7 @@ async fn a_drawn_seat_cannot_leave_until_its_case_is_final() -> anyhow::Result<(
             "this seat is serving on an open case",
         );
     }
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(&w, j, id, "no", "s").await?;
     }
 
@@ -212,7 +316,7 @@ async fn a_drawn_seat_cannot_leave_until_its_case_is_final() -> anyhow::Result<(
     }
 
     to_reveal_phase(&w, id).await;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         reveal(&w, j, id, "no", "s", "The source says no.").await?;
     }
     assert_eq!(case_json(&w, id).await["stage"], "final");
@@ -225,19 +329,23 @@ async fn a_drawn_seat_cannot_leave_until_its_case_is_final() -> anyhow::Result<(
 
 #[tokio::test]
 async fn a_draw_picks_only_staked_seats_that_are_not_serving_or_leaving() -> anyhow::Result<()> {
-    let w = setup().await?;
+    let mut w = setup().await?;
+    add_jurors(&mut w, 2).await?;
     let j = &w.jurors;
-    // j1 and j2 leave for good, so exactly three seats are left.
+    // j1 and j2 leave for good, so exactly five seats are left.
     leave(&w, &[&j[1], &j[2]]).await?;
     let first = disputed(&w).await?;
     let jury = draw_jury(&w, first).await?;
-    assert_eq!(sorted(&jury.iter().collect::<Vec<_>>()), sorted(&[&j[0], &j[3], &j[4]]));
-    for who in &jury[..2] {
+    assert_eq!(
+        sorted(&jury.iter().collect::<Vec<_>>()),
+        sorted(&[&j[0], &j[3], &j[4], &j[5], &j[6]])
+    );
+    for who in &jury[..MAJORITY] {
         commit(&w, who, first, "no", "s").await?;
     }
     to_reveal_phase(&w, first).await;
 
-    // A second case while all three are serving the first: nobody is left to draw.
+    // A second case while all five are serving the first: nobody is left to draw.
     let second = new_market(&w, 1).await?;
     skip_secs(&w.worker, 2).await;
     propose(&w, &w.carol, second, "yes").await?;
@@ -246,8 +354,8 @@ async fn a_draw_picks_only_staked_seats_that_are_not_serving_or_leaving() -> any
     assert_eq!(event_names(&resolve_draw(&w, second).await?), vec!["draw_failed"]);
 
     // The first case settles and frees its jury. j0 asks to leave straight away, so it is not available to
-    // serve, and two seats are not enough for a jury of three.
-    for who in &jury[..2] {
+    // serve, and four seats are not enough for a jury of five.
+    for who in &jury[..MAJORITY] {
         reveal(&w, who, first, "no", "s", "The source says no.").await?;
     }
     assert_eq!(case_json(&w, first).await["stage"], "final");
@@ -263,7 +371,7 @@ async fn a_draw_picks_only_staked_seats_that_are_not_serving_or_leaving() -> any
     );
     assert_eq!(
         sorted(&panel(&w, second).await.iter().collect::<Vec<_>>()),
-        sorted(&[&j[3], &j[4], &w.alice])
+        sorted(&[&j[3], &j[4], &j[5], &j[6], &w.alice])
     );
     Ok(())
 }

@@ -34,9 +34,9 @@ const MAX_DECIMALS: u8 = 18;
 const NS_PER_SECOND: u64 = 1_000_000_000;
 const NS_PER_MINUTE: u64 = 60 * NS_PER_SECOND;
 const NS_PER_DAY: u64 = 1_440 * NS_PER_MINUTE;
-// Stakes close at least a minute before the end, so nobody can wait for the price and then stake on the side that already won.
-const HARD_MIN_CLOSE_BEFORE_NS: u64 = NS_PER_MINUTE;
-const HARD_MIN_INTERVAL_NS: u64 = NS_PER_MINUTE;
+// A short round lets a late staker read the price move before staking, so an interval is at least five minutes and stakes
+// close at least half an interval before the end.
+const HARD_MIN_INTERVAL_NS: u64 = 5 * NS_PER_MINUTE;
 const HARD_MAX_INTERVAL_NS: u64 = NS_PER_DAY;
 const HARD_MIN_PRICE_WINDOW_NS: u64 = NS_PER_MINUTE;
 const HARD_MAX_PRICE_WINDOW_NS: u64 = NS_PER_DAY;
@@ -746,8 +746,8 @@ impl RoundsContract {
             "price window outside hard range"
         );
         require!(
-            (HARD_MIN_CLOSE_BEFORE_NS..=interval.0 / 2).contains(&close_before.0),
-            "stakes must close between a minute and half the interval before the end"
+            2 * close_before.0 >= interval.0 && close_before.0 < interval.0,
+            "stakes must close from half the interval up to just under a whole interval before the end"
         );
         let id = self.next_series_id;
         self.next_series_id += 1;
@@ -1279,7 +1279,7 @@ mod tests {
     const START: u64 = 1_000 * NS_PER_MINUTE;
     const INTERVAL: u64 = 5 * NS_PER_MINUTE;
     const WINDOW: u64 = 2 * NS_PER_MINUTE;
-    const CLOSE_BEFORE: u64 = NS_PER_MINUTE;
+    const CLOSE_BEFORE: u64 = INTERVAL / 2;
     const BETTING: u64 = START + NS_PER_MINUTE;
     const END: u64 = START + INTERVAL;
     const CLOSE: u64 = END - CLOSE_BEFORE;
@@ -2100,13 +2100,18 @@ mod tests {
             &|s| s.decimals = 19,
             &|s| s.interval = U64(HARD_MIN_INTERVAL_NS - 1),
             &|s| s.price_window = U64(HARD_MAX_PRICE_WINDOW_NS + 1),
-            &|s| s.close_before = U64(HARD_MIN_CLOSE_BEFORE_NS - 1),
-            &|s| s.close_before = U64(INTERVAL / 2 + 1),
+            &|s| s.close_before = U64(INTERVAL / 2 - 1),
+            &|s| s.close_before = U64(INTERVAL),
         ];
         for change in changes {
             assert!(refused(|| add(&mut c, change)));
         }
         add(&mut c, &|s| s.close_before = U64(INTERVAL / 2));
+        add(&mut c, &|s| {
+            s.interval = U64(HARD_MIN_INTERVAL_NS);
+            s.close_before = U64(HARD_MIN_INTERVAL_NS / 2);
+        });
+        add(&mut c, &|s| s.close_before = U64(INTERVAL - 1));
         c.remove_publisher(public(&keys[0]));
         assert!(
             refused(|| c.remove_publisher(public(&keys[1]))),

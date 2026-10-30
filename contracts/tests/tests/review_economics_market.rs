@@ -101,8 +101,10 @@ async fn fund_and_buy(
     mint(w, who.id(), amount).await?;
     ft_call(w, who, w.market.id(), amount, "deposit").await?;
     who.call(w.market.id(), "buy")
-        .args_json(json!({ "market_id": id.to_string(), "side": side, "amount": amount.to_string(),
-                           "min_shares": min_shares.to_string() }))
+        .args_json(
+            json!({ "market_id": id.to_string(), "side": side, "amount": amount.to_string(),
+                           "min_shares": min_shares.to_string() }),
+        )
         .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
@@ -119,12 +121,22 @@ async fn sell_all(w: &World, who: &Account, id: u64, side: &str) -> anyhow::Resu
     Ok(market_balance(w, who.id()).await - before)
 }
 
+// The cap the market had by default before it was lowered.
+const RAISED_MARKET_CAP_USDC: u128 = 100_000;
+
 #[tokio::test]
 async fn a_round_trip_and_a_sandwich_on_the_real_market() -> anyhow::Result<()> {
     let w = setup().await?;
     for who in [&w.carol, &w.dave] {
         register(&w, who).await?;
     }
+    // The default cap on what a market can hold is 10,000 USDC, below the two buys this test stacks, so the owner raises it.
+    w.owner
+        .call(w.market.id(), "set_max_market_locked")
+        .args_json(json!({ "max_market_locked": (RAISED_MARKET_CAP_USDC * USD).to_string() }))
+        .transact()
+        .await?
+        .into_result()?;
     let id = new_market(&w, 3_600).await?;
 
     // Prime the pool: 2,000 on each side, alice first. Replayed in the mirror to prove the mirror is the contract's maths.
@@ -132,8 +144,16 @@ async fn a_round_trip_and_a_sandwich_on_the_real_market() -> anyhow::Result<()> 
     fund_and_buy(&w, &w.bob, id, "no", 2_000 * USD, 1).await?;
     let (_, a_sh, y) = buy_f(0, 0, 2_000 * USD).unwrap();
     let (_, b_sh, n) = buy_f(0, y, 2_000 * USD).unwrap();
-    assert_eq!(shares(&w, id, w.alice.id()).await.0, a_sh, "mirror differs from the contract");
-    assert_eq!(shares(&w, id, w.bob.id()).await.1, b_sh, "mirror differs from the contract");
+    assert_eq!(
+        shares(&w, id, w.alice.id()).await.0,
+        a_sh,
+        "mirror differs from the contract"
+    );
+    assert_eq!(
+        shares(&w, id, w.bob.id()).await.1,
+        b_sh,
+        "mirror differs from the contract"
+    );
 
     // Plain round trip by carol: buys 1,000, sells everything straight away.
     fund_and_buy(&w, &w.carol, id, "yes", 1_000 * USD, 1).await?;
@@ -143,7 +163,10 @@ async fn a_round_trip_and_a_sandwich_on_the_real_market() -> anyhow::Result<()> 
         usd(back as i128),
         usd(1_000 * USD as i128 - back as i128)
     );
-    assert!(back < 1_000 * USD - 2 * 19 * USD, "a round trip must lose at least both fees");
+    assert!(
+        back < 1_000 * USD - 2 * 19 * USD,
+        "a round trip must lose at least both fees"
+    );
 
     // The pool is back where it was. Now carol front-runs dave's 10,000 buy (dave takes any share count) and sells after.
     let (y_after, n_after) = (y, n);
@@ -177,7 +200,9 @@ async fn a_round_trip_and_a_sandwich_on_the_real_market() -> anyhow::Result<()> 
 // Pure sweeps. Not a chain test: it prints the profit of the best front-run for victims who accept a given slippage.
 #[test]
 fn how_much_a_sandwich_makes_against_a_victim_with_a_slippage_limit() {
-    println!("pool (yes/no shares) | victim buy | slippage accepted | best front buy | attacker profit (after 2% + 2% fees)");
+    println!(
+        "pool (yes/no shares) | victim buy | slippage accepted | best front buy | attacker profit (after 2% + 2% fees)"
+    );
     for (pool, label) in [(500u128, "500/500"), (2_000, "2000/2000"), (20_000, "20000/20000")] {
         for v in [100u128, 1_000, 10_000] {
             for tol in [50u128, 100, 300, 1_000] {
@@ -211,7 +236,10 @@ fn splitting_dust_and_rounding_never_earn() {
         y = g;
     }
     println!("1,000 in one buy: {one} shares, fee {f}; in 100 buys of 10: {got} shares, fees {fees}; y after {y}");
-    assert!(got <= one + 100, "splitting must not give more than one buy (rounding is at most one unit a buy)");
+    assert!(
+        got <= one + 100,
+        "splitting must not give more than one buy (rounding is at most one unit a buy)"
+    );
 
     // The fee rounds up, so odd small amounts pay a higher rate. The cheapest sizes are multiples of 50 units.
     for a in [51u128, 99, 100, 149, 150, 1_000_001] {
@@ -220,7 +248,10 @@ fn splitting_dust_and_rounding_never_earn() {
     }
     // Smallest buy that works: below 51 units the fee eats all of it.
     let smallest = (1u128..200).find(|a| buy_f(USD, USD, *a).is_some()).unwrap();
-    println!("smallest buy that returns shares: {smallest} units = {:.6} USDC", smallest as f64 / USD as f64);
+    println!(
+        "smallest buy that returns shares: {smallest} units = {:.6} USDC",
+        smallest as f64 / USD as f64
+    );
 
     // A buy and sell of the same shares at the same pool: what rounding alone costs (no fees).
     let mut worst_gain: i128 = i128::MIN;

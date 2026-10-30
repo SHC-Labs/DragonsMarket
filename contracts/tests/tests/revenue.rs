@@ -45,7 +45,7 @@ async fn trades_pay_the_quoted_fee_and_redeem_and_withdraw_pay_none() -> anyhow:
     // balance: no fee on either.
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, id, "yes").await?;
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, id).await?;
     let pool = u(&market_json(&w, id).await["locked"]);
     w.alice

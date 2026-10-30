@@ -16,8 +16,11 @@ The upgrade path is the shared `upgrade/src/lib.rs`.
 
 A **series** is one asset cut into rounds of one interval: `asset` (a short lowercase name such as `btc-usd`),
 `decimals` of the price, `first_start`, `interval`, `price_window` and `close_before`, all fixed when it is added. Round
-`r` starts at `first_start + r * interval` and ends where round `r + 1` starts. `close_before` is at least a minute and
-at most half the interval, and each series sets its own, so a slower market can close earlier.
+`r` starts at `first_start + r * interval` and ends where round `r + 1` starts. The interval is at least five minutes.
+`close_before` is at least half the interval and less than the whole interval (so a round always has a staking window),
+and each series sets its own. The floor exists because a staker who sees the price move late in a round wins too often:
+about 75% when stakes close half an interval before the end, 85% to 96% with a 60 second cutoff on a 5-minute or longer
+interval. Both limits are checked in `add_series`, the only place a series is made; a series is never edited.
 
 - **Stakes.** Round `r` takes stakes from its start until `close_before` ahead of its end, so stakes come in while the
   price moves and stop before the last seconds decide it. Between that close and the end no round of the series takes
@@ -137,6 +140,13 @@ after it), `price_recorded` (with the signers), `round_settled` (outcome, reason
 `withdrawal_reconciled`, `series_added`, `publisher_added`, `publisher_removed`, `price_threshold_set`, `fee_set`,
 `registration_fee_set`, `paused_set`, `operator_set`, `owner_proposed`, `owner_changed`, `code_staged`, `upgrade_sent`,
 `migrated`, `seal_sent`.
+
+## Operator note: one-sided rounds
+
+A round with an empty side when its stakes close refunds everyone. A 0.1 USDC ticket on the thin side turns a lopsided
+round into a coin flip: the thin side now exists, so the round pays out instead of refunding, and the ticket's owner
+holds a cheap stake on whichever side is likely to lose. Operators should seed the thin side of a series themselves or
+accept that risk. The contract does nothing about it.
 
 ## Security properties checked by tests
 

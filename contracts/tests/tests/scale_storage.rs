@@ -298,9 +298,9 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
     }
 
     // Oracle cases. Three markets close soon after they are made.
-    let short_a = create_market(&w, CLOSE_SECS, 3_600).await?;
-    let long_b = create_market(&w, CLOSE_SECS, 3_600).await?;
-    let disputed = create_market(&w, CLOSE_SECS, 3_600).await?;
+    let short_a = create_market(&w, CLOSE_SECS, MARKET_GAP_SECS).await?;
+    let long_b = create_market(&w, CLOSE_SECS, MARKET_GAP_SECS).await?;
+    let disputed = create_market(&w, CLOSE_SECS, MARKET_GAP_SECS).await?;
     skip_secs(&w.worker, PAST_CLOSE_SECS).await;
     let before = used(&w, w.oracle.id()).await?;
     propose(&w, &w.carol, short_a, "yes").await?;

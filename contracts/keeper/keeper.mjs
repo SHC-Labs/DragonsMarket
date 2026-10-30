@@ -51,7 +51,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { b58decode, b58encode, rpc, view, viewer } from "./chain.mjs";
-import { compareCodeHashes, describeRelease, liveCodeHashes, parseReleaseHashes } from "./release-check.mjs";
+import { compareCodeHashes, describeRelease, liveCodeHashes, parseReleaseHashes, upgradeProposalProblems } from "./release-check.mjs";
 import { reviewKind, storageRunway } from "./treasury.mjs";
 import { readQueue, writeQueue, withQueueLock, touch, finish, retry, selectJobs, bounded, serializeByKey, ingestFile } from "./due-queue.mjs";
 
@@ -591,9 +591,9 @@ const REVIEW_BY_HAND = new Set([
 const needsReview = (method) => REVIEW_BY_HAND.has(method) || method.startsWith("reconcile_");
 
 // `watch` lists the other accounts whose settings or code decide what ours can do: the verifier and the NFT collection.
-export async function daoReport({ proposals, treasuryId, contracts, view: read, watch = [] }) {
+export async function daoReport({ proposals, treasuryId, contracts, view: read, watch = [], release = null }) {
   const lines = [];
-  const problems = [];
+  const problems = release ? upgradeProposalProblems({ proposals, contracts, release }) : [];
   const others = [];
   const ours = new Set(Object.values(contracts));
   const watched = new Set(watch.filter(Boolean));
@@ -748,9 +748,11 @@ function readReleaseList(source) {
   return fs.readFileSync(source === "-" ? 0 : source, "utf8");
 }
 
-// The live code hashes of the three contracts against a parsed release list: the lines to print, and whether any differ.
+// The live code hashes of the contracts against a parsed release list: the lines to print, and whether any differ.
 export async function releaseReport(opts, expected) {
-  const live = await liveCodeHashes(opts.rpc, { market: opts.market, oracle: opts.oracle, council: opts.council });
+  const accounts = { market: opts.market, oracle: opts.oracle, council: opts.council };
+  if (opts.rounds) accounts.rounds = opts.rounds;
+  const live = await liveCodeHashes(opts.rpc, accounts);
   const problems = compareCodeHashes({ expected, live });
   return { lines: describeRelease(problems), differs: problems.length > 0 };
 }
@@ -871,18 +873,19 @@ async function check(opts) {
   const ratio = bondRatioWarning(configs.market, configs.oracle);
   if (ratio) console.log(`WARNING: ${ratio}`);
   if (opts.treasury) problems.push(...driftProblems(configs, { dao: opts.treasury, operator: opts.operator }));
-  if (opts["watch-dao"]) {
+  if (expectedRelease && !opts.treasury) console.log("release: upgrade proposals not checked, pass --treasury to compare them with the release list");
+  if (opts["watch-dao"] || (expectedRelease && opts.treasury)) {
     const read = viewer(opts.rpc, at);
     const now = BigInt(block.header.timestamp_nanosec);
-    const dao = await daoReport({
-      proposals: await openProposals(opts, read, now),
-      treasuryId: opts.treasury,
-      contracts: Object.fromEntries(names.map((name) => [name, opts[name]])),
-      view: read,
-      watch: [configs.market.verifier, configs.council.nft_contract],
-    });
-    for (const line of dao.lines) console.log(line);
-    problems.push(...dao.problems);
+    const proposals = await openProposals(opts, read, now);
+    const contracts = Object.fromEntries(names.map((name) => [name, opts[name]]));
+    if (opts["watch-dao"]) {
+      const dao = await daoReport({ proposals, treasuryId: opts.treasury, contracts, view: read, watch: [configs.market.verifier, configs.council.nft_contract], release: expectedRelease });
+      for (const line of dao.lines) console.log(line);
+      problems.push(...dao.problems);
+    } else {
+      problems.push(...upgradeProposalProblems({ proposals, contracts, release: expectedRelease }));
+    }
   }
 
   let releaseDiffers = false;

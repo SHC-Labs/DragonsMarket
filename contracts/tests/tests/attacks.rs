@@ -191,7 +191,7 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
         (
             &Contractish::Oracle,
             "set_jury_size",
-            json!({ "jury_size": 1 }),
+            json!({ "jury_size": JURY }),
             "owner only",
         ),
         (
@@ -344,8 +344,8 @@ async fn a_deployed_contract_cannot_be_initialised_again() -> anyhow::Result<()>
         ),
         (
             w.oracle.id(),
-            json!({ "owner_id": me, "market_contract": me, "verifier_id": me, "collateral_token_id": "nep141:x.near", "bond": "1", "window_ms": "1",
-            "panel_deadline_ms": "1", "draw_window_ms": "1", "council": me, "jury_size": 1, "draw_delay_blocks": "1", "min_proposal_ms": "1", "operator_id": me, "network": "x", "price_threshold": 1 }),
+            json!({ "owner_id": me, "market_contract": me, "verifier_id": me, "collateral_token_id": "nep141:x.near", "bond": BOND.to_string(), "window_ms": WINDOW_MS.to_string(),
+            "panel_deadline_ms": PANEL_MS.to_string(), "draw_window_ms": DRAW_WINDOW_MS.to_string(), "council": me, "jury_size": JURY, "draw_delay_blocks": "1", "min_proposal_ms": MIN_PROPOSAL_MS.to_string(), "operator_id": me, "network": "x", "price_threshold": 1 }),
         ),
         (
             w.council.id(),
@@ -815,14 +815,17 @@ async fn starving_the_settling_call_of_gas_cannot_half_settle_a_case() -> anyhow
     propose(&w, &w.carol, id, "yes").await?;
     challenge(&w, &w.dave, id).await?;
     let jury = draw_jury(&w, id).await?;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(&w, j, id, "no", "salt-for-no-0123456789").await?;
     }
     to_reveal_phase(&w, id).await;
-    reveal(&w, &jury[0], id, "no", "salt-for-no-0123456789", "first").await?;
+    for j in &jury[..MAJORITY - 1] {
+        reveal(&w, j, id, "no", "salt-for-no-0123456789", "first").await?;
+    }
 
-    // The second reveal settles the case. With 40 TGas it cannot reserve what the settlement needs, so it fails whole.
-    let starved = jury[1]
+    // The last reveal of the majority settles the case. With 40 TGas it cannot reserve what the settlement needs, so it fails whole.
+    let last = &jury[MAJORITY - 1];
+    let starved = last
         .call(w.oracle.id(), "reveal_vote")
         .args_json(json!({ "market": w.market.id(), "market_id": id.to_string(), "outcome": "no", "salt": "salt-for-no-0123456789", "reason": "second" }))
         .deposit(NearToken::from_yoctonear(1))
@@ -834,7 +837,7 @@ async fn starving_the_settling_call_of_gas_cannot_half_settle_a_case() -> anyhow
     assert_eq!(case["stage"], "disputed", "nothing was half done");
     assert_eq!(
         case["votes"].as_array().unwrap().len(),
-        1,
+        MAJORITY - 1,
         "the starved vote was not recorded"
     );
     assert!(market_json(&w, id).await["outcome"].is_null());
@@ -844,7 +847,7 @@ async fn starving_the_settling_call_of_gas_cannot_half_settle_a_case() -> anyhow
         "seats still held"
     );
 
-    jury[1]
+    last
         .call(w.oracle.id(), "reveal_vote")
         .args_json(json!({ "market": w.market.id(), "market_id": id.to_string(), "outcome": "no", "salt": "salt-for-no-0123456789", "reason": "second" }))
         .deposit(NearToken::from_yoctonear(1))
@@ -995,11 +998,11 @@ async fn a_bogus_challenge_costs_the_attacker_and_pays_the_jurors() -> anyhow::R
     let before = holdings(&w, w.dave.id()).await;
     challenge(&w, &w.dave, id).await?;
     let jury = draw_jury(&w, id).await?;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(&w, j, id, "yes", "salt-for-yes-0123456789").await?;
     }
     to_reveal_phase(&w, id).await;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         reveal(&w, j, id, "yes", "salt-for-yes-0123456789", "The answer is right.").await?;
     }
     assert_eq!(case_json(&w, id).await["final_outcome"], "yes");
@@ -1009,14 +1012,19 @@ async fn a_bogus_challenge_costs_the_attacker_and_pays_the_jurors() -> anyhow::R
         before - BOND,
         "and is out the whole bond"
     );
+    let each = JUROR_PAY;
+    let mut paid = 0;
+    for j in &jury[..MAJORITY] {
+        paid += claimable(&w, j.id()).await;
+    }
     assert_eq!(
-        claimable(&w, jury[0].id()).await + claimable(&w, jury[1].id()).await,
-        BOND / 4,
-        "a quarter went to the jurors"
+        paid,
+        each * MAJORITY as u128,
+        "a quarter, rounded down, went to the jurors"
     );
     assert_eq!(
         claimable(&w, w.carol.id()).await,
-        2 * BOND - BOND / 4,
+        2 * BOND - paid,
         "the rest went to the proposer they attacked"
     );
     Ok(())
@@ -1042,7 +1050,7 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
         .await?
         .into_result()?;
     let (alice_yes, _) = shares(&w, id, w.alice.id()).await;
-    refused(sell(&w, &w.alice, id, "yes", alice_yes, 1).await, "market is halted");
+    sell(&w, &w.alice, id, "yes", alice_yes, 1).await?;
     thief
         .call(w.market.id(), "set_paused")
         .args_json(json!({ "paused": true }))
@@ -1135,11 +1143,14 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
         .transact()
         .await?
         .into_result()?;
-    let (out, _, fee) = quote_sell(&w, id, "yes", alice_yes).await;
-    sell(&w, &w.alice, id, "yes", alice_yes, out - fee).await?;
     assert!(
         market_balance(&w, w.alice.id()).await > 0,
-        "alice got out once the thief was replaced"
+        "alice sold out during the halt, which only blocks buys"
+    );
+    buy(&w, &w.alice, id, "yes", USD).await?;
+    assert!(
+        shares(&w, id, w.alice.id()).await.0 > 0,
+        "buying works again once the thief is replaced and the halt is lifted"
     );
     Ok(())
 }
@@ -1252,13 +1263,8 @@ async fn a_function_call_key_cannot_buy_sell_commit_or_reveal() -> anyhow::Resul
 // to the owner. The silent jurors forfeit what their seats earned and every seat is released.
 #[tokio::test]
 async fn two_colluding_accounts_cannot_stall_a_case_for_free() -> anyhow::Result<()> {
-    let w = setup().await?;
-    w.owner
-        .call(w.oracle.id(), "set_jury_size")
-        .args_json(json!({ "jury_size": 1 }))
-        .transact()
-        .await?
-        .into_result()?;
+    let mut w = setup().await?;
+    add_jurors(&mut w, SECOND_JURY).await?;
     let id = new_market(&w, 120).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 130).await;
@@ -1329,7 +1335,7 @@ async fn a_drawn_jury_cannot_be_rerolled() -> anyhow::Result<()> {
     .await?;
     assert!(direct.is_failure() && format!("{:?}", direct.into_result().err()).contains("oracle only"));
     assert_eq!(case_json(&w, id).await["panel"], drawn);
-    assert_eq!(jury.len(), 3);
+    assert_eq!(jury.len(), JURY as usize);
     Ok(())
 }
 
@@ -1339,8 +1345,8 @@ async fn a_drawn_jury_cannot_be_rerolled() -> anyhow::Result<()> {
 #[tokio::test]
 async fn at_the_deadline_an_unfinalized_proposal_is_applied_and_not_voided_over() -> anyhow::Result<()> {
     let w = setup().await?;
-    let answered = create_market(&w, 120, 600).await?;
-    let unanswered = create_market(&w, 120, 600).await?;
+    let answered = create_market(&w, 120, MARKET_GAP_SECS).await?;
+    let unanswered = create_market(&w, 120, MARKET_GAP_SECS).await?;
     buy(&w, &w.alice, answered, "yes", 10 * USD).await?;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.carol, answered, "yes").await?;
@@ -1427,7 +1433,7 @@ async fn staking_one_block_before_a_sweep_earns_only_the_time_staked() -> anyhow
 #[tokio::test]
 async fn a_pump_held_by_a_halt_until_a_void_pays_each_holder_back_what_they_put_in() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = create_market(&w, 150, 600).await?;
+    let id = create_market(&w, 150, MARKET_GAP_SECS).await?;
     buy(&w, &w.bob, id, "no", 20 * USD).await?;
     buy(&w, &w.alice, id, "yes", 80 * USD).await?;
     let pumped = u(&market_json(&w, id).await["price_yes"]);

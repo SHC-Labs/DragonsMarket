@@ -22,3 +22,6 @@ web/site-tour*.mp4
 
 # Verify skill run state and evidence (.claude/skills/verify)
 .verify/
+
+# Signed prices the keeper publisher keeps between restarts
+publisher-prices.json

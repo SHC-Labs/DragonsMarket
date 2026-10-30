@@ -49,7 +49,7 @@ async fn a_wrong_answer_nobody_challenges_pays_far_more_than_the_bond_it_risks()
     let held = locked(&w, id).await;
     skip_secs(&w.worker, 130).await;
     propose(&w, &w.bob, id, "yes").await?; // the truth is No: alice holds the honest side
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, id).await?;
     assert_eq!(market_json(&w, id).await["outcome"], "yes");
     let net = bob_net(&w, id, BOND).await?;
@@ -75,18 +75,19 @@ async fn a_wrong_answer_that_an_honest_jury_overturns_loses_the_bond_and_the_pos
     propose(&w, &w.bob, id, "yes").await?;
     challenge(&w, &w.carol, id).await?;
     let jury = draw_jury(&w, id).await?;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(&w, j, id, "no", "s").await?;
     }
     to_reveal_phase(&w, id).await;
-    reveal(&w, &jury[0], id, "no", "s", "The source says no.").await?;
-    reveal(&w, &jury[1], id, "no", "s", "The source says no.").await?;
+    for j in &jury[..MAJORITY] {
+        reveal(&w, j, id, "no", "s", "The source says no.").await?;
+    }
     assert_eq!(market_json(&w, id).await["outcome"], "no");
     let (carol, j0) = (claimable(&w, w.carol.id()).await, claimable(&w, jury[0].id()).await);
     let net = bob_net(&w, id, BOND).await?;
     println!(
         "CHALLENGED LIE, HONEST JURY: bob {:+.2} (position {:.2} + bond {:.2} lost); challenger carol nets {:+.2} on the bond; \
-         each of two jurors earns {:.4}",
+         each of three jurors earns {:.4}",
         usd(net),
         usd(ATTACK_YES as i128),
         usd(BOND as i128),
@@ -94,7 +95,7 @@ async fn a_wrong_answer_that_an_honest_jury_overturns_loses_the_bond_and_the_pos
         usd(j0 as i128)
     );
     assert_eq!(net, -((ATTACK_YES + BOND) as i128));
-    assert_eq!(carol, 2 * BOND - BOND / 4);
+    assert_eq!(carol, 2 * BOND - MAJORITY as u128 * JUROR_PAY);
     Ok(())
 }
 
@@ -109,21 +110,26 @@ async fn a_bought_jury_wins_whatever_the_bond_is_so_the_bond_only_prices_the_bri
     propose(&w, &w.bob, id, "yes").await?;
     challenge(&w, &w.carol, id).await?;
     let jury = draw_jury(&w, id).await?;
-    // The draw is public the moment it lands (the jury_drawn event), and the commit phase is half the panel time. Two
-    // bribed jurors out of three commit and reveal Yes. Nothing on chain tells a bought vote from an honest one.
-    for j in &jury[..2] {
+    // The draw is public the moment it lands (the jury_drawn event), and the commit phase is half the panel time. Three
+    // bribed jurors out of five commit and reveal Yes. Nothing on chain tells a bought vote from an honest one.
+    for j in &jury[..MAJORITY] {
         commit(&w, j, id, "yes", "s").await?;
     }
     to_reveal_phase(&w, id).await;
-    reveal(&w, &jury[0], id, "yes", "s", "The source says yes.").await?;
-    reveal(&w, &jury[1], id, "yes", "s", "The source says yes.").await?;
-    assert_eq!(market_json(&w, id).await["outcome"], "yes", "a decided round has no appeal");
+    for j in &jury[..MAJORITY] {
+        reveal(&w, j, id, "yes", "s", "The source says yes.").await?;
+    }
+    assert_eq!(
+        market_json(&w, id).await["outcome"],
+        "yes",
+        "a decided round has no appeal"
+    );
     let juror_pay = claimable(&w, jury[0].id()).await;
     let net_before_bribes = bob_net(&w, id, BOND).await?;
     // The bribed jurors are also paid by the oracle, from the challenger's bond.
-    let max_bribe_each = (net_before_bribes - 2 * juror_pay as i128 * 0) / 2;
+    let max_bribe_each = net_before_bribes / MAJORITY as i128;
     println!(
-        "BOUGHT JURY: market held {:.2}; bob nets {:+.2} before bribes; he can pay each of 2 jurors up to {:.2} and still profit \
+        "BOUGHT JURY: market held {:.2}; bob nets {:+.2} before bribes; he can pay each of 3 jurors up to {:.2} and still profit \
          (the oracle already pays each {:.4} for the same vote; bond {:.2})",
         usd(held as i128),
         usd(net_before_bribes),
@@ -132,7 +138,10 @@ async fn a_bought_jury_wins_whatever_the_bond_is_so_the_bond_only_prices_the_bri
         usd(BOND as i128)
     );
     assert!(net_before_bribes > 100 * USD as i128);
-    assert!(juror_pay < USD, "an honest juror's pay for a decided case is under one USDC at the default bond");
+    assert!(
+        juror_pay < USD,
+        "an honest juror's pay for a decided case is under one USDC at the default bond"
+    );
     Ok(())
 }
 
@@ -160,7 +169,7 @@ async fn forcing_a_void_on_a_correct_answer_costs_the_bond_and_returns_the_losin
     let case = case_json(&w, id).await;
     skip_until(&w, case["panel_deadline"].as_str().unwrap().parse()?).await;
     skip_secs(&w.worker, 1).await;
-    finalize(&w, id).await?; // escalates to seven, which five seats cannot make
+    finalize(&w, id).await?; // escalates to eleven, which five seats cannot make
     wait_for_draw(&w, id).await;
     assert_eq!(event_names(&resolve_draw(&w, id).await?), vec!["draw_failed"]);
     let draw_by: u64 = case_json(&w, id).await["draw_by"].as_str().unwrap().parse()?;
@@ -196,20 +205,21 @@ async fn a_sybil_pair_cycling_bonds_pays_the_jury_and_gains_nothing() -> anyhow:
     propose(&w, &w.carol, id, "yes").await?;
     challenge(&w, &w.dave, id).await?;
     let jury = draw_jury(&w, id).await?;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(&w, j, id, "yes", "s").await?;
     }
     to_reveal_phase(&w, id).await;
-    reveal(&w, &jury[0], id, "yes", "s", "ok").await?;
-    reveal(&w, &jury[1], id, "yes", "s", "ok").await?;
+    for j in &jury[..MAJORITY] {
+        reveal(&w, j, id, "yes", "s", "ok").await?;
+    }
     let back = claimable(&w, w.carol.id()).await + claimable(&w, w.dave.id()).await;
     let net = back as i128 - 2 * BOND as i128;
     println!(
-        "SYBIL PAIR: puts in {:.2}, gets back {:.2}, net {:+.4} (= 25% of one bond, all of it paid to the jury)",
+        "SYBIL PAIR: puts in {:.2}, gets back {:.2}, net {:+.4} (= 25% of one bond rounded down, all of it paid to the jury)",
         usd(2 * BOND as i128),
         usd(back as i128),
         usd(net)
     );
-    assert_eq!(net, -(BOND as i128 / 4));
+    assert_eq!(net, -(MAJORITY as i128 * JUROR_PAY as i128));
     Ok(())
 }

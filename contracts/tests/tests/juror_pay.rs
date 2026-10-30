@@ -8,8 +8,8 @@ fn tok(a: &Account) -> &str {
     a.id().as_str()
 }
 
-// Carol proposed Yes and Dave challenged. Two jurors vote No and settle it, the third never votes. Returns the jury as
-// (two who voted, the one who did not), the case, and the logs of the reveal that settled it. 1,000 USD of revenue
+// Carol proposed Yes and Dave challenged. Three jurors vote No and settle it, a fourth votes Yes and the fifth never votes.
+// Returns the jury as (three who voted No, the one who never voted), the case, and the logs of the reveal that settled it. 1,000 USD of revenue
 // arrives before the draw and again while the jury serves, in the quarter the chain is in.
 async fn decided_with_one_silent_juror(w: &World) -> anyhow::Result<(Vec<Account>, Account, u64, Vec<String>)> {
     mint(w, w.owner.id(), 10_000 * USD).await?;
@@ -21,18 +21,24 @@ async fn decided_with_one_silent_juror(w: &World) -> anyhow::Result<(Vec<Account
     let jury = draw_jury(w, id).await?;
     send_revenue(w, 1_000 * USD).await?;
 
-    commit(w, &jury[0], id, "no", "s").await?;
-    commit(w, &jury[1], id, "no", "s").await?;
+    for j in &jury[..MAJORITY] {
+        commit(w, j, id, "no", "s").await?;
+    }
+    let (dissenter, silent) = (&jury[MAJORITY], &jury[MAJORITY + 1]);
+    commit(w, dissenter, id, "yes", "s").await?;
     assert!(
-        !stake_of(w, tok(&jury[2])).await["serving"].is_null(),
+        !stake_of(w, tok(silent)).await["serving"].is_null(),
         "the seat serves until the case is final"
     );
 
     to_reveal_phase(w, id).await;
-    reveal(w, &jury[0], id, "no", "s", "The source says no.").await?;
-    let logs = reveal_logs(w, &jury[1], id, "no", "s", "The source says no.").await?;
+    reveal(w, dissenter, id, "yes", "s", "The source says yes.").await?;
+    for j in &jury[..MAJORITY - 1] {
+        reveal(w, j, id, "no", "s", "The source says no.").await?;
+    }
+    let logs = reveal_logs(w, &jury[MAJORITY - 1], id, "no", "s", "The source says no.").await?;
     assert_eq!(case_json(w, id).await["stage"], "final");
-    Ok((jury[..2].to_vec(), jury[2].clone(), id, logs))
+    Ok((jury[..MAJORITY].to_vec(), silent.clone(), id, logs))
 }
 
 #[tokio::test]
@@ -40,19 +46,20 @@ async fn the_majority_jurors_split_a_quarter_of_the_losing_bond_and_can_withdraw
     let w = setup().await?;
     let (voters, _, _, _) = decided_with_one_silent_juror(&w).await?;
 
-    // Dave challenged and won, so Carol's bond is the loser's: a quarter, 1,250,000, split between the two jurors who
-    // revealed No. Dave gets his own bond back and the other three quarters.
-    assert_eq!(claimable(&w, voters[0].id()).await, 625_000);
-    assert_eq!(claimable(&w, voters[1].id()).await, 625_000);
-    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND - 1_250_000);
+    // Dave challenged and won, so Carol's bond is the loser's: a quarter, 1,250,000, split between the three jurors who
+    // revealed No, 416,666 each. Dave gets his own bond back and the rest.
+    for voter in &voters {
+        assert_eq!(claimable(&w, voter.id()).await, JUROR_PAY);
+    }
+    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND - 3 * JUROR_PAY);
     assert_eq!(claimable(&w, w.carol.id()).await, 0);
 
     // It is real money: the juror withdraws it into their Intents account.
     let before = intents_balance(&w, voters[0].id()).await;
     withdraw_bond(&w, &voters[0]).await?;
-    assert_eq!(intents_balance(&w, voters[0].id()).await, before + 625_000);
+    assert_eq!(intents_balance(&w, voters[0].id()).await, before + JUROR_PAY);
     assert_eq!(claimable(&w, voters[0].id()).await, 0);
-    assert_eq!(oracle_total_owed(&w).await, 2 * BOND - 625_000);
+    assert_eq!(oracle_total_owed(&w).await, 2 * BOND - JUROR_PAY);
     assert_oracle_reconciled(&w).await;
     Ok(())
 }
@@ -126,8 +133,10 @@ async fn a_juror_who_committed_but_was_not_given_time_to_reveal_is_not_penalised
         commit(&w, j, id, "no", "s").await?;
     }
     to_reveal_phase(&w, id).await;
-    reveal(&w, &jury[0], id, "no", "s", "The source says no.").await?;
-    let logs = reveal_logs(&w, &jury[1], id, "no", "s", "The source says no.").await?;
+    for j in &jury[..MAJORITY - 1] {
+        reveal(&w, j, id, "no", "s", "The source says no.").await?;
+    }
+    let logs = reveal_logs(&w, &jury[MAJORITY - 1], id, "no", "s", "The source says no.").await?;
     assert_eq!(case_json(&w, id).await["stage"], "final");
 
     assert_eq!(case_json(&w, id).await["delinquent"], json!([]));
@@ -137,7 +146,10 @@ async fn a_juror_who_committed_but_was_not_given_time_to_reveal_is_not_penalised
     );
     let quarter = age_current_quarter(&w).await?;
     finalize_quarter(&w, quarter).await?;
-    let (third, first) = (weight(&w, quarter, &jury[2]).await, weight(&w, quarter, &jury[0]).await);
+    let (third, first) = (
+        weight(&w, quarter, &jury[MAJORITY]).await,
+        weight(&w, quarter, &jury[0]).await,
+    );
     assert!(
         third.abs_diff(first) <= 30_000_000_000,
         "the third juror kept all the time it was staked: {third} against {first}"

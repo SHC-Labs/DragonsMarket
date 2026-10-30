@@ -541,6 +541,21 @@ test("wiring check passes when every contract names the same oracle, Council, ve
   assert.deepEqual(wiringProblems({ ...configs, rounds: { ...configs.rounds, collateral_token_id: "nep141:other.near" } }, ids), ["the rounds's collateral token is nep141:other.near, expected nep141:usdc.near"]);
 });
 
+test("daoReport turns an upgrade whose hash is not in the release list into a problem", async () => {
+  const release = parseReleaseHashes(RELEASE_LIST);
+  const upgrade = (id, code_hash) => ({
+    id, status: "InProgress", proposer: "alice.near",
+    kind: { FunctionCall: { receiver_id: "oracle.near", actions: [{ method_name: "upgrade", args: Buffer.from(JSON.stringify({ code_hash })).toString("base64"), deposit: "0", gas: "1" }] } },
+  });
+  const report = await daoReport({
+    proposals: [upgrade(1, hexToBase58(HASHES.oracle)), upgrade(2, hexToBase58("99".repeat(32)))],
+    treasuryId: "dao.near", contracts: { market: "market.near", oracle: "oracle.near", council: "council.near" }, view: async () => null, release,
+  });
+  const notListed = report.problems.filter((p) => p.includes("not in the --release list"));
+  assert.equal(notListed.length, 1);
+  assert.match(notListed[0], /^DAO proposal 2 upgrades oracle/);
+});
+
 test("a proposal that names the verifier, the collection or one of our accounts in another kind is flagged for a person", async () => {
   const proposal = (id, kind) => ({ id, status: "InProgress", proposer: "alice.near", kind });
   const call = (receiver_id) => ({ FunctionCall: { receiver_id, actions: [] } });

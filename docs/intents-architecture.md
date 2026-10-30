@@ -8,7 +8,7 @@ NEAR Intents holds fungible funds while application contracts enforce their perm
 | Decisions | Intents holding layer; Trezu/Sputnik administration; 75/25 revenue; quarterly Council claims |
 | Status | Market and Council use Intents in current source; remaining integration is incomplete |
 | Product authority | [Product specification](spec.md) |
-| Contract work | Claude |
+| Contract work | Contract team |
 
 ## Contents
 
@@ -97,7 +97,7 @@ expires unexecuted if the threshold is not reached in time. It is not an exit wi
 User protection rests on facts that need no delay: `withdraw` and `redeem` never pause, upgrades
 deploy only publicly staged code, and access keys are sealed only after a proven upgrade. The
 PROPOSED DAO policy (four of five for function calls, unanimity for membership and policy) is in
-[the owner model](contracts/specs/owner-and-keeper.md#7-recommended-dao-policy). Claude must prove
+[the owner model](contracts/specs/owner-and-keeper.md#7-recommended-dao-policy). The contract team must prove
 that direct calls, deployment keys and upgrades cannot bypass DAO ownership.
 
 The [treasury handoff](contracts/governance.md) describes the proposal-preparation helper and
@@ -143,8 +143,8 @@ Source inspection on 21 October 2026; no contract build or test was run for this
 | Treasury | Allow-list proposal and vote helpers, not yet run against a real DAO; custom governance removed | Real DAO and policy, ownership handover and integration tests |
 | Frontend | Read-oriented adapters, disabled financial writes | Final DTOs, quote/sign/receipt/recovery integration |
 
-See [market](contracts/market.md), [Council](contracts/council.md), [oracle](contracts/oracle.md)
-and the dated [audit record](contracts/AUDIT.md). Those manuals and tests describe their recorded
+See [market](contracts/market.md), [Council](contracts/council.md) and [oracle](contracts/oracle.md).
+Those manuals and tests describe their recorded
 builds; a complete release requires joint evidence for the new boundary.
 
 ---
@@ -162,7 +162,7 @@ For [R-01 through R-08](spec.md#requirements-to-implementation-map), deliver:
 7. A migration or fresh-deployment plan for each changed state layout and liability.
 8. Frontend integration and a demonstrated funding-to-exit journey using the selected build.
 
-Official integration material is collected in [NEAR-RESEARCH.md](../NEAR-RESEARCH.md). Live routes,
+Official integration material is at <https://docs.near-intents.org/>. Live routes,
 API schemas and deployments must be checked when implementing them.
 
 ---

@@ -67,7 +67,7 @@ async fn price_market(w: &World) -> anyhow::Result<(u64, u64)> {
             "title": "Will bitcoin close at or above 100.00 USD?", "rule_text": "Yes if the median of three exchanges' 1 minute closes is at or above 100.00.",
             "resolution_source": "Median of the 1 minute closing prices on three major exchanges", "void_policy": "Fewer than two exchanges publish a price.",
             "category": "crypto", "subcategory": "bitcoin", "close_at": close_at.to_string(),
-            "resolve_by": (close_at + 3_600_000_000_000u64).to_string(),
+            "resolve_by": (close_at + MARKET_GAP_SECS * 1_000_000_000).to_string(),
             "price_rule": { "observation_time": close_at.to_string(), "strike": STRIKE.to_string(), "decimals": DECIMALS, "above": true }
         }))
         .gas(Gas::from_tgas(100))
@@ -120,7 +120,7 @@ async fn a_signed_price_resolves_the_market_after_the_challenge_window() -> anyh
     );
 
     // Nobody challenges. Once the window closes it is final, and the submitter's bond comes back.
-    skip_secs(&w.worker, 70).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, id).await?;
     assert_eq!(market_json(&w, id).await["outcome"], "yes");
     assert_eq!(claimable(&w, w.carol.id()).await, BOND);
@@ -241,23 +241,25 @@ async fn a_wrong_price_that_enough_publishers_signed_is_overturned_by_a_challeng
     // Dave challenges, and the jury finds the real price was below the strike.
     challenge(&w, &w.dave, id).await?;
     let jury = draw_jury(&w, id).await?;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(&w, j, id, "no", "s").await?;
     }
     to_reveal_phase(&w, id).await;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         reveal(&w, j, id, "no", "s", "The exchanges closed at 99.50.").await?;
     }
     assert_eq!(case_json(&w, id).await["final_outcome"], "no");
     assert_eq!(market_json(&w, id).await["outcome"], "no");
 
-    // The submitter lost their bond, as any proposer does: a quarter to the two jurors, the rest to the challenger.
+    // The submitter lost their bond, as any proposer does: a quarter to the three jurors, the rest to the challenger.
     assert_eq!(claimable(&w, w.carol.id()).await, 0);
-    assert_eq!(claimable(&w, w.dave.id()).await, 2 * BOND - BOND / 4);
     assert_eq!(
-        (claimable(&w, jury[0].id()).await, claimable(&w, jury[1].id()).await),
-        (BOND / 8, BOND / 8)
+        claimable(&w, w.dave.id()).await,
+        2 * BOND - MAJORITY as u128 * JUROR_PAY
     );
+    for j in &jury[..MAJORITY] {
+        assert_eq!(claimable(&w, j.id()).await, JUROR_PAY);
+    }
     Ok(())
 }
 

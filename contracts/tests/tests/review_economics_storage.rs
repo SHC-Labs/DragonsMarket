@@ -4,7 +4,6 @@
 mod common;
 use common::*;
 use near_workspaces::types::NearToken;
-use near_workspaces::Account;
 use serde_json::json;
 
 const NEAR_PER_BYTE: f64 = 1e-5;
@@ -16,7 +15,8 @@ async fn used(w: &World) -> anyhow::Result<i64> {
 }
 
 #[tokio::test]
-async fn filling_the_storage_reserve_costs_the_attacker_more_than_the_protocol_loses_at_any_realistic_near_price() -> anyhow::Result<()> {
+async fn filling_the_storage_reserve_costs_the_attacker_more_than_the_protocol_loses_at_any_realistic_near_price(
+) -> anyhow::Result<()> {
     let w = setup().await?;
     let fee = u(&w.market.view("config").await?.json::<serde_json::Value>()?["registration_fee"]);
     let long = account_with_id_len(&w, 64, "grief").await?;
@@ -77,7 +77,14 @@ async fn filling_the_storage_reserve_costs_the_attacker_more_than_the_protocol_l
         dust_bytes as f64 / POSITIONS as f64,
         (POSITIONS as u128 * DUST) as f64 / USD as f64
     );
-    println!("an 11th position: {}", if sixty_one.is_success() { "accepted".to_string() } else { format!("{:?}", sixty_one.into_result().err().map(|e| e.to_string())) });
+    println!(
+        "an 11th position: {}",
+        if sixty_one.is_success() {
+            "accepted".to_string()
+        } else {
+            format!("{:?}", sixty_one.into_result().err().map(|e| e.to_string()))
+        }
+    );
     let total = reg_long + dust_bytes;
     println!(
         "one collateral-registered wallet filled to the position cap: {total} bytes = {:.5} NEAR for {:.2} USDC; break-even NEAR price {:.2} USD",

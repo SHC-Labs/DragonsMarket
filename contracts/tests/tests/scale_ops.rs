@@ -22,7 +22,6 @@ const LIMIT_SECS: f64 = 30.0 * 60.0;
 const PROBE_CLOSE_SECS: u64 = 100;
 const VIEW_TX_TGAS: u64 = 300;
 const PAST_CLOSE_SECS: u64 = 130;
-const PAST_WINDOW_SECS: u64 = 70;
 const BYTES_PER_RECORD_OVERHEAD: u64 = 40;
 const YOCTO_PER_BYTE: f64 = 1e19;
 
@@ -300,7 +299,7 @@ async fn operator_index_cost() -> anyhow::Result<()> {
         );
 
         // (a) one more buy.
-        let probe = create_market(&w, PROBE_CLOSE_SECS, 3_600).await?;
+        let probe = create_market(&w, PROBE_CLOSE_SECS, MARKET_GAP_SECS).await?;
         fleet.next_id = fleet.next_id.max(probe + 1);
         let usage_before = storage_used(&w, w.market.id()).await?;
         let t = Instant::now();
@@ -488,7 +487,7 @@ async fn trade_gas_by_account_length_and_positions() -> anyhow::Result<()> {
         for p in LEVELS {
             let user = long_user(&w, id_len, &format!("u{p}x")).await?;
             // The reserved market R that the user redeems at the end.
-            let r_id = create_market(&w, R_CLOSE_SECS, 3_600).await?;
+            let r_id = create_market(&w, R_CLOSE_SECS, MARKET_GAP_SECS).await?;
             ft_call(&w, &user, w.market.id(), 200 * USD, "deposit").await?;
             deposit_to_intents(&w, &user, user.id(), 300 * USD).await?;
             if p >= 1 {

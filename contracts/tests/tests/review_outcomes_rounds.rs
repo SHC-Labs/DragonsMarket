@@ -9,9 +9,9 @@ use near_workspaces::{AccountDetailsPatch, Contract};
 use serde_json::{json, Value};
 
 const SECOND: u64 = 1_000_000_000;
-const INTERVAL_SECS: u64 = 120;
+const INTERVAL_SECS: u64 = 300;
 const WINDOW_SECS: u64 = 60;
-const CLOSE_BEFORE_SECS: u64 = 60;
+const CLOSE_BEFORE_SECS: u64 = 150;
 const BYTE_COST: u128 = 10_000_000_000_000_000_000;
 const NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 

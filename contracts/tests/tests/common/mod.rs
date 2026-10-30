@@ -11,17 +11,29 @@ use std::str::FromStr;
 
 pub const USD: u128 = 1_000_000; // mock token has 6 decimals
 pub const BOND: u128 = 5 * USD;
-pub const WINDOW_MS: u64 = 60_000;
-pub const PANEL_MS: u64 = 120_000;
-pub const DRAW_WINDOW_MS: u64 = 60_000;
-pub const JURY: u32 = 3;
+pub const WINDOW_MS: u64 = 3_600_000;
+pub const PANEL_MS: u64 = 7_200_000;
+pub const DRAW_WINDOW_MS: u64 = 3_600_000;
+pub const JURY: u32 = 5;
+pub const SECOND_JURY: usize = 11;
+// Reveals that settle a first-round case early.
+pub const MAJORITY: usize = JURY as usize / 2 + 1;
+pub const SECOND_MAJORITY: usize = SECOND_JURY / 2 + 1;
+// What each juror of a first-round majority is paid: a quarter of the loser's bond, shared and rounded down.
+pub const JUROR_PAY: u128 = BOND / 4 / MAJORITY as u128;
+// The oracle refuses any window under an hour, so the world runs on the hour floor.
+pub const PAST_WINDOW_SECS: u64 = WINDOW_MS / 1000 + 10;
 pub const DRAW_DELAY_BLOCKS: u64 = 2;
-// With the 60s window, two rounds of a 60s draw window and a 120s panel, and the oracle's 30s apply buffer, a market
-// needs 510s between close and resolve_by.
-pub const MIN_PROPOSAL_MS: u64 = 60_000;
-pub const MIN_RESOLVE_GAP_SECS: u64 = 510;
+// With the hour window, two rounds of an hour to draw and two hours of panel, an hour to propose, and the oracle's 30s apply
+// buffer, a market needs 28,830s between close and resolve_by.
+pub const MIN_PROPOSAL_MS: u64 = 3_600_000;
+pub const MIN_RESOLVE_GAP_SECS: u64 = 28_830;
+pub const MARKET_GAP_SECS: u64 = 36_000;
+const BLOCK_MS: u64 = 300;
 pub const NETWORK: &str = "sandbox";
 pub const PRICE_THRESHOLD: u32 = 2;
+// A quarter number no test reaches.
+const NO_QUARTER: u32 = u32::MAX;
 pub const MAX_SEATS_PER_ACCOUNT: u32 = 10;
 pub const COOLDOWN_SECS: u64 = 60;
 // A buy whose 2% fee, 1,000,001, is just over the default minimum sweep. A sweep of it pays the Council 250,000 and the
@@ -86,9 +98,23 @@ pub async fn now(worker: &Worker<Sandbox>) -> u64 {
     worker.view_block().await.unwrap().timestamp()
 }
 
-// Moves chain time forward by about this many seconds (a block is about 0.3 s in the sandbox).
+// Moves chain time forward by at least this many seconds. A block is about 0.3 s in the sandbox, but the average drifts, which
+// matters once a test skips hours, so the jump is repeated until the chain clock has passed the target.
 pub async fn skip_secs(worker: &Worker<Sandbox>, secs: u64) {
-    worker.fast_forward(secs * 1000 / 300 + 5).await.unwrap();
+    skip_to(worker, now(worker).await + secs * 1_000_000_000).await;
+}
+
+async fn skip_to(worker: &Worker<Sandbox>, t_ns: u64) {
+    loop {
+        let t = now(worker).await;
+        if t >= t_ns {
+            return;
+        }
+        worker
+            .fast_forward((t_ns - t) / 1_000_000 / BLOCK_MS + 5)
+            .await
+            .unwrap();
+    }
 }
 
 pub async fn setup() -> anyhow::Result<World> {
@@ -97,14 +123,14 @@ pub async fn setup() -> anyhow::Result<World> {
 
 pub async fn setup_with(window_ms: u64, panel_ms: u64, draw_delay_blocks: u64) -> anyhow::Result<World> {
     let worker = near_workspaces::sandbox().await?;
-    build(worker, window_ms, panel_ms, draw_delay_blocks, None, true).await
+    build(worker, window_ms, panel_ms, draw_delay_blocks, None, true, false).await
 }
 
 // As deployed, before the owner has said where fees go: the market has no fee recipients and the Council has no market. The
 // NFT collection is set, because the five jurors are staked.
 pub async fn setup_unconfigured() -> anyhow::Result<World> {
     let worker = near_workspaces::sandbox().await?;
-    build(worker, WINDOW_MS, PANEL_MS, DRAW_DELAY_BLOCKS, None, false).await
+    build(worker, WINDOW_MS, PANEL_MS, DRAW_DELAY_BLOCKS, None, false, false).await
 }
 
 // The market, the oracle and the council are owned by `admin` when given, by w.owner otherwise. `configured` has the owner set
@@ -116,6 +142,7 @@ async fn build(
     draw_delay_blocks: u64,
     admin: Option<Account>,
     configured: bool,
+    late_seat_rule: bool,
 ) -> anyhow::Result<World> {
     let verifier = worker.dev_deploy(&verifier_wasm()).await?;
     let ft = worker.dev_deploy(&wasm("mock_ft")).await?;
@@ -226,6 +253,9 @@ async fn build(
             .await?
             .into_result()?;
     }
+    if !late_seat_rule {
+        set_late_seat_rule_from(&worker, &council, NO_QUARTER).await?;
+    }
     admin
         .call(council.id(), "set_nft_contract")
         .args_json(json!({ "nft_contract": nft.id() }))
@@ -267,6 +297,62 @@ async fn build(
         stake(&w, j, j.id().as_str()).await?;
     }
     Ok(w)
+}
+
+// The Council gives a seat staked after a quarter began nothing from that quarter. The sandbox is always inside a quarter that began
+// months before its first block, so under the rule every seat of every test would earn nothing. Unless a test is about the
+// rule, the world starts the way an upgraded Council does, with the rule's first quarter set past any the tests can reach.
+// `rule_from_quarter` is the last field of the Council's state.
+pub async fn set_late_seat_rule_from(worker: &Worker<Sandbox>, council: &Contract, quarter: u32) -> anyhow::Result<()> {
+    let key = b"STATE".to_vec();
+    let mut state = worker
+        .view_state(council.id())
+        .await?
+        .get(&key)
+        .expect("the Council's state is stored under STATE")
+        .clone();
+    let at = state.len() - 4;
+    state[at..].copy_from_slice(&quarter.to_le_bytes());
+    worker.patch_state(council.id(), &key, &state).await?;
+    Ok(())
+}
+
+// Files every juror's seat as staked at the start of the quarter the chain is in, as a seat from an earlier quarter would be. The
+// sandbox has no earlier quarter to stake in. Meant for a world that has the late-seat rule switched off: the seats were counted
+// from their staking, and this moves where the count starts.
+pub async fn back_date_seats(w: &World) -> anyhow::Result<()> {
+    let starts_at = u64::from_str(current_quarter(w).await["starts_at"].as_str().unwrap())?;
+    let state = w.worker.view_state(w.council.id()).await?;
+    for juror in &w.jurors {
+        let key = [vec![1u8], borsh_string(juror.id().as_str())].concat();
+        let mut stake = state.get(&key).expect("the juror's seat is stored").clone();
+        // Stake = version: u8, owner: String, staked_at: u64, unlock_requested_at: Option<u64>, serving: Option<u64>,
+        // booked_to: u64. A fresh seat has neither option set.
+        let owner_len = u32::from_le_bytes(stake[1..5].try_into()?) as usize;
+        let staked_at = 1 + 4 + owner_len;
+        let booked_to = staked_at + 8 + 1 + 1;
+        stake[staked_at..staked_at + 8].copy_from_slice(&starts_at.to_le_bytes());
+        stake[booked_to..booked_to + 8].copy_from_slice(&starts_at.to_le_bytes());
+        w.worker.patch_state(w.council.id(), &key, &stake).await?;
+    }
+    Ok(())
+}
+
+// A world under the real rule: seats staked in the quarter the chain is in earn nothing from it.
+pub async fn setup_late_seat_rule() -> anyhow::Result<World> {
+    let worker = near_workspaces::sandbox().await?;
+    build(worker, WINDOW_MS, PANEL_MS, DRAW_DELAY_BLOCKS, None, true, true).await
+}
+
+// More staked seats for a case that reaches its second jury. Each is added to `w.jurors`.
+pub async fn add_jurors(w: &mut World, count: usize) -> anyhow::Result<()> {
+    for _ in 0..count {
+        let juror = w.worker.dev_create_account().await?;
+        mint_nft(w, &juror, juror.id().as_str()).await?;
+        stake(w, &juror, juror.id().as_str()).await?;
+        w.jurors.push(juror);
+    }
+    Ok(())
 }
 
 pub async fn mint_nft(w: &World, to: &Account, token_id: &str) -> anyhow::Result<()> {
@@ -574,9 +660,9 @@ pub async fn case_json(w: &World, id: u64) -> serde_json::Value {
         .unwrap()
 }
 
-// A market closing in `close_in_secs` that must be answered within an hour after it closes.
+// A market closing in `close_in_secs` with room after the close for a full case.
 pub async fn new_market(w: &World, close_in_secs: u64) -> anyhow::Result<u64> {
-    create_market(w, close_in_secs, 3_600).await
+    create_market(w, close_in_secs, MARKET_GAP_SECS).await
 }
 
 // Creates a market closing in `close_in_secs`, with resolve_by `gap_secs` after the close, and waits for the oracle
@@ -863,13 +949,7 @@ pub async fn council_owner_call(w: &World, method: &str, market: &AccountId) -> 
 }
 
 pub async fn skip_until(w: &World, t_ns: u64) {
-    loop {
-        let t = now(&w.worker).await;
-        if t >= t_ns {
-            return;
-        }
-        skip_secs(&w.worker, (t_ns - t) / 1_000_000_000 + 1).await;
-    }
+    skip_to(&w.worker, t_ns).await;
 }
 
 // Moves chain time to the end of the commit phase, where reveals open.
@@ -1025,8 +1105,8 @@ const SEAT_WEIGHT_KEY: u8 = 6;
 const FORFEITS_KEY: u8 = 7;
 const RECEIVED_KEY: u8 = 9;
 // What follows `next_to_finalize` in the Council's state: five 5-byte map prefixes, six u128 totals and the u32 count of
-// unstakes in flight.
-const STATE_AFTER_NEXT_TO_FINALIZE: usize = 5 * 5 + 6 * 16 + 4;
+// unstakes in flight, the u32 count of fresh seats and the u32 quarter the late-seat rule starts from.
+const STATE_AFTER_NEXT_TO_FINALIZE: usize = 5 * 5 + 6 * 16 + 4 + 4 + 4;
 
 // ACCELERATED. The sandbox cannot reach the end of a real quarter, which is about two months of blocks away. A test that needs a
 // finished quarter has the Council's books for the quarter it is in filed under the quarter two before it instead, and points
@@ -1157,6 +1237,7 @@ pub async fn setup_admin_owned() -> anyhow::Result<(World, Account)> {
         DRAW_DELAY_BLOCKS,
         Some(admin.clone()),
         true,
+        false,
     )
     .await?;
     Ok((w, admin))
@@ -1296,7 +1377,7 @@ pub async fn bulk_markets(w: &World, count: u64) -> anyhow::Result<u64> {
                         "title": format!("Bulk market number {id}"), "rule_text": "Resolves Yes if the test says so.",
                         "resolution_source": "https://example.com/source", "void_policy": "Void if the test is cancelled.",
                         "category": "world", "subcategory": "science",
-                        "close_at": close_at.to_string(), "resolve_by": (close_at + 3_600 * 1_000_000_000).to_string()
+                        "close_at": close_at.to_string(), "resolve_by": (close_at + MARKET_GAP_SECS * 1_000_000_000).to_string()
                     }))
                     .gas(Gas::from_tgas(PER_CALL)),
             );

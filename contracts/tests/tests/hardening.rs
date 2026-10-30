@@ -23,8 +23,9 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
         (
             "oracle",
             json!({ "owner_id": other, "market_contract": other, "verifier_id": other, "collateral_token_id": "nep141:token.test.near",
-                    "bond": "1", "window_ms": "1000", "panel_deadline_ms": "1000", "draw_window_ms": "1000", "council": other, "jury_size": 3,
-                    "draw_delay_blocks": "1", "min_proposal_ms": "1000", "operator_id": other, "network": NETWORK,
+                    "bond": BOND.to_string(), "window_ms": WINDOW_MS.to_string(), "panel_deadline_ms": PANEL_MS.to_string(),
+                    "draw_window_ms": DRAW_WINDOW_MS.to_string(), "council": other, "jury_size": JURY,
+                    "draw_delay_blocks": "1", "min_proposal_ms": MIN_PROPOSAL_MS.to_string(), "operator_id": other, "network": NETWORK,
                     "price_threshold": 1, "no_decision_recipient": other }),
         ),
         (
@@ -43,9 +44,9 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
         contract.call("new").args_json(&args).transact().await?.into_result()?;
         let config: serde_json::Value = contract.view("config").await?.json()?;
         let version = match name {
-            "market" => 7,
-            "oracle" => 2,
-            _ => 4,
+            "market" => 8,
+            "oracle" => 3,
+            _ => 5,
         };
         assert_eq!(
             config["state_version"], version,
@@ -817,7 +818,7 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
             "title": "Will bitcoin close at or above 100.00 USD?", "rule_text": "Yes if the median close is at or above 100.00.",
             "resolution_source": "Three exchanges", "void_policy": "Fewer than two publish a price.",
             "category": "crypto", "subcategory": "bitcoin", "close_at": close_at.to_string(),
-            "resolve_by": (close_at + 3_600_000_000_000u64).to_string(),
+            "resolve_by": (close_at + MARKET_GAP_SECS * 1_000_000_000).to_string(),
             "price_rule": { "observation_time": close_at.to_string(), "strike": "10000", "decimals": 2, "above": true }
         }))
         .gas(Gas::from_tgas(100))

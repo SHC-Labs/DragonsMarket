@@ -3,7 +3,7 @@ name = "oracle"
 version = "0.1.0"
 edition = "2021"
 publish = false
-repository = "https://github.com/SHC-Labs/Council-PM"
+repository = "https://github.com/SHC-Labs/Dragons-Market"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

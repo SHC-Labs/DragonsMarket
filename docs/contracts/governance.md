@@ -7,7 +7,7 @@ Trezu/SputnikDAO replaces the retired custom governance contract.
 | Updated | 21 October 2026 |
 | Decision | Accepted |
 | Treasury account | Not created or configured |
-| Contract integration | Claude |
+| Contract integration | Contract team |
 | Product authority | [Specification](../spec.md#7-architecture-and-administration) |
 
 ## Contents
@@ -33,7 +33,7 @@ reasoning, the protections that do not depend on a delay and the PROPOSED DAO po
 failed-call recovery and access-key control against a real SputnikDAO.
 
 The custom contract is absent from the active workspace, build and test fixtures. Its methods
-are not the target administration ABI. Past findings remain in [AUDIT.md](AUDIT.md).
+are not the target administration ABI.
 
 ---
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { b58decode, b58encode, rpc, view } from "./chain.mjs";
 import { options, readKeyFile } from "./keeper.mjs";
@@ -48,11 +50,54 @@ async function refusing(status, work) {
   }
 }
 
-export function quoter({ rpcUrl, oracle, key, venues, fetch }) {
-  const settled = new Map();
-  return async (market, marketId) => {
-    const cacheKey = `${market}:${marketId}`;
-    if (settled.has(cacheKey)) return settled.get(cacheKey);
+export const DEFAULT_PRICE_FILE = "publisher-prices.json";
+
+export function loadSigned(file) {
+  if (!fs.existsSync(file)) return {};
+  const fail = (why) => new Error(`${file} is not a publisher price file (${why}); refusing to start rather than sign a market twice. Fix or move the file`);
+  let saved;
+  try {
+    saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (e) {
+    throw fail(e.message);
+  }
+  if (saved === null || typeof saved !== "object" || Array.isArray(saved)) throw fail("expected an object keyed by market:id");
+  for (const [cacheKey, quote] of Object.entries(saved)) {
+    if (quote?.market === undefined || `${quote.market}:${quote.market_id}` !== cacheKey || typeof quote.signature !== "string" || typeof quote.price !== "string") {
+      throw fail(`the entry ${cacheKey} is not a signed quote`);
+    }
+  }
+  return saved;
+}
+
+function saveSigned(file, entries) {
+  const temp = `${file}.tmp`;
+  const fd = fs.openSync(temp, "w", 0o600);
+  try {
+    fs.writeSync(fd, JSON.stringify(entries) + "\n");
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(temp, file);
+  const dir = fs.openSync(path.dirname(path.resolve(file)), "r");
+  try {
+    fs.fsyncSync(dir);
+  } finally {
+    fs.closeSync(dir);
+  }
+}
+
+export function quoter({ rpcUrl, oracle, key, venues, fetch, priceFile }) {
+  const kept = priceFile ? loadSigned(priceFile) : {};
+  const signed = new Map(Object.entries(kept).map(([cacheKey, quote]) => [cacheKey, Promise.resolve(quote)]));
+  const persist = (cacheKey, quote) => {
+    if (!priceFile) return;
+    kept[cacheKey] = quote;
+    saveSigned(priceFile, kept);
+  };
+
+  async function sign(market, marketId) {
     const config = await view(rpcUrl, oracle, "config");
     if (!config.markets.includes(market)) throw refusal(404, `${market} is not a market ${oracle} serves`);
     if (!config.publishers.includes(key.publicKey)) throw refusal(503, `${key.publicKey} is not a publisher on ${oracle}`);
@@ -69,12 +114,26 @@ export function quoter({ rpcUrl, oracle, key, venues, fetch }) {
     const message = priceMessage({
       oracle, network: config.network, market, marketId, observationTime: rule.observation_time, price: priced.price, decimals: rule.decimals,
     });
-    const quote = {
+    return {
       market, market_id: marketId, pair, observation_time: rule.observation_time, decimals: rule.decimals,
       price: String(priced.price), sources: priced.sources, signature: key.sign(message),
     };
-    if (priced.sources === priced.venues) settled.set(cacheKey, quote);
-    return quote;
+  }
+
+  // One price per market, kept in the price file when there is one: a second price signed for the same market could count
+  // toward a different answer. The promise is cached, so two requests arriving together share one signing, and the quote is
+  // written to disk before anyone sees it. A failure is not kept.
+  return (market, marketId) => {
+    const cacheKey = `${market}:${marketId}`;
+    if (!signed.has(cacheKey)) {
+      const pending = sign(market, marketId).then((quote) => {
+        persist(cacheKey, quote);
+        return quote;
+      });
+      signed.set(cacheKey, pending);
+      pending.catch(() => signed.delete(cacheKey));
+    }
+    return signed.get(cacheKey);
   };
 }
 
@@ -102,7 +161,7 @@ function main() {
   const [command, ...rest] = process.argv.slice(2);
   const opts = options(rest);
   if (command !== "serve" || !opts.rpc || !opts.oracle) {
-    console.error("usage: publisher.mjs serve --rpc URL --oracle ID [--host 127.0.0.1] [--port 8790] [--key-file PATH] [--coinbase-url URL] [--kraken-url URL] [--bitstamp-url URL]; the key is PUBLISHER_KEY or --key-file");
+    console.error(`usage: publisher.mjs serve --rpc URL --oracle ID [--host 127.0.0.1] [--port 8790] [--key-file PATH] [--price-file PATH] [--coinbase-url URL] [--kraken-url URL] [--bitstamp-url URL]; the key is PUBLISHER_KEY or --key-file, the signed prices are kept in --price-file or PUBLISHER_PRICE_FILE (default ${DEFAULT_PRICE_FILE})`);
     process.exit(2);
   }
   if ("key" in opts) throw new Error("--key is refused: a key on the command line shows in the process list. Use PUBLISHER_KEY or --key-file");
@@ -110,8 +169,9 @@ function main() {
   if (!secret) throw new Error("no key: set PUBLISHER_KEY or pass --key-file");
   const key = publisherKey(secret);
   const venues = Object.fromEntries(Object.entries(VENUES).map(([venue, base]) => [venue, opts[`${venue}-url`] ?? base]));
+  const priceFile = opts["price-file"] ?? process.env.PUBLISHER_PRICE_FILE ?? DEFAULT_PRICE_FILE;
   const host = opts.host ?? "127.0.0.1";
-  const listening = server(quoter({ rpcUrl: opts.rpc, oracle: opts.oracle, key, venues })).listen(Number(opts.port ?? 8790), host);
+  const listening = server(quoter({ rpcUrl: opts.rpc, oracle: opts.oracle, key, venues, priceFile })).listen(Number(opts.port ?? 8790), host);
   listening.on("listening", () => console.log(`publisher ${key.publicKey} listening on http://${host}:${listening.address().port}`));
 }
 

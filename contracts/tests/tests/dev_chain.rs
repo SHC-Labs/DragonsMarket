@@ -230,8 +230,8 @@ async fn make(w: &World, index: usize) -> anyhow::Result<u64> {
 #[tokio::test]
 #[ignore]
 async fn dev_chain() -> anyhow::Result<()> {
-    let w = setup_with(600_000, 1_800_000, DRAW_DELAY_BLOCKS).await?; // 10 minute challenge window, 30 minute panel deadline
-                                                                      // Enough play money for the demo trades.
+    let w = setup().await?; // one hour challenge window, two hour panel deadline: the least the oracle accepts
+                            // Enough play money for the demo trades.
     for who in [&w.owner, &w.alice, &w.bob] {
         w.owner
             .call(w.ft.id(), "mint")
@@ -251,34 +251,25 @@ async fn dev_chain() -> anyhow::Result<()> {
 
     // Market 5: an answer nobody challenges, finalised. Alice (Yes) can redeem.
     propose(&w, &w.carol, m_final_yes, "yes").await?;
-    skip_secs(&w.worker, 620).await;
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
     finalize(&w, m_final_yes).await?;
 
     // Market 3: challenged, decided by a drawn jury. Bob (No) can redeem.
     propose(&w, &w.carol, m_verdict, "yes").await?;
     challenge(&w, &w.dave, m_verdict).await?;
     let jury = draw_jury(&w, m_verdict).await?;
-    commit(&w, &jury[0], m_verdict, "no", "dev-chain-0").await?;
-    commit(&w, &jury[1], m_verdict, "no", "dev-chain-1").await?;
+    for (i, juror) in jury[..MAJORITY].iter().enumerate() {
+        commit(&w, juror, m_verdict, "no", &format!("dev-chain-{i}")).await?;
+    }
     to_reveal_phase(&w, m_verdict).await;
-    reveal(
-        &w,
-        &jury[0],
-        m_verdict,
-        "no",
-        "dev-chain-0",
+    let reasons = [
         "The hurricane centre's advisory still lists it as a tropical storm.",
-    )
-    .await?;
-    reveal(
-        &w,
-        &jury[1],
-        m_verdict,
-        "no",
-        "dev-chain-1",
         "No hurricane advisory was issued before the deadline.",
-    )
-    .await?;
+        "The storm never reached hurricane strength.",
+    ];
+    for (i, juror) in jury[..MAJORITY].iter().enumerate() {
+        reveal(&w, juror, m_verdict, "no", &format!("dev-chain-{i}"), reasons[i]).await?;
+    }
 
     // Market 2: challenged, jury drawn, one hidden vote in.
     propose(&w, &w.carol, m_disputed, "yes").await?;

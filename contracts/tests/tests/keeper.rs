@@ -98,6 +98,16 @@ async fn market_with_gap(w: &World, gap_secs: u64) -> anyhow::Result<u64> {
     Ok(id.parse()?)
 }
 
+async fn set_jury_size(w: &World, size: u32) -> anyhow::Result<()> {
+    w.owner
+        .call(w.oracle.id(), "set_jury_size")
+        .args_json(json!({ "jury_size": size }))
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(())
+}
+
 // `extra` new accounts each holding a staked seat, on top of the five the setup stakes.
 async fn add_seat_holders(w: &World, extra: usize) -> anyhow::Result<()> {
     for _ in 0..extra {
@@ -110,13 +120,15 @@ async fn add_seat_holders(w: &World, extra: usize) -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn one_run_of_the_keeper_unsticks_everything_that_is_due_and_a_second_finds_nothing() -> anyhow::Result<()> {
-    let w = setup().await?;
+    let mut w = setup().await?;
+    // One more seat than a jury, because the seat put back below is still held when the keeper draws the second jury.
+    add_jurors(&mut w, 1).await?;
     let state = scratch(&w, "state.json");
     let state_arg = state.to_str().unwrap();
     let unfinalized = new_market(&w, 120).await?;
-    let undrawn = new_market(&w, 120).await?;
+    let undrawn = create_market(&w, 120, 2 * MIN_RESOLVE_GAP_SECS).await?;
     let locked = new_market(&w, 120).await?;
-    let unanswered = market_with_gap(&w, 600).await?;
+    let unanswered = market_with_gap(&w, MIN_RESOLVE_GAP_SECS).await?;
     skip_secs(&w.worker, 130).await;
 
     // 1. A proposal whose challenge window ends while the dispute below plays out. Nobody finalizes it.
@@ -126,15 +138,15 @@ async fn one_run_of_the_keeper_unsticks_everything_that_is_due_and_a_second_find
     propose(&w, &w.carol, locked, "yes").await?;
     challenge(&w, &w.dave, locked).await?;
     let jury = draw_jury(&w, locked).await?;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(&w, j, locked, "no", "s").await?;
     }
     to_reveal_phase(&w, locked).await;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         reveal(&w, j, locked, "no", "s", "The source says no.").await?;
     }
     assert_eq!(case_json(&w, locked).await["stage"], "final");
-    let token = jury[2].id().to_string();
+    let token = jury[MAJORITY].id().to_string();
     relock_seat(&w, &token, locked).await?;
 
     // 3. A challenge late enough that its jury is still drawable when the unanswered market's deadline has passed.
@@ -146,7 +158,7 @@ async fn one_run_of_the_keeper_unsticks_everything_that_is_due_and_a_second_find
     propose(&w, &w.carol, undrawn, "yes").await?;
     challenge(&w, &w.dave, undrawn).await?;
     // Far enough past the deadline that the keeper's last final block, which trails the tip, is past it too, and
-    // still inside the 60 s draw window that opened at the challenge.
+    // still inside the draw window that opened at the challenge.
     skip_until(&w, deadline + 10_000_000_000).await;
     wait_for_draw(&w, undrawn).await;
 
@@ -187,7 +199,10 @@ async fn one_run_of_the_keeper_unsticks_everything_that_is_due_and_a_second_find
     assert!(state.exists(), "the queue persists work before dispatch");
 
     assert_eq!(market_json(&w, unfinalized).await["outcome"], "yes");
-    assert_eq!(case_json(&w, undrawn).await["panel"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        case_json(&w, undrawn).await["panel"].as_array().unwrap().len(),
+        JURY as usize
+    );
     assert_eq!(market_json(&w, unanswered).await["outcome"], "void");
     assert!(
         stake_of(&w, &token).await["serving"].is_null(),
@@ -208,11 +223,11 @@ async fn one_run_of_the_keeper_unsticks_everything_that_is_due_and_a_second_find
 
     // The jury decides. Bounded reconciliation removes the remaining completed job.
     let jury = panel(&w, undrawn).await;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         commit(&w, j, undrawn, "no", "s").await?;
     }
     to_reveal_phase(&w, undrawn).await;
-    for j in &jury[..2] {
+    for j in &jury[..MAJORITY] {
         reveal(&w, j, undrawn, "no", "s", "The source says no.").await?;
     }
     assert_eq!(case_json(&w, undrawn).await["stage"], "final");
@@ -380,58 +395,33 @@ async fn the_deploy_check_reports_whether_the_council_can_seat_a_jury_and_a_seco
             .await?
             .into_result()?;
     }
-    // Five seat holders and a jury of three: enough for a first jury with a proposer and a challenger who hold seats,
-    // too few for the second jury of 7 that a failed first round calls for.
+    // Five seat holders and a jury of five: a first jury with a proposer and a challenger who hold seats cannot be drawn.
     let (out, ok) = keeper(&w, &["check"]).await;
     assert!(
-        !ok && out.contains("5 drawable seat holders") && out.contains("12 are needed (3 + 7 + 2)"),
+        !ok && out.contains("PROBLEM")
+            && out.contains("5 drawable seat holders")
+            && out.contains("7 are needed to be safe"),
         "{out}"
     );
-    assert!(
-        !out.contains("every draw will fail") && !out.contains("to be safe"),
-        "{out}"
-    );
+    assert!(!out.contains("every draw will fail"), "{out}");
 
-    // Raise the jury to 5: exactly as many holders as jurors, so a dispute whose parties hold seats cannot be drawn.
-    w.owner
-        .call(w.oracle.id(), "set_jury_size")
-        .args_json(json!({ "jury_size": 5 }))
-        .transact()
-        .await?
-        .into_result()?;
-    let (out, ok) = check_showing(&w, "jury size 5 then").await;
-    assert!(
-        !ok && out.contains("PROBLEM") && out.contains("7 are needed to be safe"),
-        "{out}"
-    );
-
-    // And 7 jurors with five holders: every draw fails.
-    w.owner
-        .call(w.oracle.id(), "set_jury_size")
-        .args_json(json!({ "jury_size": 7 }))
-        .transact()
-        .await?
-        .into_result()?;
+    // And a jury of seven with five holders: every draw fails.
+    set_jury_size(&w, 7).await?;
     let (out, ok) = check_showing(&w, "jury size 7 then").await;
     assert!(!ok && out.contains("every draw will fail"), "{out}");
 
-    // Back to 3 with 12 different holders: both juries and both parties fit.
-    w.owner
-        .call(w.oracle.id(), "set_jury_size")
-        .args_json(json!({ "jury_size": 3 }))
-        .transact()
-        .await?
-        .into_result()?;
-    add_seat_holders(&w, 6).await?;
-    let (out, ok) = check_showing(&w, "11 drawable seat holders").await;
-    assert!(
-        !ok && out.contains("11 drawable seat holders") && out.contains("12 are needed (3 + 7 + 2)"),
-        "{out}"
-    );
-    add_seat_holders(&w, 1).await?;
+    // Back to 5 with 12 different holders: the first jury and both parties fit, the second jury of 11 does not.
+    set_jury_size(&w, JURY).await?;
+    add_seat_holders(&w, 7).await?;
     let (out, ok) = check_showing(&w, "12 drawable seat holders").await;
     assert!(
-        ok && out.contains("12 drawable seat holders") && out.trim_end().ends_with("ok"),
+        !ok && out.contains("12 drawable seat holders") && out.contains("18 are needed (5 + 11 + 2)"),
+        "{out}"
+    );
+    add_seat_holders(&w, 6).await?;
+    let (out, ok) = check_showing(&w, "18 drawable seat holders").await;
+    assert!(
+        ok && out.contains("18 drawable seat holders") && out.trim_end().ends_with("ok"),
         "{out}"
     );
     Ok(())

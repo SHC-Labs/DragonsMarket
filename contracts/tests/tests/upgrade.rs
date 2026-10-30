@@ -131,11 +131,11 @@ fn governed_contracts(w: &World) -> Vec<(&'static str, &'static str, &Contract)>
 // Market layout 7, Council layout 4 and oracle layout 2.
 fn state_version_of(label: &str) -> u32 {
     if label == "oracle" {
-        2
+        3
     } else if label == "market" {
-        7
+        8
     } else {
-        4
+        5
     }
 }
 
@@ -414,7 +414,7 @@ async fn the_version_five_build_upgrades_to_this_one_before_any_market_and_keeps
         .await?
         .into_result()?;
     let c = config(&w.market).await;
-    assert_eq!((&c["state_version"], &c["upgrade_proven"]), (&json!(7), &json!(true)));
+    assert_eq!((&c["state_version"], &c["upgrade_proven"]), (&json!(8), &json!(true)));
     assert_eq!(
         account_records(&w).await,
         before,
@@ -434,7 +434,7 @@ async fn the_version_five_build_upgrades_to_this_one_before_any_market_and_keeps
 async fn a_version_five_build_that_has_created_a_market_refuses_the_upgrade_and_keeps_its_code() -> anyhow::Result<()> {
     let base = setup().await?;
     let w = version_five_world(&base).await?;
-    create_market(&w, 600, 3_600).await?;
+    create_market(&w, 600, MARKET_GAP_SECS).await?;
     let old = deployed_hash(&w.market).await;
     let hash = stage(&w.bob, w.market.id(), &wasm("market")).await?;
     let r = w

@@ -110,10 +110,13 @@ const GAS_SETTLE_FLOOR: Gas =
 const NEP141_PREFIX: &str = "nep141:";
 // Root layout version. Migration reads the exact current root or the one before. Version 2 added the sweep ledger and
 // optional recipients; version 3 tagged stored records; version 4 adds storage policy and operational position paging.
-const STATE_VERSION: u16 = 7;
-// What one market can hold at most, in the collateral's smallest unit: 100,000 at 6 decimals by default, and never above what
-// the pricing math accepts.
-const DEFAULT_MAX_MARKET_LOCKED: u128 = 100_000_000_000;
+const STATE_VERSION: u16 = 8;
+// What one market can hold at most, in the collateral's smallest unit: 10,000 at 6 decimals by default for a new contract, and
+// never above what the pricing math accepts. A contract migrated from before keeps the 100,000 it was running with.
+const DEFAULT_MAX_MARKET_LOCKED: u128 = 10_000_000_000;
+const LEGACY_MAX_MARKET_LOCKED: u128 = 100_000_000_000;
+// How long a halt stops new buys before it lapses on its own. The owner extends it by halting again and lifts it with resume.
+const HALT_DURATION_NS: u64 = 24 * 3_600 * 1_000_000_000;
 const HARD_MIN_MARKET_LOCKED: u128 = 1_000_000;
 // Pages bound scanned market ids, including ids without a holding.
 const POSITION_PAGE_DEFAULT: u64 = 50;
@@ -149,6 +152,7 @@ enum Key {
     Registrations,
     Costs,
     MarketCaps,
+    HaltUntil,
 }
 
 #[near(serializers=[borsh, json])]
@@ -592,9 +596,72 @@ pub struct MarketContract {
     // The operator can set a lower cap for a single market; nothing sets one above this.
     max_market_locked: u128,
     market_caps: LookupMap<u64, u128>,
+    // market -> when its halt lapses, in ns. Kept after the halt ends, so the operator cannot halt the same market again; the
+    // owner's resume deletes it.
+    halt_until: LookupMap<u64, u64>,
 }
 
 // Exact layout of state version 6, which had no market caps.
+// Exact layout of state version 7, which had no halt expiry.
+#[near(serializers=[borsh])]
+struct StateV7 {
+    state_version: u16,
+    upgrade_proven: bool,
+    upgrade_in_flight: bool,
+    owner: AccountId,
+    pending_owner: Option<AccountId>,
+    operator: AccountId,
+    oracle: AccountId,
+    verifier: AccountId,
+    collateral_token_id: String,
+    paused: bool,
+    sells_paused: bool,
+    fee_rate_bps: u128,
+    max_fee_rate_bps: u128,
+    min_revenue_share_bps: u128,
+    max_revenue_share_bps: u128,
+    max_min_sweep: u128,
+    max_positions: u32,
+    void_grace_ns: u64,
+    settle_wait_minutes: u32,
+    reconcile_wait_minutes: u32,
+    min_sweep_interval_minutes: u32,
+    next_market_id: u64,
+    markets: LookupMap<u64, VersionedMarket>,
+    balances: LookupMap<AccountId, u128>,
+    balances_total: u128,
+    accounts: LookupMap<AccountId, u32>,
+    shares: LookupMap<(u64, AccountId, u8), u128>,
+    costs: LookupMap<(u64, AccountId), i128>,
+    position_markets: LookupMap<AccountId, Vec<u64>>,
+    recipients: Option<FeeRecipients>,
+    revenue_share_bps: u128,
+    fees: u128,
+    revenue_due: u128,
+    treasury_due: u128,
+    revenue_unresolved: u128,
+    locked_total: u128,
+    min_sweep: u128,
+    next_sweep_id: u64,
+    last_sweep_at: Option<u64>,
+    sweeps: LookupMap<u64, VersionedSweep>,
+    legs_in_flight_total: u128,
+    legs_in_flight_count: u32,
+    next_withdrawal_id: u64,
+    withdrawals: LookupMap<u64, VersionedWithdrawal>,
+    pending_withdrawals_total: u128,
+    pending_withdrawal_count: u32,
+    pending_by_account: LookupMap<AccountId, u128>,
+    exempt_accounts: LookupMap<AccountId, bool>,
+    position_counts: LookupMap<AccountId, u32>,
+    market_storage_deposit: u128,
+    storage_reserve: u128,
+    registration_fee: u128,
+    registrations: LookupMap<AccountId, Registration>,
+    max_market_locked: u128,
+    market_caps: LookupMap<u64, u128>,
+}
+
 #[near(serializers=[borsh])]
 struct StateV6 {
     state_version: u16,
@@ -650,6 +717,69 @@ struct StateV6 {
     storage_reserve: u128,
     registration_fee: u128,
     registrations: LookupMap<AccountId, Registration>,
+}
+
+impl From<StateV7> for MarketContract {
+    fn from(old: StateV7) -> Self {
+        Self {
+            state_version: STATE_VERSION,
+            upgrade_proven: old.upgrade_proven,
+            upgrade_in_flight: old.upgrade_in_flight,
+            owner: old.owner,
+            pending_owner: old.pending_owner,
+            operator: old.operator,
+            oracle: old.oracle,
+            verifier: old.verifier,
+            collateral_token_id: old.collateral_token_id,
+            paused: old.paused,
+            sells_paused: old.sells_paused,
+            fee_rate_bps: old.fee_rate_bps,
+            max_fee_rate_bps: old.max_fee_rate_bps,
+            min_revenue_share_bps: old.min_revenue_share_bps,
+            max_revenue_share_bps: old.max_revenue_share_bps,
+            max_min_sweep: old.max_min_sweep,
+            max_positions: old.max_positions,
+            void_grace_ns: old.void_grace_ns,
+            settle_wait_minutes: old.settle_wait_minutes,
+            reconcile_wait_minutes: old.reconcile_wait_minutes,
+            min_sweep_interval_minutes: old.min_sweep_interval_minutes,
+            next_market_id: old.next_market_id,
+            markets: old.markets,
+            balances: old.balances,
+            balances_total: old.balances_total,
+            accounts: old.accounts,
+            shares: old.shares,
+            costs: old.costs,
+            position_markets: old.position_markets,
+            recipients: old.recipients,
+            revenue_share_bps: old.revenue_share_bps,
+            fees: old.fees,
+            revenue_due: old.revenue_due,
+            treasury_due: old.treasury_due,
+            revenue_unresolved: old.revenue_unresolved,
+            locked_total: old.locked_total,
+            min_sweep: old.min_sweep,
+            next_sweep_id: old.next_sweep_id,
+            last_sweep_at: old.last_sweep_at,
+            sweeps: old.sweeps,
+            legs_in_flight_total: old.legs_in_flight_total,
+            legs_in_flight_count: old.legs_in_flight_count,
+            next_withdrawal_id: old.next_withdrawal_id,
+            withdrawals: old.withdrawals,
+            pending_withdrawals_total: old.pending_withdrawals_total,
+            pending_withdrawal_count: old.pending_withdrawal_count,
+            pending_by_account: old.pending_by_account,
+            exempt_accounts: old.exempt_accounts,
+            position_counts: old.position_counts,
+            market_storage_deposit: old.market_storage_deposit,
+            storage_reserve: old.storage_reserve,
+            registration_fee: old.registration_fee,
+            registrations: old.registrations,
+            max_market_locked: old.max_market_locked,
+            market_caps: old.market_caps,
+            halt_until: LookupMap::new(Key::HaltUntil),
+        }
+    }
 }
 
 impl From<StateV6> for MarketContract {
@@ -708,8 +838,9 @@ impl From<StateV6> for MarketContract {
             storage_reserve: old.storage_reserve,
             registration_fee: old.registration_fee,
             registrations: old.registrations,
-            max_market_locked: DEFAULT_MAX_MARKET_LOCKED,
+            max_market_locked: LEGACY_MAX_MARKET_LOCKED,
             market_caps: LookupMap::new(Key::MarketCaps),
+            halt_until: LookupMap::new(Key::HaltUntil),
         }
     }
 }
@@ -843,8 +974,9 @@ impl From<StateV5> for MarketContract {
             storage_reserve: old.storage_reserve,
             registration_fee: old.registration_fee,
             registrations: old.registrations,
-            max_market_locked: DEFAULT_MAX_MARKET_LOCKED,
+            max_market_locked: LEGACY_MAX_MARKET_LOCKED,
             market_caps: LookupMap::new(Key::MarketCaps),
+            halt_until: LookupMap::new(Key::HaltUntil),
         }
     }
 }
@@ -962,6 +1094,7 @@ impl MarketContract {
             registrations: LookupMap::new(Key::Registrations),
             max_market_locked: DEFAULT_MAX_MARKET_LOCKED,
             market_caps: LookupMap::new(Key::MarketCaps),
+            halt_until: LookupMap::new(Key::HaltUntil),
         };
         state.make_exempt(&owner_id);
         state.make_exempt(&operator_id);
@@ -1019,6 +1152,7 @@ impl MarketContract {
         let version = u16::from_le_bytes([bytes[0], bytes[1]]);
         let mut state: Self = match version {
             STATE_VERSION => env::state_read().unwrap_or_else(|| env::panic_str("invalid current state")),
+            7 => Self::from(env::state_read::<StateV7>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
             6 => Self::from(env::state_read::<StateV6>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
             5 => Self::from(env::state_read::<StateV5>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
             _ => env::panic_str("unsupported state version"),
@@ -1214,23 +1348,35 @@ impl MarketContract {
         }
     }
 
+    // Stops new buys on one market for HALT_DURATION_NS. Sells, withdrawals, claims and redemptions keep working. The operator
+    // can halt a market once; after that only the owner halts it again, which extends the halt by another HALT_DURATION_NS.
     pub fn halt(&mut self, market_id: U64, reason: String) {
         self.only_operator_or_owner();
         let mut m = self.market(market_id.0);
         require!(m.outcome.is_none(), "already resolved");
+        require!(
+            env::predecessor_account_id() == self.owner || !self.halt_until.contains_key(&market_id.0),
+            "the operator halts a market once, the owner halts it again"
+        );
+        let until = env::block_timestamp().saturating_add(HALT_DURATION_NS);
         m.halted = true;
+        self.halt_until.insert(market_id.0, until);
         self.store_market(market_id.0, m);
         emit(
             "market_halted",
-            json!({ "market_id": market_id.0.to_string(), "reason": reason }),
+            json!({ "market_id": market_id.0.to_string(), "reason": reason, "until": until.to_string() }),
         );
     }
 
+    // Lifts a halt. The owner's resume also clears the record, so the operator can halt that market again.
     pub fn resume(&mut self, market_id: U64) {
         self.only_operator_or_owner();
         let mut m = self.market(market_id.0);
         require!(m.outcome.is_none(), "already resolved");
         m.halted = false;
+        if env::predecessor_account_id() == self.owner {
+            self.halt_until.remove(&market_id.0);
+        }
         self.store_market(market_id.0, m);
         emit("market_resumed", json!({ "market_id": market_id.0.to_string() }));
     }
@@ -1726,7 +1872,7 @@ impl MarketContract {
         require!(!self.sells_paused, "sells are paused");
         require!(self.accounts.contains_key(who), "do the storage deposit first");
         let idx = side_index(side);
-        let mut m = self.open_market(id);
+        let mut m = self.tradable_market(id);
         let (target, other) = m.sides(idx);
         let (fee, refund, left) = dpm::sell_after_fee(target, other, shares, self.fee_rate_bps)
             .unwrap_or_else(|| env::panic_str("cannot sell that many shares"));
@@ -2262,7 +2408,7 @@ impl MarketContract {
                     market_id: U64(id),
                     yes,
                     no,
-                    status: m.status().to_string(),
+                    status: m.status(self.is_halted(id, &m)).to_string(),
                     outcome: m.outcome,
                     redeemable: U128(
                         m.outcome
@@ -2558,10 +2704,10 @@ impl Market {
         dpm::winning_payout(held, self.winners(outcome), self.locked).unwrap_or(0)
     }
 
-    fn status(&self) -> &'static str {
+    fn status(&self, halted: bool) -> &'static str {
         if self.outcome.is_some() {
             "resolved"
-        } else if self.halted {
+        } else if halted {
             "halted"
         } else if env::block_timestamp() >= self.close_at {
             "closed"
@@ -2669,12 +2815,26 @@ impl MarketContract {
     }
 
     fn open_market(&self, id: u64) -> Market {
+        let m = self.tradable_market(id);
+        require!(!self.is_halted(id, &m), "market is halted");
+        m
+    }
+
+    // A market a holder can still sell in, halted or not.
+    fn tradable_market(&self, id: u64) -> Market {
         let m = self.market(id);
         require!(m.registered, "market is not registered with the oracle yet");
-        require!(!m.halted, "market is halted");
         require!(m.outcome.is_none(), "market is resolved");
         require!(env::block_timestamp() < m.close_at, "market is closed");
         m
+    }
+
+    fn is_halted(&self, id: u64, m: &Market) -> bool {
+        m.halted
+            && self
+                .halt_until
+                .get(&id)
+                .is_some_and(|until| env::block_timestamp() < *until)
     }
 
     fn register_with_oracle(&self, id: u64) {
@@ -2978,7 +3138,7 @@ impl MarketContract {
             price_rule: m.price_rule,
             close_at: U64(m.close_at),
             resolve_by: U64(m.resolve_by),
-            status: m.status().to_string(),
+            status: m.status(self.is_halted(id, m)).to_string(),
             registered: m.registered,
             outcome: m.outcome,
             refunds: m.refunds,
@@ -4011,8 +4171,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "market is halted")]
-    fn a_halted_market_refuses_sells_as_well_as_buys() {
+    fn a_halted_market_still_lets_holders_sell() {
         let (mut c, mut total_in) = world();
         step(&mut c, &mut total_in, 0, 0, 0, 10_000_000, 1);
         act_as(OWNER, 4);
@@ -4020,6 +4179,7 @@ mod tests {
         let (held, _) = holdings(&c, 0, USERS[0]);
         act_as(USERS[0], 5);
         c.sell(U64(0), "yes".into(), U128(held), U128(1));
+        assert_eq!(holdings(&c, 0, USERS[0]).0, 0);
     }
 
     // Ann sells out at a loss before a Void. An exit is final, so what she left behind is owed to nobody once the
@@ -4253,6 +4413,79 @@ mod tests {
         assert!(!c.market(0).halted);
     }
 
+    fn halted_market_world() -> MarketContract {
+        let (mut c, mut total_in) = world();
+        step(&mut c, &mut total_in, 0, 0, 0, 10_000_000, 1);
+        let mut m = c.market(0);
+        m.close_at = 10 * NS_PER_DAY;
+        c.store_market(0, m);
+        act_as(OWNER, 5);
+        c.set_operator(acct("ops.near"));
+        act_as("ops.near", 10);
+        c.halt(U64(0), "checking".into());
+        c
+    }
+
+    fn buy_one_unit(c: &mut MarketContract, at: u64) {
+        act_as(VERIFIER, at);
+        let _ = receive(c, acct(USERS[0]), U128(1_000_000), "buy:0:yes:1".into());
+    }
+
+    #[test]
+    fn an_operator_halt_stops_buys_and_lapses_after_the_halt_duration() {
+        let mut c = halted_market_world();
+        assert!(refused(|| buy_one_unit(&mut c, 11)));
+        assert!(refused(|| buy_one_unit(&mut c, 10 + HALT_DURATION_NS - 1)));
+        assert_eq!(status(&c, 0), "halted");
+        buy_one_unit(&mut c, 10 + HALT_DURATION_NS);
+        assert_eq!(status(&c, 0), "open");
+    }
+
+    #[test]
+    fn a_new_contract_caps_a_market_at_ten_thousand() {
+        let (c, _) = world();
+        assert_eq!(DEFAULT_MAX_MARKET_LOCKED, 10_000 * 1_000_000);
+        assert_eq!(c.market_cap(U64(0)), U128(DEFAULT_MAX_MARKET_LOCKED));
+    }
+
+    #[test]
+    fn exits_keep_working_while_a_market_is_halted() {
+        let mut c = halted_market_world();
+        let (held, _) = holdings(&c, 0, USERS[0]);
+        act_as(USERS[0], 20);
+        c.sell(U64(0), "yes".into(), U128(held / 2), U128(1));
+        let after_sell = c.get_account(acct(USERS[0])).available;
+        assert!(after_sell.0 > 0);
+        act_as(USERS[0], 21);
+        let _ = c.withdraw(U128(after_sell.0));
+    }
+
+    #[test]
+    fn the_operator_halts_a_market_once_and_the_owner_extends_it() {
+        let mut c = halted_market_world();
+        act_as("ops.near", 11);
+        assert!(refused(|| c.halt(U64(0), "again".into())), "the operator cannot extend");
+        act_as(OWNER, HALT_DURATION_NS);
+        c.halt(U64(0), "still looking".into());
+        assert!(refused(|| buy_one_unit(&mut c, 10 + HALT_DURATION_NS + 1)));
+        buy_one_unit(&mut c, 2 * HALT_DURATION_NS);
+    }
+
+    #[test]
+    fn resume_lifts_a_halt_before_it_lapses_and_only_the_owner_frees_the_operator_to_halt_again() {
+        let mut c = halted_market_world();
+        act_as("ops.near", 11);
+        c.resume(U64(0));
+        buy_one_unit(&mut c, 12);
+        act_as("ops.near", 13);
+        assert!(refused(|| c.halt(U64(0), "again".into())));
+        act_as(OWNER, 14);
+        c.resume(U64(0));
+        act_as("ops.near", 15);
+        c.halt(U64(0), "again".into());
+        assert!(refused(|| buy_one_unit(&mut c, 16)));
+    }
+
     // ---- what the view says about a market that cannot trade yet ---------------------------------------------
 
     fn status(c: &MarketContract, id: u64) -> String {
@@ -4303,8 +4536,10 @@ mod tests {
             .0;
         c.halt(U64(id), "x".into());
         assert_eq!(status(&c, id), "halted");
-        act_unpaid(OWNER, CLOSE + 3 * NS_PER_DAY);
+        act_unpaid(OWNER, 6);
         assert_eq!(status(&c, id), "halted");
+        act_unpaid(OWNER, CLOSE + 3 * NS_PER_DAY);
+        assert_eq!(status(&c, id), "closed", "the halt lapsed on its own");
         c.resume(U64(id));
         assert_eq!(status(&c, id), "closed");
         let mut m = c.market(id);
@@ -7053,7 +7288,7 @@ mod tests {
                 market_id: U64(id),
                 yes: U128(yes),
                 no: U128(no),
-                status: m.status().to_string(),
+                status: m.status(c.is_halted(id, &m)).to_string(),
                 outcome: m.outcome,
                 redeemable: U128(
                     m.outcome
@@ -7965,7 +8200,80 @@ mod tests {
         let upgraded = MarketContract::migrate();
         assert_eq!(upgraded.state_version, STATE_VERSION);
         assert_eq!(upgraded.total_owed(), owed);
-        assert_eq!(upgraded.market_cap(U64(id)), U128(DEFAULT_MAX_MARKET_LOCKED));
+        assert_eq!(upgraded.market_cap(U64(id)), U128(LEGACY_MAX_MARKET_LOCKED));
+        assert!(upgraded.upgrade_proven && !upgraded.upgrade_in_flight);
+    }
+
+    #[test]
+    fn a_version_seven_contract_moves_to_eight_keeping_its_caps_and_halting_nothing() {
+        let mut c = deployed_with_a_balance();
+        let id = create_registered(&mut c, OWNER);
+        c.max_market_locked = LEGACY_MAX_MARKET_LOCKED;
+        let owed = c.total_owed();
+        let old = StateV7 {
+            state_version: 7,
+            upgrade_proven: c.upgrade_proven,
+            upgrade_in_flight: true,
+            owner: c.owner,
+            pending_owner: c.pending_owner,
+            operator: c.operator,
+            oracle: c.oracle,
+            verifier: c.verifier,
+            collateral_token_id: c.collateral_token_id,
+            paused: c.paused,
+            sells_paused: c.sells_paused,
+            fee_rate_bps: c.fee_rate_bps,
+            max_fee_rate_bps: c.max_fee_rate_bps,
+            min_revenue_share_bps: c.min_revenue_share_bps,
+            max_revenue_share_bps: c.max_revenue_share_bps,
+            max_min_sweep: c.max_min_sweep,
+            max_positions: c.max_positions,
+            void_grace_ns: c.void_grace_ns,
+            settle_wait_minutes: c.settle_wait_minutes,
+            reconcile_wait_minutes: c.reconcile_wait_minutes,
+            min_sweep_interval_minutes: c.min_sweep_interval_minutes,
+            next_market_id: c.next_market_id,
+            markets: c.markets,
+            balances: c.balances,
+            balances_total: c.balances_total,
+            accounts: c.accounts,
+            shares: c.shares,
+            costs: c.costs,
+            position_markets: c.position_markets,
+            recipients: c.recipients,
+            revenue_share_bps: c.revenue_share_bps,
+            fees: c.fees,
+            revenue_due: c.revenue_due,
+            treasury_due: c.treasury_due,
+            revenue_unresolved: c.revenue_unresolved,
+            locked_total: c.locked_total,
+            min_sweep: c.min_sweep,
+            next_sweep_id: c.next_sweep_id,
+            last_sweep_at: c.last_sweep_at,
+            sweeps: c.sweeps,
+            legs_in_flight_total: c.legs_in_flight_total,
+            legs_in_flight_count: c.legs_in_flight_count,
+            next_withdrawal_id: c.next_withdrawal_id,
+            withdrawals: c.withdrawals,
+            pending_withdrawals_total: c.pending_withdrawals_total,
+            pending_withdrawal_count: c.pending_withdrawal_count,
+            pending_by_account: c.pending_by_account,
+            exempt_accounts: c.exempt_accounts,
+            position_counts: c.position_counts,
+            market_storage_deposit: c.market_storage_deposit,
+            storage_reserve: c.storage_reserve,
+            registration_fee: c.registration_fee,
+            registrations: c.registrations,
+            max_market_locked: c.max_market_locked,
+            market_caps: c.market_caps,
+        };
+        env::state_write(&old);
+        act_unpaid(SELF, 5);
+        let upgraded = MarketContract::migrate();
+        assert_eq!(upgraded.state_version, STATE_VERSION);
+        assert_eq!(upgraded.total_owed(), owed);
+        assert_eq!(upgraded.market_cap(U64(id)), U128(LEGACY_MAX_MARKET_LOCKED));
+        assert!(!upgraded.halt_until.contains_key(&id));
         assert!(upgraded.upgrade_proven && !upgraded.upgrade_in_flight);
     }
 

@@ -46,7 +46,11 @@ impl Round {
     // The winning side's holders split the pool less 3% of what the losing side paid, never taking the pool below one unit per
     // winning share. A one-sided round refunds everyone.
     fn fee(&self, up_wins: bool) -> u128 {
-        let (winners, loser_paid) = if up_wins { (self.up, self.paid_down) } else { (self.down, self.paid_up) };
+        let (winners, loser_paid) = if up_wins {
+            (self.up, self.paid_down)
+        } else {
+            (self.down, self.paid_up)
+        };
         let pool = self.paid_up + self.paid_down;
         (loser_paid * FEE_BPS / 10_000).min(pool.saturating_sub(winners))
     }
@@ -82,15 +86,27 @@ fn favourite_wins(t: f64, l: f64) -> f64 {
 #[test]
 fn what_the_live_price_is_worth_in_the_last_minute() {
     println!("series interval | close_before | a staker who backs the side the price already favours wins");
-    for (t, l) in [(120.0, 60.0), (300.0, 60.0), (300.0, 150.0), (900.0, 60.0), (3_600.0, 60.0), (3_600.0, 1_800.0)] {
+    for (t, l) in [
+        (120.0, 60.0),
+        (300.0, 60.0),
+        (300.0, 150.0),
+        (900.0, 60.0),
+        (3_600.0, 60.0),
+        (3_600.0, 1_800.0),
+    ] {
         println!("{t:>8}s | {l:>6}s | {:.1}%", 100.0 * favourite_wins(t, l));
     }
     assert!(favourite_wins(300.0, 60.0) > 0.85);
-    assert!((favourite_wins(300.0, 150.0) - 0.75).abs() < 1e-9, "at the hard maximum of half the interval, still 75%");
+    assert!(
+        (favourite_wins(300.0, 150.0) - 0.75).abs() < 1e-9,
+        "at the hard maximum of half the interval, still 75%"
+    );
 
     // Edge in money. Crowd: 1,000 USDC on Up first, 1,000 on Down second (the order matters: see below). A late staker backs Up with
     // probability p. EV is p times the payout minus the stake.
-    println!("\nlate staker x on Up into a crowd that staked 1000 Up then 1000 Down; implied chance of Up before = 25%");
+    println!(
+        "\nlate staker x on Up into a crowd that staked 1000 Up then 1000 Down; implied chance of Up before = 25%"
+    );
     println!("p     | x=10 EV%  | x=100 EV% | x=1000 EV%");
     for p in [0.5, 0.6, 0.75, 0.85, 0.96] {
         let mut row = format!("{p:.2}  ");
@@ -115,7 +131,11 @@ fn what_the_live_price_is_worth_in_the_last_minute() {
         let before = r.chance_up();
         let sh = r.stake(true, 100 * USD);
         let ev = 0.85 * r.payout(sh, true) as f64 - 100.0 * USD as f64;
-        println!("{a}/{b} (Down staked first): chance of Up before {:.0}%  EV {:+.1}%", 100.0 * before, ev / USD as f64);
+        println!(
+            "{a}/{b} (Down staked first): chance of Up before {:.0}%  EV {:+.1}%",
+            100.0 * before,
+            ev / USD as f64
+        );
     }
 }
 
@@ -155,7 +175,13 @@ fn staking_both_sides_with_two_wallets_only_pays_the_fee_on_the_loser() {
         let up = r.payout(sa, true);
         let down = r.payout(sb, false);
         let put = (a + b) * USD;
-        println!("{a:>5} | {b:>6} | {:>8.2} | {:>8.2} | {:>8.2} | {:>6.2}", usd(put as f64), usd(up as f64), usd(down as f64), usd((put - up.min(down)) as f64));
+        println!(
+            "{a:>5} | {b:>6} | {:>8.2} | {:>8.2} | {:>8.2} | {:>6.2}",
+            usd(put as f64),
+            usd(up as f64),
+            usd(down as f64),
+            usd((put - up.min(down)) as f64)
+        );
         assert!(up <= put && down <= put, "no riskless profit from holding both sides");
         assert!(put - up.min(down) <= put * 3 / 100);
     }
@@ -178,7 +204,11 @@ fn the_order_of_the_first_two_stakes_moves_the_price_and_an_empty_side_refunds()
     assert!(second > first);
     // 3% fee on the losing side and what it does to a winner's multiple.
     let fee = r.fee(true);
-    println!("fee if Up wins: {:.2} (3% of the Down side's {:.0})", usd(fee as f64), usd(r.paid_down as f64));
+    println!(
+        "fee if Up wins: {:.2} (3% of the Down side's {:.0})",
+        usd(fee as f64),
+        usd(r.paid_down as f64)
+    );
     assert_eq!(fee, 30 * USD);
     // A round with one side empty is refunded in full at no fee (rounds::Round::decide, reason one_sided). So a lone big stake is safe
     // until someone takes the other side, and the cheapest way to take it is the minimum stake above.
