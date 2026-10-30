@@ -103,7 +103,8 @@ async fn learn_stake_gas(w: &World, who: &Account, token: &str) -> anyhow::Resul
         .await?;
     let burnt = tg(r.total_gas_burnt);
     r.into_result()?;
-    let per_call = (burnt * 1.5).ceil().max(30.0) as u64;
+    // A stake needs the council's own floor (38 TGas) plus what the collection keeps for its resolve step.
+    let per_call = (burnt * 1.5).ceil().max(50.0) as u64;
     println!("one stake burnt {burnt:.1} TGas; batches use {per_call} TGas an action");
     Ok(per_call)
 }

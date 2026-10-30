@@ -264,7 +264,7 @@ async fn the_owner_can_remove_an_intents_key_registered_for_the_market_and_the_c
 // (sell), and it cannot touch any destination, the owner-only pause on sells or the upgrade.
 #[tokio::test]
 async fn the_operator_can_halt_buys_but_never_exits_and_reaches_no_destination() -> anyhow::Result<()> {
-    let (w, _admin) = setup_admin_owned().await?;
+    let (w, admin) = setup_admin_owned().await?;
     let operator = &w.owner;
     let id = new_market(&w, 600).await?;
     buy(&w, &w.alice, id, "yes", 10 * USD).await?;
@@ -322,7 +322,16 @@ async fn the_operator_can_halt_buys_but_never_exits_and_reaches_no_destination()
         assert!(r.is_failure(), "operator called {method}");
     }
 
-    operator
+    refused(
+        operator
+            .call(w.market.id(), "resume")
+            .args_json(json!({ "market_id": id.to_string() }))
+            .transact()
+            .await?
+            .into_result(),
+        "owner only",
+    );
+    admin
         .call(w.market.id(), "resume")
         .args_json(json!({ "market_id": id.to_string() }))
         .transact()

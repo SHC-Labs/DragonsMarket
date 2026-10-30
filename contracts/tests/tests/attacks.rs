@@ -72,7 +72,7 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
             &Contractish::Market,
             "resume",
             json!({ "market_id": "0" }),
-            "operator or owner only",
+            "owner only",
         ),
         (
             &Contractish::Market,
@@ -1129,7 +1129,7 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
             .transact()
             .await?
             .into_result(),
-        "operator or owner only",
+        "owner only",
     );
     replacement
         .call(w.market.id(), "set_paused")
@@ -1137,7 +1137,16 @@ async fn a_stolen_operator_key_can_halt_trading_but_cannot_take_money_or_keep_th
         .transact()
         .await?
         .into_result()?;
-    replacement
+    refused(
+        replacement
+            .call(w.market.id(), "resume")
+            .args_json(json!({ "market_id": id.to_string() }))
+            .transact()
+            .await?
+            .into_result(),
+        "owner only",
+    );
+    admin
         .call(w.market.id(), "resume")
         .args_json(json!({ "market_id": id.to_string() }))
         .transact()
