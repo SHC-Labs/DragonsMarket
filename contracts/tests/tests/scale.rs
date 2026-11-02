@@ -21,9 +21,7 @@ use std::time::Instant;
 const DEFAULT_MARKETS: u64 = 300;
 const STEP_SIZES: [u64; 2] = [600, 1_200];
 const FLAT_TOLERANCE: f64 = 0.10;
-const ENTITLEMENT_LIMIT_TGAS: f64 = 100.0;
-const ENTITLEMENT_CAP: u32 = 25;
-const ENTITLEMENT_ASKED: u32 = 50;
+const HOLDER_VIEW_LIMIT_TGAS: f64 = 100.0;
 const VIEW_LIMIT_TGAS: f64 = 200.0;
 const CHEAP_LIMIT_TGAS: f64 = 20.0;
 const TX_LIMIT_TGAS: u64 = 300;
@@ -489,33 +487,24 @@ async fn views_keep_working_as_markets_pile_up() -> anyhow::Result<()> {
 
     t.view(
         &w,
-        "council.list_quarters (50)",
+        "council.quarter_snapshots (50)",
         n,
         &w.council,
-        "list_quarters",
-        json!({ "from_quarter": 0, "limit": 50 }),
+        "quarter_snapshots",
+        json!({ "from": null, "limit": 50 }),
         any,
     )
     .await;
     t.view(&w, "council.reward_totals", n, &w.council, "reward_totals", none, any)
         .await;
-    for (asked, label) in [
-        (
-            ENTITLEMENT_CAP,
-            format!("council.entitlements_of ({ENTITLEMENT_CAP}, {SEATS_EACH} seats)"),
-        ),
-        (
-            ENTITLEMENT_ASKED,
-            format!("council.entitlements_of ({ENTITLEMENT_ASKED} asked, clamped, {SEATS_EACH} seats)"),
-        ),
-    ] {
+    for view in ["claimable_of", "in_progress_of"] {
         t.view(
             &w,
-            &label,
+            &format!("council.{view} ({SEATS_EACH} seats)"),
             n,
             &w.council,
-            "entitlements_of",
-            json!({ "account_id": holder.id(), "from_quarter": 0, "limit": asked }),
+            view,
+            json!({ "account_id": holder.id() }),
             any,
         )
         .await;
@@ -618,12 +607,15 @@ async fn views_keep_working_as_markets_pile_up() -> anyhow::Result<()> {
             }
         }
     }
-    for r in t.0.iter().filter(|r| r.view.starts_with("council.entitlements_of")) {
+    for r in
+        t.0.iter()
+            .filter(|r| r.view.starts_with("council.claimable_of") || r.view.starts_with("council.in_progress_of"))
+    {
         assert!(r.ok, "{} failed: {}", r.view, r.note);
         let gas = r.gas.expect("gas");
         assert!(
-            gas < ENTITLEMENT_LIMIT_TGAS,
-            "{} burnt {gas:.1} TGas, expected under {ENTITLEMENT_LIMIT_TGAS}",
+            gas < HOLDER_VIEW_LIMIT_TGAS,
+            "{} burnt {gas:.1} TGas, expected under {HOLDER_VIEW_LIMIT_TGAS}",
             r.view
         );
     }

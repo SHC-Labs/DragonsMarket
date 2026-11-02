@@ -32,9 +32,8 @@ pub const MARKET_GAP_SECS: u64 = 36_000;
 const BLOCK_MS: u64 = 300;
 pub const NETWORK: &str = "sandbox";
 pub const PRICE_THRESHOLD: u32 = 2;
-// A quarter number no test reaches.
-const NO_QUARTER: u32 = u32::MAX;
 pub const MAX_SEATS_PER_ACCOUNT: u32 = 10;
+pub const NS_PER_DAY: u64 = 86_400_000_000_000;
 pub const COOLDOWN_SECS: u64 = 60;
 // A buy whose 2% fee, 1,000,001, is just over the default minimum sweep. A sweep of it pays the Council 250,000 and the
 // treasury 750,000, both rounded down, and leaves one unit collected.
@@ -44,6 +43,7 @@ pub const COUNCIL_SHARE: u128 = 250_000;
 pub const TREASURY_SHARE: u128 = 750_000;
 pub const FAR_DEADLINE: &str = "2100-01-01T00:00:00Z";
 const NEP413_PREFIX_TAG: u32 = 2_147_484_061;
+const SECOND_ROUND_KEY: u64 = 1 << 63;
 
 pub struct World {
     pub worker: Worker<Sandbox>,
@@ -65,9 +65,54 @@ pub struct World {
     pub jurors: Vec<Account>,
 }
 
+impl World {
+    // The same world with another Council, for a test that runs a second one beside the world's own.
+    pub fn with_council(&self, council: Contract) -> World {
+        World {
+            worker: self.worker.clone(),
+            verifier: self.verifier.clone(),
+            ft: self.ft.clone(),
+            market: self.market.clone(),
+            oracle: self.oracle.clone(),
+            council,
+            nft: self.nft.clone(),
+            owner: self.owner.clone(),
+            alice: self.alice.clone(),
+            bob: self.bob.clone(),
+            carol: self.carol.clone(),
+            dave: self.dave.clone(),
+            treasury: self.treasury.clone(),
+            jurors: self.jurors.clone(),
+        }
+    }
+}
+
+// The newest modification time of any .rs file under `dir`.
+fn newest_source(dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    let mut newest = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        let time = if path.is_dir() { newest_source(&path) } else if path.extension().is_some_and(|e| e == "rs") { entry.metadata().ok()?.modified().ok() } else { None };
+        newest = newest.max(time);
+    }
+    newest
+}
+
+// A wasm built before the last edit to its source makes a sandbox failure look like a code bug. It has happened twice, so a stale
+// wasm stops the test here with the fix instead.
 pub fn wasm(name: &str) -> Vec<u8> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../target/near/{0}/{0}.wasm", name));
-    std::fs::read(&p).unwrap_or_else(|e| panic!("run contracts/build.sh first ({p:?}): {e}"))
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let p = root.join(format!("target/near/{0}/{0}.wasm", name));
+    let bytes = std::fs::read(&p).unwrap_or_else(|e| panic!("run contracts/build.sh first ({p:?}): {e}"));
+    let built = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+    let own = root.join(name.replace('_', "-")).join("src");
+    let shared = root.join("upgrade/src");
+    let uses_upgrade = ["council", "market", "oracle", "rounds"].contains(&name);
+    let source = [Some(own), uses_upgrade.then_some(shared)].into_iter().flatten().filter_map(|d| newest_source(&d)).max();
+    if let (Some(built), Some(source)) = (built, source) {
+        assert!(built >= source, "the {name} wasm is older than its source: run contracts/build.sh before the sandbox tests ({p:?})");
+    }
+    bytes
 }
 
 // The verifier is built outside the repository from the pinned source (contracts/INTENTS-PROOF.md). A missing file fails the
@@ -83,6 +128,19 @@ before running them. Build it with:\n\
   mkdir -p contracts/target/intents && cp $SCRATCH/intents-repro/defuse.wasm contracts/target/intents/defuse.wasm\n\
 The sha256 must be a1afab98916d9f213746544dcf8e4e6bdb22c0be6bc5dfbd8ea8814c9922b547 (the code hash of intents.near). \
 Details are in contracts/INTENTS-PROOF.md.";
+
+// The version 5 Council is built outside the working tree from the commit this version was made from, so the upgrade test has the
+// code that is deployed today. A missing file fails the test with the recipe.
+pub const V5_RECIPE: &str = "the version 5 Council wasm is missing. The upgrade test needs the code that is deployed today. Build it with:\n\
+  SCRATCH=$(mktemp -d)\n\
+  git -C <the Dragons Market checkout> archive fd188d0 contracts | tar -x -C $SCRATCH\n\
+  cd $SCRATCH/contracts/council && cargo near build non-reproducible-wasm --locked --out-dir $SCRATCH/out\n\
+  mkdir -p contracts/target/near/council_v5 && cp $SCRATCH/out/council.wasm contracts/target/near/council_v5/council_v5.wasm";
+
+pub fn v5_wasm() -> Vec<u8> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/near/council_v5/council_v5.wasm");
+    std::fs::read(&p).unwrap_or_else(|e| panic!("{V5_RECIPE}\n(looked at {p:?}: {e})"))
+}
 
 pub fn verifier_wasm() -> Vec<u8> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/intents/defuse.wasm");
@@ -123,14 +181,14 @@ pub async fn setup() -> anyhow::Result<World> {
 
 pub async fn setup_with(window_ms: u64, panel_ms: u64, draw_delay_blocks: u64) -> anyhow::Result<World> {
     let worker = near_workspaces::sandbox().await?;
-    build(worker, window_ms, panel_ms, draw_delay_blocks, None, true, false).await
+    build(worker, window_ms, panel_ms, draw_delay_blocks, None, true).await
 }
 
 // As deployed, before the owner has said where fees go: the market has no fee recipients and the Council has no market. The
 // NFT collection is set, because the five jurors are staked.
 pub async fn setup_unconfigured() -> anyhow::Result<World> {
     let worker = near_workspaces::sandbox().await?;
-    build(worker, WINDOW_MS, PANEL_MS, DRAW_DELAY_BLOCKS, None, false, false).await
+    build(worker, WINDOW_MS, PANEL_MS, DRAW_DELAY_BLOCKS, None, false).await
 }
 
 // The market, the oracle and the council are owned by `admin` when given, by w.owner otherwise. `configured` has the owner set
@@ -142,7 +200,6 @@ async fn build(
     draw_delay_blocks: u64,
     admin: Option<Account>,
     configured: bool,
-    late_seat_rule: bool,
 ) -> anyhow::Result<World> {
     let verifier = worker.dev_deploy(&verifier_wasm()).await?;
     let ft = worker.dev_deploy(&wasm("mock_ft")).await?;
@@ -253,9 +310,6 @@ async fn build(
             .await?
             .into_result()?;
     }
-    if !late_seat_rule {
-        set_late_seat_rule_from(&worker, &council, NO_QUARTER).await?;
-    }
     admin
         .call(council.id(), "set_nft_contract")
         .args_json(json!({ "nft_contract": nft.id() }))
@@ -299,51 +353,6 @@ async fn build(
     Ok(w)
 }
 
-// The Council gives a seat staked after a quarter began nothing from that quarter. The sandbox is always inside a quarter that began
-// months before its first block, so under the rule every seat of every test would earn nothing. Unless a test is about the
-// rule, the world starts the way an upgraded Council does, with the rule's first quarter set past any the tests can reach.
-// `rule_from_quarter` is the last field of the Council's state.
-pub async fn set_late_seat_rule_from(worker: &Worker<Sandbox>, council: &Contract, quarter: u32) -> anyhow::Result<()> {
-    let key = b"STATE".to_vec();
-    let mut state = worker
-        .view_state(council.id())
-        .await?
-        .get(&key)
-        .expect("the Council's state is stored under STATE")
-        .clone();
-    let at = state.len() - 4;
-    state[at..].copy_from_slice(&quarter.to_le_bytes());
-    worker.patch_state(council.id(), &key, &state).await?;
-    Ok(())
-}
-
-// Files every juror's seat as staked at the start of the quarter the chain is in, as a seat from an earlier quarter would be. The
-// sandbox has no earlier quarter to stake in. Meant for a world that has the late-seat rule switched off: the seats were counted
-// from their staking, and this moves where the count starts.
-pub async fn back_date_seats(w: &World) -> anyhow::Result<()> {
-    let starts_at = u64::from_str(current_quarter(w).await["starts_at"].as_str().unwrap())?;
-    let state = w.worker.view_state(w.council.id()).await?;
-    for juror in &w.jurors {
-        let key = [vec![1u8], borsh_string(juror.id().as_str())].concat();
-        let mut stake = state.get(&key).expect("the juror's seat is stored").clone();
-        // Stake = version: u8, owner: String, staked_at: u64, unlock_requested_at: Option<u64>, serving: Option<u64>,
-        // booked_to: u64. A fresh seat has neither option set.
-        let owner_len = u32::from_le_bytes(stake[1..5].try_into()?) as usize;
-        let staked_at = 1 + 4 + owner_len;
-        let booked_to = staked_at + 8 + 1 + 1;
-        stake[staked_at..staked_at + 8].copy_from_slice(&starts_at.to_le_bytes());
-        stake[booked_to..booked_to + 8].copy_from_slice(&starts_at.to_le_bytes());
-        w.worker.patch_state(w.council.id(), &key, &stake).await?;
-    }
-    Ok(())
-}
-
-// A world under the real rule: seats staked in the quarter the chain is in earn nothing from it.
-pub async fn setup_late_seat_rule() -> anyhow::Result<World> {
-    let worker = near_workspaces::sandbox().await?;
-    build(worker, WINDOW_MS, PANEL_MS, DRAW_DELAY_BLOCKS, None, true, true).await
-}
-
 // More staked seats for a case that reaches its second jury. Each is added to `w.jurors`.
 pub async fn add_jurors(w: &mut World, count: usize) -> anyhow::Result<()> {
     for _ in 0..count {
@@ -382,12 +391,22 @@ pub async fn stake(w: &World, who: &Account, token_id: &str) -> anyhow::Result<(
 }
 
 pub async fn request_unstake(w: &World, who: &Account, token_id: &str) -> anyhow::Result<()> {
-    who.call(w.council.id(), "request_unstake")
-        .args_json(json!({ "token_id": token_id }))
-        .transact()
-        .await?
-        .into_result()?;
+    request_unstake_with(w, who, token_id, true).await?.into_result()?;
     Ok(())
+}
+
+// The request with the cut flag given, and the outcome left unchecked so a test can look at a refusal, the logs or the gas.
+pub async fn request_unstake_with(
+    w: &World,
+    who: &Account,
+    token_id: &str,
+    accepts_cut: bool,
+) -> anyhow::Result<near_workspaces::result::ExecutionFinalResult> {
+    Ok(who
+        .call(w.council.id(), "request_unstake")
+        .args_json(json!({ "token_id": token_id, "accepts_cut": accepts_cut }))
+        .transact()
+        .await?)
 }
 
 // Returns the logs of the whole call, the transfer and the callback included.
@@ -1039,178 +1058,368 @@ pub async fn sweep(w: &World, who: &Account) -> anyhow::Result<near_workspaces::
         .into_result()?)
 }
 
-// The council's claim_quarter. Returns the logs of the whole call, the transfer and the callback included.
-pub async fn claim_quarter(w: &World, who: &Account, quarter: u32, token_id: &str) -> anyhow::Result<Vec<String>> {
-    let r = who
-        .call(w.council.id(), "claim_quarter")
-        .args_json(json!({ "quarter": quarter, "token_id": token_id }))
-        .deposit(NearToken::from_yoctonear(1))
-        .gas(Gas::from_tgas(100))
-        .transact()
-        .await?
-        .into_result()?;
-    Ok(r.logs().iter().map(|l| l.to_string()).collect())
-}
-
 pub async fn council_total_received(w: &World) -> u128 {
     let s: String = w.council.view("total_received").await.unwrap().json().unwrap();
     s.parse().unwrap()
-}
-
-pub async fn current_quarter(w: &World) -> serde_json::Value {
-    w.council.view("current_quarter").await.unwrap().json().unwrap()
-}
-
-pub async fn get_quarter(w: &World, quarter: u32) -> serde_json::Value {
-    w.council
-        .view("get_quarter")
-        .args_json(json!({ "quarter": quarter }))
-        .await
-        .unwrap()
-        .json()
-        .unwrap()
-}
-
-pub async fn entitlement(w: &World, quarter: u32, token_id: &str, who: &AccountId) -> serde_json::Value {
-    w.council
-        .view("get_entitlement")
-        .args_json(json!({ "quarter": quarter, "token_id": token_id, "account_id": who }))
-        .await
-        .unwrap()
-        .json()
-        .unwrap()
 }
 
 pub async fn reward_totals(w: &World) -> serde_json::Value {
     w.council.view("reward_totals").await.unwrap().json().unwrap()
 }
 
-pub async fn finalize_quarter(w: &World, quarter: u32) -> anyhow::Result<Vec<String>> {
+// What a claim of every seat `who` holds would pay now.
+pub async fn claimable_of(w: &World, who: &AccountId) -> u128 {
+    let s: String = w
+        .council
+        .view("claimable_of")
+        .args_json(json!({ "account_id": who }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    s.parse().unwrap()
+}
+
+pub async fn seat_earnings(w: &World, token_id: &str) -> serde_json::Value {
+    w.council
+        .view("seat_earnings")
+        .args_json(json!({ "token_id": token_id }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap()
+}
+
+// The council's claim for the named seats. Returns the logs of the whole call, the payout and the callback included.
+pub async fn claim(w: &World, who: &Account, token_ids: &[&str]) -> anyhow::Result<Vec<String>> {
+    let r = claim_with_gas(w, who, token_ids, 100).await?.into_result()?;
+    Ok(r.logs().iter().map(|l| l.to_string()).collect())
+}
+
+// The same claim with the gas given, and the outcome left unchecked so a test can look at a refusal or the gas burnt.
+pub async fn claim_with_gas(
+    w: &World,
+    who: &Account,
+    token_ids: &[&str],
+    tgas: u64,
+) -> anyhow::Result<near_workspaces::result::ExecutionFinalResult> {
+    Ok(who
+        .call(w.council.id(), "claim")
+        .args_json(json!({ "token_ids": token_ids }))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(tgas))
+        .transact()
+        .await?)
+}
+
+// Anyone walks the Council's days up to today. Returns the logs of the call.
+pub async fn advance_days(w: &World) -> anyhow::Result<Vec<String>> {
     let r = w
         .bob
-        .call(w.council.id(), "finalize_quarter")
-        .args_json(json!({ "quarter": quarter }))
-        .gas(Gas::from_tgas(100))
+        .call(w.council.id(), "advance_days")
+        .args_json(json!({ "max_steps": null }))
         .transact()
         .await?
         .into_result()?;
     Ok(r.logs().iter().map(|l| l.to_string()).collect())
 }
 
-// The Council's storage keys: the enum prefix, then the Borsh key. Quarters = 5, SeatWeight = 6, Forfeits = 7, Claims = 8,
-// Received = 9. A quarter is a u32 and a sweep id a u64, both little endian.
-const SECOND_ROUND_KEY: u64 = 1 << 63;
-const QUARTERS_KEY: u8 = 5;
-const SEAT_WEIGHT_KEY: u8 = 6;
-const FORFEITS_KEY: u8 = 7;
-const RECEIVED_KEY: u8 = 9;
-// What follows `next_to_finalize` in the Council's state: five 5-byte map prefixes, six u128 totals and the u32 count of
-// unstakes in flight, the u32 count of fresh seats and the u32 quarter the late-seat rule starts from.
-const STATE_AFTER_NEXT_TO_FINALIZE: usize = 5 * 5 + 6 * 16 + 4 + 4 + 4;
+// ---- the Council's day ledger ---------------------------------------------------------------------------------------
+//
+// ACCELERATED. A thousand sandbox blocks take about eight seconds and move the chain clock by about five minutes, so the
+// next UTC midnight is a quarter of an hour away at best and the end of a quarter is a day or more. A test that needs a day
+// to pass or a quarter to end edits the Council's day cursor (`last_day`), its running-quarter marker and its seats' start
+// days instead. They are plain fields: the contract cannot tell an edited ledger from one it wrote on those days. Everything
+// that follows is the contract's own code on real calls, the walk over the days, the splits, the quarter close and the
+// claim, with real money in the verifier. The helpers check the state layout before they write, so a changed layout fails
+// loudly instead of corrupting a test.
+const STATE_KEY: &[u8] = b"STATE";
+const STAKES_PREFIX: u8 = 1;
+const DAY_ACC_PREFIX: u8 = 11;
+const JOINS_ON_PREFIX: u8 = 15;
+const ACCRUED_PREFIX: u8 = 12;
+const CLAIMS_PREFIX: u8 = 13;
+// Byte offsets counted back from the end of the Council's state: its last field is a 5-byte map prefix, and the fields
+// before it are next_claim_id, pending_total_slots, pending, accrued_total, accrued, last_closed_quarter, quarter_acc,
+// day_acc, last_day, joins_on, active, cut_pool, carry, carry_scaled and acc.
+const ACCRUED_TOTAL_FROM_END: usize = 50;
+const NEXT_CLAIM_ID_FROM_END: usize = 13;
+const PENDING_CLAIMS_TOTAL_FROM_END: usize = 170;
+const TOTAL_PAID_FROM_END: usize = 186;
+const LAST_CLOSED_QUARTER_FROM_END: usize = 59;
+const LAST_DAY_FROM_END: usize = 77;
+const ACTIVE_FROM_END: usize = 86;
+const ACC_FROM_END: usize = 150;
 
-// ACCELERATED. The sandbox cannot reach the end of a real quarter, which is about two months of blocks away. A test that needs a
-// finished quarter has the Council's books for the quarter it is in filed under the quarter two before it instead, and points
-// `next_to_finalize` there, and sets the grace period to its least. Nothing else is touched: every amount, weight and total is
-// what the contracts wrote, except that the quarter's seat time is set to the sum of the weights counted, because the chain
-// counted seat time and the weights in different blocks and a real quarter would end at one instant. Every seat's staked time
-// is counted first, so the weights exist. Returns the quarter it filed them under.
-pub async fn age_current_quarter(w: &World) -> anyhow::Result<u32> {
-    age_quarter(w, true).await
+// Days since 1970-01-01 of a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let shifted_month = i64::from(if month > 2 { month - 3 } else { month + 9 });
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
-// The same for a quarter nobody held a seat in: only the revenue moves, and the quarter it moves to has no seat time. The
-// seats stay in the quarter the chain is in.
-pub async fn age_revenue_only(w: &World) -> anyhow::Result<u32> {
-    age_quarter(w, false).await
+// The UTC day a quarter starts on. A quarter id is year * 4 + (quarter - 1).
+pub fn quarter_start_day(quarter: u32) -> u64 {
+    days_from_civil(i64::from(quarter / 4), quarter % 4 * 3 + 1, 1) as u64
 }
 
-async fn age_quarter(w: &World, with_seats: bool) -> anyhow::Result<u32> {
-    let current = current_quarter(w).await["quarter"].as_u64().unwrap() as u32;
-    let aged = current - 2;
-    w.owner
-        .call(w.council.id(), "set_close_grace_ns")
-        .args_json(json!({ "close_grace_ns": (24 * 3_600 * 1_000_000_000u64).to_string() }))
-        .transact()
-        .await?
-        .into_result()?;
+pub async fn quarter_info(w: &World) -> serde_json::Value {
+    w.council.view("quarter_info").await.unwrap().json().unwrap()
+}
+
+// The quarter the chain is in.
+pub async fn running_quarter(w: &World) -> u32 {
+    quarter_info(w).await["quarter"].as_u64().unwrap() as u32
+}
+
+pub async fn quarter_snapshots(w: &World) -> Vec<(u32, u128)> {
+    let snapshots: Vec<serde_json::Value> = w
+        .council
+        .view("quarter_snapshots")
+        .args_json(json!({ "from": null, "limit": null }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    snapshots
+        .iter()
+        .map(|s| (s["quarter"].as_u64().unwrap() as u32, u(&s["acc"])))
+        .collect()
+}
+
+pub async fn in_progress_of(w: &World, who: &AccountId) -> u128 {
+    let s: String = w
+        .council
+        .view("in_progress_of")
+        .args_json(json!({ "account_id": who }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    s.parse().unwrap()
+}
+
+async fn council_state(w: &World) -> std::collections::HashMap<Vec<u8>, Vec<u8>> {
+    w.worker.view_state(w.council.id()).await.unwrap()
+}
+
+fn council_last_day(state: &std::collections::HashMap<Vec<u8>, Vec<u8>>) -> u64 {
+    let main = &state[STATE_KEY];
+    let at = main.len() - LAST_DAY_FROM_END;
+    u64::from_le_bytes(main[at..at + 8].try_into().unwrap())
+}
+
+// Writes `value` over the bytes of the Council's main record that end `from_end` bytes before its end, after checking the
+// record still has last_day where this file expects it.
+async fn patch_council_main(w: &World, edits: &[(usize, Vec<u8>)]) -> anyhow::Result<()> {
+    let state = council_state(w).await;
+    let mut main = state[STATE_KEY].clone();
+    let expected: u64 = config(&w.council).await["last_day"].as_str().unwrap().parse()?;
+    assert_eq!(
+        council_last_day(&state),
+        expected,
+        "last_day is not where this helper expects it: the Council's state layout changed"
+    );
+    for (from_end, value) in edits {
+        let at = main.len() - from_end;
+        main[at..at + value.len()].copy_from_slice(value);
+    }
+    w.worker.patch_state(w.council.id(), STATE_KEY, &main).await?;
+    Ok(())
+}
+
+// Where a seat's earn_from_day sits in its record: version, owner, staked_at, the two options, then the day. Returns the offset
+// and whether the seat asked to leave or is serving.
+fn earn_from_day_at(stake: &[u8]) -> (usize, bool, bool) {
+    let owner_len = u32::from_le_bytes(stake[1..5].try_into().unwrap()) as usize;
+    let mut at = 1 + 4 + owner_len + 8;
+    let leaving = stake[at] == 1;
+    at += if leaving { 9 } else { 1 };
+    let serving = stake[at] == 1;
+    at += if serving { 9 } else { 1 };
+    (at, leaving, serving)
+}
+
+fn day_key(prefix: u8, day: u64) -> Vec<u8> {
+    [vec![prefix], day.to_le_bytes().to_vec()].concat()
+}
+
+// Every seat that has not started earning gets the start day `start`, in its record and in the books: the Council counts it as
+// earning, with the revenue index as it stands now as its starting point, as a walk over that day would have done. The
+// Council must have walked to today. Returns how many seats started.
+async fn start_waiting_seats_on(w: &World, start: u64) -> anyhow::Result<usize> {
+    let state = council_state(w).await;
+    let walked = council_last_day(&state);
+    assert_eq!(
+        walked,
+        now(&w.worker).await / NS_PER_DAY,
+        "call advance_days first: the Council has not walked to today"
+    );
+    assert!(
+        !state.contains_key(&day_key(DAY_ACC_PREFIX, start)),
+        "the day {start} already has an index: seats can start there once"
+    );
+    let waiting = walked + 1;
     let tokens: Vec<String> = w
         .council
         .view("staked_tokens")
         .args_json(json!({ "from_index": 0, "limit": 1000 }))
         .await?
         .json()?;
+    let mut moved = 0;
     for token in tokens {
-        w.bob
-            .call(w.council.id(), "book_seat_time")
-            .args_json(json!({ "token_id": token }))
-            .transact()
-            .await?
-            .into_result()?;
-    }
-    let state = w.worker.view_state(w.council.id()).await?;
-    let from = current.to_le_bytes();
-    let counted: u128 = state
-        .iter()
-        .filter(|(key, _)| key.first() == Some(&SEAT_WEIGHT_KEY) && key[1..5] == from)
-        .map(|(_, value)| u128::from(u64::from_le_bytes(value[..8].try_into().unwrap())))
-        .sum();
-    for (key, value) in &state {
-        if key.len() < 5 || key[1..5] != from {
+        let key = [vec![STAKES_PREFIX], borsh_string(&token)].concat();
+        let mut stake = state[&key].clone();
+        let (at, leaving, serving) = earn_from_day_at(&stake);
+        if leaving || serving || u64::from_le_bytes(stake[at..at + 8].try_into()?) != waiting {
             continue;
         }
-        let mut moved = key.clone();
-        moved[1..5].copy_from_slice(&aged.to_le_bytes());
-        match key[0] {
-            QUARTERS_KEY => {
-                // QuarterBook = version: u8, revenue_in: u128, carry_in: u128, seat_ns: u128, ...
-                let mut book = value.clone();
-                if with_seats {
-                    book[33..49].copy_from_slice(&counted.to_le_bytes());
-                    w.worker.patch_state(w.council.id(), &moved, &book).await?;
-                    w.worker
-                        .patch_state(w.council.id(), key, &vec![0u8; value.len()])
-                        .await?;
-                } else {
-                    let mut kept = value.clone();
-                    kept[1..17].fill(0);
-                    book[33..].fill(0);
-                    w.worker.patch_state(w.council.id(), &moved, &book).await?;
-                    w.worker.patch_state(w.council.id(), key, &kept).await?;
-                }
-            }
-            SEAT_WEIGHT_KEY | FORFEITS_KEY if with_seats => {
-                w.worker.patch_state(w.council.id(), &moved, value).await?;
-                w.worker
-                    .patch_state(w.council.id(), key, &vec![0u8; value.len()])
-                    .await?;
-            }
-            _ => {}
-        }
+        stake[at..at + 8].copy_from_slice(&start.to_le_bytes());
+        w.worker.patch_state(w.council.id(), &key, &stake).await?;
+        moved += 1;
     }
-    for (key, value) in &state {
-        if key.first() == Some(&RECEIVED_KEY) {
-            // Received = version: u8, amount: u128, quarter: u32, at: u64
-            let mut value = value.clone();
-            if value[17..21] == from {
-                value[17..21].copy_from_slice(&aged.to_le_bytes());
-                w.worker.patch_state(w.council.id(), key, &value).await?;
-            }
-        }
-    }
-    let state_key = b"STATE".to_vec();
-    let mut main = state
-        .get(&state_key)
-        .expect("the Council's state is stored under STATE")
-        .clone();
-    let at = main.len() - STATE_AFTER_NEXT_TO_FINALIZE - 4;
+    let main = &state[STATE_KEY];
+    let acc = &main[main.len() - ACC_FROM_END..main.len() - ACC_FROM_END + 16];
+    let active = u32::from_le_bytes(main[main.len() - ACTIVE_FROM_END..][..4].try_into()?);
+    w.worker
+        .patch_state(w.council.id(), &day_key(DAY_ACC_PREFIX, start), acc)
+        .await?;
+    w.worker
+        .patch_state(w.council.id(), &day_key(JOINS_ON_PREFIX, waiting), &0u32.to_le_bytes())
+        .await?;
+    patch_council_main(w, &[(ACTIVE_FROM_END, (active + moved as u32).to_le_bytes().to_vec())]).await?;
+    Ok(moved)
+}
+
+// ACCELERATED. The seats staked so far have been earning since the first day of the quarter the Council still takes to be
+// running, `quarters_back` quarters before the one the chain is in. The Council's last finished quarter is the one before
+// that. With 0 the quarter is the chain's own and nothing is due to end. Meant for a fresh world: no revenue has arrived.
+pub async fn back_date(w: &World, quarters_back: u32) -> anyhow::Result<()> {
     assert_eq!(
-        main[at..at + 4],
-        from,
-        "next_to_finalize is not where this helper expects it: the state layout changed"
+        council_total_received(w).await,
+        0,
+        "seats are back-dated before the first revenue arrives"
     );
-    main[at..at + 4].copy_from_slice(&aged.to_le_bytes());
-    w.worker.patch_state(w.council.id(), &state_key, &main).await?;
-    Ok(aged)
+    let running = running_quarter(w).await - quarters_back;
+    start_waiting_seats_on(w, quarter_start_day(running)).await?;
+    if quarters_back > 0 {
+        patch_council_main(
+            w,
+            &[(LAST_CLOSED_QUARTER_FROM_END, (running - 1).to_le_bytes().to_vec())],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+// ACCELERATED. Puts the Council's day cursor back to the day before the quarter that follows the one `back_date` made it
+// believe in. The next call that moves money walks the days from there, closes that quarter and folds in the seats that
+// start on the way, as it does after a quarter ends. The walk takes as many days as have passed in the chain's own quarter,
+// 1 to 92, plus a quarter for each step back past the first.
+pub async fn end_quarters(w: &World, quarters_back: u32) -> anyhow::Result<()> {
+    let first_after = quarter_start_day(running_quarter(w).await - quarters_back + 1);
+    patch_council_main(w, &[(LAST_DAY_FROM_END, (first_after - 1).to_le_bytes().to_vec())]).await
+}
+
+// ACCELERATED. Lets one UTC midnight pass for the Council: the seats staked since the last one start earning, with the index
+// as it is now as their starting point. The chain's own clock stays where it is. The start day is a day before today that no
+// seat started on yet, which is only a label for the books.
+pub async fn to_next_day(w: &World) -> anyhow::Result<()> {
+    let state = council_state(w).await;
+    let mut day = council_last_day(&state);
+    while state.contains_key(&day_key(DAY_ACC_PREFIX, day)) {
+        day -= 1;
+    }
+    start_waiting_seats_on(w, day).await?;
+    Ok(())
+}
+
+// ACCELERATED. Nothing in the sandbox makes a payout callback fail to arrive, so this writes the books a Council would hold
+// then. Right after one claim by `who` of `amount` over `tokens`, as claim number 0, the balance is debited and the amount is
+// in flight, with nothing booked as paid or credited back: `reconcile_claim` is what decides it.
+pub async fn leave_claim_in_flight(w: &World, who: &Account, amount: u128, tokens: &[&str]) -> anyhow::Result<()> {
+    let totals = reward_totals(w).await;
+    assert_eq!(
+        u(&totals["total_paid"]) + u(&totals["accrued_total"]),
+        amount,
+        "exactly one claim has been made, and it is for the amount given"
+    );
+    assert_eq!(u(&totals["pending_claims"]), 0);
+    let state = council_state(w).await;
+    let main = &state[STATE_KEY];
+    let total_paid_at = main.len() - TOTAL_PAID_FROM_END;
+    assert_eq!(
+        u128::from_le_bytes(main[total_paid_at..total_paid_at + 16].try_into()?),
+        u(&totals["total_paid"]),
+        "total_paid is not where this helper expects it: the Council's state layout changed"
+    );
+    let mut record = vec![0u8];
+    record.extend(borsh_string(who.id().as_str()));
+    record.extend(amount.to_le_bytes());
+    record.extend((tokens.len() as u32).to_le_bytes());
+    for token in tokens {
+        record.extend(borsh_string(token));
+    }
+    record.extend(now(&w.worker).await.to_le_bytes());
+    w.worker
+        .patch_state(w.council.id(), &day_key(CLAIMS_PREFIX, 0), &record)
+        .await?;
+    let accrued_key = [vec![ACCRUED_PREFIX], borsh_string(who.id().as_str())].concat();
+    w.worker
+        .patch_state(w.council.id(), &accrued_key, &0u128.to_le_bytes())
+        .await?;
+    patch_council_main(
+        w,
+        &[
+            (ACCRUED_TOTAL_FROM_END, 0u128.to_le_bytes().to_vec()),
+            (TOTAL_PAID_FROM_END, 0u128.to_le_bytes().to_vec()),
+            (PENDING_CLAIMS_TOTAL_FROM_END, amount.to_le_bytes().to_vec()),
+            (NEXT_CLAIM_ID_FROM_END, 1u64.to_le_bytes().to_vec()),
+        ],
+    )
+    .await
+}
+
+pub async fn reconcile_claim(
+    w: &World,
+    who: &Account,
+    id: u64,
+    paid: bool,
+) -> anyhow::Result<near_workspaces::result::ExecutionFinalResult> {
+    Ok(who
+        .call(w.council.id(), "reconcile_claim")
+        .args_json(json!({ "id": id.to_string(), "paid": paid }))
+        .transact()
+        .await?)
+}
+
+// As `setup`, with the five jurors already earning in the quarter the chain is in.
+pub async fn setup_earning() -> anyhow::Result<World> {
+    let w = setup().await?;
+    back_date(&w, 0).await?;
+    Ok(w)
+}
+
+// ACCELERATED. The Council is `days` days behind: its day cursor goes back that far.
+pub async fn rewind_days(w: &World, days: u64) -> anyhow::Result<()> {
+    let today = council_last_day(&council_state(w).await);
+    patch_council_main(w, &[(LAST_DAY_FROM_END, (today - days).to_le_bytes().to_vec())]).await
+}
+
+// ACCELERATED. As `rewind_days`, with one seat counted as starting on each of those days, so the walk that catches up has a day
+// with joiners every step. Only the counts exist, no seat record, which is all the walk reads. Meant for gas measurements.
+pub async fn fall_behind(w: &World, days: u64) -> anyhow::Result<()> {
+    let today = council_last_day(&council_state(w).await);
+    for day in today - days + 1..=today {
+        w.worker
+            .patch_state(w.council.id(), &day_key(JOINS_ON_PREFIX, day), &1u32.to_le_bytes())
+            .await?;
+    }
+    rewind_days(w, days).await
 }
 
 // Lets `who` receive the collateral token.
@@ -1237,7 +1446,6 @@ pub async fn setup_admin_owned() -> anyhow::Result<(World, Account)> {
         DRAW_DELAY_BLOCKS,
         Some(admin.clone()),
         true,
-        false,
     )
     .await?;
     Ok((w, admin))
@@ -1285,8 +1493,8 @@ pub async fn relock_seat(w: &World, token_id: &str, market_id: u64) -> anyhow::R
         .get(&stake_key)
         .expect("the staked seat is stored under the key this test expects")
         .clone();
-    // Stake = version: u8, owner: String, staked_at: u64, unlock_requested_at: Option<u64>, serving: Option<u64>, booked_to: u64,
-    // serving_from: u64, index: u32
+    // Stake = version: u8, owner: String, staked_at: u64, unlock_requested_at: Option<u64>, serving: Option<u64>, earn_from_day: u64,
+    // settled_acc: u128, forfeited: u128, serving_acc: u128, index: u32
     let owner_len = u32::from_le_bytes(old[1..5].try_into()?) as usize;
     let mut at = 1 + 4 + owner_len + 8;
     let mut new = old[..at].to_vec();

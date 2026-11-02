@@ -46,7 +46,7 @@ fn minimum_args(close_at: u64) -> Value {
     json!({
         "title": "a", "rule_text": "a", "resolution_source": "a", "void_policy": "a",
         "category": "a", "subcategory": "a",
-        "close_at": close_at.to_string(), "resolve_by": (close_at + 3_600 * 1_000_000_000).to_string()
+        "close_at": close_at.to_string(), "resolve_by": (close_at + MARKET_GAP_SECS * 1_000_000_000).to_string()
     })
 }
 
@@ -54,7 +54,7 @@ fn maximum_args(close_at: u64) -> Value {
     json!({
         "title": "x".repeat(200), "rule_text": "x".repeat(2000), "resolution_source": "x".repeat(300), "void_policy": "x".repeat(500),
         "category": "w".repeat(32), "subcategory": "s".repeat(32),
-        "close_at": close_at.to_string(), "resolve_by": (close_at + 3_600 * 1_000_000_000).to_string()
+        "close_at": close_at.to_string(), "resolve_by": (close_at + MARKET_GAP_SECS * 1_000_000_000).to_string()
     })
 }
 
@@ -123,6 +123,7 @@ async fn history_growth(w: &World, id: u64) -> anyhow::Result<(i64, i64)> {
 #[ignore]
 async fn storage_bytes_per_record() -> anyhow::Result<()> {
     let w = setup().await?;
+    back_date(&w, 1).await?;
     let started = std::time::Instant::now();
     let base = used(&w, w.market.id()).await?;
     println!("market contract storage_usage at the start: {base} B; 1 NEAR locks 100,000 B");
@@ -139,7 +140,7 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
     println!("|---|---|---|---|---|");
     // Warm up: the first market and the first account entries can grow the state's own bookkeeping.
     let warm = now(&w.worker).await + THIRTY_DAYS_SECS * 1_000_000_000;
-    let (warm_id, _, _) = create_measured(&w, typical_args(warm, 3_600)).await?;
+    let (warm_id, _, _) = create_measured(&w, typical_args(warm, MARKET_GAP_SECS)).await?;
     trade_from_balance(&w, &w.bob, warm_id, "yes").await?;
 
     let close = now(&w.worker).await + THIRTY_DAYS_SECS * 1_000_000_000;
@@ -157,7 +158,7 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
         "the oracle's info for the market",
     );
 
-    let (typ_id, typ_market, typ_oracle) = create_measured(&w, typical_args(close, 3_600)).await?;
+    let (typ_id, typ_market, typ_oracle) = create_measured(&w, typical_args(close, MARKET_GAP_SECS)).await?;
     row(
         "create_market, typical text (market record)",
         typ_market,
@@ -236,7 +237,7 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
         "the Council's record of the revenue that sweep sent",
         used(&w, w.council.id()).await? - council_before,
         "-",
-        "received entry and the quarter's book",
+        "the received entry",
     );
 
     // Accounts: a storage deposit, a credited balance, then positions. Each buy also adds a history point to its market, so the
@@ -343,31 +344,17 @@ async fn storage_bytes_per_record() -> anyhow::Result<()> {
         "panel list; the two-round dispute with 11 and 21 jurors was not built: it needs 21 more staked seats and four time skips",
     );
 
-    // The Council: seat weight entry, then a claim.
-    skip_secs(&w.worker, 3_600).await;
-    let before = used(&w, w.council.id()).await?;
-    w.bob
-        .call(w.council.id(), "book_seat_time")
-        .args_json(json!({ "token_id": w.jurors[1].id() }))
-        .transact()
-        .await?
-        .into_result()?;
-    row(
-        "book_seat_time for one seat (one seat_weight entry, stake updated)",
-        used(&w, w.council.id()).await? - before,
-        "-",
-        "one quarter covered",
-    );
-    let aged = age_current_quarter(&w).await?;
-    finalize_quarter(&w, aged).await?;
+    // The Council: a claim for a finished quarter.
+    end_quarters(&w, 1).await?;
+    advance_days(&w).await?;
     let before = used(&w, w.council.id()).await?;
     let juror = &w.jurors[0];
-    claim_quarter(&w, juror, aged, juror.id().as_str()).await?;
+    claim(&w, juror, &[juror.id().as_str()]).await?;
     row(
         "one Council claim (claim record, after the payout callback)",
         used(&w, w.council.id()).await? - before,
         "-",
-        "the seat_weight entry was written earlier by book_seat_time",
+        "the claim record and the balance it paid out are removed again",
     );
     println!("total run time {:.0}s", started.elapsed().as_secs_f64());
     Ok(())

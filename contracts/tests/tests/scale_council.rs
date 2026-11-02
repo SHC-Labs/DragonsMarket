@@ -1,17 +1,13 @@
-// Council gas at scale: the entitlement listing by number of staked tokens, and the jury draw by number of seats. Heavy, so both
-// tests are ignored by default. Run one at a time:
-//   cargo test -p tests --test scale_council <name> -- --ignored --nocapture --test-threads=1
+// Council gas at scale: the jury draw by number of seats. Heavy, so the test is ignored by default:
+//   cargo test -p tests --test scale_council -- --ignored --nocapture --test-threads=1
 mod common;
 use common::*;
 use near_workspaces::operations::Function;
 use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::Account;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::time::Instant;
 
-const TOKEN_STEPS: [usize; 6] = [10, 25, 35, 40, 50, 100];
-const QUARTERS: u32 = 25;
-const LIMIT: u32 = 25;
 const MINT_BATCH: usize = 25;
 const MINT_PER_CALL: u64 = 10;
 const BATCH_GAS: u64 = 280;
@@ -26,34 +22,6 @@ const CLOSE_SECS: u64 = 100;
 const PAST_CLOSE_SECS: u64 = 130;
 const LEAVE_BATCH: usize = 20;
 const LEAVE_PER_CALL: u64 = 12;
-const SEAT_WEIGHT_NS: u64 = 1_000_000_000;
-const POOL: u128 = 1_000_000_000;
-const WEIGHT_TOTAL: u128 = 1_000_000_000_000;
-const SEAT_WEIGHT_KEY: u8 = 6;
-const QUARTERS_KEY: u8 = 5;
-const PATCH_CHUNK: usize = 500;
-
-fn bstr(s: &str) -> Vec<u8> {
-    let mut v = (s.len() as u32).to_le_bytes().to_vec();
-    v.extend_from_slice(s.as_bytes());
-    v
-}
-
-// A finalized quarter: revenue_in, carry_in, seat_ns, forfeit_ns, finalized, pool, weight_total, rolled_to, paid, pending.
-fn finalized_book() -> Vec<u8> {
-    let mut b = vec![];
-    b.extend(POOL.to_le_bytes());
-    b.extend(0u128.to_le_bytes());
-    b.extend(WEIGHT_TOTAL.to_le_bytes());
-    b.extend(0u128.to_le_bytes());
-    b.push(1);
-    b.extend(POOL.to_le_bytes());
-    b.extend(WEIGHT_TOTAL.to_le_bytes());
-    b.push(0);
-    b.extend(0u128.to_le_bytes());
-    b.extend(0u128.to_le_bytes());
-    b
-}
 
 async fn mint_many(w: &World, to: &Account, tokens: &[String]) -> anyhow::Result<()> {
     for chunk in tokens.chunks(MINT_BATCH) {
@@ -107,110 +75,6 @@ async fn learn_stake_gas(w: &World, who: &Account, token: &str) -> anyhow::Resul
     let per_call = (burnt * 1.5).ceil().max(50.0) as u64;
     println!("one stake burnt {burnt:.1} TGas; batches use {per_call} TGas an action");
     Ok(per_call)
-}
-
-#[tokio::test]
-#[ignore]
-async fn entitlements_of_gas_by_token_count() -> anyhow::Result<()> {
-    let started = Instant::now();
-    let w = setup().await?;
-    w.owner
-        .call(w.council.id(), "set_max_seats_per_account")
-        .args_json(json!({ "max_seats_per_account": 200 }))
-        .transact()
-        .await?
-        .into_result()?;
-    let holder = w.worker.dev_create_account().await?;
-    let current = current_quarter(&w).await["quarter"].as_u64().unwrap() as u32;
-    let from = current - QUARTERS;
-    println!(
-        "current quarter {current}; the listing asks for {QUARTERS} finalized quarters from {from}, limit {LIMIT}"
-    );
-
-    let mut patch = w.worker.patch(w.council.id());
-    for q in from..from + QUARTERS {
-        patch = patch.state(
-            &[vec![QUARTERS_KEY], q.to_le_bytes().to_vec()].concat(),
-            &finalized_book(),
-        );
-    }
-    patch.transact().await?;
-
-    println!("\n| what | tokens T | burnt TGas | ms | notes |");
-    println!("|---|---|---|---|---|");
-    let mut per_call = 0;
-    let mut have = 0usize;
-    let mut points = vec![];
-    for t in TOKEN_STEPS {
-        let new: Vec<String> = (have..t).map(|i| format!("ent-{i}")).collect();
-        mint_many(&w, &holder, &new).await?;
-        let rest: &[String] = if have == 0 {
-            per_call = learn_stake_gas(&w, &holder, &new[0]).await?;
-            &new[1..]
-        } else {
-            &new
-        };
-        stake_many(&w, &holder, rest, per_call).await?;
-        assert_eq!(seat_count(&w).await?, w.jurors.len() + t);
-        // A seat weight for each new token in each quarter.
-        for chunk in new.chunks(PATCH_CHUNK / QUARTERS as usize) {
-            let mut patch = w.worker.patch(w.council.id());
-            for token in chunk {
-                for q in from..from + QUARTERS {
-                    let key = [
-                        vec![SEAT_WEIGHT_KEY],
-                        q.to_le_bytes().to_vec(),
-                        bstr(token),
-                        bstr(holder.id().as_str()),
-                    ]
-                    .concat();
-                    patch = patch.state(&key, &SEAT_WEIGHT_NS.to_le_bytes());
-                }
-            }
-            patch.transact().await?;
-        }
-        have = t;
-        let args = json!({ "account_id": holder.id(), "from_quarter": from, "limit": LIMIT });
-        let t0 = Instant::now();
-        let r = holder
-            .call(w.council.id(), "entitlements_of")
-            .args_json(args)
-            .gas(Gas::from_tgas(300))
-            .transact()
-            .await?;
-        let ms = t0.elapsed().as_millis();
-        let burnt = tg(r.total_gas_burnt);
-        match r.into_result() {
-            Ok(ok) => {
-                let n = ok.json::<Vec<Value>>()?.len();
-                println!("| entitlements_of (as a transaction) | {t} | {burnt:.1} | {ms} | {n} entries returned (T x {QUARTERS} = {}) |", t * QUARTERS as usize);
-                points.push((t as f64, burnt));
-            }
-            Err(e) => {
-                println!(
-                    "| entitlements_of (as a transaction) | {t} | ran out of 300 TGas | {ms} | {} |",
-                    e.to_string().chars().take(80).collect::<String>()
-                );
-                break;
-            }
-        }
-    }
-    if points.len() >= 2 {
-        let n = points.len() as f64;
-        let (sx, sy): (f64, f64) = (points.iter().map(|p| p.0).sum(), points.iter().map(|p| p.1).sum());
-        let sxx: f64 = points.iter().map(|p| p.0 * p.0).sum();
-        let sxy: f64 = points.iter().map(|p| p.0 * p.1).sum();
-        let b = (n * sxy - sx * sy) / (n * sxx - sx * sx);
-        let a = (sy - b * sx) / n;
-        println!("fit over {} points: gas = {a:.2} + {b:.3} * T TGas", points.len());
-        println!(
-            "EXTRAPOLATION: reaches 200 TGas at T = {:.0}; reaches 300 TGas at T = {:.0}",
-            (200.0 - a) / b,
-            (300.0 - a) / b
-        );
-    }
-    println!("total run time {:.0}s", started.elapsed().as_secs_f64());
-    Ok(())
 }
 
 struct Draw {
@@ -394,7 +258,7 @@ async fn jury_draw_gas_by_seat_count() -> anyhow::Result<()> {
                 for t in chunk {
                     batch = batch.call(
                         Function::new("request_unstake")
-                            .args_json(json!({ "token_id": t }))
+                            .args_json(json!({ "token_id": t, "accepts_cut": true }))
                             .gas(Gas::from_tgas(LEAVE_PER_CALL)),
                     );
                 }

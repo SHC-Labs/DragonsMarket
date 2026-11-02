@@ -128,14 +128,14 @@ fn governed_contracts(w: &World) -> Vec<(&'static str, &'static str, &Contract)>
     ]
 }
 
-// Market layout 7, Council layout 4 and oracle layout 2.
+// Market layout 8, Council layout 6 and oracle layout 3.
 fn state_version_of(label: &str) -> u32 {
     if label == "oracle" {
         3
     } else if label == "market" {
         8
     } else {
-        5
+        6
     }
 }
 

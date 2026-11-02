@@ -123,7 +123,7 @@ async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once() -
     assert_eq!(record["council"]["to"], json!(w.council.id()));
     assert_eq!(record["treasury"]["to"], json!(w.treasury.id()));
 
-    // The Council took it as revenue of the quarter it arrived in, under the sweep's id.
+    // The Council took it under the sweep's id. Its seats were all staked today and none earns yet, so the share waits.
     let received: serde_json::Value = w
         .council
         .view("received_of")
@@ -131,8 +131,7 @@ async fn a_sweep_sends_25_percent_to_the_council_and_75_to_the_treasury_once() -
         .await?
         .json()?;
     assert_eq!(u(&received["amount"]), COUNCIL_SHARE);
-    assert_eq!(received["quarter"], current_quarter(&w).await["quarter"]);
-    assert_eq!(u(&current_quarter(&w).await["revenue_in"]), COUNCIL_SHARE);
+    assert_eq!(u(&reward_totals(&w).await["carry"]), COUNCIL_SHARE);
     assert_eq!(council_total_received(&w).await, COUNCIL_SHARE);
     assert_reconciled(&w).await;
 
@@ -253,7 +252,7 @@ async fn nothing_is_swept_or_claimed_until_the_owner_has_configured_the_recipien
         "the Council's share is due again"
     );
     refused(
-        claim_quarter(&w, &w.jurors[0], 0, w.jurors[0].id().as_str()).await,
+        claim(&w, &w.jurors[0], &[w.jurors[0].id().as_str()]).await,
         "the Council is not configured, the owner must call allow_market",
     );
     assert_reconciled(&w).await;
