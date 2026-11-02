@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  ALLOWED, CLOSE_GRACE_DAYS, CONTRACT_LIMITS, GUARDED_KINDS, TARGETS, codeHash, prepareAdministrationProposal, prepareStageCode,
+  ALLOWED, CONTRACT_LIMITS, GUARDED_KINDS, TARGETS, codeHash, prepareAdministrationProposal, prepareStageCode,
   prepareTreasuryVote, reviewKind, storageRunway, prepareStorageTopUp,
 } from "./treasury.mjs";
 import { b58encode } from "./chain.mjs";
@@ -120,7 +120,6 @@ const SAMPLES = {
     propose_owner: { new_owner: DAO },
     accept_owner: {},
     set_cooldown_ns: { cooldown_ns: "172800000000000" },
-    set_close_grace_ns: { close_grace_ns: "604800000000000" },
     allow_market: { market: CONTRACTS.market },
     disallow_market: { market: "old-market.example.near" },
     set_max_seats_per_account: { max_seats_per_account: 2 },
@@ -128,7 +127,7 @@ const SAMPLES = {
     allow_tokens: { token_ids: ["1", "2"] },
     set_token_range: { first: "1", last: "100" },
     clear_token_range: {},
-    reconcile_claim: { quarter: 8107, token_id: "1", owner: "holder.example.near", paid: false },
+    reconcile_claim: { id: "3", paid: false },
     set_allowlist_enabled: { enabled: true },
     set_reconcile_wait_ns: { reconcile_wait_ns: "3600000000000" },
   },
@@ -212,8 +211,8 @@ test("a value past what the contract allows is refused, and the value at the lim
     ["market", "set_min_sweep", { min_sweep: "1" }, { min_sweep: "0" }],
     ["market", "set_min_sweep", { min_sweep: String(limit.market.HARD_MAX_MIN_SWEEP) }, { min_sweep: String(limit.market.HARD_MAX_MIN_SWEEP + 1n) }],
     ["market", "set_next_sweep_id", { next_sweep_id: "5" }, { next_sweep_id: "0" }],
-    ["council", "set_close_grace_ns", { close_grace_ns: "86400000000000" }, { close_grace_ns: "86399999999999" }],
-    ["council", "set_close_grace_ns", { close_grace_ns: "2592000000000000" }, { close_grace_ns: "2592000000000001" }],
+    ["council", "reconcile_claim", { id: "1", paid: true }, { id: "0", paid: true }],
+    ["council", "reconcile_claim", { id: "1", paid: true }, { id: "1", paid: 1 }],
     ["council", "allow_market", { market: CONTRACTS.market }, { market: "Not A Market" }],
     ["council", "disallow_market", { market: CONTRACTS.market }, { market: 7 }],
     ["oracle", "allow_market", { market: CONTRACTS.market }, { market: "x" }],
@@ -263,17 +262,6 @@ test("the next sweep id can only move up from where the market is", async () => 
   await assert.rejects(propose("market", "set_next_sweep_id", { next_sweep_id: "4" }), /can only move up from 5/);
   const kind = functionCall(CONTRACTS.market, "set_next_sweep_id", { next_sweep_id: "4" });
   await assert.rejects(vote(stored(1, kind)), /can only move up from 5/);
-});
-
-test("the grace period bounds are the ones in the Council's source", () => {
-  const rust = source("council");
-  const days = (name) => {
-    const match = new RegExp(`const ${name}: u64 = (?:(\\d+) \\* )?NS_PER_DAY;`).exec(rust);
-    assert.ok(match, `council has no constant ${name} in days`);
-    return BigInt(match[1] ?? 1);
-  };
-  assert.equal(days("MIN_CLOSE_GRACE_NS"), CLOSE_GRACE_DAYS.min);
-  assert.equal(days("MAX_CLOSE_GRACE_NS"), CLOSE_GRACE_DAYS.max);
 });
 
 test("a new market is checked the way the contract checks it", async () => {
