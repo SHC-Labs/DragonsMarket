@@ -4,8 +4,8 @@ Release requirements for Intents-backed settlement and Trezu/Sputnik administrat
 
 | Field | Value |
 | --- | --- |
-| Updated | 21 October 2026 |
-| Status | Blocked on integration and review; not an executable deployment recipe |
+| Updated | 1 November 2026 |
+| Status | Integration is built. Open gates: the real treasury and DAO handover, a run against real USDC, the live funding and withdrawal flow and the owner's financial approval. Not an executable deployment recipe |
 | Contract work | Contract team |
 | Financial deployment approval | Project owner |
 | Product authority | [Specification](../spec.md) |
@@ -46,15 +46,15 @@ example DAO names and sandbox keys are not production configuration.
       so only the Intents path can fund it, and `keeper.mjs check` reports it.
 - [ ] Show committed backing remains controlled inside Intents and reconciles with positions.
 - [ ] Verify buy, sell, Yes/No/Void redemption and available-balance withdrawal.
-- [ ] Complete the oracle bond/juror-payment migration to Intents.
+- [ ] Prove oracle bonds and juror pay end to end through Intents (`mt_on_transfer` with `propose:` and `challenge:`).
 - [ ] Run at least `price_threshold` publishers (`keeper/publisher.mjs`), each on its own host with its own key, and
       have the DAO add each key with `add_publisher`. Run `keeper/resolver.mjs run` on a schedule from an account that
       holds only the bond float in Intents, and answer event markets with `resolver.mjs propose` (see "Publishing and
       submitting prices" in [oracle.md](oracle.md)). Without them every market Voids at its `resolve_by`.
 - [ ] Verify earned-fee allocation: 75% treasury and 25% Council-controlled rewards, with the real
       treasury account (see the configuration order below).
-- [x] Quarterly entitlement and claim rules, with repeat and cross-path claims refused (built
-      2026-10-21, sandbox and unit tests).
+- [x] Revenue share rules, with repeat and cross-path claims refused (Council state version 6, "pay by arrival,
+      claim by quarter", unit tests).
       A run against the real USDC contract and a real DAO is still open.
 - [ ] Run a testnet load test before adding any second market instance: parallel signers sending buys,
       recording the transactions included per block and the rejections, over the complete deposit,
@@ -75,16 +75,16 @@ proposal once the DAO owns the contract, and the helper in `contracts/keeper` pr
 | 1 | council | `set_nft_contract(nft_contract)` | Only while nothing is staked. The collection must have a fixed supply with minting closed first. |
 | 2 | council | `allow_tokens(token_ids)` or `set_token_range(first, last)` | The allowlist starts on with nothing allowed. |
 | 3 | council | `allow_market(market)` | The market contract. Revenue and claims refuse until a market is on the list. The last entry cannot be removed, so add a new market before `disallow_market` on the old one. |
-| 4 | council | `set_close_grace_ns(close_grace_ns)` | Optional. 7 days to start, 1 to 30 days allowed. This is the wait after a quarter ends before it can be finalized and claimed. |
-| 5 | market | `set_fee_recipients(revenue_pool, treasury)` | The Council contract and the verified Trezu treasury. A sweep refuses until it is set. Read the treasury account back from the DAO before the proposal. |
-| 6 | market | `set_revenue_share_bps(revenue_share_bps)` | Optional. 2,500 (25% to the Council, 75% to the treasury) to start, 1,000 to 5,000 allowed. |
-| 7 | market | `set_min_sweep(min_sweep)` | Optional. 1,000,000 units to start, 1 to 100,000,000 allowed. |
-| 8 | market | `set_next_sweep_id(next_sweep_id)` | Only when this market replaces an older one that already sent sweeps to the same Council. The Council refuses a sweep id it has taken, so start above the highest. It can only move up. |
+| 4 | market | `set_fee_recipients(revenue_pool, treasury)` | The Council contract and the verified Trezu treasury. A sweep refuses until it is set. Read the treasury account back from the DAO before the proposal. |
+| 5 | market | `set_revenue_share_bps(revenue_share_bps)` | Optional. 2,500 (25% to the Council, 75% to the treasury) to start, 1,000 to 5,000 allowed. |
+| 6 | market | `set_min_sweep(min_sweep)` | Optional. 1,000,000 units to start, 1 to 100,000,000 allowed. |
+| 7 | market | `set_next_sweep_id(next_sweep_id)` | Only when this market replaces an older one that already sent sweeps to the same Council. The Council refuses a sweep id it has taken, so start above the highest. It can only move up. |
+| 8 | rounds | `set_treasury(treasury)` | The verified Trezu treasury. `sweep_fees` refuses until it is set. |
 
-Send a small sweep after step 5 and read both Intents balances, the sweep record (`get_sweep`) and
-the Council's `received_of`. The keeper sweeps when fees reach its own threshold (10 units to start),
-which is above the contract's minimum, and never within an hour of the last sweep. The keeper also calls the market's `settle_leg`
-and the Council's `advance_quarters` and `finalize_quarter`; its function call keys need those methods (see the header of `keeper.mjs`).
+Send a small sweep after step 4 and read both Intents balances, the sweep record (`get_sweep`) and
+the Council's `received_of`. The keeper sweeps when fees reach its own threshold (10,000,000 units to start),
+which is above the contract's minimum, and never within the sweep interval of the last sweep (60 minutes at the least). The keeper also calls the market's `settle_leg`
+and the Council's `advance_days`, which closes quarters and starts seats that are due; its function call keys need those methods (see the header of `keeper.mjs`). The keeper has no finalize or quarter job: a quarter becomes claimable when any call walks the days past its end, and every claim does that itself.
 
 Existing market and Council Intents code is part of this work. Its presence does not establish
 that the complete production journey has passed. The [verifier proof](INTENTS-PROOF.md) retains its original test scope.
@@ -106,9 +106,39 @@ every contract, that its policy matches the
 - [ ] Prove the upgrade path before removing deployment keys; verify the resulting key list.
 - [ ] Confirm routine operators cannot redirect fees or spend backing.
 - [ ] Create markets from a dedicated operator account, not the DAO owner account.
-- [ ] Market state version 6 (dynamic parimutuel pricing) upgrades a version-5 market only while it
-  has created no market. A version-5 deployment that has markets is not upgraded: deploy version 6
-  fresh, stop creating markets on the old one, and let its markets resolve and pay out there.
+- [ ] Council deploy: `new` takes no collection and no market. Then run the configuration order above
+  (`set_nft_contract`, the allowlist, `allow_market`) before announcing staking. A seat staked on UTC day D
+  starts earning on day D+1.
+- [ ] Upgrade each contract in this order: `stage_code` with the new wasm (the deposit is about 1 NEAR per 100 KB of
+  code, stays in the contract and is not refunded when the upgrade runs), have the DAO vote on the code hash, then
+  `upgrade` with at least 100 TGas (exactly 100 works). A failed or rolled-back upgrade consumes the staged code, so
+  stage it and pay the deposit again before the next attempt. Upgrading to identical code works and leaves the code
+  hash unchanged.
+- [ ] Check the state version each `migrate` reads. A version it does not know refuses and the whole upgrade reverts.
+
+  | Contract | State version | `migrate` accepts |
+  | --- | --- | --- |
+  | market | 8 | 5, 6, 7, 8 |
+  | oracle | 3 | 2, 3 |
+  | council | 6 | 5, 6 |
+  | rounds | 2 | 1, 2 |
+
+- [ ] Council version 5 to 6. `migrate` refuses, and the whole upgrade reverts, unless every quarter that has ended
+  is finalized, no claim is pending, no unstake is waiting for its NFT transfer, and the money of finalized quarters
+  is claimed (up to 1,000 units of rounding for each finalized quarter is allowed). Finalize and let holders claim
+  before staging. Open revenue and the rounding left behind wait in the carry and are shared at the next sweep.
+  Existing seats that had not asked to leave start earning the next UTC day, and nothing is claimable until the
+  running quarter ends. After the upgrade, read `config` (`state_version` 6) and `quarter_info`, and check that
+  `seat_count` is unchanged.
+- [ ] Market. A version-5 market (constant-product pricing) upgrades only while it has created no market. A version-5
+  deployment that has markets is not upgraded: deploy the current version fresh, stop creating markets on the old one,
+  and let its markets resolve and pay out there. A version-5 or version-6 market gets the pool ceiling of 100,000
+  tokens it was running with, so set `set_max_market_locked` after the upgrade. A market halted before version 8
+  stays halted until the owner calls `resume`.
+- [ ] Oracle version 2 to 3. `migrate` refuses while the price threshold is not more than half of the publishers, or
+  while the bond, a window or the jury size is below its floor. Fix the setting in the old code first.
+- [ ] Rounds version 1 to 2. State version 1 had no treasury; `migrate` leaves it unset. It refuses while the price
+  threshold is not more than half of the publishers.
 
 [The treasury handoff](governance.md) describes what remains unconfigured. Do not turn its
 proposal-preparation helper into a production submitter without reviewing the chosen interfaces.
@@ -137,13 +167,21 @@ The project owner sets initial market exposure and user limits after security an
 Publish mint participation terms, reward eligibility and claim rules before asking users to buy
 an NFT. Earnings and returns must not be guaranteed.
 
-Set the market caps against the oracle bond before opening the venue: `set_max_market_locked` (owner) is the most any market can hold, and `set_market_cap` (operator or owner) lowers it for one market. A wrong answer costs the bond, so a market should not hold much more than that bond can answer for. Rounds series set their own `close_before` (at least a minute) when they are added.
+Set the market caps against the oracle bond before opening the venue: `set_max_market_locked` (owner) is the most any market can hold, and `set_market_cap` (operator or owner) lowers it for one market. A wrong answer costs the bond, so a market should not hold much more than that bond can answer for. Rounds series set their own `close_before` (from half the interval up to just under a whole interval) when they are added.
 
-Two checks before an owner call that settles something by hand. `reconcile_leg` with `arrived=false` on a Council leg puts the amount back into `revenue_due` without asking the Council, so read the Council's `received_of` for that sweep first: if it holds a record, the money arrived. Do not upgrade the Council while an unstake is waiting for its NFT transfer, because the new version starts its in-flight count at zero.
+Two checks before an owner call that settles something by hand. `reconcile_leg` with `arrived=false` on a Council leg puts the amount back into `revenue_due` without asking the Council, so read the Council's `received_of` for that sweep first: if it holds a record, the money arrived. Do not upgrade the Council while an unstake is waiting for its NFT transfer, because the new version starts its in-flight count at zero. The version 5 to 6 migration refuses in that case.
 
 Do not open the venue until `keeper.mjs check` shows enough drawable seat holders (jury size
 + second jury + 2; a seat that is serving or asked to leave does not count). After the contracts
 are sealed, `keeper.mjs check --expect-sealed` is the release gate.
+
+The number is not arbitrary. A first jury of 5 that stays silent escalates to a second jury of 11, and the first 5 seats stay
+serving until the case ends, so 16 distinct holders must be free, plus the proposer and the challenger if they hold seats.
+With fewer, the draw is refused and the case ends with no decision at `draw_by`: an event market is voided and both bonds go
+back, so a challenge costs almost nothing and someone who expects to lose can challenge a correct answer to cancel the market.
+A price market keeps its signed price and is not affected. Run `keeper.mjs check` from a scheduler at least hourly and alert on
+a non-zero exit. While it reports too few drawable holders, the operator and the owner (who alone create markets) open no new
+event markets. Markets already open keep running.
 
 Launch only against evidence for [R-01 through R-08](../spec.md#requirements-to-implementation-map),
 with the implemented limitations disclosed. Publishing, deployment and real-money testing need
@@ -175,10 +213,11 @@ and the condition that must page a person.
 | --- | --- | --- |
 | DAO proposals on the owner account | `keeper.mjs check --treasury <dao> --watch-dao` | Any problem line: a proposal that changes control, money or dispute settings, names the verifier or the NFT collection, or is not on the allow-list |
 | Ownership and destination drift | `keeper.mjs check --treasury <dao> --operator <id>` | An owner, pending owner, treasury, fee recipient or no-decision recipient that is not the DAO, or an operator that is not the expected one |
+| Fee settings drift | `keeper.mjs check --expect-fee-rate-bps N --expect-max-fee-rate-bps N --expect-revenue-share-bps N` | The market's fee rate, fee rate ceiling or revenue share differs from what the DAO announced. Pin the ceiling to the intended rate, so the owner must raise the ceiling in a separate step before it can raise the fee. Each option is compared only when given |
 | Verifier keys | `keeper.mjs check` reads `public_keys_of` in the verifier for market, oracle, council and rounds | Any registered key for any of the four contracts, predecessor authentication off, account locked, or `mt_transfer` paused |
 | Access keys | `keeper.mjs check --expect-sealed` | Any access key left on a contract after sealing, or any new key on the NFT collection |
 | Code hash | `keeper.mjs check --release <file> --rounds <id> --treasury <dao>` | A live hash that differs from the release list, or an upgrade proposal whose hash is not in it |
-| Council seat ownership | `keeper.mjs check` (drawable seat holders against jury size) | Fewer drawable holders than jury size + second jury + 2, or the NFT collection's code differs from `--collection-code-hash` |
+| Council seat ownership | `keeper.mjs check` (drawable seat holders against jury size) | Fewer drawable holders than jury size + second jury + 2 (why, and what to do: section 5), or the NFT collection's code differs from `--collection-code-hash` |
 | Keeper health | The keeper's state file and events file, and `keeper.mjs check` margins | The keeper's last finished run is older than twice the market's `min_sweep_interval_minutes` (the hard floor is 60 minutes, so 120 minutes at the floor), a job failing repeatedly, or an account below `--min-margin` |
 | Liveness of price publishing | `GET /price?market=<id>&id=<market id>` on every publisher for an open price market whose observation time passed more than two minutes ago | Fewer publishers answering than the oracle's price threshold, or a publisher key that is not in the oracle's publisher list |
 
@@ -204,6 +243,10 @@ the threshold lets fewer keys decide every price market.
   check prints a warning when the cap is more than 100 times the bond.
 - Rounds. The interval is at least 5 minutes, and stakes close at least half the interval
   before the end of a round.
+- Gas floors, in TGas. Oracle: settle (`finalize`, `resolve_by_deadline`) 100, `retry_unlock` 55, the jury draw about
+  275 (`resolve_draw`). Council: `claim` and `unstake` 33 (attach 100 from the website), `request_unstake` none.
+  Market: `sweep_fees` 87. Rounds: `sweep_fees` 60. A call below its floor is refused with the amount in the
+  message.
 
 ---
 
@@ -213,14 +256,13 @@ The wasm hashes of a release are what lets the DAO and the keeper agree on what 
 order.
 
 1. Build reproducibly. From `contracts/`, with every change committed and docker running, run
-   `./release.sh`. It runs `./build.sh --reproducible`, checks the three wasm files and prints the
+   `./release.sh`. It runs `./build.sh --reproducible`, checks the four wasm files and prints the
    release message on stdout: `Release hashes`, a blank line, one `<contract> sha256:<hex>` line each
-   for market, oracle and council, then `commit <hash>` and `toolchain <version>`. `release.sh` does
-   not print a rounds line yet. When rounds is deployed, add it by hand before the `commit` line, from
-   the same reproducible build: `rounds sha256:$(sha256sum target/near/rounds/rounds.wasm | cut -d' ' -f1)`.
+   for market, oracle, council and rounds, then `commit <hash>` and `toolchain <version>`.
    Build on a second machine and compare the hashes before going on.
 2. Run the build check. `node verify-build.mjs target/near/market/market.wasm
-   target/near/oracle/oracle.wasm target/near/council/council.wasm` (`release.sh` already does this).
+   target/near/oracle/oracle.wasm target/near/council/council.wasm target/near/rounds/rounds.wasm`
+   (`release.sh` already does this).
    It reads the source metadata embedded in each wasm and prints the crate, the wasm sha256, the
    commit and the image digest.
 3. Publish the hash list in the message of an annotated git tag (`git tag -a <tag name>`, with the
@@ -240,7 +282,7 @@ order.
 
 ## View cost at scale
 
-Measured 2026-10-22, and again after the account index and the `entitlements_of` cap, in the NEAR sandbox with `contracts/tests/tests/scale.rs`. Each view method was
+Measured 2026-10-22, and again after the account index, in the NEAR sandbox with `contracts/tests/tests/scale.rs`. Each view method was
 also sent as an ordinary transaction with 300 TGas attached, and the gas burnt is the figure below.
 It includes a fixed transaction cost of about 1.7 TGas (what `total_owed`, which only reads a
 counter, burns). A public RPC limits a view call to about 200 TGas. The sandbox does not enforce
@@ -261,10 +303,7 @@ seeded and traded, the newest 20 holding positions for one account, one market w
 | market `get_account` (1 held, newest market) | 300 / 600 / 1,200 | 2.4 / 2.3 / 2.3 | 1 / 1 / 0 |
 | oracle `list_cases` (50, 50 cases) | 300 | 7.3 | 5 |
 | oracle `bond_totals`, `total_owed` | 300 | 1.7 | 1 |
-| council `list_quarters` (50) | 300 | 6.7 | 4 |
 | council `reward_totals` | 300 | 1.7 | 0 |
-| council `entitlements_of` (25 quarters, account with 10 seats) | 300 | 56.9 | 6 |
-| council `entitlements_of` (50 asked, clamped to 25, 10 seats) | 300 | 56.9 | 5 |
 | council `staked_tokens` (105 seats) | 300 | 9.6 | 3 |
 
 Before and after, in TGas:
@@ -274,7 +313,6 @@ Before and after, in TGas:
 | `get_positions` and `get_account`, 20 held | 72.4 at N = 300 | 7.1 at N = 300, 600 and 1,200 |
 | `get_positions`, 1 held in the newest market | 142.0 at N = 600, 282.4 at N = 1,200 | 2.1 at N = 600 and 1,200 |
 | `get_account`, 1 held in the newest market | same as `get_positions` | 2.3 at N = 600 and 1,200 |
-| `entitlements_of`, 10 seats, 50 quarters asked | 111.6 | 56.9 (clamped to 25 quarters) |
 
 The market keeps, for each account, the sorted list of market ids in which it holds shares, updated
 only where a share entry is created or removed. `get_positions` reads that list instead of scanning
@@ -282,9 +320,7 @@ market ids from 0, so its cost follows the number of positions (about 0.27 TGas 
 number of markets. `get_account` calls it and costs the same. Writing the list costs a trade a
 read and a write of one record of 8 bytes per market the account holds. An ordinary account holds
 at most 20; the operator and the owner, who are not held to that cap, can hold one per market, and
-a record of 1,000 markets is 8 KB. `entitlements_of` walks at most 25 quarters, and each quarter costs a
-lookup for every token the account has ever staked, so its gas also grows with the number of
-seats; only an account with 10 seats was measured.
+a record of 1,000 markets is 8 KB.
 
 `create_market` burns 7.3 TGas in all (the oracle registration included), but needs at least 40
 TGas attached (30 ran out of gas; sizes above 40 were not tried, and nothing between 30 and 40). Six calls of 45 TGas fit in one 300 TGas transaction.
@@ -296,8 +332,8 @@ cd contracts && SCALE_MARKETS=300 cargo test -p tests --test scale -- --ignored 
 ```
 
 For launch: `get_positions` and `get_account` burned under 8 TGas at 300, 600 and 1,200 markets
-and did not grow with the number of markets. `entitlements_of` burned 56.9 TGas for an account
-with 10 seats and is capped at 25 quarters per call. Every other view measured stays under 10 TGas.
-Not measured: an account with more than 10 seats on `entitlements_of`, an operator holding a position
-in hundreds of markets on `get_positions`, a Council with revenue in many quarters, and views with
+and did not grow with the number of markets. Every other view measured stays under 10 TGas.
+Not measured: the Council views of state version 6 (`claimable_of`, `in_progress_of`, `seat_earnings`,
+`quarter_snapshots`), an operator holding a position
+in hundreds of markets on `get_positions`, and views with
 more than 120 history points (the cap).

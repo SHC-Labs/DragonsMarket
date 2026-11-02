@@ -2,12 +2,12 @@
 
 **The views, events, messages, gas, error strings and status enums the website needs from each contract, written so web types can be generated from it, with the places where `web/lib` differs today.**
 
-**Dynamic parimutuel pricing, 2026-10-27.** The market's types, `sell`, `config`, the message grammar and the trade events below are updated for market state version 6, which replaced the constant-product pool and its seed (see [market.md](../market.md)). `web/lib/market.ts` and the portfolio were changed to match on the same day. Rows elsewhere that still name the seed or the closing-price Void are history.
+**Dynamic parimutuel pricing, 2026-10-27.** The market's types, `sell`, `config`, the message grammar and the trade events below are updated for market state version 6, which replaced the constant-product pool (the state is version 8 now) and its seed (see [market.md](../market.md)). `web/lib/market.ts` and the portfolio were changed to match on the same day. Rows elsewhere that still name the seed or the closing-price Void are history.
 
 | Field | Value |
 | --- | --- |
 | Date | 2026-10-21 |
-| Status | Draft. Items marked EXISTING are checked in source. Items marked NEW are PROPOSED and are not an ABI until the contract phase that adds them lands. On 2026-10-21 the Council views and calls of section 7 and the market's `get_sweep`, `list_sweeps`, `settle_leg`, `treasury` and `treasury_due` of section 4 were BUILT as written, with `SweepView.council.to` and `SweepView.treasury.to` added; `config` of both contracts lists the new settings (null recipients until set) |
+| Status | Draft. Items marked EXISTING are checked in source. Items marked NEW are PROPOSED and are not an ABI until the contract phase that adds them lands. Section 7 was rewritten on 2026-10-31 for Council state version 6 and describes the built contract. On 2026-10-21 the market's `get_sweep`, `list_sweeps`, `settle_leg`, `treasury` and `treasury_due` of section 4 were BUILT as written, with `SweepView.council.to` and `SweepView.treasury.to` added; `config` of both contracts lists the new settings (null recipients until set) |
 | Scope | `web/lib/market.ts`, `config.ts`, `settlement.ts`, `errors.ts`, `hooks.ts`, `rpc.ts` and the components that call or display contract data |
 | Source | Contract working tree on top of commit `6cad02e`, read 2026-10-21. Website files as of the same day |
 | Index | [README.md](README.md) |
@@ -153,7 +153,7 @@ interface OwedView { balances: U128; locked: U128; fees: U128; revenue_due: U128
 | `get_sweep`, `list_sweeps` | `{sweep_id: U64}`, `{from_index: U64, limit: U64}` | `SweepView \| null`, `SweepView[]` | BUILT |
 | `in_flight`, `owed_breakdown` | `{}` | `InFlightView`, `OwedView`. `total` equals `total_owed`, which includes `pending_withdrawals`. `legs` counts fee legs that are `pending` or `unresolved` | BUILT |
 
-`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `fee_rate_bps: number`, `revenue_pool: string \| null`, `treasury: string \| null`, `revenue_share_bps: number`, `treasury_share_bps: number`, `min_sweep: U128`, `next_sweep_id: U64`, `revenue_unresolved: U128`, `void_grace_ns: U64`, `settle_wait_minutes: number`, `reconcile_wait_minutes: number`, `min_sweep_interval_minutes: number`, `max_fee_rate_bps: number`, `min_revenue_share_bps: number`, `max_revenue_share_bps: number`, `max_min_sweep: U128`, `registration_fee: U128`. `max_positions` is the stored cap on entries: a position on one side takes two, its shares and its cost record. Also returned: `last_sweep_at: U64 | null`, `market_storage_deposit: U128`, `storage_reserve: U128`, `position_page_default: number` (50), `position_page_max: number` (100). Market state version is 6; oracle 2 and Council 3.
+`config` (EXISTING): `state_version: number`, `upgrade_proven: boolean`, `upgrade_in_flight: boolean`, `owner`, `pending_owner: string | null`, `operator`, `oracle`, `verifier`, `collateral_token_id: string`, `paused: boolean`, `sells_paused: boolean`, `markets: U64`, `storage_deposit: U128` (yocto), `max_positions: number`, `max_market_locked: U128`, `fee_rate_bps: number`, `revenue_pool: string \| null`, `treasury: string \| null`, `revenue_share_bps: number`, `treasury_share_bps: number`, `min_sweep: U128`, `next_sweep_id: U64`, `revenue_unresolved: U128`, `void_grace_ns: U64`, `settle_wait_minutes: number`, `reconcile_wait_minutes: number`, `min_sweep_interval_minutes: number`, `max_fee_rate_bps: number`, `min_revenue_share_bps: number`, `max_revenue_share_bps: number`, `max_min_sweep: U128`, `registration_fee: U128`. `max_positions` is the stored cap on entries: a position on one side takes two, its shares and its cost record. Also returned: `last_sweep_at: U64 | null`, `market_storage_deposit: U128`, `storage_reserve: U128`, `position_page_default: number` (50), `position_page_max: number` (100). Market state version is 8; oracle 3 and Council 6. `market_cap({market_id})` is a view returning the most that market's pool can hold, and a buy past it fails with `this market has reached its cap`.
 
 ---
 
@@ -262,12 +262,12 @@ Every per-market view and call takes the market contract account first, then the
 | Propose | verifier (NEW). Token contract today | `mt_transfer_call` (NEW). `ft_transfer_call` today | `{receiver_id: oracle, token_id, amount: bond, msg: "propose:<market account>:<id>:<outcome>:<evidence>"}` | `1` | 100 TGas | BUILT |
 | Challenge | same | same | `msg: "challenge:<market account>:<id>:<answer>"` | `1` | 100 TGas | BUILT |
 | Commit | oracle | `commit_vote` | `{market, market_id, commitment} | `1` | 100 TGas | EXISTING contract, no builder |
-| Reveal | oracle | `reveal_vote` | `{market, market_id, outcome, salt, reason} | `1` | 100 TGas, floor 80 | EXISTING contract, no builder |
-| Finalize | oracle | `finalize` | `{market, market_id} | `0` | 100 TGas, floor 80 | EXISTING (`market.ts:177-183`) |
+| Reveal | oracle | `reveal_vote` | `{market, market_id, outcome, salt, reason} | `1` | 100 TGas, floor 100 | EXISTING contract, no builder |
+| Finalize | oracle | `finalize` | `{market, market_id} | `0` | 100 TGas, floor 100 | EXISTING (`market.ts:177-183`) |
 | Retry apply | oracle | `retry_apply` | `{market, market_id} | `0` | 100 TGas | EXISTING (`market.ts:185-191`) |
 | Draw a jury | oracle | `resolve_draw` | `{market, market_id} | `0` | 300 TGas, floor 275 | EXISTING contract, no builder |
-| Resolve by deadline | oracle | `resolve_by_deadline` | `{market, market_id}` | `0` | 100 TGas, floor 80 | BUILT contract, no builder |
-| Retry unlock | oracle | `retry_unlock` | `{market, market_id}` | `0` | see contract floor | BUILT contract, no builder |
+| Resolve by deadline | oracle | `resolve_by_deadline` | `{market, market_id}` | `0` | 100 TGas, floor 100 | BUILT contract, no builder |
+| Retry unlock | oracle | `retry_unlock` | `{market, market_id}` | `0` | 100 TGas, floor 55 | BUILT contract, no builder |
 | Withdraw bond | oracle | `withdraw_bond` | `{}` | `1` | 100 TGas | EXISTING (`market.ts:193-199`) |
 
 The oracle refuses a market account it does not serve with `that market contract is not allowed`, and a malformed one with `bad market account`. `commitment` is `hex(sha256("<juror account>:<yes|no|void>:<salt>"))`, 64 lowercase hex characters. The salt must be random and stored durably before the commit is sent, because a lost salt makes the reveal impossible (`oracle/src/lib.rs:279-284`; the site's own note at `market.ts:174-175`). A juror may vote only for the proposed answer or the challenger's answer (`Case.proposed`, `Case.challenger_answer`).
@@ -290,24 +290,18 @@ The oracle refuses a market account it does not serve with `that market contract
 ### 7.1 Types
 
 ```ts
-interface Stake { owner: AccountId; staked_at: U64; unlock_requested_at: U64 | null; serving: U64 | null }
-// NEW: booked_to: U64
+interface Stake { owner: AccountId; staked_at: U64; unlock_requested_at: U64 | null; serving: U64 | null;
+                  earn_from_day: U64 }
+type SeatState = "waiting" | "earning" | "leaving" | "serving";
+interface SeatEarnings { owner: AccountId; state: SeatState; earning_from: U64; earned_closed: U128;
+                         earned_in_progress: U128; start_acc: U128; settled_acc: U128 }
+interface QuarterInfo { quarter: number; starts_at: U64; ends_at: U64; last_closed_quarter: number; last_day: U64 }
+interface QuarterSnapshot { quarter: number; acc: U128 }
+interface RewardTotals { total_received: U128; total_paid: U128; pending_claims: U128; carry: U128;
+                         cut_pool: U128; accrued_total: U128; pending_total_slots: U128 }
 ```
 
-PROPOSED:
-
-```ts
-type QuarterState = "open" | "closing" | "final";
-interface QuarterView { quarter: number; label: string; starts_at: U64; ends_at: U64; claimable_from: U64;
-                        state: QuarterState; revenue_in: U128; carry_in: U128; pool: U128; seat_ns: U128;
-                        forfeit_ns: U128; paid: U128; pending: U128; rolled_to: number | null }
-type EntitlementStatus = "accruing" | "closing" | "claimable" | "pending" | "paid";
-interface EntitlementView { quarter: number; token_id: string; owner: AccountId; weight_ns: U128; amount: U128;
-                            estimated: boolean; status: EntitlementStatus;
-                            requested_at: U64 | null; paid_at: U64 | null }
-interface RewardTotals { total_received: U128; total_paid: U128; pending_claims: U128;
-                         open_pool: U128; final_unclaimed: U128; rolled: U128 }
-```
+`earned_closed` is what a `claim` would pay for the seat now. `earned_in_progress` is what it has made in the quarter still running, which no claim can reach until the quarter closes.
 
 ### 7.2 Views
 
@@ -320,29 +314,28 @@ interface RewardTotals { total_received: U128; total_paid: U128; pending_claims:
 | `stake_of` | `{token_id}` | `Stake \| null` | EXISTING |
 | `jury_of` | `{case_key: U64}` | `string[]` | EXISTING |
 | `total_received` | `{}` | `U128` | EXISTING |
-| `pending_reward` | `{token_id}` | `U128` | EXISTING, REMOVED by the quarterly change |
 | `config` | `{}` | See below | EXISTING |
-| `seats_of` | `{account_id}` | `string[]` | NEW |
-| `current_quarter` | `{}` | `QuarterView` | NEW |
-| `get_quarter`, `list_quarters` | `{quarter: number}`, `{from_quarter: number, limit: number}` | `QuarterView \| null`, `QuarterView[]` | NEW |
-| `quarter_of` | `{at: U64}` | `{quarter: number, label: string, starts_at: U64, ends_at: U64}` | NEW |
-| `get_entitlement` | `{quarter: number, token_id, account_id}` | `EntitlementView \| null` | NEW |
-| `entitlements_of` | `{account_id, from_quarter: number, limit: number}` | `EntitlementView[]`. A page covers `min(limit, entitlements_page_quarters)` quarters; the next page starts at `from_quarter` plus that | NEW |
-| `entitlements_page_quarters` | `{account_id}` | `number`, the most quarters one `entitlements_of` page covers for that account | NEW |
-| `received_of` | `{market: AccountId, sweep_id: U64}` | `{amount: U128, quarter: number, at: U64} \| null` | NEW |
-| `reward_totals` | `{}` | `RewardTotals` | NEW |
+| `seats_of` | `{account_id}` | `string[]` | EXISTING |
+| `claimable_of` | `{account_id}` | `U128`, what a `claim` naming every seat of the account would pay now. It does not walk the days, so a quarter that ended shows here only after something has closed it | EXISTING |
+| `in_progress_of` | `{account_id}` | `U128`, the running-quarter earnings of the account's earning seats plus a kept half that is not yet claimable | EXISTING |
+| `seat_earnings` | `{token_id}` | `SeatEarnings \| null` | EXISTING |
+| `quarter_info` | `{}` | `QuarterInfo` | EXISTING |
+| `quarter_snapshots` | `{from?: number, limit?: number}` | `QuarterSnapshot[]`, oldest first, at most 50 | EXISTING |
+| `received_of` | `{market: AccountId, sweep_id: U64}` | `{amount: U128, at: U64} \| null` | EXISTING |
+| `reward_totals` | `{}` | `RewardTotals` | EXISTING |
 
-`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `oracle`, `nft_contract`, `verifier`, `collateral_token_id`, `cooldown_ns: U64`, `max_seats_per_account: number`, `allowlist_enabled: boolean`, `markets: AccountId[]` (replaces `market`; `set_market` is gone), `allowed_range: {first: U64, last: U64} \| null`, `total_received: U128`, `stream_ns`, `stream_remaining`, `stream_ends_at`. The three `stream_*` fields are REMOVED. NEW: `close_grace_ns`, `reconcile_wait_ns`, `next_to_finalize`, `last_tick`.
+Removed in version 6: `pending_reward`, `current_quarter`, `get_quarter`, `list_quarters`, `quarter_of`, `get_entitlement`, `entitlements_of`, `entitlements_page_quarters`.
+
+`config` (EXISTING): `state_version`, `upgrade_proven`, `upgrade_in_flight`, `owner`, `pending_owner`, `oracle`, `nft_contract`, `verifier`, `collateral_token_id`, `cooldown_ns: U64`, `reconcile_wait_ns: U64`, `max_seats_per_account: number`, `allowlist_enabled: boolean`, `markets: AccountId[]`, `allowed_range: {first: U64, last: U64} \| null`, `total_received: U128`, `last_day: U64`, `active_seats: number`, `last_closed_quarter: number`. The `stream_*` fields, `close_grace_ns`, `next_to_finalize` and `last_tick` do not exist in version 6.
 
 ### 7.3 Calls
 
 | Action | Receiver | Method | Args | Deposit | Gas | Status |
 | --- | --- | --- | --- | --- | --- | --- |
 | Stake a seat | NFT contract | `nft_transfer_call` | `{receiver_id: council, token_id, msg: ""}` | `1` | 100 TGas | EXISTING contract, no builder. Check `is_allowed` first |
-| Ask to unstake | council | `request_unstake` | `{token_id}` | `0` | 30 TGas | EXISTING contract, no builder |
-| Unstake | council | `unstake` | `{token_id}` | `1` | 100 TGas, floor 58 today, 33 after the change | EXISTING contract, no builder |
-| Claim a quarter | council | `claim_quarter` | `{quarter, token_id}` | `1` | 100 TGas, floor 33 | NEW |
-| Claim today (30-day stream) | council | `claim` | `{token_id}` | `1` | 100 TGas, floor 33 | EXISTING, REMOVED by the quarterly change |
+| Ask to unstake | council | `request_unstake` | `{token_id, accepts_cut: true}` | `0` | 30 TGas | EXISTING. The contract refuses unless `accepts_cut` is true. A pop-up must show the warning first: leaving before the quarter ends costs 50% of the running quarter's earnings, and earlier quarters are paid in full |
+| Unstake | council | `unstake` | `{token_id}` | `1` | 100 TGas, floor 33 | EXISTING |
+| Claim | council | `claim` | `{token_ids}` (at most 10; an empty list pays what is already settled) | `1` | 100 TGas, floor 33. Attach 100: the first claim after about 100 idle days burns about 65 | EXISTING |
 
 Revenue is never sent from the site. It arrives from the market's sweep.
 
@@ -359,15 +352,16 @@ TGas. A floor is a refusal the contract enforces with a message that names the a
 | `buy`, `sell`, `redeem`, `withdraw` | none enforced. `withdraw` sends the transfer (15) and its callback (10), so it needs at least 25 plus its own work | 100 |
 | `sweep_fees` | 87 | 100 (keeper) |
 | `commit_vote` | none | 100 |
-| `reveal_vote`, `finalize`, `resolve_by_deadline` | 80 (apply 20, callback 10, two jury releases 30, margin 20) | 100 |
+| `reveal_vote`, `finalize`, `resolve_by_deadline` | 100 (apply 20, callback 10, two jury releases 50, margin 20) | 100 |
 | `resolve_draw` | 275 | 300 |
 | `retry_apply` | none | 100 |
-| `retry_unlock` | 35 | 100 |
+| `retry_unlock` | 55 | 100 |
 | `withdraw_bond` | 33 | 100 |
 | `unstake` | 33 | 100 |
-| `claim_quarter` | 33 | 100 |
+| `request_unstake` | none | 30 (burns 2.6 to 4.7) |
+| `claim` | 33 | 100 (a claim that has to walk about 100 idle days burns about 65) |
 | `upgrade` | 100 | 100 to 250 |
-| `stage_code` | none enforced. The attached deposit must pay the storage (1 NEAR per 100 KB); the surplus is refunded | 100 |
+| `stage_code` | none enforced. The attached deposit must pay the storage (about 1 NEAR per 100 KB, not refunded when the upgrade runs); the surplus is refunded | 100 |
 | `settle_leg` (market) | 30 | 100 |
 
 Sources: the `GAS_*` constants and `require_gas` calls in `market`, `oracle`, `council` and `upgrade`, and the sandbox measurements in `scale-readiness.md`. The refusal text has the form `attach at least N TGas: <reason>`.
@@ -388,14 +382,15 @@ The site does not parse events today. When it does, the envelope is `EVENT_JSON:
 | market | `withdraw_confirmed` | `account`, `amount`, `id` | The verifier moved the money |
 | market | `withdraw_failed` | `account`, `amount`, `id` | The verifier refused, the balance came back |
 | market | `outcome_set` | `market_id`, `outcome`, `refunds` | Market resolved. `refunds` true means every holder is paid back what they put in |
-| oracle | `proposed`, `challenged`, `jury_drawn`, `draw_failed`, `vote_committed`, `vote_revealed`, `escalated`, `final`, `outcome_applied` | see oracle.md | Case progress |
+| oracle | `proposed`, `challenged`, `jury_drawn`, `draw_failed`, `vote_committed`, `vote_revealed`, `escalated`, `draw_extended`, `final`, `outcome_applied` | see oracle.md | Case progress |
 | oracle | `bond_payout_requested`, `bond_paid`, `bond_payout_failed` | `account`, `amount`, `id` (`U64`, string) | Bond payout progress. The request is emitted before the transfer, so it is not a payout |
 | oracle | `bond_received` NEW | `account`, `amount` | Bond custody |
 | council | `staked`, `unstake_requested`, `unstaked`, `unstake_failed` | `token_id`, `owner` | Seat progress |
-| council | `quarter_finalized` NEW | `quarter`, `pool`, `weight_ns`, `rolled_to` | A quarter became claimable |
-| council | `claim_requested`, `claim_paid`, `claim_failed` NEW | `quarter`, `token_id`, `owner`, `amount` | Claim progress |
+| council | `quarter_closed` | `quarter`, `acc`, `cut_shared`, `carried` | A quarter became claimable |
+| council | `seat_cut` | `token_id`, `owner`, `quarter`, `earned`, `cut`, `kept` | A seat asked to leave and gave up half of the running quarter |
+| council | `claim_requested`, `claim_paid`, `claim_failed` | `id`, `account`, `amount`, `tokens`, `requested_at` | Claim progress |
 
-`withdraw` and today's `revenue_claimed` are emitted before their transfer is known to have worked. Read them as requests.
+`withdraw` and `claim_requested` are emitted before their transfer is known to have worked. Read them as requests.
 
 ---
 
@@ -408,7 +403,6 @@ The site shows a sentence from `web/lib/errors.ts`. It matches the panic text wi
 | `has not closed` | market `market has not closed`, oracle `the market has not closed yet` |
 | `market is closed`, `market is resolved`, `market is halted`, `sells are paused` (matched before the generic `paused`), `paused`, `a withdrawal is still pending`, `wait an hour since the last sweep` (or `wait <n> minutes since the last sweep`) | market |
 | `too many positions`, `min shares must be above zero`, `price moved`, `not enough balance`, `not enough shares` | market |
-| `a jury drawn in this quarter is still open` | council |
 | `storage deposit` | market `do the storage deposit first` |
 | `wrong token` | market, oracle, council |
 | `not registered with the oracle` | market |
@@ -422,7 +416,8 @@ Strings with no site copy today, grouped by what the user was doing:
 | Propose, challenge | `send exactly the bond`, `an answer was already proposed`, `too late to propose, the market will be voided at its deadline`, `the market has not closed yet`, `the challenge window closed`, `you cannot challenge your own answer`, `a challenge must name a different answer than the proposal`, `outcome must be yes, no or void`, `nothing to challenge` |
 | Commit, reveal | `not on the panel for this case`, `the commit phase is over`, `the commit phase is still open`, `the panel deadline passed`, `already committed`, `already revealed`, `the vote does not match the commitment`, `vote for the proposed answer or the challenger's answer`, `a reason is required`, `commitment must be 64 lowercase hex characters` |
 | Stake, unstake | `that token is not on the allowlist`, `already staked`, `the council is full`, `that account already holds the most seats allowed`, `this seat is serving on an open case`, `the cooldown has not passed`, `request an unstake first` |
-| Claim | `nothing to claim`, NEW `already claimed`, `claim is already pending`, `that quarter is not final` |
+| Leave | `leaving before the quarter ends costs 50% of this quarter's earnings: pass accepts_cut true`, `unstake already requested` |
+| Claim | `nothing to claim`, `at most 10 tokens in one claim`, `not your seat`, `not staked`, `call advance_days first` |
 | Gas | `attach at least N TGas`. The site should read N and retry with it |
 
 A transaction that succeeds while the receiver refuses (`mt_transfer_call`) has its panic text in a receipt, not in the top-level status. `txPanics` finds it. The site must still call it a refund, not a failure of the wallet.
@@ -438,8 +433,7 @@ A transaction that succeeds while the receiver refuses (`mt_transfer_call`) has 
 | `Stage` | `proposed`, `disputed`, `final` | `Case.stage` |
 | `Ruling` | `unchallenged`, `decided`, `no_decision`, `no_jury` | `final` event |
 | `LegStatus` NEW | `pending`, `settled`, `refused`, `unresolved` | `SweepView` |
-| `QuarterState` NEW | `open`, `closing`, `final` | `QuarterView.state` |
-| `EntitlementStatus` NEW | `accruing`, `closing`, `claimable`, `pending`, `paid` | `EntitlementView.status` |
+| `SeatState` | `waiting`, `earning`, `leaving`, `serving` | `SeatEarnings.state` |
 
 Money states the interface must keep apart (R-08), with their source:
 
@@ -450,9 +444,9 @@ Money states the interface must keep apart (R-08), with their source:
 | Committed in positions | `market.get_positions` (shares, and `redeemable` when resolved). The backing of a market is `MarketView.locked` |
 | Pending withdrawal | `market.get_account.pending_withdrawals` |
 | Bond held, claimable bond | `oracle.claimable_of`, `Case.bond` |
-| Accrued reward | `council.get_entitlement` with `estimated = true` |
-| Claimable reward | `council.get_entitlement` with status `claimable` |
-| Paid reward | `claim_paid` events, `EntitlementView.paid_at` |
+| Reward in progress (shown as "Earned this quarter") | `council.in_progress_of`, and `SeatEarnings.earned_in_progress` for one seat |
+| Claimable reward (shown as "Revenue ready to claim") | `council.claimable_of`, and `SeatEarnings.earned_closed` for one seat |
+| Paid reward | `claim_paid` events and `reward_totals.total_paid` |
 
 ---
 
@@ -472,10 +466,10 @@ Money states the interface must keep apart (R-08), with their source:
 | Configuration | `web/lib/config.ts:15-27` | No verifier, council, collateral token id or NFT account. `isConfigured` needs `tokenId` | Section 2 |
 | Positions | `web/app/portfolio/page.tsx:36-43` | One `get_shares` call per market | `get_positions`. `getPositions` exists in the library layer; the page still pending |
 | Council list | `web/app/council/view.tsx:13-18` | `listMarkets`, then `getCase` per market | `list_cases`. `listCases` exists in the library layer; the page still pending |
-| Error copy | `web/lib/errors.ts:2-16` | Covers the market only | Section 10. Library layer DONE for the market, oracle and council strings listed there, including `sells are paused`, `a withdrawal is still pending` and `a jury drawn in this quarter is still open` |
+| Error copy | `web/lib/errors.ts:2-16` | Covers the market only | Section 10. Library layer DONE for the market, oracle and council strings listed there, including `sells are paused` and `a withdrawal is still pending`. The council string `a jury drawn in this quarter is still open` no longer exists |
 | New views and settings | `web/lib/market.ts`, `council.ts` | `get_positions`, `get_account`, `in_flight`, `owed_breakdown`, `list_cases`, `bond_totals`, `get_market_info` and the new `config` fields had no wrappers or types | Library layer DONE (`getPositions`, `getAccount`, `getInFlight`, `getOwedBreakdown`, `listCases`, `getBondTotals`, `getMarketInfo`, extended config types). Components still pending |
 | First release wallet rule | `web/lib/config.ts` | No shared text | `WALLET_RULE_V1` exported. Library layer DONE, components still pending |
-| Council calls | `web/lib/council.ts` | Had no stake, unstake or claim builder | DONE for the library layer 2026-10-23: `stakeCall`, `requestUnstakeCall`, `unstakeCall`, `claimQuarterCall`. Section 7.3 |
+| Council calls | `web/lib/council.ts` | Had no stake, unstake or claim builder | DONE for the library layer 2026-10-23: `stakeCall`, `requestUnstakeCall` (sends `accepts_cut: true`), `unstakeCall`, `claimCall`. Section 7.3 |
 | Voting | `web/lib/market.ts` | Had no commit or reveal builder | DONE for the library layer 2026-10-23: `commitVoteCall`, `revealVoteCall`, `commitmentFor`, `newSalt`. Section 6.3 |
 | Redeem and withdraw | `market.ts:153-167` | Builders exist. The portfolio disables them (`portfolio/page.tsx:91`, `:124`) | Enable after the market change |
 | Trade ticket | `web/components/TradeTicket.tsx:9-12` | Local only. No quotes and no send | Wire `quote_buy`, `quote_sell` and the builders |

@@ -147,7 +147,7 @@ single-collateral. Withdrawals use USDC under the accepted policy, with withdraw
 costs shown to and paid by the user.
 
 NEAR Intents holds the fungible backing, fee allocations and reward balances. The accepted target
-also covers dispute bonds and juror payments. NFT staking remains NEP-171 custody, and native
+also holds dispute bonds and juror payments. NFT staking remains NEP-171 custody, and native
 NEAR for storage/gas is separate operational funding.
 
 Holding location does not establish authorisation. The design must specify each Intents account,
@@ -248,11 +248,13 @@ The split applies to earned fees, never deposits, position backing, withdrawal l
 bonds. Specify integer rounding and track both transfer legs independently. The configured
 recipient must be verified before transfers are enabled.
 
-Quarterly claims are decided product behaviour and are built in the Council (2026-10-21): UTC
-calendar quarters, entitlement by time staked inside the quarter, a claim window that opens once a
-quarter is final (7 days after it ends to start), no-seat quarters rolling their pool into the next,
-unclaimed shares that never expire, and late-arriving fees booked to the quarter they arrive in. A
-last-minute stake earns only the time it was staked.
+Quarterly claims are decided product behaviour and are built in the Council (state version 6, "pay
+by arrival, claim by quarter"). Quarters are UTC calendar quarters. A seat staked on UTC day D
+earns from day D+1, and each fee sweep is split equally among the seats earning when it arrives.
+A finished quarter can be claimed and never expires. The running quarter cannot be claimed. A seat
+that leaves before the quarter ends gives up half of the running quarter's earnings to the seats
+still earning at the quarter close. A juror who never reveals forfeits its share of revenue that
+arrived while it served.
 
 Claims reserve an entitlement once and complete only after verified settlement. Interrupted
 payouts remain recoverable without reopening an already-paid entitlement. Earnings vary with
@@ -268,7 +270,7 @@ actual fees and eligible participation; no fixed return or payment amount is pro
 | R-02 | Buy, sell, redeem and recover interrupted payouts | Market / settlement | Liabilities reconcile and uncertain callbacks cannot pay twice |
 | R-03 | Allocate earned fees 75% treasury / 25% Council | Market / settlement | Exact rounding, recipient verification and independent transfer-leg recovery. BUILT 2026-10-21 in the contract, treasury account not yet verified on a real DAO |
 | R-04 | Enforce NFT eligibility and case obligations | Council / oracle | Ineligible seats cannot earn or vote; locks and stake changes follow the rules |
-| R-05 | Account for quarters and settle claims once | Council / settlement | Boundary, late-fee, no-seat, repeated-claim and failed-transfer tests. BUILT 2026-10-21, sandbox runs of a finished quarter are accelerated |
+| R-05 | Account for quarters and settle claims once | Council / settlement | Boundary, late-fee, no-seat, repeated-claim and failed-transfer tests. BUILT as state version 6 |
 | R-06 | Settle bonds and juror pay independently | Oracle / settlement | Every final or failed round reconciles without spending holder allocations |
 | R-07 | Use Trezu/Sputnik member approvals for sensitive administration, with the DAO voting period as the only delay (decided 2026-10-21) | DAO integration | Restricted methods refuse other callers, owner handover, upgrades and key-bypass checks, all with a real SputnikDAO |
 | R-08 | Expose reliable user, quarter and operation state | Views / events / services | UI distinguishes availability, commitments, accrual, claims and confirmed payments |
@@ -281,13 +283,13 @@ choices change only through the project owner.
 
 ## 12. Current implementation
 
-Source inspection on 21 October 2026, without running or modifying contract code:
+Checked against the contract source:
 
 | Area | Observed state | Remaining work |
 | --- | --- | --- |
 | Market | Uses verifier-held balances and Intents transfer callbacks | End-to-end funding/identity/exit validation and production configuration |
-| Council | Receives and pays through its Intents account | Quarterly entitlement and claim enforcement |
-| Oracle | Outcome/jury logic exists; bonds and juror pay arrive through the verifier and are paid from the oracle's own Intents account (phase I3, 21 October 2026) | Real USDC and mainnet run, website bond message, a push payout for a DAO recipient |
+| Council | Receives and pays through its Intents account; quarterly earnings and claims enforced (state version 6) | A run against real funds and a real DAO |
+| Oracle | Outcome/jury logic exists; bonds and juror pay arrive through the verifier and are paid from the oracle's own Intents account (phase I3, 21 October 2026) | Real USDC and mainnet run, a push payout for a DAO recipient |
 | Administration | Custom governance removed from workspace; the proposal and vote helper is an allow-list (21 October 2026), not yet run against a real DAO | Create and verify treasury, run the helper against it and transfer ownership |
 | Website | Pages and wallet connection exist; financial writes remain disabled | Reviewed DTOs, quotes, signing, receipts and recovery |
 | Backend | Required operation and reconciliation responsibilities are defined | Choose and implement the actual service and persistence design |

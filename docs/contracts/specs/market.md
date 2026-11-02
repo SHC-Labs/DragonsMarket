@@ -2,7 +2,9 @@
 
 **Dynamic parimutuel pricing, 2026-10-27.** Market state version 6 replaces the constant-product pool with a dynamic parimutuel cost function (`dpm/src/lib.rs`). Superseded below, with [market.md](../market.md) authoritative: everything about seeding, `seed:` messages, the creation fee and opening prices; the pool fields `pool_yes`, `pool_no`, `twap`, `seeded`, `void_price_yes` and `residual_claimed`; the fee formula; `sell(market_id, side, shares, min_collateral)` in place of `collateral_out` and `max_shares_in`; the Void, which now pays each holder back what they put in; the operator's last-day halt rule, which is gone; the events `market_seeded`, `create_fee_set`, `void_rules_set` and `open_price_bounds_set`; and invariant I-M1, restated in section 10. Section 10 and the scope line are updated; the rest stays as design history.
 
-**Current implementation, 2026-10-23.** Market state version 4 adds native storage funding, reserve policy, exact holder counts for new records, a seeder mirror and bounded exempt-account position windows. See [market contract](../market.md) for the current policy and [website ABI](website-abi.md) for exact JSON fields. The older proposal tables below document previous work; where they differ, the current implementation and ABI take precedence. Migration reads the exact version-3 root, preserves tag-0 market records and writes new records with tag 1. Sweeps and withdrawals retain tag 0. No balance, receipt or payout ledger is discarded.
+**Current state.** Market state is version 8. `migrate` accepts the exact roots of versions 5, 6 and 7 (version 5 only while it has created no market) and the current one. Version 7 added per-market pool caps and the ceiling `max_market_locked` (`set_market_cap`, `set_max_market_locked`); version 8 added the halt record. A halt stops new buys for 24 hours and sells keep working. The operator can halt a market once, then only the owner can, and only the owner can `resume`. `set_fee_rate_bps` and `set_fee_limits` are owner only. The fee rate is refused above the stored ceiling (`the fee rate is capped at <n> basis points`, 500 to start, never above 2,000). The sweep interval is 60 to 1,440 minutes. [market.md](../market.md) is authoritative for every method, event and refusal text.
+
+**Implementation, 2026-10-23.** Market state version 4 adds native storage funding, reserve policy, exact holder counts for new records, a seeder mirror and bounded exempt-account position windows. See [market contract](../market.md) for the current policy and [website ABI](website-abi.md) for exact JSON fields. The older proposal tables below document previous work; where they differ, the current implementation and ABI take precedence. Migration reads the exact version-3 root, preserves tag-0 market records and writes new records with tag 1. Sweeps and withdrawals retain tag 0. No balance, receipt or payout ledger is discarded.
 
 
 **The complete function set the market contract needs for the accepted end-to-end product, with every existing method checked against the code and every missing method specified.**
@@ -87,8 +89,8 @@ The market lists binary questions, prices every trade by a dynamic parimutuel co
 
 | Role | Set by | Powers |
 | --- | --- | --- |
-| Owner | `new`, then `propose_owner` and `accept_owner` | `upgrade`, `seal`, `propose_owner`, `set_operator`, `set_fee_recipients`, `set_fee_rate_bps`, `set_create_fee`, `set_void_rules`, `set_sweep_timing`, `set_open_price_bounds`, `set_max_positions`, `set_fee_limits`, `reconcile_revenue`, and everything the operator can do. DECIDED: the owner is the Trezu or SputnikDAO account, which the contract treats as a plain `AccountId` |
-| Operator | `set_operator`, owner only | `create_market`, `retry_register`, `halt` (not in the last 24 hours before close), `resume`, `set_paused`, `claim_residual`, and seeding through the verifier |
+| Owner | `new`, then `propose_owner` and `accept_owner` | `upgrade`, `seal`, `propose_owner`, `set_operator`, `set_fee_recipients`, `set_fee_rate_bps`, `set_void_grace`, `set_sweep_timing`, `set_max_positions`, `set_max_market_locked`, `set_fee_limits`, `reconcile_leg`, `resume`, and everything the operator can do. DECIDED: the owner is the Trezu or SputnikDAO account, which the contract treats as a plain `AccountId` |
+| Operator | `set_operator`, owner only | `create_market`, `retry_register`, `halt` (once per market), `set_market_cap`, `set_paused`, `claim_residual` |
 | Oracle | `new`, no setter | `set_outcome` only |
 | Verifier | `new`, no setter | `mt_on_transfer` only |
 | Anyone | none | Trade from a registered account, `redeem`, `withdraw`, `sweep_fees`, `void_if_unresolved` after the grace period, `stage_code`, NEP-145 registration for any account, every view |
@@ -141,7 +143,7 @@ All EXISTING (`lib.rs:260-306`) except where marked.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `state_version` | `u16` | First field. `migrate` reads exactly this layout (currently 4). Markets, sweeps and withdrawals are stored behind a one-byte version tag |
+| `state_version` | `u16` | First field. `migrate` reads exactly this layout (currently 8). Markets, sweeps and withdrawals are stored behind a one-byte version tag |
 | `upgrade_proven` | `bool` | Set by `migrate`. `seal` refuses until true |
 | `upgrade_in_flight` | `bool` | Set by `upgrade`, cleared by `migrate` |
 | `owner` | `AccountId` | The DAO |
@@ -241,7 +243,7 @@ Gas floors are the attached gas the contract itself refuses to run below. Where 
 | `new` (`:356`) | The account itself, in a deploy and init batch | `owner_id`, `operator_id`, `oracle_id`, `verifier_id: AccountId`, `collateral_token_id: String`, `revenue_pool`, `business_wallet: AccountId` | contract | none | n/a | Refuses an id that does not start with `nep141:`. Private and init | none |
 | `stage_code` (`:401`) | Anyone | wasm bytes as call input | `Base58CryptoHash` | payable, storage cost | 100 TGas for 250 KB | Stores the wasm under its own sha256. Refuses an empty call or too small a deposit | `code_staged` |
 | `upgrade` (`:414`) | Owner | `code_hash: Base58CryptoHash` | `Promise` | none | 100 TGas floor | Deploys the staged code and calls `migrate` in one batch. A panicking `migrate` reverts the deploy. Refuses a hash nobody staged | `upgrade_sent` |
-| `migrate` (`:427`) | The account itself | none | contract | none | 30 TGas reserved | Reads exactly `state_version` 1. Refuses unless `upgrade` set the mark | `migrated` |
+| `migrate` (`:427`) | The account itself | none | contract | none | 30 TGas reserved | Reads the layout its version byte names (5, 6, 7 or 8). Refuses unless `upgrade` set the mark | `migrated` |
 | `seal` (`:438`) | Owner | `public_key: PublicKey` | `Promise` | none | none | Deletes one access key. Refused until `upgrade_proven` | `seal_sent` |
 | `propose_owner` (`:446`) | Owner | `new_owner: AccountId` | none | none | none | Names the next owner. Nothing changes until acceptance | `owner_proposed` |
 | `accept_owner` (`:452`) | The proposed account | none | none | none | none | Completes the handover | `owner_changed` |
@@ -254,8 +256,8 @@ Gas floors are the attached gas the contract itself refuses to run below. Where 
 | `create_market` (`:467`) | Operator or owner | `title`, `rule_text`, `resolution_source`, `void_policy`, `category`, `subcategory: String`, `close_at`, `resolve_by: U64`, `price_rule: Option<PriceRule>` | `U64` market id | none | 100 TGas used by tests (20 reserved for the oracle call, 10 for the callback) | Hashes the rule, stores the market unregistered and asks the oracle to register it. Refuses while paused, empty or oversized text, bad slugs, a `close_at` in the past, `resolve_by` not after `close_at`, a price rule observed before close or at or after `resolve_by`, strike zero, more than 18 decimals | `market_created` |
 | `retry_register` (`:568`) | Operator or owner | `market_id: U64` | none | none | 30 TGas | Sends the oracle registration again. Refuses an already registered market | none |
 | `on_registered` (`:576`) | The account itself | `market_id: U64` | none | none | 10 TGas | Marks the market registered when the oracle accepted it | `market_registered` |
-| `halt` (`:587`) | Operator or owner | `market_id: U64`, `reason: String` | none | none | none | Stops trading. The operator cannot halt in the last 24 hours before close, or after close. Refuses a resolved market | `market_halted` |
-| `resume` (`:605`) | Operator or owner | `market_id: U64` | none | none | none | Lifts a halt. Refuses a resolved market | `market_resumed` |
+| `halt` (`:587`) | Operator or owner | `market_id: U64`, `reason: String` | none | none | none | Stops new buys for 24 hours. The operator can halt a market once, then only the owner can. Sells keep working. Refuses a resolved market | `market_halted` |
+| `resume` (`:605`) | Owner | `market_id: U64` | none | none | none | Lifts a halt. Refuses a resolved market | `market_resumed` |
 | `set_paused` (`:616`) | Operator or owner | `paused: bool` | none | none | none | Stops deposits, buys, seeds and market creation. Not `sell` | `paused` |
 | `claim_residual` (`:651`) | Operator or owner | `market_id: U64` | none | none | none | After resolution, moves what the pool holds beyond what holders are owed into the internal balance of `business_wallet`. Once per market. Refuses an unresolved market and a second claim | `residual_claimed` |
 | `set_outcome` (`:674`) | Oracle | `market_id: U64`, `outcome: Outcome` | none | none | 20 TGas reserved by the oracle | Records `yes`, `no` or `void`. Repeating the same answer does nothing. Refuses before close and a different answer | `outcome_set` |
@@ -267,7 +269,7 @@ Gas floors are the attached gas the contract itself refuses to run below. Where 
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `mt_on_transfer` (`:715`) | The verifier | `sender_id: AccountId`, `previous_owner_ids: Vec<AccountId>`, `token_ids: Vec<String>`, `amounts: Vec<U128>`, `msg: String` | `Vec<U128>`, always `["0"]` | none | The receiver gets the attached gas minus about 20.5 TGas | Section 5. A panic refunds the sender in full | `deposit`, `buy`, `market_seeded` |
 | `buy` (`:787`) | A registered account | `market_id: U64`, `side: String`, `amount: U128`, `min_shares: U128` | none | exactly 1 | 100 TGas used by the website | Spends balance held here. Debit and trade are one receipt, so a refusal restores the balance | `buy` |
-| `sell` (`:796`) | A registered account | `market_id: U64`, `side: String`, `collateral_out: U128`, `max_shares_in: U128` | none | exactly 1 | 100 TGas used by the website | Takes `collateral_out` from the pool, keeps the fee and credits the rest to the seller's balance. Refuses `price moved, would need more shares than your maximum` | `sell` |
+| `sell` (`:796`) | A registered account | `market_id: U64`, `side: String`, `collateral_out: U128`, `max_shares_in: U128` | none | exactly 1 | 100 TGas used by the website | Takes `collateral_out` from the pool, keeps the fee and credits the rest to the seller's balance. Refuses `price moved, you would get less than your minimum` | `sell` |
 | `redeem` (`:839`) | Anyone with shares | `market_id: U64` | `U128` payout | none | none | After resolution turns all of the caller's shares in that market into balance. No deadline. Never pauses | `redeemed` |
 | `withdraw` (`:872`) | Anyone with a balance | `amount: U128` | `Promise` | exactly 1 | 25 TGas reserved plus own work, 100 used by tests | Debits first, then `mt_transfer` to the caller's own Intents account. Never pauses. Refuses zero and `not enough balance` | `withdraw`, then `withdraw_failed` if the verifier refused |
 | `on_withdraw` (`:893`) | The account itself | `id: U64` | none | none | 10 TGas | Reads the amount and account from the withdrawal's record. An error means the verifier receipt failed and nothing moved, so it credits the balance back. No record means nothing to do | `withdraw_confirmed` or `withdraw_failed` |
@@ -281,10 +283,10 @@ Gas floors are the attached gas the contract itself refuses to run below. Where 
 | `reconcile_revenue` (`:1002`) | Owner | `amount: U128`, `arrived: bool` | none | none | none | Settles parked revenue in parts. `arrived` true drops it, false makes it due again. Refuses zero and more than is unresolved | `revenue_reconciled` |
 | `on_business_sent` (`:1017`) | The account itself | `amount: U128` | none | none | 10 TGas | An error restores the amount to `business_due` | `fee_transfer_failed` |
 | `set_fee_recipients` (`:622`) | Owner | `revenue_pool: AccountId`, `business_wallet: AccountId` | none | none | none | Takes effect for the next sweep and for amounts still owed | `fee_recipients_set` |
-| `set_fee_rate_bps` (`:632`) | Owner | `fee_rate_bps: u32` | none | none | none | Refuses above 500 | `fee_rate_set` |
+| `set_fee_rate_bps` (`:632`) | Owner | `fee_rate_bps: u32` | none | none | none | Refuses above the stored ceiling (500 to start) with `the fee rate is capped at <n> basis points` | `fee_rate_set` |
 | `set_create_fee` (`:642`) | Owner | `create_fee: U128` | none | none | none | Refuses above 10,000,000 | `create_fee_set` |
 
-The sweep floor in the code is 87 TGas (42 for the Council transfer call, 15 and 10 for the treasury transfer and its callback, 10 for the Council callback and 10 for the call itself). The comment at `lib.rs:910` still says 95, and `keeper/keeper.mjs:56` repeats it. The sandbox test asserts 87 (`gas_floors.rs:296-306`). The code is right and the comments are stale.
+The sweep floor in the code is 87 TGas (42 for the Council transfer call, 15 and 10 for the treasury transfer and its callback, 10 for the Council callback and 10 for the call itself). The sandbox test asserts 87 (`gas_floors.rs`).
 
 ### 6.5 Views and NEP-145
 
@@ -509,15 +511,15 @@ Exact panic strings (Checked in source: `require!` and `panic_str` in `market/sr
 
 | Group | Strings |
 | --- | --- |
-| Access | `owner only`, `operator or owner only`, `oracle only`, `not the proposed owner`, `only the verifier can deliver money`, `a halt in the last day before close is an owner action` (see 6.6) |
-| Verifier delivery | `exactly one token and amount`, `wrong token`, `the money must come from the sender's own balance`, `amount must be positive`, `unknown action`, `bad market id`, `bad min shares`, `bad starting price` |
+| Access | `owner only`, `operator or owner only`, `oracle only`, `not the proposed owner`, `only the verifier can deliver money` |
+| Verifier delivery | `exactly one token and amount`, `wrong token`, `the money must come from the sender's own balance`, `amount must be positive`, `unknown action`, `bad market id`, `bad min shares`, `bad amount`, `bad shares`, `bad min collateral` |
 | Registration | `do the storage deposit first`, `attach at least 0.05 NEAR`, `the account is not registered`, `nothing above the 0.05 NEAR deposit to withdraw`, `force is not supported, redeem your shares and withdraw your balance first`, `redeem or sell your positions first`, `withdraw your balance first` |
-| Market state | `no such market`, `market is not registered with the oracle yet`, `market has no liquidity yet`, `market is halted`, `market is resolved`, `market is closed`, `market has not closed`, `already resolved`, `not resolved`, `not resolved yet`, `already registered`, `already seeded`, `already claimed`, `paused` |
-| Trading | `side must be yes or no`, `min shares must be above zero`, `cannot buy that amount`, `cannot sell that amount`, `price moved, you would get fewer shares than your minimum`, `price moved, would need more shares than your maximum`, `not enough balance`, `not enough shares`, `nothing to redeem`, `too many positions, redeem or sell one first` |
-| Creation and seed | `title is required` and the three like it, `text is too long`, `category and subcategory must be lowercase slugs of up to 32 characters`, `close_at must be in the future`, `resolve_by must be after close_at`, `observation_time must not be before close_at`, `observation_time must be before resolve_by`, `a price rule needs a strike above zero and at most 18 decimals`, `the seed must be more than the creation fee`, `seed too large`, `the starting price must be between 1% and 99%`, `the seed is too small to open at that price` |
-| Fees | `the fee rate is capped at 500 basis points`, `the creation fee is capped at 10 units`, `that is more than is unresolved`, and the gas refusal `attach at least 87 TGas: a sweep sends the Council its part and the business wallet its part` |
+| Market state | `no such market`, `market is not registered with the oracle yet`, `market is halted`, `market is resolved`, `market is closed`, `market has not closed`, `already resolved`, `not resolved`, `not resolved yet`, `already registered`, `paused` |
+| Trading | `side must be yes or no`, `min shares must be above zero`, `cannot buy that amount`, `cannot sell that many shares`, `price moved, you would get fewer shares than your minimum`, `price moved, you would get less than your minimum`, `not enough balance`, `not enough shares`, `nothing to redeem`, `too many positions, redeem or sell one first` |
+| Creation | `title is required` and the three like it, `text is too long`, `category and subcategory must be lowercase slugs of up to 32 characters`, `close_at must be in the future`, `resolve_by must be after close_at`, `observation_time must not be before close_at`, `observation_time must be before resolve_by`, `a price rule needs a strike above zero and at most 18 decimals`, `attach the market storage deposit` |
+| Fees | `the fee rate is capped at 500 basis points`, `the Council share must be between <low> and <high> basis points`, `the sweep minimum must be between 1 and <max>`, and the gas refusal `attach at least 87 TGas: a sweep sends the Council its part and the treasury its part` |
 | Upgrade | `there is no state to migrate`, `migrate runs only inside an upgrade`, `prove the upgrade path before deleting keys`, `no code is staged under that hash`, `attach at least 100 TGas to upgrade` |
-| Internal | `invariant broken`, `hash failed`, `a voided market has no closing price` |
+| Internal | `hash failed` |
 
 New strings (PROPOSED): `no sweep to settle`, `the leg is not unresolved`, `wait 10 minutes after the sweep before settling`, `the leg is not pending`, `the sweep total is below the minimum`.
 
