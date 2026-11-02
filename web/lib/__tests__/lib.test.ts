@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cents, formatMoney, formatShares, maxSharesWithSlippage, minSharesWithSlippage, shortAccount, timeLeft, toMicro } from "../format";
+import { cents, formatDateTimeUtc, formatMoney, formatShares, maxSharesWithSlippage, minSharesWithSlippage, shortAccount, timeLeft, toMicro } from "../format";
 import { friendlyError } from "../errors";
 
 describe("toMicro", () => {
@@ -65,5 +65,12 @@ describe("friendlyError", () => {
   it("never leaves a person without a reference", () => {
     expect(friendlyError(null, "abc123")).toBe("The transaction could not be confirmed. Check its final status before trying again. Reference abc123.");
     expect(friendlyError("some new panic", "abc123")).toContain("abc123");
+  });
+});
+
+describe("formatDateTimeUtc", () => {
+  it("shows the end of a quarter in UTC whatever the zone of the browser", () => {
+    expect(formatDateTimeUtc("1798761600000000000")).toBe("01 Jan 2027, 00:00 UTC");
+    expect(formatDateTimeUtc(1790812800000000000n)).toBe("01 Oct 2026, 00:00 UTC");
   });
 });

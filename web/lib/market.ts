@@ -318,6 +318,8 @@ export const isRegistered = (account: string) => view<boolean>(market(), "is_reg
 // Free funds live in the user's Intents account, not in a token contract.
 export const tokenBalance = (account: string) =>
   view<string>(config.verifierId, "mt_balance_of", { account_id: account, token_id: config.collateralTokenId });
+// What the wallet holds as the token itself, before it is moved into the Intents account.
+export const walletTokenBalance = (account: string) => view<string>(config.tokenId, "ft_balance_of", { account_id: account });
 export const claimableBond = (account: string) => view<string>(oracle(), "claimable_of", { account_id: account });
 export const quoteBuy = (id: string, side: Side, amount: bigint) =>
   view<BuyQuote>(market(), "quote_buy", { market_id: id, side, amount: amount.toString() });
@@ -363,6 +365,16 @@ export const storageDepositCall = (): FunctionCall => ({
 });
 
 export const depositCall = (amount: bigint) => verifierTransfer(market(), amount, "deposit");
+
+// Moves the token from the wallet into the signer's own Intents account, where every buy draws from. The verifier reads
+// the message as the account to credit and returns the whole amount if it cannot.
+export const fundCall = (account: string, amount: bigint): FunctionCall => ({
+  receiverId: config.tokenId,
+  methodName: "ft_transfer_call",
+  args: { receiver_id: config.verifierId, amount: amount.toString(), msg: account },
+  gas: "200000000000000",
+  deposit: ONE_YOCTO,
+});
 
 // Buy with funds still in the Intents account.
 export const buyCall = (id: string, side: Side, amount: bigint, minShares: bigint) =>
