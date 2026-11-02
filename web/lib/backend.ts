@@ -49,7 +49,7 @@ export async function currentSession(): Promise<string | null> {
   return body.session?.account_id ?? null;
 }
 
-/** Proves ownership of `account` by signing the backend's challenge with the wallet (NEP-413), which creates a 24 hour session. */
+/** Proves ownership of `account` by signing the backend's challenge with the wallet (NEP-413), which creates a session. */
 export async function signIn(account: string, sign: SignMessage): Promise<void> {
   const { body: challenge } = await call<Challenge>("/v1/auth/challenge", { method: "POST", body: { accountId: account } });
   if (challenge.accountId !== account) throw new BackendError("The service asked for a different account.", 0, "account_mismatch");
@@ -63,6 +63,11 @@ export async function signIn(account: string, sign: SignMessage): Promise<void> 
 
 export async function signOut(): Promise<void> {
   if (backendEnabled()) await call("/v1/auth/logout", { method: "POST", body: {} }).catch(() => {});
+}
+
+/** Ends every session this account has on the service, on every device. Unlike signOut it reports failure, because the person needs to know. */
+export async function signOutEverywhere(): Promise<void> {
+  await call("/v1/auth/logout-all", { method: "POST", body: {} });
 }
 
 // A watched market is stored as "<market contract>/<id>", so one account can watch markets on more than one deployment.

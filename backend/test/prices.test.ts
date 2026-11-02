@@ -176,7 +176,7 @@ test('Coinbase, Kraken and Bitstamp give the USD close of the minute ending at t
   assert.ok([coinbase, kraken, bitstamp].every(o => o.quote === 'USD' && o.exactBoundary && o.sourceTimeNs === '1700000099999000000'));
   const policy = { asset: 'BTC' as const, quote: 'USD' as const, boundaryNs: boundary, decimals: 8, minimumSources: 2, maxDeviationBps: 100 };
   assert.equal(candidate([coinbase, kraken, bitstamp], policy), '8080944000000');
-  assert.equal(candidate([coinbase, kraken], policy), '8081390000000');
+  assert.equal(candidate([coinbase, kraken], policy), '8081151172839', 'two sources average, as the keeper does');
   assert.throws(() => candidate([coinbase, kraken, bitstamp], { ...policy, quote: 'USDC' }), /insufficient_exact_independent_sources/);
   assert.throws(() => candidate([coinbase, kraken, { ...bitstamp, price: '82000' }], policy), /divergent_price_sources/);
 });

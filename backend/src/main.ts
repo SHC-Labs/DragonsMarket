@@ -1,7 +1,7 @@
 import { readConfig } from './config.js';
 import { createPool, verifyDatabase } from './database.js';
 import { createApp } from './app.js';
-import { createReadApi, ReadError } from './read-api.js';
+import { createReadApi } from './read-api.js';
 import { cleanupExpiredAuth } from './auth.js';
 import { backendStatus } from './monitoring.js';
 import { createPrivateApi } from './private-api.js';
@@ -27,14 +27,7 @@ try {
       await verifyDatabase(statusPool, config);
       return ingestionStatus(statusPool, config);
     },
-    async url => {
-      if (url.pathname === '/v1/health/services') {
-        if (url.search) throw new ReadError(400, 'invalid_query');
-        await verifyDatabase(statusPool, config);
-        return backendStatus(statusPool, config);
-      }
-      return evidence(url);
-    },
+    evidence,
     createPrivateApi(
       pool,
       config,
@@ -43,6 +36,10 @@ try {
         ? { terms: process.env.POLICY_TERMS_HASH, privacy: process.env.POLICY_PRIVACY_HASH }
         : null,
     ),
+    async () => {
+      await verifyDatabase(statusPool, config);
+      return backendStatus(statusPool, config);
+    },
   );
   server.on('error', () => {
     console.error('API failed to listen');

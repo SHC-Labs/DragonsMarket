@@ -148,10 +148,10 @@ test('receipt migration backfills existing journals without changing block check
   await pool.query('DROP TABLE chain_integrity_reports,source_heads,feed_exports,backend_jobs,user_operations,price_evidence,signing_decisions,reconciliation_reports,wallet_challenges,wallet_sessions,wallet_watchlist,policy_acknowledgements');
   await pool.query('DROP INDEX raw_events_read_page');
   await pool.query("DELETE FROM schema_migrations WHERE version >= '004_receipt_reads.sql'");
-  assert.equal(await migrate(pool), 7);
+  assert.equal(await migrate(pool), 8);
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM indexed_receipts')).rows[0].n, 3);
   assert.deepEqual((await pool.query('SELECT * FROM indexer_checkpoints')).rows, before);
-  assert.equal((await migrationFiles()).length, 10);
+  assert.equal((await migrationFiles()).length, 11);
 }));
 
 test('pending settlements: requests stay listed until their own terminal event lands', async () => setup(async (pool, root) => {

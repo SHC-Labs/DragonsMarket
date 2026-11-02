@@ -185,7 +185,7 @@ pub struct Stake {
 
 versioned!(VersionedStake, StoredStake, Stake);
 
-// What one quarter holds. `seat_ns` is the sum over the quarter of the number of seats still earning (staked and not asking to leave), in seat nanoseconds. It only
+// What one quarter holds. `seat_ns` is the sum over the quarter of the number of seats still earning (staked, not asking to leave, and not fresh for that quarter), in seat nanoseconds. It only
 // moves when the seat count changes or when advance_quarters is called, so every method that changes the count moves it to
 // the present first.
 #[near(serializers=[borsh])]
@@ -438,7 +438,8 @@ pub struct CouncilContract {
     // How many open juries were drawn at each time, so finalize_quarter can see whether one drawn before a quarter's end is
     // still open. One entry per open case at most.
     open_juries: BTreeMap<u64, u32>,
-    // Staked seats that have not asked to unstake. Only these add seat time: a seat's time stops at its request.
+    // Staked seats that have not asked to unstake. Only these add seat time: a seat's time stops at its request, and a seat
+    // counted in `fresh` adds none for the quarter it was staked in.
     earning: u32,
     // How long after a quarter ends it can be finalized, and so when its claims open.
     close_grace_ns: u64,
@@ -1565,7 +1566,10 @@ impl NonFungibleTokenReceiver for CouncilContract {
         );
         require!(self.is_allowed(token_id.clone()), "that token is not on the allowlist");
         require!(!self.stakes.contains_key(&token_id), "already staked");
-        require!(self.staked.len() < MAX_SEATS, "the council is full");
+        require!(
+            self.staked.len() + self.unstakes_in_flight < MAX_SEATS,
+            "the council is full"
+        );
         let held = self.seats_of.get(&previous_owner_id).copied().unwrap_or(0);
         require!(
             held < self.max_seats_per_account,
@@ -1605,7 +1609,7 @@ impl CouncilContract {
         let open = self.nft_contract.as_ref() == Some(&collection)
             && self.is_allowed(token_id.clone())
             && !self.stakes.contains_key(&token_id)
-            && self.staked.len() < MAX_SEATS
+            && self.staked.len() + self.unstakes_in_flight < MAX_SEATS
             && self.seats_of.get(&previous_owner_id).copied().unwrap_or(0) < self.max_seats_per_account;
         if !owned || !open {
             emit(
@@ -1706,6 +1710,8 @@ impl CouncilContract {
 
     // The seat was not counted while it was out, so the time it was out is not booked. It keeps its request, so it does not
     // earn again and `earning` stays as it is. This runs in a callback that must not fail, so seat time moves as far as it can.
+    // The stake checks count unstakes still in flight against MAX_SEATS, so a restore never takes the council past it. An account
+    // can end one seat over its own cap for each unstake of its that failed, which stays until the extra seat leaves.
     fn restore_stake(&mut self, token_id: TokenId, mut stake: Stake) {
         self.advance_seat_time(env::block_timestamp(), MAX_QUARTER_STEPS);
         stake.booked_to = U64(self.last_tick);
@@ -2210,6 +2216,22 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_unstake_cannot_push_the_council_past_max_seats() {
+        let mut c = council();
+        for i in 0..MAX_SEATS {
+            stake(&mut c, &i.to_string(), "a.near");
+        }
+        let before = c.stake_of("0".into()).unwrap();
+        leave(&mut c, "0", "a.near");
+        assert_eq!((c.seat_count(), c.unstakes_in_flight), (MAX_SEATS - 1, 1));
+        let message = refusal(|| stake(&mut c, "new", "b.near"));
+        assert!(message.contains("the council is full"), "{message}");
+        act_as("council.near");
+        c.on_unstaked("0".into(), before, Err(PromiseError::Failed));
+        assert_eq!(c.seat_count(), MAX_SEATS);
+    }
+
+    #[test]
     fn the_owner_changes_the_collection_while_nothing_is_staked() {
         let mut c = council();
         c.set_nft_contract(acct("other-nft.near"));
@@ -2289,14 +2311,11 @@ mod tests {
         assert!(migrated.upgrade_proven && !migrated.upgrade_in_flight);
     }
 
-    #[test]
-    fn migrate_moves_version_four_state_to_five_and_keeps_the_running_quarter_on_the_old_rule() {
-        let mut c = council();
-        stake(&mut c, "7", "o0.near");
-        let old = StateV4 {
+    fn version_four(c: CouncilContract) -> StateV4 {
+        StateV4 {
             state_version: 4,
             upgrade_proven: c.upgrade_proven,
-            upgrade_in_flight: true,
+            upgrade_in_flight: c.upgrade_in_flight,
             owner: c.owner,
             pending_owner: c.pending_owner,
             oracle: c.oracle,
@@ -2331,8 +2350,37 @@ mod tests {
             open_pool: c.open_pool,
             final_pool: c.final_pool,
             rolled_total: c.rolled_total,
-            unstakes_in_flight: 2,
+            unstakes_in_flight: c.unstakes_in_flight,
+        }
+    }
+
+    #[test]
+    fn the_version_five_layout_starts_with_the_version_four_bytes() {
+        let build = || {
+            let mut c = council();
+            stake(&mut c, "7", "o0.near");
+            c.unstakes_in_flight = 2;
+            c.upgrade_in_flight = true;
+            c
         };
+        let five = borsh::to_vec(&build()).unwrap();
+        let four = borsh::to_vec(&version_four(build())).unwrap();
+        let appended = borsh::to_vec(&(0u32, 0u32)).unwrap().len();
+        assert_eq!(five.len(), four.len() + appended);
+        assert_eq!(
+            &five[2..four.len()],
+            &four[2..],
+            "only the version tag differs in the old part"
+        );
+    }
+
+    #[test]
+    fn migrate_moves_version_four_state_to_five_and_keeps_the_running_quarter_on_the_old_rule() {
+        let mut c = council();
+        stake(&mut c, "7", "o0.near");
+        c.unstakes_in_flight = 2;
+        c.upgrade_in_flight = true;
+        let old = version_four(c);
         env::state_write(&old);
         testing_env!(context("alice.near").build());
         let migrated = CouncilContract::migrate();

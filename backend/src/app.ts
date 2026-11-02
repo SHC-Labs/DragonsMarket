@@ -1,7 +1,7 @@
 import { isPrivateRoute, type PrivateHandler } from './private-api.js';
 import { createServer, type IncomingMessage } from 'node:http';
 import { BlockList, isIP } from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Config } from './config.js';
 import { publicConfig } from './config.js';
 import { isReadRoute, ReadError, type ReadHandler } from './read-api.js';
@@ -10,6 +10,19 @@ const WINDOW_MS = 60000;
 const REQUESTS_PER_WINDOW = 120;
 const CHALLENGES_PER_WINDOW = 5;
 const MAX_TRACKED_CLIENTS = 10000;
+
+const digest = (value: string) => createHash('sha256').update(value).digest();
+/** Compares through fixed-length digests so neither the token's content nor its length shows in the timing. */
+export function operatorAuthorized(configured: string | null, header: string | undefined): boolean {
+  const supplied = /^Bearer (.+)$/.exec(header ?? '')?.[1] ?? '';
+  const matches = timingSafeEqual(digest(supplied), digest(configured ?? ''));
+  return configured !== null && matches;
+}
+
+export interface ServiceStatus {
+  alerts: string[];
+}
+export type ServiceStatusReader = () => Promise<ServiceStatus>;
 
 type Counters = Map<string, { start: number; count: number }>;
 /** Counts a hit in the client's current window and says whether it is still within `max`. The oldest entry is dropped when the map is full. */
@@ -83,6 +96,7 @@ export function createApp(
   indexerStatus: () => Promise<unknown> = async () => ({ state: 'not_configured', live: false }),
   read?: ReadHandler,
   privateRead?: PrivateHandler,
+  serviceStatus?: ServiceStatusReader,
 ) {
   const limits: Counters = new Map(),
     challengeLimits: Counters = new Map();
@@ -189,6 +203,26 @@ export function createApp(
       } catch (error) {
         logFailure(requestId, 'ready', error);
         reply(503, { status: 'not_ready', error: { code: 'database_or_configuration_unavailable', requestId } });
+      }
+      return;
+    }
+    if (path === '/v1/health/services' || path === '/v1/operator/services') {
+      const detailed = path === '/v1/operator/services';
+      if (detailed && !operatorAuthorized(config.operatorToken, req.headers.authorization)) {
+        reply(404, { error: { code: 'not_found', requestId } });
+        return;
+      }
+      if (url.search) {
+        reply(400, { error: { code: 'invalid_query', requestId } });
+        return;
+      }
+      try {
+        if (!serviceStatus) throw new Error('service_status_not_configured');
+        const status = await serviceStatus();
+        reply(200, detailed ? status : { status: status.alerts.length ? 'degraded' : 'ok' });
+      } catch (error) {
+        logFailure(requestId, 'services', error);
+        reply(503, { error: { code: 'health_unavailable', requestId } });
       }
       return;
     }

@@ -5,6 +5,8 @@ import { isAccount as account } from './validate.js';
 import { base58Decode } from './base58.js';
 // Challenges live five minutes, so this bounds the table however many addresses a client rotates through.
 const MAX_PENDING_CHALLENGES = 100000;
+// A session's idle clock is written at most this often, so a busy page does not turn every request into a row update.
+const IDLE_TOUCH_SECONDS = 300;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const isUuid = (s: string) => UUID.test(s);
 export const tokenHash = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -72,11 +74,12 @@ export async function login(pool: pg.Pool, config: Config, id: string, publicKey
     await c.query('BEGIN');
     const consumed = await c.query('UPDATE wallet_challenges SET consumed_at=now() WHERE id=$1 AND consumed_at IS NULL AND expires_at>now()', [id]);
     if (consumed.rowCount !== 1) throw new Error('challenge_used_or_expired');
-    await c.query("INSERT INTO wallet_sessions(token_hash,account_id,network,public_key,expires_at) VALUES($1,$2,$3,$4,now()+interval '24 hours')", [
+    await c.query("INSERT INTO wallet_sessions(token_hash,account_id,network,public_key,expires_at) VALUES($1,$2,$3,$4,now()+make_interval(secs=>$5))", [
       tokenHash(token),
       row.account_id,
       config.network,
       publicKey,
+      config.sessionAbsoluteSeconds,
     ]);
     await c.query('COMMIT');
     return token;
@@ -89,14 +92,22 @@ export async function login(pool: pg.Pool, config: Config, id: string, publicKey
 }
 export async function session(pool: pg.Pool, config: Config, token: string) {
   if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
-  return (
-    (
-      await pool.query('SELECT account_id,network,expires_at FROM wallet_sessions WHERE token_hash=$1 AND network=$2 AND expires_at>now()', [
-        tokenHash(token),
-        config.network,
-      ])
-    ).rows[0] ?? null
-  );
+  const found = (
+    await pool.query(
+      `SELECT account_id,network,expires_at,last_seen_at<now()-make_interval(secs=>$4) AS stale FROM wallet_sessions
+       WHERE token_hash=$1 AND network=$2 AND expires_at>now() AND last_seen_at>now()-make_interval(secs=>$3)`,
+      [tokenHash(token), config.network, config.sessionIdleSeconds, IDLE_TOUCH_SECONDS],
+    )
+  ).rows[0];
+  if (!found) return null;
+  const { stale, ...identity } = found;
+  if (stale) await pool.query('UPDATE wallet_sessions SET last_seen_at=now() WHERE token_hash=$1', [tokenHash(token)]);
+  return identity;
+}
+
+/** Ends every session the account has, on every device. Returns how many were revoked. */
+export async function revokeAllSessions(pool: pg.Pool, accountId: string) {
+  return (await pool.query('DELETE FROM wallet_sessions WHERE account_id=$1', [accountId])).rowCount ?? 0;
 }
 
 /** Bounded housekeeping for expired credentials only. Legal acknowledgements and signing decisions are retained. */

@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { NearConnector } from "@hot-labs/near-connect";
 import { usePathname } from "next/navigation";
 import { config } from "@/lib/config";
-import { backendEnabled, currentSession, signIn, signOut } from "@/lib/backend";
+import { backendEnabled, currentSession, signIn, signOut, signOutEverywhere } from "@/lib/backend";
 import type { FunctionCall } from "@/lib/market";
 import { createLegalAcceptance, legalAcceptanceKey, parseLegalAcceptance, readLegalAcceptance, saveLegalAcceptance } from "@/lib/legal";
 import { TermsAcceptanceDialog } from "./TermsAcceptanceDialog";
@@ -19,6 +19,7 @@ interface WalletState {
   // The account the backend knows this browser as, or null. Signing in asks the wallet to sign one message and moves no money.
   backendAccount: string | null;
   signInToBackend: () => Promise<void>;
+  signOutOnAllDevices: () => Promise<void>;
   send: (call: FunctionCall) => Promise<string>;
 }
 
@@ -29,6 +30,7 @@ const Ctx = createContext<WalletState>({
   disconnect: () => {},
   backendAccount: null,
   signInToBackend: () => Promise.reject(new Error("wallet not ready")),
+  signOutOnAllDevices: () => Promise.reject(new Error("wallet not ready")),
   send: () => Promise.reject(new Error("wallet not ready")),
 });
 
@@ -131,6 +133,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     connector.current?.disconnect().catch(() => {});
   }, []);
 
+  const signOutOnAllDevices = useCallback(async () => {
+    await signOutEverywhere();
+    disconnect();
+  }, [disconnect]);
+
   const acceptPolicies = () => {
     if (!walletAccount || !walletAvailable) throw new Error("Connect a wallet first.");
     saveLegalAcceptance(window.localStorage, createLegalAcceptance(walletAccount, config.network));
@@ -167,8 +174,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, [walletAccount]);
 
   const value = useMemo(
-    () => ({ account, walletAvailable, openConnect, disconnect, backendAccount, signInToBackend, send }),
-    [account, walletAvailable, openConnect, disconnect, backendAccount, signInToBackend, send],
+    () => ({ account, walletAvailable, openConnect, disconnect, backendAccount, signInToBackend, signOutOnAllDevices, send }),
+    [account, walletAvailable, openConnect, disconnect, backendAccount, signInToBackend, signOutOnAllDevices, send],
   );
   return <Ctx.Provider value={value}>{children}{!readingPolicy && walletAvailable && walletAccount && !accepted && <TermsAcceptanceDialog key={walletAccount} account={walletAccount} onAccept={acceptPolicies} onDismiss={disconnect} />}</Ctx.Provider>;
 }

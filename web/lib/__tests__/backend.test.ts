@@ -55,6 +55,17 @@ describe("backend client", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("asks the service to end every session and reports a failure", async () => {
+    const backend = await load();
+    vi.mocked(fetch).mockResolvedValueOnce(reply(200, { authenticated: false }));
+    await backend.signOutEverywhere();
+    const [path, init] = vi.mocked(fetch).mock.calls[0]!;
+    expect(path).toBe("https://api.example/v1/auth/logout-all");
+    expect(init).toMatchObject({ method: "POST", credentials: "include" });
+    vi.mocked(fetch).mockResolvedValueOnce(reply(401, { error: { code: "session_required" } }));
+    await expect(backend.signOutEverywhere()).rejects.toMatchObject({ status: 401, code: "session_required" });
+  });
+
   it("keeps only this market's watched ids and stores them under the market contract", async () => {
     const backend = await load();
     vi.mocked(fetch).mockResolvedValueOnce(reply(200, { data: [{ item: "market.near/3" }, { item: "other.near/9" }, { item: "market.near/12" }] }));

@@ -1117,7 +1117,7 @@ impl MarketContract {
     // Owner only, which is the DAO. SputnikDAO executes a proposal in the call of the approval that reaches its threshold,
     // so the DAO's voting period is the only delay a code change waits out (decided 2026-10-21). Withdraw and redeem never
     // pause. Sell stays open too unless the owner itself has set sells_paused, and the operator's pause does not touch it.
-    // A market the operator has halted does not take sells either. The deploy and migrate are one batch: a migrate that panics
+    // The deploy and migrate are one batch: a migrate that panics
     // puts the old code back. Attach at least 100 TGas.
     pub fn upgrade(&mut self, code_hash: Base58CryptoHash) -> Promise {
         upgrade::require_upgrade_gas();
@@ -1368,15 +1368,14 @@ impl MarketContract {
         );
     }
 
-    // Lifts a halt. The owner's resume also clears the record, so the operator can halt that market again.
+    // Owner only, so a halt the owner set cannot be lifted by the operator key. It also clears the record, which lets the
+    // operator halt that market again. A market halted before the record existed (a migrated one) stays halted until here.
     pub fn resume(&mut self, market_id: U64) {
-        self.only_operator_or_owner();
+        self.only_owner();
         let mut m = self.market(market_id.0);
         require!(m.outcome.is_none(), "already resolved");
         m.halted = false;
-        if env::predecessor_account_id() == self.owner {
-            self.halt_until.remove(&market_id.0);
-        }
+        self.halt_until.remove(&market_id.0);
         self.store_market(market_id.0, m);
         emit("market_resumed", json!({ "market_id": market_id.0.to_string() }));
     }
@@ -2834,7 +2833,7 @@ impl MarketContract {
             && self
                 .halt_until
                 .get(&id)
-                .is_some_and(|until| env::block_timestamp() < *until)
+                .is_none_or(|until| env::block_timestamp() < *until)
     }
 
     fn register_with_oracle(&self, id: u64) {
@@ -4359,9 +4358,11 @@ mod tests {
             None,
         );
         c.halt(id, "checking something".into());
-        c.resume(id);
+        assert!(refused(|| c.resume(id)));
         c.set_paused(true);
         c.set_paused(false);
+        act_as(OWNER, 7);
+        c.resume(id);
     }
 
     #[test]
@@ -4408,7 +4409,7 @@ mod tests {
         assert!(refused(|| {
             let _ = receive(&mut c, acct(USERS[0]), U128(1_000_000), "buy:0:yes:1".into());
         }));
-        act_as("ops.near", CLOSE - 1);
+        act_as(OWNER, CLOSE - 1);
         c.resume(U64(0));
         assert!(!c.market(0).halted);
     }
@@ -4472,18 +4473,19 @@ mod tests {
     }
 
     #[test]
-    fn resume_lifts_a_halt_before_it_lapses_and_only_the_owner_frees_the_operator_to_halt_again() {
+    fn only_the_owner_can_resume_a_halt_and_that_frees_the_operator_to_halt_again() {
         let mut c = halted_market_world();
         act_as("ops.near", 11);
-        c.resume(U64(0));
-        buy_one_unit(&mut c, 12);
+        assert!(refused(|| c.resume(U64(0))));
+        assert!(refused(|| buy_one_unit(&mut c, 12)));
         act_as("ops.near", 13);
         assert!(refused(|| c.halt(U64(0), "again".into())));
         act_as(OWNER, 14);
         c.resume(U64(0));
-        act_as("ops.near", 15);
+        buy_one_unit(&mut c, 15);
+        act_as("ops.near", 16);
         c.halt(U64(0), "again".into());
-        assert!(refused(|| buy_one_unit(&mut c, 16)));
+        assert!(refused(|| buy_one_unit(&mut c, 17)));
     }
 
     // ---- what the view says about a market that cannot trade yet ---------------------------------------------
@@ -8204,13 +8206,8 @@ mod tests {
         assert!(upgraded.upgrade_proven && !upgraded.upgrade_in_flight);
     }
 
-    #[test]
-    fn a_version_seven_contract_moves_to_eight_keeping_its_caps_and_halting_nothing() {
-        let mut c = deployed_with_a_balance();
-        let id = create_registered(&mut c, OWNER);
-        c.max_market_locked = LEGACY_MAX_MARKET_LOCKED;
-        let owed = c.total_owed();
-        let old = StateV7 {
+    fn version_seven(c: MarketContract) -> StateV7 {
+        StateV7 {
             state_version: 7,
             upgrade_proven: c.upgrade_proven,
             upgrade_in_flight: true,
@@ -8266,7 +8263,16 @@ mod tests {
             registrations: c.registrations,
             max_market_locked: c.max_market_locked,
             market_caps: c.market_caps,
-        };
+        }
+    }
+
+    #[test]
+    fn a_version_seven_contract_moves_to_eight_keeping_its_caps_and_halting_nothing() {
+        let mut c = deployed_with_a_balance();
+        let id = create_registered(&mut c, OWNER);
+        c.max_market_locked = LEGACY_MAX_MARKET_LOCKED;
+        let owed = c.total_owed();
+        let old = version_seven(c);
         env::state_write(&old);
         act_unpaid(SELF, 5);
         let upgraded = MarketContract::migrate();
@@ -8275,6 +8281,20 @@ mod tests {
         assert_eq!(upgraded.market_cap(U64(id)), U128(LEGACY_MAX_MARKET_LOCKED));
         assert!(!upgraded.halt_until.contains_key(&id));
         assert!(upgraded.upgrade_proven && !upgraded.upgrade_in_flight);
+    }
+
+    #[test]
+    fn a_market_halted_before_the_upgrade_stays_halted_after_it() {
+        let mut c = deployed_with_a_balance();
+        let id = create_registered(&mut c, OWNER);
+        let mut m = c.market(id);
+        m.halted = true;
+        c.store_market(id, m);
+        env::state_write(&version_seven(c));
+        act_unpaid(SELF, 5);
+        let upgraded = MarketContract::migrate();
+        assert_eq!(upgraded.get_market(U64(id)).unwrap().status, "halted");
+        assert!(upgraded.is_halted(id, &upgraded.market(id)));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type pg from 'pg';
 import type { Config } from './config.js';
-import { challenge, isUuid, login, session, tokenHash, type CheckAccessKey } from './auth.js';
+import { challenge, isUuid, login, revokeAllSessions, session, tokenHash, type CheckAccessKey } from './auth.js';
 import { isAccount as account } from './validate.js';
 import { ReadError } from './read-api.js';
 import { LOCK } from './locks.js';
@@ -73,7 +73,7 @@ export function createPrivateApi(
       } catch (e) {
         throw e instanceof Error && LOGIN_REJECTIONS.includes(e.message) ? new ReadError(401, 'login_rejected') : new ReadError(503, 'login_unavailable');
       }
-      res.setHeader('Set-Cookie', [`${sessionCookie}=${token}; Max-Age=86400${attrs}`, `${challengeCookie}=; Max-Age=0${attrs}`]);
+      res.setHeader('Set-Cookie', [`${sessionCookie}=${token}; Max-Age=${config.sessionAbsoluteSeconds}${attrs}`, `${challengeCookie}=; Max-Age=0${attrs}`]);
       return { authenticated: true };
     }
     const token = cookie(req, sessionCookie),
@@ -82,6 +82,11 @@ export function createPrivateApi(
     if (!identity) throw new ReadError(401, 'session_required');
     if (path === '/v1/auth/logout' && method === 'POST') {
       await pool.query('DELETE FROM wallet_sessions WHERE token_hash=$1', [tokenHash(token)]);
+      res.setHeader('Set-Cookie', `${sessionCookie}=; Max-Age=0${attrs}`);
+      return { authenticated: false };
+    }
+    if (path === '/v1/auth/logout-all' && method === 'POST') {
+      await revokeAllSessions(pool, identity.account_id);
       res.setHeader('Set-Cookie', `${sessionCookie}=; Max-Age=0${attrs}`);
       return { authenticated: false };
     }

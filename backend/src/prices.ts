@@ -30,6 +30,25 @@ export function decimal(value: unknown, decimals = 8) {
   if (scaled <= 0n) throw new Error('nonpositive_price');
   return scaled;
 }
+// The keeper's publisher (contracts/keeper/prices.mjs) reads prices at twelve digits, averages the middle pair of an even count
+// (rounded down) and rounds half up to the series' decimals. Publishers sign one price only if they all derive the same one.
+const PRICE_SCALE_DIGITS = 12;
+const MAX_PRICE_DECIMALS = 18;
+function scaledClose(value: unknown) {
+  if (typeof value !== 'string' || !/^\d{1,30}(\.\d{1,18})?$/.test(value)) throw new Error('invalid_decimal');
+  const [whole, fraction = ''] = value.split('.');
+  const scaled = BigInt(whole!) * 10n ** BigInt(PRICE_SCALE_DIGITS) + BigInt(fraction.slice(0, PRICE_SCALE_DIGITS).padEnd(PRICE_SCALE_DIGITS, '0'));
+  if (scaled <= 0n) throw new Error('nonpositive_price');
+  return scaled;
+}
+export function atDecimals(scaled: bigint, decimals: number) {
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > MAX_PRICE_DECIMALS) throw new Error('invalid_decimal');
+  const digits = BigInt(decimals),
+    places = BigInt(PRICE_SCALE_DIGITS);
+  if (digits >= places) return scaled * 10n ** (digits - places);
+  const unit = 10n ** (places - digits);
+  return (scaled + unit / 2n) / unit;
+}
 function parseExact(raw: string): unknown {
   return JSON.parse(raw, (_key, value: unknown, context?: { source?: string }) =>
     typeof value === 'number'
@@ -230,10 +249,13 @@ export function candidate(
   const selected = observations.filter(o => o.asset === policy.asset && o.quote === policy.quote && o.boundaryNs === policy.boundaryNs && o.exactBoundary);
   if (new Set(selected.map(o => o.source)).size !== selected.length) throw new Error('duplicate_price_source');
   if (selected.length < policy.minimumSources) throw new Error('insufficient_exact_independent_sources');
-  const prices = selected.map(o => decimal(o.price, policy.decimals)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  const median = prices[Math.floor(prices.length / 2)]!;
+  const prices = selected.map(o => scaledClose(o.price)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const middle = Math.floor(prices.length / 2);
+  const median = prices.length % 2 ? prices[middle]! : (prices[middle - 1]! + prices[middle]!) / 2n;
   if (prices.some(p => (p > median ? p - median : median - p) * 10000n > median * BigInt(policy.maxDeviationBps))) throw new Error('divergent_price_sources');
-  return median.toString();
+  const price = atDecimals(median, policy.decimals);
+  if (price <= 0n) throw new Error('nonpositive_price');
+  return price.toString();
 }
 export async function recordEvidence(pool: pg.Pool, o: Observation) {
   const hash = createHash('sha256').update(o.raw).digest('hex');
