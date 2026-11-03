@@ -154,7 +154,7 @@ The test verifies receipt IDs, event payloads and final contract settings agains
 
 `LocalSandboxReader` and `captureLocalTransactions` live in `src/ingestion/local-source.ts`. The source is labelled `local_capture`, not `fixture` or `live`. The third migration adds that status label. Migration 004 indexes receipt outcomes and backfills committed journals. Migrations 005 and 006 add source heads, transaction provenance, jobs, operations, price/signing evidence, reconciliation reports and wallet sessions. Migration 007 enforces append-only deployment identities so service users do not need deployment-update privileges. It captures only the known calls controlled by this isolated harness. It cannot discover arbitrary users' transactions and must never be presented as complete network ingestion.
 
-Prerequisites are the repository Rust toolchain, WebAssembly target, `cargo-near`, Node 22.23.4+ in the 22.x line and local PostgreSQL. The official `near-sandbox` and `near-api-js` packages are test-only dependencies. The first sandbox run downloads its pinned binary. Build output, binary cache and sandbox temporary files stay under ignored `backend/.local/`; that folder is excluded from Docker builds. The test prints the WASM SHA-256 and receipt/event counts for its actual run.
+Prerequisites are the repository Rust toolchain, WebAssembly target, `cargo-near`, Node 24.21.0+ in the 24.x line and local PostgreSQL. The official `near-sandbox` and `near-api-js` packages are test-only dependencies. The first sandbox run downloads its pinned binary. Build output, binary cache and sandbox temporary files stay under ignored `backend/.local/`; that folder is excluded from Docker builds. The test prints the WASM SHA-256 and receipt/event counts for its actual run.
 
 A mutation check also confirmed that incorrectly marking rejected receipts as successful makes this integration fail. The correct adapter was restored afterward. The separate public-RPC capability checks still do not establish a complete live receipt stream.
 
@@ -312,7 +312,7 @@ The backup command writes a custom-format pg_dump archive with a SHA-256 file un
 
 ## Host development and checks
 
-Use Node 22.23.4 or a newer 22.x release and npm, matching the website runtime. Dependencies are locked in `package-lock.json`: TypeScript, the `pg` PostgreSQL driver, and type declarations. HTTP and tests use Node's standard library.
+Use Node 24.21.0 or a newer 24.x release and npm; the NEAR Intents Agent API SDK needs Node 24. Dependencies are locked in `package-lock.json`: TypeScript, the `pg` PostgreSQL driver, the official `@near-intents-agent-api/sdk`, and type declarations. HTTP and tests use Node's standard library.
 
 ```sh
 npm ci

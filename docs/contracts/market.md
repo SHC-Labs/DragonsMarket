@@ -371,12 +371,13 @@ message decides what to do. The message grammar is the one the NEP-141 hook had.
 
 | `msg`                              | Who                | What it does                                                                                                                                                       |
 | ---------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `deposit`                          | Registered account | Adds the amount to the sender's balance. Refused if paused or not registered. Extra text after `deposit` is ignored.                                               |
-| `register`                         | Not yet registered | Registers the sender for the registration fee (`config.registration_fee`), which is due to the treasury whole, and credits the rest to the sender's balance. The market's own NEAR carries the account's storage, inside the storage reserve. Refused if paused, if the sender is registered already (`already registered`) or if the amount is short of the fee (`send at least the registration fee`). Extra text after `register` is ignored. |
-| `buy:<market>:<side>:<min shares>` | Registered account | Buys directly with the money sent. `side` is `yes` or `no`. `min shares` is a slippage floor and must be above zero. Extra text after the fourth part is ignored. |
+| `deposit`                          | Registered account | Adds the amount to the sender's balance. Refused if paused or not registered.                                                                                     |
+| `register`                         | Not yet registered | Registers the sender for the registration fee (`config.registration_fee`), which is due to the treasury whole, and credits the rest to the sender's balance. The market's own NEAR carries the account's storage, inside the storage reserve. Refused if paused, if the sender is registered already (`already registered`) or if the amount is short of the fee (`send at least the registration fee`). |
+| `buy:<market>:<side>:<min shares>` | Registered account | Buys directly with the money sent. `side` is `yes` or `no`. `min shares` is a slippage floor and must be above zero. |
 
-Also refused for any message: an amount of zero, an unknown action, or a market id that is not a
-number.
+Also refused for any message: an amount of zero, an unknown action, a market id that is not a
+number, or more parts than the action takes (`the message has more parts than its action takes`),
+so a signed buy sent with its money cannot be read as a buy with a different minimum.
 
 A plain deposit is not a funded position. Depositing tokens into the verifier with the market's
 account as the recipient, in any message form, credits the market's Intents account and never calls
@@ -409,10 +410,11 @@ Then:
 
 | `msg`                              | Who                | What it does |
 | ---------------------------------- | ------------------ | ------------ |
-| `deposit`                          | Registered account | Credits the amount to the sender's balance once the verifier has it. Refused if paused or not registered. Extra text after `deposit` is ignored. |
+| `deposit`                          | Registered account | Credits the amount to the sender's balance once the verifier has it. Refused if paused or not registered. |
 | `buy:<market>:<side>:<min shares>` | Registered account | Credits the amount once the verifier has it, then buys `side` with it as `buy` does from a balance. Refused if paused, not registered, the market is not open, the side is not `yes` or `no`, or the minimum is zero. A buy that fails after the credit, because the price moved or the market closed in between, leaves the money in the balance. |
 
-Any other message is refused (`unknown action`), `register` included: an account with no
+A message with more parts than its action takes is refused, as above. Any other message is
+refused (`unknown action`), `register` included: an account with no
 NEAR registers through the verifier instead (see "Money in"). Every refusal comes before the
 forward, so the token hands the whole amount back to the sender.
 
@@ -451,8 +453,8 @@ verifier's own documentation says that wNEAR is not refunded, so clients leave i
 | `withdraw:<amount>`                                     | `withdraw`, into the signer's own Intents account |
 
 Also refused: an unknown action (`unknown action`) and a part that is not a number (`bad market id`,
-`bad amount`, `bad min shares`, `bad shares`, `bad min collateral`). Extra text after the last
-part is ignored, as above.
+`bad amount`, `bad min shares`, `bad shares`, `bad min collateral`), and more parts than the
+action takes, as above.
 
 The verifier starts `on_auth` without waiting for it, so `execute_intents` succeeds even when this
 contract refuses the action. The refusal shows as a failed receipt on this contract, nothing moves,

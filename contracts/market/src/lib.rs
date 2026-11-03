@@ -1022,6 +1022,13 @@ fn parse_part<T: std::str::FromStr>(part: Option<&str>, what: &str) -> T {
         .unwrap_or_else(|| env::panic_str(&format!("bad {what}")))
 }
 
+fn no_more<'a>(mut parts: impl Iterator<Item = &'a str>) {
+    require!(
+        parts.next().is_none(),
+        "the message has more parts than its action takes"
+    );
+}
+
 #[near]
 impl MarketContract {
     // Only this account can run it, so a deploy and init batch signed by it is the one way in.
@@ -1762,14 +1769,19 @@ impl MarketContract {
         let mut parts = msg.split(':');
         match parts.next() {
             Some("deposit") => {
+                no_more(parts);
                 self.assert_can_deposit(&sender_id);
                 self.credit_deposit(&sender_id, amount.0);
             }
-            Some("register") => self.register_with_collateral(&sender_id, amount.0),
+            Some("register") => {
+                no_more(parts);
+                self.register_with_collateral(&sender_id, amount.0);
+            }
             Some("buy") => {
                 let id: u64 = parse_part(parts.next(), "market id");
                 let side = side_index(parts.next().unwrap_or(""));
                 let min_out: u128 = parse_part(parts.next(), "min shares");
+                no_more(parts);
                 self.buy_with(&sender_id, id, side, amount.0, min_out);
             }
             _ => env::panic_str("unknown action"),
@@ -1825,6 +1837,7 @@ impl MarketContract {
                 let side = side_index(parts.next().unwrap_or(""));
                 let amount: u128 = parse_part(parts.next(), "amount");
                 let min_out: u128 = parse_part(parts.next(), "min shares");
+                no_more(parts);
                 self.debit(&signer_id, amount);
                 self.buy_with(&signer_id, id, side, amount, min_out);
             }
@@ -1833,13 +1846,17 @@ impl MarketContract {
                 let side = parts.next().unwrap_or("");
                 let shares: u128 = parse_part(parts.next(), "shares");
                 let min_collateral: u128 = parse_part(parts.next(), "min collateral");
+                no_more(parts);
                 self.sell_for(&signer_id, id, side, shares, min_collateral);
             }
             Some("redeem") => {
-                let _ = self.redeem_for(&signer_id, parse_part(parts.next(), "market id"));
+                let id: u64 = parse_part(parts.next(), "market id");
+                no_more(parts);
+                let _ = self.redeem_for(&signer_id, id);
             }
             Some("withdraw") => {
                 let amount: u128 = parse_part(parts.next(), "amount");
+                no_more(parts);
                 return PromiseOrValue::Promise(self.withdraw_for(signer_id, amount));
             }
             _ => env::panic_str("unknown action"),
@@ -2627,6 +2644,7 @@ impl FungibleTokenReceiver for MarketContract {
         let mut parts = msg.split(':');
         let arrival = match parts.next() {
             Some("deposit") => {
+                no_more(parts);
                 self.assert_can_deposit(&sender_id);
                 Arrival::Deposit
             }
@@ -2634,6 +2652,7 @@ impl FungibleTokenReceiver for MarketContract {
                 let id: u64 = parse_part(parts.next(), "market id");
                 let side = side_index(parts.next().unwrap_or(""));
                 let min_out: u128 = parse_part(parts.next(), "min shares");
+                no_more(parts);
                 self.market_to_buy(&sender_id, id, min_out);
                 Arrival::Buy {
                     market_id: U64(id),
@@ -8385,6 +8404,36 @@ mod tests {
             let reason = refusal(|| token_sends(&mut c, USERS[0], 5_000_000, msg, 100));
             assert!(reason.contains("paused"), "{msg}: {reason}");
         }
+    }
+
+    #[test]
+    fn a_message_with_extra_parts_is_refused() {
+        let (mut c, total_in) = world();
+        let extra = "the message has more parts than its action takes";
+        for msg in ["deposit:1", "register:", "buy:0:yes:5000000:1"] {
+            act_as(VERIFIER, 3);
+            let reason = refusal(|| {
+                let _ = receive(&mut c, acct(USERS[0]), U128(5_000_000), msg.into());
+            });
+            assert!(reason.contains(extra), "{msg} by transfer: {reason}");
+        }
+        for msg in [
+            "buy:0:yes:1000000:1:9",
+            "sell:0:yes:1:0:9",
+            "redeem:0:9",
+            "withdraw:1:2",
+        ] {
+            act_as(VERIFIER, 3);
+            let reason = refusal(|| {
+                let _ = c.on_auth(acct(USERS[0]), msg.into());
+            });
+            assert!(reason.contains(extra), "{msg} signed: {reason}");
+        }
+        for msg in ["deposit:x", "buy:0:yes:1:9"] {
+            let reason = refusal(|| token_sends(&mut c, USERS[0], 5_000_000, msg, 100));
+            assert!(reason.contains(extra), "{msg} by token: {reason}");
+        }
+        assert_eq!(c.total_owed().0, total_in);
     }
 
     #[test]

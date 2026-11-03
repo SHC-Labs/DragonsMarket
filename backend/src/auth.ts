@@ -94,7 +94,7 @@ export async function session(pool: pg.Pool, config: Config, token: string) {
   if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
   const found = (
     await pool.query(
-      `SELECT account_id,network,expires_at,last_seen_at<now()-make_interval(secs=>$4) AS stale FROM wallet_sessions
+      `SELECT account_id,network,public_key,expires_at,last_seen_at<now()-make_interval(secs=>$4) AS stale FROM wallet_sessions
        WHERE token_hash=$1 AND network=$2 AND expires_at>now() AND last_seen_at>now()-make_interval(secs=>$3)`,
       [tokenHash(token), config.network, config.sessionIdleSeconds, IDLE_TOUCH_SECONDS],
     )

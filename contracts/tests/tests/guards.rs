@@ -399,41 +399,45 @@ fn the_rounds_contract_pays_out_only_in_a_withdrawal_to_the_account_itself() {
         withdraw.contains("self.debit(&who, amount)") && withdraw.contains(".mt_transfer(who,"),
         "the payout goes to the account whose balance it came out of"
     );
-    for nep141 in ["ft_on_transfer", "ft_transfer", "mt_transfer_call", "mt_batch_transfer"] {
-        assert!(!code.contains(nep141), "the rounds code names {nep141}");
+    for forbidden in ["mt_transfer_call", "mt_batch_transfer"] {
+        assert!(!code.contains(forbidden), "the rounds code names {forbidden}");
     }
 }
 
 #[test]
-fn the_market_sends_the_token_only_to_its_own_intents_account() {
-    let sources = sources_of("market");
-    let code: String = sources.iter().map(|(_, code)| code.as_str()).collect();
-    assert_eq!(
-        code.matches(".ft_transfer_call(").count(),
-        1,
-        "the market makes exactly one token call"
-    );
-    assert!(
-        !code.contains(".ft_transfer("),
-        "the market never sends the token itself"
-    );
-    let hook: String = code
-        .split("impl FungibleTokenReceiver for MarketContract {")
-        .nth(1)
-        .expect("the market takes the token through the standard receiver")
-        .split("\n}\n")
-        .next()
-        .unwrap()
-        .split_whitespace()
-        .collect();
-    assert!(
-        hook.contains("ext_ft_core::ext(token)"),
-        "the token is called through the standard interface"
-    );
-    assert!(
-        hook.contains(".ft_transfer_call(self.verifier.clone(),amount,None,env::current_account_id().to_string(),)"),
-        "the token goes whole to the verifier, into the market's own account"
-    );
+fn the_token_goes_only_into_the_contracts_own_intents_account() {
+    for (contract, receiver) in [("market", "MarketContract"), ("rounds", "RoundsContract")] {
+        let sources = sources_of(contract);
+        let code: String = sources.iter().map(|(_, code)| code.as_str()).collect();
+        assert_eq!(
+            code.matches(".ft_transfer_call(").count(),
+            1,
+            "{contract} makes exactly one token call"
+        );
+        assert!(
+            !code.contains(".ft_transfer("),
+            "{contract} never sends the token itself"
+        );
+        let hook: String = code
+            .split(&format!("impl FungibleTokenReceiver for {receiver} {{"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("{contract} takes the token through the standard receiver"))
+            .split("\n}\n")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect();
+        assert!(
+            hook.contains("ext_ft_core::ext(token)"),
+            "{contract} calls the token through the standard interface"
+        );
+        assert!(
+            hook.contains(
+                ".ft_transfer_call(self.verifier.clone(),amount,None,env::current_account_id().to_string(),)"
+            ),
+            "{contract} sends the token whole to the verifier, into its own account"
+        );
+    }
 }
 
 // The fee split is expressed in basis points the owner can set. No account id is written in the market's or the Council's code,

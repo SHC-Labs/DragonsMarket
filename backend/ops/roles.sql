@@ -14,7 +14,9 @@ GRANT INSERT,UPDATE ON indexed_blocks,indexed_receipts,raw_events,indexer_checkp
 GRANT SELECT,INSERT,UPDATE,DELETE ON wallet_challenges,wallet_sessions,wallet_watchlist TO dm_api;
 -- Legal acknowledgements are retained, so the API can add and read them but never change or remove one.
 GRANT SELECT,INSERT ON policy_acknowledgements TO dm_api;
-GRANT SELECT ON user_operations,backend_jobs,reconciliation_reports,chain_integrity_reports,signing_decisions TO dm_api;
+GRANT SELECT ON backend_jobs,reconciliation_reports,chain_integrity_reports,signing_decisions TO dm_api;
+GRANT SELECT,INSERT,UPDATE ON user_operations,agent_accounts,agent_grants,agent_intents,agent_access_tokens TO dm_api;
+GRANT SELECT,INSERT ON agent_access_stakes TO dm_api;
 GRANT SELECT,INSERT,UPDATE ON backend_jobs,user_operations,price_evidence,feed_exports,reconciliation_reports,chain_integrity_reports TO dm_worker;
 GRANT USAGE ON SEQUENCE chain_integrity_reports_id_seq TO dm_worker;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO dm_backup;

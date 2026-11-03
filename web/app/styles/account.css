@@ -58,6 +58,37 @@
 .portfolio-skeleton > div { height: 12rem; }
 .portfolio-skeleton > div:last-child { grid-column: 1 / -1; height: 18rem; }
 
+.agents-page { display: grid; gap: var(--s-7); }
+.agent-intro, .agent-create { display: grid; justify-items: start; gap: var(--s-4); max-width: 46rem; padding: var(--s-7); border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); }
+.agent-intro p, .agent-create > p { margin: 0; line-height: 1.6; }
+.agent-rules { display: grid; gap: var(--s-2); margin: 0; padding-left: var(--s-5); color: var(--text-muted); line-height: 1.5; }
+.agent-list { display: grid; gap: var(--s-4); }
+.agent-card { display: grid; gap: var(--s-4); padding: var(--s-6); border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--elev-1); overflow-wrap: anywhere; }
+.agent-card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s-3); }
+.agent-name { margin: 0; font-family: var(--font-display-stack); font-size: var(--fs-xl); font-weight: 600; letter-spacing: -0.025em; }
+.agent-account { display: flex; flex-wrap: wrap; gap: var(--s-2); margin: 0; font-size: var(--fs-sm); }
+.agent-step { display: grid; justify-items: start; gap: var(--s-3); width: 100%; }
+.agent-summary { margin: 0; padding: var(--s-4); border-left: 2px solid var(--brand); border-radius: var(--r-xs); background: var(--raised); line-height: 1.5; }
+.agent-label { font-size: var(--fs-sm); color: var(--text-muted); }
+.agent-step .field { width: min(100%, 24rem); }
+.agent-desk { display: grid; gap: var(--s-4); }
+.agent-balances { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-3); margin: 0; }
+.agent-balances > div { padding: var(--s-4); border-radius: var(--r-md); background: var(--raised); }
+.agent-balances dt { font-size: var(--fs-xs); color: var(--text-muted); }
+.agent-balances dd { margin: var(--s-1) 0 0; font-size: var(--fs-lg); font-weight: 500; }
+.agent-panel { display: grid; gap: var(--s-3); padding-top: var(--s-4); border-top: 1px solid var(--line); }
+.agent-panel p { margin: 0; }
+.agent-panel-title { margin: 0; font-size: var(--fs-md); font-weight: 500; }
+.agent-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); }
+.agent-amount { width: 9rem; }
+.agent-select { min-height: var(--control-md); padding: 0 var(--s-4); border: 1px solid var(--border-input); border-radius: var(--r-sm); background: var(--bg); color: var(--text); }
+.agent-history { display: grid; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
+.agent-history > li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); font-size: var(--fs-sm); }
+.agent-connect { display: grid; gap: var(--s-2); margin: 0; }
+.agent-connect > div { display: grid; gap: var(--s-1); padding: var(--s-3) var(--s-4); border-radius: var(--r-md); background: var(--raised); }
+.agent-connect dt { font-size: var(--fs-xs); color: var(--text-muted); }
+.agent-connect dd { margin: 0; font-size: var(--fs-sm); overflow-wrap: anywhere; user-select: all; }
+
 @media (max-width: 899px) {
   .account-empty { grid-template-columns: 1fr; padding: var(--s-7) var(--s-6); gap: var(--s-6); min-height: 0; }
   .account-empty-art { height: 12rem; }
@@ -71,4 +102,6 @@
   .portfolio-breakdown { margin-left: 0; }
   .account-empty h2 { font-size: var(--fs-2xl); }
   .account-empty p { font-size: var(--fs-md); }
+  .agent-balances { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .agent-intro, .agent-create, .agent-card { padding: var(--s-5); }
 }

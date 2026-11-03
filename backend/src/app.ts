@@ -8,6 +8,8 @@ import { isReadRoute, ReadError, type ReadHandler } from './read-api.js';
 
 const WINDOW_MS = 60000;
 const REQUESTS_PER_WINDOW = 120;
+const ACCESS_REQUESTS_PER_WINDOW = 6000;
+const REQUESTS_PER_ACCESS_TOKEN = 120;
 const CHALLENGES_PER_WINDOW = 5;
 const MAX_TRACKED_CLIENTS = 10000;
 
@@ -99,7 +101,8 @@ export function createApp(
   serviceStatus?: ServiceStatusReader,
 ) {
   const limits: Counters = new Map(),
-    challengeLimits: Counters = new Map();
+    challengeLimits: Counters = new Map(),
+    tokenLimits: Counters = new Map();
   const proxies = trustedProxyList(config.trustedProxyAddresses);
   const server = createServer(async (req, res) => {
     const requestId = randomUUID();
@@ -118,7 +121,12 @@ export function createApp(
     };
     const client = clientAddress(req, config.trustedProxyHops, proxies);
     const now = Date.now();
-    if (!withinLimit(limits, client, REQUESTS_PER_WINDOW, now)) {
+    const access = (req.url ?? '').startsWith('/v1/agent-access/');
+    const token = access ? createHash('sha256').update(String(req.headers.authorization)).digest('hex') : '';
+    if (
+      !withinLimit(limits, client, access ? ACCESS_REQUESTS_PER_WINDOW : REQUESTS_PER_WINDOW, now) ||
+      (access && !withinLimit(tokenLimits, token, REQUESTS_PER_ACCESS_TOKEN, now))
+    ) {
       res.setHeader('Retry-After', '60');
       reply(429, { error: { code: 'rate_limited', requestId } });
       return;

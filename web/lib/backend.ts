@@ -10,7 +10,7 @@ export const backendEnabled = () => config.backendUrl !== "";
 
 interface Reply<T> { ok: boolean; status: number; body: T }
 
-async function call<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<Reply<T>> {
+export async function call<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<Reply<T>> {
   if (!backendEnabled()) throw new BackendError("The backend is not configured.", 0, "backend_disabled");
   const method = init.method ?? "GET";
   let response: Response;
@@ -50,9 +50,13 @@ export async function currentSession(): Promise<string | null> {
 }
 
 /** Proves ownership of `account` by signing the backend's challenge with the wallet (NEP-413), which creates a session. */
-export async function signIn(account: string, sign: SignMessage): Promise<void> {
+export async function signIn(account: string, sign: SignMessage, origin = globalThis.location?.origin): Promise<void> {
   const { body: challenge } = await call<Challenge>("/v1/auth/challenge", { method: "POST", body: { accountId: account } });
   if (challenge.accountId !== account) throw new BackendError("The service asked for a different account.", 0, "account_mismatch");
+  if (challenge.recipient !== origin || challenge.callbackUrl !== origin
+    || !challenge.message.startsWith(`Sign in to Dragons Market\nAccount: ${account}\n`)) {
+    throw new BackendError("The sign-in request did not match this site, so nothing was signed.", 0, "challenge_mismatch");
+  }
   const signed = await sign({ message: challenge.message, recipient: challenge.recipient, nonce: nonceBytes(challenge.nonce), callbackUrl: challenge.callbackUrl });
   if (signed.accountId !== account) throw new BackendError("The wallet signed for a different account.", 0, "account_mismatch");
   await call("/v1/auth/verify", { method: "POST", body: { id: challenge.id, publicKey: signed.publicKey, signature: signed.signature } });

@@ -1,12 +1,11 @@
 # rounds
 
-**Up and Down rounds, 2026-10-26; stakes inside the round, 2026-10-28.** A contract for the short crypto markets (5-minute
-BTC, ETH and NEAR). A round takes stakes while it runs, until `close_before` ahead of its end, and prices each stake by
-dynamic parimutuel: a stake buys shares of its side at the price the round has reached, and the side that was right
-shares the pool less a fee. There is no seed and the treasury is never the counterparty. Prices come from publishers
-signing the price at fixed moments, checked k of n, with no bond, challenge or jury. State version 1; never deployed, so
-the 2026-10-28 layout replaced the first one in place. Not yet in the reproducible build or the release; see "Not built
-yet".
+**Up and Down rounds, 2026-10-26; stakes inside the round and the token path, 2026-10-28.** A contract for the short
+crypto markets (5-minute BTC, ETH and NEAR). A round takes stakes while it runs, until `close_before` ahead of its end,
+and prices each stake by dynamic parimutuel: a stake buys shares of its side at the price the round has reached, and the
+side that was right shares the pool less a fee. There is no seed and the treasury is never the counterparty. Prices come
+from publishers signing the price at fixed moments, checked k of n, with no bond, challenge or jury. State version 3,
+and `migrate` takes state version 1 or 2. Not yet in the reproducible build or the release; see "Not built yet".
 
 Source: `rounds/src/lib.rs`. The pricing maths is the `dpm` crate (`dpm/src/lib.rs`), the same one the market prices
 with. The publisher signature check is `price-signatures/src/lib.rs`, the same check the oracle makes on a signed price.
@@ -50,7 +49,8 @@ interval. Both limits are checked in `add_series`, the only place a series is ma
 | Owner (the DAO) | Everything below, plus the upgrade, `seal`, ownership handover, the operator, `set_fee_bps`, `set_registration_fee`, `add_publisher`, `set_price_threshold`, `reconcile_withdrawal` |
 | Operator | `add_series`, `set_paused`, `remove_publisher` (cutting off a leaked key needs no vote) |
 | The verifier | `mt_on_transfer` (money in) and `on_auth` (signed actions) |
-| Anyone | `record_price` with valid signatures, `settle_round`, `claim` for any account, the views |
+| The collateral token | `ft_on_transfer` (money in by `ft_transfer_call`) |
+| Anyone | `record_price` with valid signatures, `settle_round`, `claim` for any account, `storage_deposit` for any account, the views |
 
 ## Starting it up: `new`
 
@@ -62,12 +62,44 @@ message), and `price_threshold` at least 1. Publishers are added after, by the o
 ## Money in: `mt_on_transfer`
 
 The verifier calls it after a transfer to this contract with a message. A panic makes the verifier refund the sender.
+On every path a message carries exactly the parts its action takes, and one with more is refused, so a signed stake
+sent with its money cannot be read as a stake with a different minimum.
 
 | Message | Does |
 | --- | --- |
 | `register` | Registers the sender. The registration fee (0.25 to start) goes to fees and the rest to the balance |
 | `deposit` | Credits the balance of a registered account |
 | `stake:<series>:<round>:<up\|down>:<min shares>` | Stakes the whole amount, refused if it buys fewer than `min shares` |
+
+## Money in by token: `ft_on_transfer`
+
+For an account that holds the collateral token itself and nothing in Intents. It registers in NEAR first (below), then
+calls `ft_transfer_call(receiver_id: <this contract>, amount, msg)` on the token with 1 yocto and 300 TGas. The token
+goes whole into this contract's own Intents account, and the callback credits what the verifier took and hands back the
+rest. Every refusal comes before the forward, so a refused transfer comes back whole. At least 75 TGas must reach the
+hook (`attach at least 75 TGas`): 50 for the forward, 20 for the callback, which may start a stake, and 5 for its own
+work. Measured in the sandbox, 84 TGas on the token call is the least that clears it, and a stake by token burns about
+7.4 TGas in this contract. That holds for a token that passes all its unused gas on; one built on an older
+`near-contract-standards` keeps a fixed 30 TGas for itself, so 100 TGas leaves it short.
+
+| Message | Does |
+| --- | --- |
+| `deposit` | Credits the balance |
+| `deposit_for:<account>` | Credits the balance of another registered account, at least the minimum stake. The deposit event names the sender as `from`, and a refusal before the forward still refunds the sender |
+| `stake:<series>:<round>:<up\|down>:<min shares>` | Credits the balance, then stakes the whole amount through `stake_credited`, a private method, in its own receipt with 10 TGas. A stake the round refuses by then, or one that would buy fewer than `min shares`, stays in the balance |
+
+`register` is not a message here: an account that pays by token registers in NEAR.
+
+## Registering in NEAR: NEP-145
+
+`storage_deposit(account_id)` with 0.05 NEAR registers `account_id`, or the caller, and takes no registration fee.
+Anyone can pay for another account. Whatever is attached above 0.05 goes back to the payer, all of it for an account
+that is already registered. `storage_balance_bounds` is 0.05 both ways, so nothing is ever available to
+`storage_withdraw`.
+
+`storage_unregister` with exactly 1 yocto closes an account with no open stakes, no balance and no withdrawal in flight.
+The 0.05 NEAR goes back to whoever paid it, and an account that registered with the fee gets only its yocto: the fee is
+never returned. `force` is refused. A pause refuses `storage_deposit` like every other way in.
 
 ## Signed actions: `on_auth`
 
@@ -112,14 +144,17 @@ Measured by `measure_an_account_at_its_open_stake_limit`, keys and record overhe
 
 | Record | Bytes | NEAR at 1e19 per byte |
 | --- | --- | --- |
-| A registration, account and balance, at the longest account id | 238 | 0.00238 |
+| A registration with the fee, account, record and balance, at the longest account id | 348 | 0.00348 |
+| A registration in NEAR another account paid, with its balance, at the longest account ids | 416 | 0.00416 |
 | A stake at the longest account id | 154 | 0.00154 |
 | A round at its largest | 140 | 0.0014 |
 | A price | 69 | 0.00069 |
 
-An account holds at most 20 open stakes, so one account costs the contract at most 3,318 bytes (about 0.033 NEAR), which
-the registration fee is set to cover. Rounds are stored only once someone stakes, and a price only while a round with
-stakes needs it. Every new record must leave a 1 NEAR reserve after storage; the operator tops the account up.
+An account holds at most 20 open stakes. One that registered with the fee costs the contract at most 3,428 bytes (about
+0.034 NEAR), which the registration fee is set to cover. One that registered in NEAR takes at most 3,496 bytes (about
+0.035 NEAR), inside its 0.05 NEAR deposit; the test checks that it fits. Rounds are stored only once someone stakes,
+and a price only while a round with stakes needs it. Every new record must leave a 1 NEAR reserve after storage; the
+operator tops the account up.
 
 ## Views
 
@@ -127,14 +162,16 @@ stakes needs it. Every new record must leave a 1 NEAR reserve after storage; the
 `get_round(series_id, round)` (shares and what each side paid), `get_price(series_id, round)` (the price at its start),
 `quote_stake(series_id, round, side, amount)` (the shares that amount buys now), `get_stake(series_id, round,
 account_id)`, `get_account(account_id)`, `get_balance(account_id)`, `is_registered(account_id)`, `total_owed`,
-`owed_breakdown`, `is_staged(code_hash)`.
+`owed_breakdown`, `is_staged(code_hash)`, `storage_balance_of(account_id)`, `storage_balance_bounds`. `config` includes
+the registration fee and the storage deposit.
 
 `total_owed` is balances plus what every round has left plus fees plus withdrawals waiting on their callback. The keeper
 compares it with the verifier's `mt_balance_of` for this account; more there is surplus, less is an incident.
 
 ## Events
 
-Standard `rounds`, version 1.0.0: `registered`, `deposit`, `staked` (with the shares bought and both sides' shares
+Standard `rounds`, version 1.0.0: `registered` (with `fee` for a registration with the fee, `paid_by` for one in NEAR),
+`unregistered` (with `deposit_to`), `deposit`, `staked` (with the shares bought and both sides' shares
 after it), `price_recorded` (with the signers), `round_settled` (outcome, reason `price`, `tie`, `one_sided` or
 `no_price`, and fee), `claimed` (with the stake's shares), `withdraw`, `withdraw_confirmed`, `withdraw_failed`,
 `withdrawal_reconciled`, `series_added`, `publisher_added`, `publisher_removed`, `price_threshold_set`, `fee_set`,
@@ -159,11 +196,22 @@ accept that risk. The contract does nothing about it.
 - One signature short of the threshold, a repeated publisher or a key that is not a publisher records nothing, and the
   first quorum for a moment is final.
 - Only the verifier can bring money in or act for a signer, and a signed stake cannot spend more than the balance.
+- Only the collateral token can bring money in by token, never on the verifier's behalf and only with gas for the
+  forward. A transfer from an account that is not registered, or with a stake the round would refuse, is refused before
+  the forward. The contract owes exactly what the verifier took (property test over every report the verifier can give),
+  and an account that leaves while its token is on the way keeps that money.
+- An account leaves only with no open stake, balance or withdrawal in flight, and the NEAR deposit goes back to whoever
+  paid it.
 - Against the real verifier: accounts with no NEAR register, stake inside the round, win and withdraw by signed
   intents, a replayed withdrawal is refused, stakes before the start and at the close are refused, and the contract's
   books equal its verifier balance at every step.
+- Against the real verifier and token: an account with nothing in Intents registers in NEAR, deposits and stakes by
+  token, wins, withdraws and leaves with its deposit back; a refused transfer comes back whole; a stake by token with
+  just enough gas completes; a stake the round refuses stays a balance; and the callbacks that credit and spend
+  balances refuse outside callers.
 - The source guard allows one verifier interface, `mt_transfer`, called once, from the withdrawal to the account whose
-  balance it came from.
+  balance it came from, and one token call, the forward of the whole amount to the verifier for this contract's own
+  account.
 
 ## Not built yet
 
@@ -174,5 +222,4 @@ accept that risk. The contract does nothing about it.
 - **Selling.** A stake is held to the end of its round.
 - **Pruning.** Settled rounds and their prices stay stored after every stake is claimed, and a losing stake stays until
   someone claims it (paying nothing). A keeper can clear losers with `claim`; deleting empty rounds is not built.
-- **Leaving.** There is no unregister. The registration fee is not refunded in any case.
 - **A per-series stop.** The operator's pause stops every series at once.

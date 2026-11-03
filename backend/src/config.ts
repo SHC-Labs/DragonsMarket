@@ -1,5 +1,7 @@
 import { isIP } from 'node:net';
 import { readRpcSettings, type RpcSettings } from './providers.js';
+import { readAgentApiSettings, type AgentApiSettings } from './agent-api.js';
+import { isAccount } from './validate.js';
 
 export type Network = 'sandbox' | 'testnet' | 'mainnet';
 export type ContractRole = 'market' | 'rounds' | 'oracle' | 'council' | 'verifier';
@@ -15,6 +17,8 @@ export interface Config {
   sessionIdleSeconds: number;
   network: Network;
   rpc: RpcSettings;
+  agentApi: AgentApiSettings | null;
+  agentAccounts: { grantKey: Buffer; walletContract: string } | null;
   deployment: null | {
     id: string;
     startBlock: string;
@@ -39,6 +43,22 @@ function url(value: string, name: string, protocols: string[]): URL {
   try { result = new URL(value); } catch { throw new Error(`Invalid ${name}`); }
   if (!protocols.includes(result.protocol) || !result.hostname) throw new Error(`Invalid ${name}`);
   return result;
+}
+
+function readAgentAccounts(env: NodeJS.ProcessEnv, agentApi: AgentApiSettings | null): Config['agentAccounts'] {
+  const key = env.AGENT_GRANT_KEY, walletContract = env.AGENT_API_WALLET_CONTRACT;
+  if (!key && !walletContract) return null;
+  if (!key || !walletContract || !agentApi) {
+    throw new Error('AGENT_GRANT_KEY and AGENT_API_WALLET_CONTRACT go together, with AGENT_API_URL and AGENT_API_KEY');
+  }
+  const grantKey = Buffer.from(key, 'base64');
+  if (grantKey.length !== 32 || grantKey.toString('base64') !== key) {
+    throw new Error('AGENT_GRANT_KEY must be 32 bytes of base64');
+  }
+  if (!isAccount(walletContract) || ['intents.near', 'intents.far'].includes(walletContract)) {
+    throw new Error('Invalid AGENT_API_WALLET_CONTRACT');
+  }
+  return { grantKey, walletContract };
 }
 
 export function readNetwork(env: NodeJS.ProcessEnv): Network {
@@ -94,13 +114,18 @@ export function readConfig(env: NodeJS.ProcessEnv): Config {
   const sessionAbsoluteSeconds = integer(env.SESSION_ABSOLUTE_SECONDS || String(DEFAULT_SESSION_ABSOLUTE_SECONDS), 'SESSION_ABSOLUTE_SECONDS', MIN_SESSION_SECONDS, MAX_SESSION_SECONDS);
   const sessionIdleSeconds = integer(env.SESSION_IDLE_SECONDS || String(DEFAULT_SESSION_IDLE_SECONDS), 'SESSION_IDLE_SECONDS', MIN_SESSION_SECONDS, MAX_SESSION_SECONDS);
   if (sessionIdleSeconds > sessionAbsoluteSeconds) throw new Error('SESSION_IDLE_SECONDS cannot exceed SESSION_ABSOLUTE_SECONDS');
-  return { databaseUrl, network, rpc, host, port, webOrigin, trustedProxyHops, trustedProxyAddresses, operatorToken, sessionAbsoluteSeconds, sessionIdleSeconds, deployment };
+  const agentApi = readAgentApiSettings(env);
+  return {
+    databaseUrl, network, rpc, agentApi, agentAccounts: readAgentAccounts(env, agentApi), host, port, webOrigin,
+    trustedProxyHops, trustedProxyAddresses, operatorToken, sessionAbsoluteSeconds, sessionIdleSeconds, deployment,
+  };
 }
 
 // Deliberate allowlist: never spread process.env or expose database credentials.
 export function publicConfig(config: Config) {
   return {
     apiVersion: 'v1', network: config.network, deployment: config.deployment,
-    capabilities: { trading: false, funding: false, indexing: config.network === 'mainnet' && config.deployment !== null, walletSessions: true },
+    capabilities: { trading: false, funding: false, indexing: config.network === 'mainnet' && config.deployment !== null, walletSessions: true,
+      agents: config.agentApi !== null && config.agentAccounts !== null && config.deployment !== null },
   };
 }

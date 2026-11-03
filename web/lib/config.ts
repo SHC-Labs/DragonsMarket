@@ -31,6 +31,7 @@ export const config = {
   tokenId: process.env.NEXT_PUBLIC_TOKEN_ID ?? "",
   // The Dragons Market backend (sessions, synced watchlist, settlement status). Empty keeps the site working from the chain alone.
   backendUrl: (process.env.NEXT_PUBLIC_BACKEND_URL ?? "").replace(/\/+$/, ""),
+  mcpUrl: process.env.NEXT_PUBLIC_MCP_URL ?? "",
   tokenSymbol: network === "mainnet" ? "USDC" : "mUSD",
   tokenDecimals: 6,
 };

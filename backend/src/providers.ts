@@ -57,11 +57,13 @@ async function readCapped(response: Response, max: number): Promise<string> {
 }
 
 export class RpcError extends Error {
-  constructor(public readonly code: string | number) { super(`RPC request failed (${code})`); }
+  constructor(public readonly code: string | number, public readonly causeName: string | null = null) {
+    super(`RPC request failed (${code})`);
+  }
 }
 
 // Only read operations are allowed in this provider diagnostic. No wallet or signing keys.
-type ReadMethod = 'status' | 'block' | 'EXPERIMENTAL_indexer_block' | 'query';
+type ReadMethod = 'status' | 'block' | 'EXPERIMENTAL_indexer_block' | 'query' | 'EXPERIMENTAL_tx_status';
 export class ReadRpcClient {
   private tail: Promise<unknown> = Promise.resolve();
   private nextAt = 0;
@@ -89,7 +91,10 @@ export class ReadRpcClient {
       let body: unknown;
       try { body = JSON.parse(await readCapped(response, MAX_RPC_RESPONSE_BYTES)); } catch { throw new RpcError(`http_${response.status}_invalid_json`); }
       if (!isObject(body) || body.id !== id || body.jsonrpc !== '2.0') throw new RpcError('invalid_envelope');
-      if (isObject(body.error) && typeof body.error.code === 'number') throw new RpcError(body.error.code);
+      if (isObject(body.error) && typeof body.error.code === 'number') {
+        const cause = isObject(body.error.cause) && typeof body.error.cause.name === 'string' ? body.error.cause.name : null;
+        throw new RpcError(body.error.code, cause);
+      }
       if (!response.ok) throw new RpcError(`http_${response.status}`);
       if (!Object.hasOwn(body, 'result')) throw new RpcError('missing_result');
       return body.result;
