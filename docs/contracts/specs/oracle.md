@@ -1,14 +1,11 @@
 # Dragons Market: oracle contract implementation spec
 
-**The complete function set the oracle needs for the accepted product: the dispute rules that already exist, and the Intents bond and payout custody that does not exist yet.**
+**The complete function set the oracle needs for the accepted product: the dispute rules and the Intents bond and payout custody.**
 
 | Field | Value |
 | --- | --- |
-| Date | 2026-10-21 |
-| Status | Draft. Existing rows are checked in source. Rows marked NEW or CHANGED are PROPOSED |
+| Status | Rows are checked in source at state version 3. Rows marked PROPOSED are not built |
 | Scope | `contracts/oracle/src/lib.rs` |
-| Source | Working tree on top of commit `6cad02e`, read 2026-10-21 09:00 to 09:22 |
-| Revision checked | `oracle/src/lib.rs` sha256 prefix `ec8878d63390ecf8` (3586 lines, unchanged between copies, 15 lines differ from `HEAD`) |
 | Index | [README.md](README.md) |
 
 ---
@@ -33,16 +30,15 @@
 
 ## 1. Summary
 
-The oracle's dispute logic is complete and well tested: propose, challenge naming an answer, jury draw from the Council, commit and reveal, one escalation to a larger disjoint jury, no-decision settlement, price answers signed by publishers, deadline answers, retryable apply and unlock. Its custody is not on Intents. It still takes bonds as a NEP-141 `ft_on_transfer` from a token contract and pays them with `ft_transfer` (Checked in source: `oracle/src/lib.rs:17`, `:194-197`, `:228`, `:645`, `:915-931`). The source guard pins that interface (`tests/tests/guards.rs:48`).
+The oracle's dispute logic is complete and well tested: propose, challenge naming an answer, jury draw from the Council, commit and reveal, one escalation to a larger disjoint jury, no-decision settlement, price answers signed by publishers, deadline answers, retryable apply and unlock. Its custody is on Intents, with the same shape the market and the Council have:
 
-This is the largest missing piece of requirement R-06. The work is a migration with the same shape the market and the Council already went through:
-
-| Change | Section |
-| --- | --- |
-| Replace `bond_token` with the verifier and the exact collateral token id; replace `ft_on_transfer` with `mt_on_transfer` | 8.1 |
-| Replace `withdraw_bond` payout by `ft_transfer` with `mt_transfer` from the oracle's own Intents account; add a permissionless `payout_bond` | 8.2 |
-| Count bonds held and bonds owed so the keeper can reconcile the oracle's Intents balance | 8.3 |
-| Case list view, events for bond movement, `jury_size` event | 8.4, 8.5 |
+| Item | Status | Section |
+| --- | --- | --- |
+| The verifier and the exact collateral token id in place of a bond token; `mt_on_transfer` in place of `ft_on_transfer` | BUILT | 8.1 |
+| `withdraw_bond` pays with `mt_transfer` from the oracle's own Intents account | BUILT | 8.2 |
+| A permissionless `payout_bond` | PROPOSED, not built | 8.2 |
+| Bonds held and bonds owed counted so the keeper can reconcile the oracle's Intents balance | BUILT | 8.3 |
+| Case list view, events for bond movement, `jury_size` event | BUILT | 8.4, 8.5 |
 
 Dispute bonds and juror pay stay in the oracle's own Intents account. They never mix with holder revenue, which lives in the Council's account. DECIDED (README section 3).
 
@@ -58,7 +54,7 @@ The oracle decides outcomes. Someone proposes an answer with a bond. A challenge
 | Operator | `set_operator`, owner only | `remove_publisher` only, so a leaked publisher key can be cut off in one call |
 | Market | `new`, no setter | `register_market` only |
 | Jurors | Drawn per case | `commit_vote`, `reveal_vote` for the case they sit on |
-| Bond token | `new`, no setter (today) | `ft_on_transfer` only. After migration the verifier calls `mt_on_transfer` |
+| Verifier | `new`, no setter | `mt_on_transfer` only |
 | Anyone | none | Propose or challenge by sending the exact bond, `resolve_draw`, `finalize`, `resolve_by_deadline`, `retry_apply`, `retry_unlock`, `withdraw_bond` for their own balance, `stage_code`, views |
 
 Checked in source: roles at `oracle/src/lib.rs:226`, owner checks at `:472-589`, market check at `:604`.
@@ -67,16 +63,16 @@ Checked in source: roles at `oracle/src/lib.rs:226`, owner checks at `:472-589`,
 
 ## 3. Money flows in Intents terms
 
-The oracle needs its own Intents account `O`. It must have no key registered in the verifier and predecessor authentication on, like the market. NEW rule for the keeper: `public_keys_of(O)` empty, `is_auth_by_predecessor_id_enabled(O)` true, `is_account_locked(O)` false.
+The oracle needs its own Intents account `O`. It must have no key registered in the verifier and predecessor authentication on, like the market. Rule for the keeper: `public_keys_of(O)` empty, `is_auth_by_predecessor_id_enabled(O)` true, `is_account_locked(O)` false.
 
-| Money | Today (NEP-141) | Target (Intents) |
-| --- | --- | --- |
-| Proposer bond arrives | `ft_transfer_call` of the token to the oracle with `msg` | User calls verifier `mt_transfer_call(receiver_id=O, token_id, amount=bond, msg)`. The verifier calls `O.mt_on_transfer` |
-| Challenger bond arrives | Same, `msg = challenge:<market account>:<market id>:<answer>` | Same through the verifier |
-| A case settles | `claimable[account] += amount` in the oracle's own ledger. No token moves | Same. No verifier call. The money stays in `O` |
-| Winner, jurors or recipient collects | `withdraw_bond` calls `ft_transfer` on the token | `withdraw_bond` calls verifier `mt_transfer(receiver_id=caller, token_id, amount, null, null)` with 1 yocto from `O` |
-| A third party pushes a payout | Not possible | `payout_bond(account_id)` pays `claimable[account_id]` to that same account's own Intents account |
-| Failed payout | `on_bond_withdrawn` restores `claimable` on error | Same. An error means the verifier receipt failed and nothing moved |
+| Money | How it moves |
+| --- | --- |
+| Proposer bond arrives | User calls verifier `mt_transfer_call(receiver_id=O, token_id, amount=bond, msg)`. The verifier calls `O.mt_on_transfer` |
+| Challenger bond arrives | Same, `msg = challenge:<market account>:<market id>:<answer>` |
+| A case settles | `claimable[account] += amount` in the oracle's own ledger. No verifier call. The money stays in `O` |
+| Winner, jurors or recipient collects | `withdraw_bond` calls verifier `mt_transfer(receiver_id=caller, token_id, amount, null, null)` with 1 yocto from `O` |
+| A third party pushes a payout | Not possible today. PROPOSED: `payout_bond(account_id)` pays `claimable[account_id]` to that same account's own Intents account |
+| Failed payout | `on_bond_withdrawn` restores `claimable` on error. An error means the verifier receipt failed and nothing moved. `reconcile_bond_payout` settles a payout whose callback never came |
 
 Settlement math is unchanged and already built (`oracle/src/lib.rs:1179-1250`). The ruling decides who is paid:
 
@@ -87,7 +83,7 @@ Settlement math is unchanged and already built (`oracle/src/lib.rs:1179-1250`). 
 | No jury ever seated, in either round (added 2026-10-22) | The proposer and the challenger each get their own bond back. Nobody else is paid. The `final` ruling is `no_jury` and the event market is Void as before |
 | No decision after two juries | The proposer gets their own bond back plus the part of the challenger's bond that jurors do not take. Half of the challenger's bond, rounded down, is split equally among every juror who revealed. If nobody revealed, that half goes to `no_decision_recipient` |
 
-`juror_share_bps` 2500 and `no_decision_share_bps` 5000 at the start, set with `set_juror_shares` and copied onto each case when it is proposed. PROPOSED: the no-decision recipient is the Trezu treasury. The sandbox harness already sets it to the business account (`tests/tests/common/mod.rs:171`). Juror pay is separate from the holder revenue share. A juror who never votes forfeits the revenue their seat earned while serving. That money never passes through the oracle. The Council handles it in its own accounting ([council.md](council.md#6-the-quarterly-accounting-proposal)).
+`juror_share_bps` 2500 and `no_decision_share_bps` 5000 at the start, set with `set_juror_shares` and copied onto each case when it is proposed. PROPOSED: the no-decision recipient is the Trezu treasury. The sandbox harness already sets it to the business account (`tests/tests/common/mod.rs:171`). Juror pay is separate from the holder revenue share. A juror who never votes forfeits the share of revenue that arrived while their seat served. That money never passes through the oracle. The Council handles it in its own accounting ([council.md](council.md#67-silent-jurors)).
 
 ---
 
@@ -103,14 +99,14 @@ All EXISTING (`oracle/src/lib.rs:212-253`).
 | `owner`, `pending_owner` | `AccountId`, `Option<AccountId>` | The DAO and a pending handover |
 | `operator` | `AccountId` | Can remove a publisher |
 | `market` | `AccountId` | Only caller of `register_market` |
-| `bond_token` | `AccountId` | The NEP-141 contract. CHANGED, see below |
+| `verifier`, `collateral_token_id` | `AccountId`, `String` | The Intents verifier and the exact `nep141:<contract>` token id bonds are paid in |
 | `bond` | `u128` | Bond in force for new cases |
 | `window_ns`, `panel_deadline_ns`, `draw_window_ns`, `min_proposal_ns` | `u64` | Windows, applied to markets registered from now on |
 | `apply_buffer_ns`                                                     | `u64` | Room left for apply() to land. Default 30 s, owner range 5 s to 5 minutes. Copied onto each market at registration |
 | `juror_share_bps`, `no_decision_share_bps`                            | `u32` | Juror shares of the loser's bond and of the challenger's bond when no jury decided. Defaults 2500 and 5000, owner ranges 500 to 5000 and 1000 to 10000. Copied onto each case when proposed |
 | `max_publishers`                                                      | `u32` | Most publishers that can be added. Default 10, owner range 1 to 25, not below `price_threshold` |
 | `council` | `AccountId` | Draws juries and releases seats |
-| `jury_size` | `u32` | Odd, at most 21 |
+| `jury_size` | `u32` | Odd, from 5 to 21 |
 | `allowed_markets` | `Vec<AccountId>` | BUILT. The market accounts that may register markets and take new proposals and challenges. Replaces the single `market`. A disallowed market keeps its open cases. The last one may be removed |
 | `last_case_uid` | `u64` | BUILT. The uid the last case got; the first is 1 and it only goes up |
 | `draw_delay_blocks` | `u64` | Blocks between a challenge and the earliest draw |
@@ -123,21 +119,21 @@ All EXISTING (`oracle/src/lib.rs:212-253`).
 
 `Case` (`:154-192`): `case_uid`, `stage`, `proposer`, `proposed`, `bond`, `evidence`, `window_ends_at`, `challenger`, `challenger_answer`, `round`, `jury_size`, `draw_by`, `draw_after_height`, `commit_ends_at`, `panel_deadline`, `panel`, `first_panel`, `commits`, `votes`, `final_outcome`, `applied`, `challenged_at`, `juror_share_bps`, `no_decision_share_bps`, `delinquent`.
 
-### 4.2 Changes (PROPOSED)
+### 4.2 Changes from the NEP-141 version
 
 | Field | Change |
 | --- | --- |
-| `bond_token: AccountId` | Removed. Replaced by `verifier: AccountId` and `collateral_token_id: String`, the exact `nep141:<contract>` string, validated like the market |
-| `bonds_held: u128` | NEW. Sum of the bonds of every case that is not final: one bond after a proposal, two after a challenge |
-| `claimable_total: u128` | NEW. Sum of `claimable` |
+| `bond_token: AccountId` | BUILT: removed. Replaced by `verifier: AccountId` and `collateral_token_id: String`, validated like the market |
+| `bonds_held: u128` | BUILT. Sum of the bonds of every case that is not final: one bond after a proposal, two after a challenge |
+| `claimable_total: u128` | BUILT. Sum of `claimable` |
 | `pending_payouts_total: u128` | BUILT. Amounts zeroed in `claimable` whose transfer has not reported yet. A `payouts` map keyed by a payout id (`last_payout_id`, from 1) holds `{account, amount, at}` for each |
-| `state_version` | Bump to 2. As built, `markets`, `cases` and `payouts` hold version-tagged records (one byte, 0 today, read through `into_current`, always written current), `markets` and `cases` are keyed by (market account, market id). Nothing is deployed, so no migration is needed |
+| `state_version` | BUILT: 3. `migrate` reads version 3 or the version 2 layout and refuses any other (`unsupported state version`). `markets`, `cases` and `payouts` hold version-tagged records (one byte, 0 today, read through `into_current`, always written current), `markets` and `cases` are keyed by (market account, market id) |
 
 ---
 
 ## 5. Message grammar
 
-`mt_on_transfer` splits `msg` with `splitn(4, ':')`, so the last part may itself contain colons (Checked in source: `oracle/src/lib.rs:645-678`, same rule today for `ft_on_transfer`).
+`mt_on_transfer` splits `msg` with `splitn(5, ':')`, so the last part may itself contain colons.
 
 ```text
 propose:<market_account>:<market_id>:<outcome>:<evidence>
@@ -156,7 +152,7 @@ challenge:<market_account>:<market_id>:<answer>
 
 The amount must equal the bond exactly (`send exactly the bond`). A challenge must equal the bond its case was proposed with. A price market refuses `propose` (`a price market is answered with a signed price`) and an event market refuses `price`. The signed message is `price:v2:<oracle account>:<network>:<market account>:<market id>:<observation time>:<price>:<decimals>` (`oracle/src/lib.rs:341-346`).
 
-After migration the verifier calls `mt_on_transfer(sender_id, previous_owner_ids, token_ids, amounts, msg)`. The checks mirror the market, in this order: caller is the verifier, exactly one token and one amount, the token id equals `collateral_token_id`, `previous_owner_ids == [sender_id]`. The bond is then taken from `amounts[0]`. The answer is `["0"]`, which keeps everything. A panic refunds the sender in full.
+The verifier calls `mt_on_transfer(sender_id, previous_owner_ids, token_ids, amounts, msg)`. The checks mirror the market, in this order: caller is the verifier, exactly one token and one amount, the token id equals `collateral_token_id`, `previous_owner_ids == [sender_id]`. The bond is then taken from `amounts[0]`. The answer is `["0"]`, which keeps everything. A panic refunds the sender in full.
 
 ---
 
@@ -168,8 +164,9 @@ After migration the verifier calls `mt_on_transfer(sender_id, previous_owner_ids
 | `proposed` | A challenge naming a different answer inside the window | `disputed` |
 | `proposed` | The window ends and anyone calls `finalize` | `final`, unchallenged |
 | `disputed` | A majority of the seated jury reveals | `final`, decided |
-| `disputed` | Round 0 ends with no majority, and there is time for another round | `disputed`, round 1, one larger jury |
-| `disputed` | Round 1 ends with no majority, or round 0 ends with no time left | `final`, no decision |
+| `disputed` | Round 0 seated no jury and there is time to wait | `disputed`, round 0, `draw_by` moved one draw window on (`draw_extended`), at most 32 windows from the challenge |
+| `disputed` | Round 0 ends with no majority, and there is time for another round | `disputed`, round 1, one jury of `2 * jury_size + 1`, at most 21, drawn from holders outside the first jury, the proposer and the challenger |
+| `disputed` | Round 1 ends with no majority, or round 0 ends with no time left | `final`, no decision (`no_jury` when no jury was ever seated) |
 | no case | `resolve_by` passes and anyone calls `resolve_by_deadline` | The market is voided |
 
 | Moment | Rule | Source |
@@ -177,10 +174,10 @@ After migration the verifier calls `mt_on_transfer(sender_id, previous_owner_ids
 | Registration | The market calls `register_market`. The gap `resolve_by - close_at` must be at least `min_proposal + window + 2 * (draw window + panel deadline) + 30 s`. A price market is measured from its observation time and needs at least `price_threshold` publishers | `:596-639`, `:1045-1049` |
 | Propose | After `close_at`, with enough time left for both rounds and a 30 s apply buffer. One case per market | `:1072-1117` |
 | Challenge | Inside the window, by an account other than the proposer, naming a different answer. Sets `draw_by = now + draw window` and `draw_after_height = height + draw delay` | `:1119-1146` |
-| Draw | Anyone calls `resolve_draw` from `draw_after_height` to `draw_by`. The Council reads the block seed itself. Needs 275 TGas | `:684-741` |
+| Draw | Anyone calls `resolve_draw` from `draw_after_height` to `draw_by`. The Council reads the block seed itself. Needs 275 TGas. A draw with too few free holders is refused by the Council (`not enough seat holders to draw a jury: N eligible, M needed`) and logs `draw_failed` | `:684-741` |
 | Commit | The seated jury commits a hash in the first half of the panel deadline | `:747-771` |
 | Reveal | In the second half. A majority of the panel settles at once | `:776-830` |
-| Finalize | Anyone, after the window for an unchallenged case, or after the round for a disputed one. A first round that fails is followed by one larger jury of other accounts if time allows | `:835-850`, `:1151-1176` |
+| Finalize | Anyone, after the window for an unchallenged case, or after the round for a disputed one. A first round that fails is followed by one larger jury of other accounts if time allows. A first draw that seated nobody waits for seats instead (`draw_extended`) | `:835-850`, `:1151-1176` |
 | Deadline | After `resolve_by`, anyone calls `resolve_by_deadline`. It settles what can be settled and voids a market with no case | `:857-875` |
 | Apply | `settle` sends `set_outcome` to the market. `retry_apply` repeats it | `:1252-1261`, `:878-883` |
 | Release | `settle` sends `unlock_case` to the Council for each jury. `retry_unlock` repeats it | `:1266-1277`, `:888-900` |
@@ -193,35 +190,35 @@ Gas floors are enforced with `upgrade::require_gas` (`oracle/src/lib.rs:26-43`).
 
 | Method | Caller | Args | Returns | Yocto | Gas | Behaviour and refusals | Events |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `new` (`:371`) | The account itself | `owner_id`, `market_contract`, `bond_token: AccountId`, `bond: U128`, `window_ms`, `panel_deadline_ms`, `draw_window_ms: U64`, `council: AccountId`, `jury_size: u32`, `draw_delay_blocks`, `min_proposal_ms: U64`, `operator_id: AccountId`, `network: String`, `price_threshold: u32`, `no_decision_recipient: AccountId` | contract | none | n/a | Refuses a zero bond, a network name that is empty or has a colon, a zero threshold, a zero window, an even or oversized jury | none |
+| `new` (`:371`) | The account itself | `owner_id`, `market_contract`, `verifier_id: AccountId`, `collateral_token_id: String`, `bond: U128`, `window_ms`, `panel_deadline_ms`, `draw_window_ms: U64`, `council: AccountId`, `jury_size: u32`, `draw_delay_blocks`, `min_proposal_ms: U64`, `operator_id: AccountId`, `network: String`, `price_threshold: u32`, `no_decision_recipient: AccountId` | contract | none | n/a | Refuses a bond under 5 USDC, a network name that is empty or has a colon, a zero threshold, a window under an hour or over a year, a jury that is not odd or not from 5 to 21 | none |
 | `stage_code` (`:428`) | Anyone | wasm as input | `Base58CryptoHash` | payable | 100 TGas | As in the market | `code_staged` |
 | `upgrade` (`:440`), `migrate` (`:453`), `seal` (`:464`) | Owner, itself, owner | as the market | | none | 100 TGas floor for `upgrade` | As the market | `upgrade_sent`, `migrated`, `seal_sent` |
-| `set_bond` (`:472`) | Owner | `bond: U128` | none | none | none | Applies to new cases. A case keeps its own bond. Refuses zero | `bond_set` |
-| `set_window_ms` (`:481`), `set_panel_deadline_ms` (`:488`), `set_min_proposal_ms` (`:495`), `set_draw_window_ms` (`:502`) | Owner | `U64` milliseconds | none | none | none | Apply to markets registered from now on. Refuse zero | `window_set`, `panel_deadline_set`, `min_proposal_set`, `draw_window_set` |
+| `set_bond` (`:472`) | Owner | `bond: U128` | none | none | none | Applies to new cases. A case keeps its own bond. Refuses a bond under 5 USDC | `bond_set` |
+| `set_window_ms` (`:481`), `set_panel_deadline_ms` (`:488`), `set_min_proposal_ms` (`:495`), `set_draw_window_ms` (`:502`) | Owner | `U64` milliseconds | none | none | none | Apply to markets registered from now on. Refuse a value under an hour or over a year | `window_set`, `panel_deadline_set`, `min_proposal_set`, `draw_window_set` |
 | `set_draw_delay_blocks` (`:510`) | Owner | `U64` | none | none | none | Zero is allowed | `draw_delay_set` |
 | `set_juror_shares` | Owner | `decided_bps: u32`, `no_decision_bps: u32` | none | none | none | 500 to 5000 and 1000 to 10000. Applies to cases proposed afterwards | `juror_shares_set` |
 | `set_apply_buffer_ms` | Owner | `apply_buffer_ms: U64` | none | none | none | 5000 to 300000. Applies to markets registered afterwards | `apply_buffer_set` |
 | `set_max_publishers` | Owner | `max_publishers: u32` | none | none | none | 1 to 25, not below the threshold. Live, removes no publisher | `max_publishers_set` |
 | `propose_owner` (`:517`), `accept_owner` (`:523`) | Owner, proposed account | `new_owner: AccountId` | none | none | none | As the market | `owner_proposed`, `owner_changed` |
-| `set_jury_size` (`:532`) | Owner | `jury_size: u32` | none | none | none | Odd and at most 21. Applies to new challenges and new rounds | none today, NEW `jury_size_set` |
+| `set_jury_size` (`:532`) | Owner | `jury_size: u32` | none | none | none | Odd, from 5 to 21. Applies to new challenges and new rounds | `jury_size_set` |
 | `set_operator` (`:538`) | Owner | `operator_id` | none | none | none | | `operator_set` |
 | `set_no_decision_recipient` (`:544`) | Owner | `recipient: AccountId` | none | none | none | | `no_decision_recipient_set` |
 | `add_publisher` (`:551`) | Owner | `key: PublicKey` | none | none | none | ed25519 only, no duplicates, at most `max_publishers` | `publisher_added` |
 | `remove_publisher` (`:565`) | Operator or owner | `key: PublicKey` | none | none | none | Refuses a key that is not a publisher and a removal that leaves fewer than the threshold | `publisher_removed` |
 | `set_price_threshold` (`:581`) | Owner | `threshold: u32` | none | none | none | Between 1 and the publisher count | `price_threshold_set` |
 | `register_market` (`:596`) | An allowed market account | `market_id: U64`, `close_at: U64`, `resolve_by: U64`, `rule_hash: String`, `price_rule: Option<PriceRule>` | none | none | 20 TGas reserved by the market | Idempotent. Refuses a market with too little time and a price market with too few publishers | `market_registered` |
-| `ft_on_transfer` (`:645`) | The bond token | `sender_id: AccountId`, `amount: U128`, `msg: String` | `PromiseOrValue<U128>`, always 0 | none | token call | Section 5. CHANGED in 8.1 | `proposed`, `challenged` |
+| `mt_on_transfer` | The verifier | `sender_id: AccountId`, `previous_owner_ids: Vec<AccountId>`, `token_ids: Vec<String>`, `amounts: Vec<U128>`, `msg: String` | `Vec<U128>`, always `[0]` | none | verifier call | Section 5 | `proposed`, `challenged` |
 | `resolve_draw` (`:684`) | Anyone | `market: AccountId`, `market_id: U64` | `Promise` | none | 275 TGas floor | Calls the Council's `draw` with 250 TGas | `jury_drawn` or `draw_failed` via `on_drawn` |
 | `on_drawn` (`:710`) | The account itself | `market: AccountId`, `market_id: U64`, `round: u8` | none | none | 15 TGas | Seats the jury only for the round the case is in | `jury_drawn`, `draw_failed` |
 | `commit_vote` (`:747`) | A panel member | `market: AccountId`, `market_id: U64`, `commitment: String` | none | exactly 1 | none | Commitment is `hex(sha256("<juror>:<yes\|no\|void>:<salt>"))`, 64 lowercase hex characters. Once, before `commit_ends_at` | `vote_committed` |
-| `reveal_vote` (`:776`) | A panel member | `market: AccountId`, `market_id: U64`, `outcome: Outcome`, `salt: String`, `reason: String` | none | exactly 1 | 80 TGas floor | Only the proposed or the challenger's answer. Must match the commitment. Reason required, at most 1000 bytes. Salt at most 64 bytes. Settles on a majority | `vote_revealed`, then `final` and `outcome_applied` on settlement |
-| `finalize` (`:835`) | Anyone | `market: AccountId`, `market_id: U64` | none | none | 80 TGas floor | Settles an unchallenged case after its window, or closes a round that is over | `final` or `escalated` |
-| `resolve_by_deadline` (`:857`) | Anyone | `market: AccountId`, `market_id: U64` | none | none | 80 TGas floor | After `resolve_by`. Refuses a case that still has time | `deadline_void`, `final` |
+| `reveal_vote` (`:776`) | A panel member | `market: AccountId`, `market_id: U64`, `outcome: Outcome`, `salt: String`, `reason: String` | none | exactly 1 | 100 TGas floor | Only the proposed or the challenger's answer. Must match the commitment. Reason required, at most 1000 bytes. Salt at most 64 bytes. Settles on a majority | `vote_revealed`, then `final` and `outcome_applied` on settlement |
+| `finalize` (`:835`) | Anyone | `market: AccountId`, `market_id: U64` | none | none | 100 TGas floor | Settles an unchallenged case after its window, or closes a round that is over | `final`, `escalated` or `draw_extended` |
+| `resolve_by_deadline` (`:857`) | Anyone | `market: AccountId`, `market_id: U64` | none | none | 100 TGas floor | After `resolve_by`. Refuses a case that still has time | `deadline_void`, `final` |
 | `retry_apply` (`:878`) | Anyone | `market: AccountId`, `market_id: U64` | none | none | 30 TGas suggested | Resends the answer to the market | `outcome_applied` via `on_applied` |
-| `retry_unlock` (`:888`) | Anyone | `market: AccountId`, `market_id: U64` | `Promise` | none | 35 TGas floor | Releases the jury seats again. The Council ignores a repeat | none |
+| `retry_unlock` (`:888`) | Anyone | `market: AccountId`, `market_id: U64` | `Promise` | none | 55 TGas floor | Releases the jury seats again. The Council ignores a repeat | none |
 | `on_applied` (`:903`) | The account itself | `market: AccountId`, `market_id: U64` | none | none | 10 TGas | Marks the case applied | `outcome_applied` |
-| `withdraw_bond` (`:915`) | Anyone with a balance | none | `Promise` | exactly 1 | 25 TGas suggested | Zeroes `claimable[caller]` and pays it with `ft_transfer`. CHANGED in 8.2 | none |
-| `on_bond_withdrawn` (`:934`) | The account itself | `account: AccountId`, `amount: U128` | none | none | 10 TGas | Restores `claimable` on error | none |
+| `withdraw_bond` (`:915`) | Anyone with a balance | none | `Promise` | exactly 1 | 33 TGas floor | Zeroes `claimable[caller]` and pays it with `mt_transfer` from the oracle's Intents account | `bond_payout_requested` |
+| `on_bond_withdrawn` (`:934`) | The account itself | `id: U64` | none | none | 10 TGas | Restores `claimable` on error | `bond_paid` or `bond_payout_failed` |
 
 Views today: `get_case(market: AccountId, market_id: U64) returns Option<Case>` (`:947`), `get_market_info(market: AccountId, market_id: U64) returns Option<MarketInfo>` (`:951`), `claimable_of(account_id) returns U128` (`:955`), `is_staged(code_hash)` (`:960`), `config()` (`:964`).
 
@@ -231,22 +228,22 @@ Views today: `get_case(market: AccountId, market_id: U64) returns Option<Case>` 
 
 ### 8.1 Bond custody on Intents (R-06)
 
-PROPOSED. The accepted decision puts bonds in Intents until an authorised exit.
+BUILT. The accepted decision puts bonds in Intents until an authorised exit.
 
 | Item | Specification |
 | --- | --- |
-| `new` CHANGED | Replace `bond_token: AccountId` with `verifier_id: AccountId` and `collateral_token_id: String`. Refuse an id that does not start with `nep141:` |
-| `mt_on_transfer(sender_id: AccountId, previous_owner_ids: Vec<AccountId>, token_ids: Vec<String>, amounts: Vec<U128>, msg: String)` NEW, replaces `ft_on_transfer` | Caller must be the verifier. Checks from section 5. Runs the same `propose`, `price` and `challenge` code. Adds the bond to `bonds_held`. Returns `["0"]`. Emits `bond_received {account, amount, action, market_id}` |
-| `ft_on_transfer` | Removed. A direct NEP-141 transfer to the oracle bounces. The oracle holds no token itself |
-| Guard test | `EXPECTED_EXTERNAL_INTERFACES` in `tests/tests/guards.rs:44-52` changes: remove `("oracle", "ext_ft", &["ft_transfer"])`, add `("oracle", "ext_verifier", &["mt_transfer"])`. The test `the_verifier_is_only_ever_asked_to_transfer` (`guards.rs:253`) then covers the oracle |
+| `new` | Takes `verifier_id: AccountId` and `collateral_token_id: String`. Refuses an id that does not start with `nep141:` |
+| `mt_on_transfer(sender_id: AccountId, previous_owner_ids: Vec<AccountId>, token_ids: Vec<String>, amounts: Vec<U128>, msg: String)` | Caller must be the verifier. Checks from section 5. Runs the `propose`, `price` and `challenge` code. Adds the bond to `bonds_held`. Returns `["0"]`. PROPOSED, not built: a `bond_received {account, amount, action, market_id}` event |
+| `ft_on_transfer` | Does not exist. A direct NEP-141 transfer to the oracle bounces. The oracle holds no token itself |
+| Guard test | `EXPECTED_EXTERNAL_INTERFACES` in `tests/tests/guards.rs` lists the oracle's verifier interface (`mt_transfer`, `remove_public_key`), and a guard fails if the oracle names any NEP-141 interface |
 
 ### 8.2 Payouts (R-06)
 
 | Item | Specification |
 | --- | --- |
-| `withdraw_bond()` CHANGED | Exactly 1 yocto. Zeroes `claimable[caller]`, moves the amount from `claimable_total` to `pending_payouts_total`, sends `mt_transfer(caller, collateral_token_id, amount, null, memo "bp:<n>")` from the oracle, then `on_bond_paid`. 25 TGas floor |
-| `payout_bond(account_id: AccountId)` NEW | Anyone. Same as `withdraw_bond` for `account_id`, paid to that same account's own Intents account. No yocto needed from the caller. This lets a keeper pay jurors and the treasury without a DAO proposal. Nobody can redirect the money, because the receiver is always the account that owns the claim |
-| `on_bond_paid(account, amount)` NEW, replaces `on_bond_withdrawn` | On error restores `claimable` and `claimable_total`, emits `bond_payout_failed`. On success emits `bond_paid {account, amount}`. Both paths reduce `pending_payouts_total` |
+| `withdraw_bond()` | Exactly 1 yocto. Zeroes `claimable[caller]`, moves the amount from `claimable_total` to `pending_payouts_total`, sends `mt_transfer(caller, collateral_token_id, amount, null, memo "bp:<n>")` from the oracle, then `on_bond_withdrawn`. 33 TGas floor |
+| `payout_bond(account_id: AccountId)` PROPOSED, not built | Anyone. Same as `withdraw_bond` for `account_id`, paid to that same account's own Intents account. No yocto needed from the caller. This lets a keeper pay jurors and the treasury without a DAO proposal. Nobody can redirect the money, because the receiver is always the account that owns the claim |
+| `on_bond_withdrawn(id)` | On error restores `claimable` and `claimable_total`, emits `bond_payout_failed`. On success emits `bond_paid {account, amount}`. Both paths reduce `pending_payouts_total` |
 
 An error from `mt_transfer` means the verifier receipt failed and nothing moved. The verifier call returns nothing and is one receipt, so no unknown state exists unless the callback runs out of gas. The callback has 10 TGas.
 
@@ -271,7 +268,7 @@ The website's Council page loads every market and then every case one by one (`w
 | Item | Specification |
 | --- | --- |
 | `set_jury_size` event | BUILT: emits `jury_size_set {jury_size}` |
-| Floors for `retry_apply` and `withdraw_bond` | Add `require_gas` with 30 and 25 TGas |
+| Floors | BUILT for `withdraw_bond` (33 TGas). `retry_apply` has none and suggests 30 TGas |
 | Owner-only list | Every setter stays owner only. Only `remove_publisher` is shared with the operator |
 
 ---
@@ -286,7 +283,7 @@ The website's Council page loads every market and then every case one by one (`w
 | Windows of one market | `get_market_info` | EXISTING |
 | Claimable bond of an account | `claimable_of` | EXISTING |
 | Pending payout | `bond_totals().pending_payouts`, events `bond_payout_requested`, `bond_paid`, `bond_payout_failed` | BUILT |
-| Reconciliation | `total_owed`, `bond_totals` | NEW |
+| Reconciliation | `total_owed`, `bond_totals` | BUILT |
 | Publishers and threshold, network | `config` | EXISTING |
 
 ---
@@ -304,16 +301,18 @@ Envelope: `EVENT_JSON:{"standard":"oracle","version":"1.0.0","event":"<name>","d
 | `vote_committed` | `market`, `market_id`, `juror`, `commitment` | EXISTING |
 | `vote_revealed` | `market`, `market_id`, `juror`, `outcome`, `reason` | EXISTING |
 | `escalated` | `market`, `market_id`, `jury_size` (number), `draw_by` | EXISTING |
+| `draw_extended` | `market`, `market_id`, `round`, `draw_by` | BUILT. The first draw seated nobody and the case waits one more draw window |
 | `final` | `market`, `market_id`, `outcome`, `ruling` (`unchallenged`, `decided`, `no_decision`, `no_jury`), `juror_pay_each`, `paid_jurors`, `delinquent` | EXISTING |
 | `outcome_applied` | `market`, `market_id` | EXISTING |
 | `deadline_void` | `market`, `market_id` | EXISTING |
 | `market_registered` | `market`, `market_id` | EXISTING |
 | `bond_set`, `window_set`, `panel_deadline_set`, `min_proposal_set`, `draw_window_set`, `draw_delay_set`, `operator_set`, `no_decision_recipient_set`, `publisher_added`, `publisher_removed`, `price_threshold_set` | the changed value | EXISTING |
 | `owner_proposed`, `owner_changed`, `code_staged`, `upgrade_sent`, `migrated`, `seal_sent` | as the market | EXISTING |
+| `upgrade_failed` | none | BUILT. The deploy and migrate batch failed and the in-flight mark was cleared |
 | `jury_size_set` | `jury_size` | BUILT |
 | `apply_failed` | `market`, `market_id` | BUILT. The market did not accept the outcome |
 | `market_allowed`, `market_disallowed` | `market` | BUILT |
-| `bond_received` | `account`, `amount`, `action` (`propose`, `price`, `challenge`), `market_id` | NEW |
+| `bond_received` | `account`, `amount`, `action` (`propose`, `price`, `challenge`), `market_id` | PROPOSED, not built |
 | `bond_payout_requested` | `account`, `amount`, `id` | BUILT |
 | `bond_paid` | `account`, `amount`, `id` | BUILT |
 | `bond_payout_failed` | `account`, `amount`, `id` | BUILT |
@@ -327,10 +326,10 @@ The `final` event carries who is paid but not the amounts that went into `claima
 | Invariant | Statement | Test status |
 | --- | --- | --- |
 | I-O1 exact payout | A settled case credits `claimable` with exactly the bonds that entered it, and only to the proposer, challenger, winning jurors or the recipient | `oracle lib.rs:1572` proptest (test exists, not run). `juror_pay.rs:42` sandbox |
-| I-O2 reconciliation | With no payout in flight, `mt_balance_of(O, token) >= total_owed()` | NEW |
+| I-O2 reconciliation | With no payout in flight, `mt_balance_of(O, token) >= total_owed()` | `intents_oracle.rs` sandbox |
 | I-O3 a full binary ballot settles | An odd jury with full turnout always has a majority | `oracle lib.rs:1647` proptest |
 | I-O4 no free self-dispute | A pair of accounts that propose and challenge each other ends down by at least the juror share | `oracle lib.rs:1676` proptest, `attacks.rs:1205` |
-| I-O5 holder revenue never touches the oracle | `O` receives only `mt_on_transfer` bonds and sends only `claimable` payouts | NEW source guard: the oracle never names `revenue` |
+| I-O5 holder revenue never touches the oracle | `O` receives only `mt_on_transfer` bonds and sends only `claimable` payouts | BUILT source guard (`the_oracle_never_names_holder_revenue` in `guards.rs`): no line of the oracle's code names `revenue` |
 | I-O6 bond equals the case's bond | A challenge matches the bond its case was proposed with, so `set_bond` touches only new cases | `oracle lib.rs:3529` unit test |
 | I-O7 deadline | At `resolve_by`, every registered market's case is settleable or has no case | `oracle lib.rs:2652` proptest |
 
@@ -342,15 +341,15 @@ Exact panic strings (Checked in source: `oracle/src/lib.rs`).
 
 | Group | Strings |
 | --- | --- |
-| Access | `owner only`, `operator or owner only`, `that market contract is not allowed`, `already an allowed market`, `not an allowed market`, `a stored record has a newer version than this code can read`, `not the proposed owner`, `wrong token` (becomes `only the verifier can deliver money` after migration) |
+| Access | `owner only`, `operator or owner only`, `that market contract is not allowed`, `already an allowed market`, `not an allowed market`, `a stored record has a newer version than this code can read`, `not the proposed owner`, `wrong token`, `only the verifier can deliver money` |
 | Bond delivery | `bad market id`, `send exactly the bond`, `unknown action`, `outcome must be yes, no or void`, `bad price`, `a price market is answered with a signed price`, `not a price market` |
 | Case state | `no case for that market`, `an answer was already proposed`, `the market has not closed yet`, `too late to propose, the market will be voided at its deadline`, `evidence link is too long`, `nothing to challenge`, `the challenge window closed`, `you cannot challenge your own answer`, `a challenge must name a different answer than the proposal`, `market is not registered` |
 | Jury | `no open dispute`, `the jury is already drawn`, `too early to draw the jury`, `too late to draw a jury`, `no challenger`, `not on the panel for this case`, `the commit phase is over`, `commitment must be 64 lowercase hex characters`, `already committed`, `no commitment to reveal`, `no challenger answer`, `vote for the proposed answer or the challenger's answer`, `the commit phase is still open`, `the panel deadline passed`, `already revealed`, `the vote does not match the commitment`, `a reason is required`, `reason is too long`, `salt is too long` |
 | Settlement | `challenge window is still open`, `the panel still has time`, `already final`, `the answer deadline has not passed`, `already resolved`, `the case still has time; finalize it when its round is over`, `nothing to apply`, `no final outcome`, `no settled dispute to unlock`, `nothing to withdraw` |
 | Registration | `resolve_by is too soon after close_at for a case to finish`, `not enough price publishers are configured`, `observation_time must not be before close_at` |
 | Price | `the observation time has not come`, `not enough valid publisher signatures`, `a signature is 128 hex characters`, `a signature is hex`, `a signature is <publisher key>.<hex>`, `bad publisher key`, `not a publisher`, `a publisher signed twice`, `a signature does not match` |
-| Settings | `bond must be positive`, `windows must be positive`, `jury size must be odd and at most 21`, `publishers use ed25519 keys`, `already a publisher`, `there can be at most <n> publishers`, `that would leave fewer publishers than must sign`, `the threshold must be between 1 and the number of publishers`, `the network name must be a word without a colon`, `at least one publisher must sign a price` |
-| Gas | `attach at least 80 TGas: a call that settles a case sends the answer to the market and releases the juries`, `attach at least 275 TGas: the jury draw reads every staked seat`, `attach at least 35 TGas: each jury's release gets an equal share of what is attached`, `attach at least 100 TGas to upgrade` |
+| Settings | `the bond must be at least 5 USDC`, `windows must be at least an hour and at most a year`, `jury size must be odd, from 5 to 21`, `publishers use ed25519 keys`, `already a publisher`, `there can be at most <n> publishers`, `that would leave fewer publishers than must sign`, `the threshold must be between 1 and the number of publishers`, `the network name must be a word without a colon`, `at least one publisher must sign a price` |
+| Gas | `attach at least 33 TGas: a withdrawal sends the payout and then settles it`, `attach at least 100 TGas: a call that settles a case sends the answer to the market and releases the juries`, `attach at least 275 TGas: the jury draw reads every staked seat`, `attach at least 55 TGas: each jury's release gets an equal share of what is attached`, `attach at least 100 TGas to upgrade` |
 
 ---
 
@@ -361,7 +360,7 @@ Existing tests were not run in this task.
 | Requirement | Evidence that exists | Evidence still required |
 | --- | --- | --- |
 | R-04 jury, seat locks, case obligations | `council.rs:25-266`, `rounds.rs`, `staking.rs:187`, `safety.rs:253`, unit `oracle lib.rs:1909-1965` | Nothing new for the dispute rules |
-| R-06 bonds on Intents | None. Bond tests use `ft_transfer_call` to the oracle (`common/mod.rs:331-339`) | A harness change so `propose`, `challenge` and `price` go through `mt_transfer_call`. Refusal refunds in full. A plain deposit to the oracle is surplus. A refused payout restores `claimable`. `payout_bond` pays only the account itself. `total_owed` equals the verifier balance after a full dispute with a second round. Holder revenue never appears in the oracle account |
+| R-06 bonds on Intents | `intents_oracle.rs`: a bond through the real verifier is credited to its sender, a refused message is refunded in full, a wrong token id is refused, a plain deposit is surplus, a refused payout restores `claimable`, `total_owed` equals the verifier balance after a full dispute | `payout_bond` pays only the account itself, if it is built. A dispute with a second round against the verifier balance |
 | R-06 juror pay separate | `juror_pay.rs:42`, `:69`, `:112` | A sandbox check that the Council's Intents balance is unchanged by a settlement and a payout |
 | R-08 views | `get_case` JSON in `flow.rs` | `list_cases`, `bond_totals`, `total_owed` with exact JSON shapes |
 | R-07 owner is a DAO account | owner fixture only | A real SputnikDAO calling `set_bond`, `add_publisher` and `upgrade` |

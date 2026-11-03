@@ -1,7 +1,5 @@
-// Economics of the Council's quarterly revenue share: a seat staked late in a quarter takes a share of revenue that arrived
-// before it existed, the per-account seat cap does not stop that, and what a seat earns. Real contracts, sandbox chain. The sandbox
-// cannot reach the end of a real quarter, so the quarter is read while open: the view's estimate is the same formula the final
-// claim uses (pool times seat time over all seat time). Run with --nocapture.
+// Economics of the Council's revenue share: a seat staked after revenue arrived takes none of it, the per-account seat cap does
+// not change that, and what leaving costs a seat that has earned nothing. Real contracts, sandbox chain.
 mod common;
 use common::*;
 
@@ -11,13 +9,12 @@ const HEAD_START_SECS: u64 = 600;
 const REVENUE: u128 = 1_000 * USD;
 
 #[tokio::test]
-async fn a_seat_staked_after_the_revenue_arrived_still_takes_a_share_of_it() -> anyhow::Result<()> {
-    let w = setup().await?;
+async fn a_seat_staked_after_the_revenue_arrived_takes_no_share_of_it() -> anyhow::Result<()> {
+    let w = setup_earning().await?;
     mint(&w, w.owner.id(), 10_000 * USD).await?;
-    // Five long-term seats, then a stretch of time, then the quarter's revenue.
+    // Five long-term seats, then a stretch of time, then the revenue.
     skip_secs(&w.worker, HEAD_START_SECS).await;
     send_revenue(&w, REVENUE).await?;
-    let quarter = current_quarter(&w).await["quarter"].as_u64().unwrap() as u32;
 
     // Alice stakes ten seats afterwards and leaves five minutes later. No revenue arrives while she is in.
     let tokens: Vec<String> = (0..LATE_SEATS).map(|i| format!("late{i}")).collect();
@@ -49,33 +46,25 @@ async fn a_seat_staked_after_the_revenue_arrived_still_takes_a_share_of_it() -> 
         request_unstake(&w, &w.alice, t).await?;
     }
 
-    let mut alice = 0u128;
-    let mut alice_weight = 0u128;
-    for t in &tokens {
-        let e = entitlement(&w, quarter, t, w.alice.id()).await;
-        alice += u(&e["amount"]);
-        alice_weight += u(&e["weight_ns"]);
-    }
-    let incumbent = entitlement(&w, quarter, w.jurors[0].id().as_str(), w.jurors[0].id()).await;
-    let q = current_quarter(&w).await;
-    let total = u(&q["seat_ns"]);
+    let incumbent = in_progress_of(&w, w.jurors[0].id()).await;
     println!(
-        "revenue {:.2} arrived BEFORE alice staked. alice: {LATE_SEATS} seats for ~{HOLD_SECS}s end up with {:.4} ({:.2}% of the quarter) \
-         = {:.4} per seat-hour, against {:.4} for one incumbent seat. seat-ns: alice {alice_weight} of {total}",
+        "revenue {:.2} arrived BEFORE alice staked. alice: {LATE_SEATS} seats for ~{HOLD_SECS}s end up with {:.4} \
+         against {:.4} for one incumbent seat",
         REVENUE as f64 / USD as f64,
-        alice as f64 / USD as f64,
-        100.0 * alice as f64 / REVENUE as f64,
-        alice as f64 / USD as f64 / (LATE_SEATS as f64 * HOLD_SECS as f64 / 3600.0),
-        u(&incumbent["amount"]) as f64 / USD as f64,
+        in_progress_of(&w, w.alice.id()).await as f64 / USD as f64,
+        incumbent as f64 / USD as f64,
     );
-    assert!(
-        alice > 0,
-        "she took a share of money that was in the Council before she staked"
+    assert_eq!(incumbent, REVENUE / 5, "the five seats that were there share all of it");
+    assert_eq!(
+        in_progress_of(&w, w.alice.id()).await + claimable_of(&w, w.alice.id()).await,
+        0,
+        "she took nothing from money that was in the Council before she staked"
     );
-    assert!(
-        alice_weight * 100 / total >= 1,
-        "a measurable share of the whole quarter"
+    let totals = reward_totals(&w).await;
+    assert_eq!(
+        (u(&totals["cut_pool"]), u(&totals["pending_total_slots"])),
+        (0, 0),
+        "leaving with nothing earned costs nothing"
     );
-
     Ok(())
 }

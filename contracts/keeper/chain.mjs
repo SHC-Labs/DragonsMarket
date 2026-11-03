@@ -1,16 +1,52 @@
 // Reading the chain, and base58, for the keeper and the treasury helper. No dependencies: Node 22 built-ins only.
 
-export async function rpc(url, method, params) {
-  const res = await fetch(url, {
-    signal: AbortSignal.timeout(30_000),
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: "keeper", method, params }),
-  });
-  if (!res.ok) throw new Error(`${method}: HTTP ${res.status}`);
-  const body = await res.json();
-  if (body.error) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
-  return body.result;
+// Free public endpoints refuse bursts. `urls` may be one endpoint or several separated by commas: a refused call (HTTP 429 or 5xx,
+// a timeout or a dropped connection) moves to the next endpoint after a short wait. Calls are also spaced at least `paceMs` apart
+// (KEEPER_RPC_PACE_MS or --rpc-pace-ms), so a long run stays under the limits instead of hitting them and retrying.
+let paceMs = Number(process.env.KEEPER_RPC_PACE_MS ?? 0);
+let nextSlot = 0;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export function setRpcPace(ms) {
+  paceMs = ms;
+  nextSlot = 0;
+}
+
+async function waitForSlot() {
+  if (!paceMs) return;
+  const at = Math.max(Date.now(), nextSlot);
+  nextSlot = at + paceMs;
+  if (at > Date.now()) await sleep(at - Date.now());
+}
+
+export async function rpc(urls, method, params) {
+  const endpoints = String(urls).split(",").map((url) => url.trim()).filter(Boolean);
+  let last = "";
+  for (let attempt = 0; attempt < Math.max(3, endpoints.length * 2); attempt++) {
+    if (attempt > 0) await sleep(400 * attempt);
+    await waitForSlot();
+    let res;
+    try {
+      res = await fetch(endpoints[attempt % endpoints.length], {
+        signal: AbortSignal.timeout(30_000),
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: "keeper", method, params }),
+      });
+    } catch (e) {
+      last = `${method}: ${e.message}`;
+      continue;
+    }
+    if (res.status === 429 || res.status >= 500) {
+      last = `${method}: HTTP ${res.status}`;
+      continue;
+    }
+    if (!res.ok) throw new Error(`${method}: HTTP ${res.status}`);
+    const body = await res.json();
+    if (body.error) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
+    return body.result;
+  }
+  throw new Error(`every RPC endpoint refused: ${last}`);
 }
 
 // Reads at the last final block, or at `blockId` (a height) when two views must agree on one block.

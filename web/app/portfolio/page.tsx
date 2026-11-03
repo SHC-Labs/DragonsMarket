@@ -6,15 +6,15 @@ import { Button, Notice } from "@/components/ui";
 import { CountUp } from "@/components/CountUp";
 import { MarketIcon } from "@/components/MarketIcon";
 import { Embers } from "@/components/Embers";
-import { Award, Lock, Wallet } from "@/components/icons";
+import { Award, Wallet } from "@/components/icons";
 import { useWallet } from "@/components/WalletProvider";
 import { backendEnabled, pendingFor, pendingLabel } from "@/lib/backend";
 import { config } from "@/lib/config";
 import { formatMoney, formatShares } from "@/lib/format";
-import { usePoll } from "@/lib/hooks";
+import { usePoll, useTx } from "@/lib/hooks";
 import {
-  getBalance, getPositions, getShares, listMarkets, tokenBalance,
-  type MarketView,
+  getBalance, getPositions, getShares, listMarkets, redeemCall, tokenBalance, withdrawCall,
+  type FunctionCall, type MarketView,
 } from "@/lib/market";
 
 // redeemable is the contract's own figure for what redeem would pay now: a winner's share of the pool, or on a Void what the
@@ -40,7 +40,8 @@ function Balance({ label, value, children, tone }: { label: string; value: bigin
 }
 
 export default function Portfolio() {
-  const { account, openConnect, walletAvailable } = useWallet();
+  const { account, openConnect, walletAvailable, send } = useWallet();
+  const { state, run, reset } = useTx(send, account);
   const { data, error, loading, reload } = usePoll(
     async () => {
       if (!account) return null;
@@ -61,6 +62,12 @@ export default function Portfolio() {
     6000,
   );
 
+  const busy = state.phase === "waiting";
+  const act = async (call: FunctionCall, done: () => Promise<boolean>, doneMessage: string) => {
+    await run(call, { done, doneMessage });
+    await reload();
+  };
+
   // Money a contract has started to send you and has not yet confirmed. It comes from the backend, which is optional, so a
   // failed or disabled lookup shows nothing rather than an error.
   const pending = usePoll(async () => (account && backendEnabled() ? pendingFor(account) : []), [account], 15000);
@@ -69,7 +76,7 @@ export default function Portfolio() {
     return (
       <div className="page-content">
         <Title />
-        <AccountEmptyState title="View your portfolio" description="Connect your wallet to see your positions and balances. Withdrawals and redemptions are not open yet." actions={<Button onClick={openConnect} disabled={!walletAvailable}>Connect wallet</Button>} />
+        <AccountEmptyState title="View your portfolio" description="Connect your wallet to see your positions and balances, redeem resolved positions and withdraw." actions={<Button onClick={openConnect} disabled={!walletAvailable}>Connect wallet</Button>} />
       </div>
     );
   }
@@ -103,12 +110,15 @@ export default function Portfolio() {
             </span>
           </div>
           <dl className="portfolio-balances">
-            <Balance label="In your wallet" value={data.inWallet} tone="wallet" />
+            <Balance label="In your Intents account" value={data.inWallet} tone="wallet" />
             <Balance label="Market balance" value={data.inMarket} tone="market">
-              <Button variant="secondary" size="sm" disabled aria-describedby="portfolio-integration"><Lock size={15} />Withdrawals coming soon</Button>
+              <Button variant="secondary" size="sm" disabled={busy || data.inMarket === 0n} aria-describedby="portfolio-integration" onClick={() => act(withdrawCall(data.inMarket), async () => BigInt(await getBalance(account)) < data.inMarket, "Withdrawn to your Intents account.")}>Withdraw</Button>
             </Balance>
           </dl>
-          <p id="portfolio-integration" className="portfolio-note">You can view your positions here. Withdrawals and redemptions are not open yet.</p>
+          <p id="portfolio-integration" className="portfolio-note">Redeem a resolved position to move its payout into your market balance, then withdraw the balance to your Intents account.</p>
+          {state.phase === "waiting" && <Notice>Waiting for your wallet and the chain.</Notice>}
+          {state.phase === "done" && <Notice>{state.message}</Notice>}
+          {state.phase === "failed" && <Notice tone="danger"><span>{state.message} </span><Button variant="ghost" size="sm" onClick={reset}>Dismiss</Button></Notice>}
           {pending.data && pending.data.length > 0 && (
             <Notice>
               <ul aria-label="Payments waiting for confirmation">
@@ -152,7 +162,7 @@ export default function Portfolio() {
                     </div>
                     <div className="position-action">
                       {resolved ? (
-                        <Button size="sm" disabled aria-describedby="portfolio-integration">Redemption coming soon</Button>
+                        <Button size="sm" disabled={busy} onClick={() => act(redeemCall(p.market.id), async () => { const [y, n] = await getShares(p.market.id, account); return BigInt(y) + BigInt(n) === 0n; }, "Redeemed. Withdraw the balance to your Intents account.")}>Redeem</Button>
                       ) : p.market.status === "open" ? (
                         <Link href={`/market?id=${p.market.id}`} className="btn btn-secondary btn-sm">Sell</Link>
                       ) : null}

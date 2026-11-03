@@ -24,16 +24,16 @@ const GAS_CALLBACK: Gas = Gas::from_tgas(10);
 // Measured against the Council's seat cap; see the note on CouncilContract.
 const GAS_DRAW: Gas = Gas::from_tgas(250);
 const GAS_DRAWN: Gas = Gas::from_tgas(15);
-// unlock_case burned 8.9 TGas for a 21 juror case where every juror forfeits revenue, the most work it can do
-// (measured in the sandbox), so 15 leaves room.
-const GAS_UNLOCK: Gas = Gas::from_tgas(15);
+// unlock_case burned 20.2 TGas for a 21 juror case where every juror is silent after the Council went 30 days without a
+// receipt, the most work it can do (measured in the sandbox), so 25 leaves room.
+const GAS_UNLOCK: Gas = Gas::from_tgas(25);
 // The gas floors. Each is what the method reserves for the calls it sends plus a margin over what it burns itself, and
 // each was checked against the least that worked in the sandbox. A call below its floor fails
 // part way through with a host error that names no amount, so these refuse it first and say how much to attach.
 //
 // A call that settles a case sends the answer to the market with its callback, then releases the first jury and, after a
 // second round, the second. Its own work was 8.4 TGas in the worst case measured: a second round of 21 jurors, the 11th
-// of them revealing a 1,000 byte reason. 72 TGas was the least that worked there.
+// of them revealing a 1,000 byte reason. 72 TGas was the least that worked there, before the release grew from 15 to 25.
 const GAS_SETTLE_OVERHEAD: Gas = Gas::from_tgas(20);
 const GAS_SETTLE_FLOOR: Gas =
     Gas::from_gas(GAS_APPLY.as_gas() + GAS_CALLBACK.as_gas() + 2 * GAS_UNLOCK.as_gas() + GAS_SETTLE_OVERHEAD.as_gas());
@@ -41,7 +41,7 @@ const GAS_SETTLE_FLOOR: Gas =
 const GAS_DRAW_OVERHEAD: Gas = Gas::from_tgas(10);
 const GAS_DRAW_FLOOR: Gas = Gas::from_gas(GAS_DRAW.as_gas() + GAS_DRAWN.as_gas() + GAS_DRAW_OVERHEAD.as_gas());
 // retry_unlock attaches no fixed gas, so each of the two releases takes an equal share of what the caller attached. The
-// floor leaves each one the 15 that settle gives it.
+// floor leaves each one the 25 that settle gives it.
 const GAS_RETRY_UNLOCK_OVERHEAD: Gas = Gas::from_tgas(5);
 const GAS_RETRY_UNLOCK_FLOOR: Gas = Gas::from_gas(2 * GAS_UNLOCK.as_gas() + GAS_RETRY_UNLOCK_OVERHEAD.as_gas());
 // A bond withdrawal sends the payout and then settles it, and burns about 3 TGas itself. 29 TGas was the least that worked in the
@@ -3408,14 +3408,14 @@ mod tests {
     // The least a method may be called with, and the words its refusal starts with.
     #[test]
     fn a_call_below_its_gas_floor_is_refused_with_the_amount_to_attach() {
-        let settle = "attach at least 80 TGas: a call that settles a case sends the answer to the market and releases the juries";
+        let settle = "attach at least 100 TGas: a call that settles a case sends the answer to the market and releases the juries";
         let mut o = challenged(Outcome::Yes, Outcome::No);
         let at = DRAW_BY + 1;
-        act_with_gas("anyone.near", at, 79);
+        act_with_gas("anyone.near", at, 99);
         assert_eq!(refusal(|| o.finalize(acct(MARKET), U64(0))), settle);
-        act_with_gas("anyone.near", at, 79);
+        act_with_gas("anyone.near", at, 99);
         assert_eq!(refusal(|| o.resolve_by_deadline(acct(MARKET), U64(0))), settle);
-        act_with_gas("j0.near", at, 79);
+        act_with_gas("j0.near", at, 99);
         assert_eq!(
             refusal(|| o.reveal_vote(acct(MARKET), U64(0), Outcome::Yes, "s".into(), "r".into())),
             settle
@@ -3425,10 +3425,10 @@ mod tests {
             refusal(|| drop(o.resolve_draw(acct(MARKET), U64(0)))),
             "attach at least 275 TGas: the jury draw reads every staked seat"
         );
-        act_with_gas("anyone.near", at, 34);
+        act_with_gas("anyone.near", at, 54);
         assert_eq!(
             refusal(|| drop(o.retry_unlock(acct(MARKET), U64(0)))),
-            "attach at least 35 TGas: each jury's release gets an equal share of what is attached"
+            "attach at least 55 TGas: each jury's release gets an equal share of what is attached"
         );
         act_with_gas("anyone.near", at, 32);
         assert_eq!(
@@ -3448,17 +3448,17 @@ mod tests {
                 "{refused}"
             )
         };
-        act_with_gas("anyone.near", at, 80);
+        act_with_gas("anyone.near", at, 100);
         past(refusal(|| o.finalize(acct(MARKET), U64(99))));
-        act_with_gas("anyone.near", at, 80);
+        act_with_gas("anyone.near", at, 100);
         past(refusal(|| o.resolve_by_deadline(acct(MARKET), U64(99))));
-        act_with_gas("j0.near", at, 80);
+        act_with_gas("j0.near", at, 100);
         past(refusal(|| {
             o.reveal_vote(acct(MARKET), U64(99), Outcome::Yes, "s".into(), "r".into())
         }));
         act_with_gas("anyone.near", at, 275);
         past(refusal(|| drop(o.resolve_draw(acct(MARKET), U64(99)))));
-        act_with_gas("anyone.near", at, 35);
+        act_with_gas("anyone.near", at, 55);
         past(refusal(|| drop(o.retry_unlock(acct(MARKET), U64(99)))));
         let refused = {
             act_with_gas("anyone.near", at, 33);
@@ -3471,15 +3471,15 @@ mod tests {
     fn the_floors_follow_from_what_the_methods_reserve() {
         assert_eq!(
             GAS_SETTLE_FLOOR,
-            Gas::from_tgas(80),
-            "apply 20, its callback 10, two releases of 15, and 20 for the call itself"
+            Gas::from_tgas(100),
+            "apply 20, its callback 10, two releases of 25, and 20 for the call itself"
         );
         assert_eq!(
             GAS_DRAW_FLOOR,
             Gas::from_tgas(275),
             "the draw 250, its callback 15, and 10 for the call itself"
         );
-        assert_eq!(GAS_RETRY_UNLOCK_FLOOR, Gas::from_tgas(35));
+        assert_eq!(GAS_RETRY_UNLOCK_FLOOR, Gas::from_tgas(55));
         assert_eq!(
             GAS_WITHDRAW_FLOOR,
             Gas::from_tgas(33),

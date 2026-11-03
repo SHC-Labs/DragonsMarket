@@ -6,7 +6,7 @@ NEAR Intents holds fungible funds while application contracts enforce their perm
 | --- | --- |
 | Updated | 21 October 2026 |
 | Decisions | Intents holding layer; Trezu/Sputnik administration; 75/25 revenue; quarterly Council claims |
-| Status | Market and Council use Intents in current source; remaining integration is incomplete |
+| Status | Market, Council and oracle use Intents in current source; real-funds and real-DAO runs and the frontend integration remain |
 | Product authority | [Product specification](spec.md) |
 | Contract work | Contract team |
 
@@ -121,25 +121,25 @@ through the reviewed administration path, together with `revenue_pool`, the Coun
 split is a share in basis points the owner can move (2,500 to the Council to start). Code field names
 do not imply that a treasury account has already been selected.
 
-The Council books revenue by UTC calendar quarter. A seat earns for the time it was staked inside the
-quarter, a quarter is claimable once its grace period has passed, no-seat quarters roll their pool
-into the next quarter, unclaimed shares never expire and late-arriving fees belong to the quarter they
-arrive in. A reward cannot be paid through two different claim paths.
+The Council splits each sweep equally among the seats earning when it arrives, and a seat staked on
+UTC day D earns from day D+1. Earnings are claimed by UTC calendar quarter: a finished quarter can be
+claimed and never expires, and the running quarter cannot be claimed. A reward cannot be paid through
+two different claim paths.
 
-Oracle bonds and juror payments still need their own Intents migration. Moving those liabilities
-must preserve the case rules and must not take money from holder allocations.
+Oracle bonds and juror payments arrive through the verifier (`mt_on_transfer`) and are paid from the
+oracle's own Intents account. They stay separate from holder allocations.
 
 ---
 
 ## Current implementation and gaps
 
-Source inspection on 21 October 2026; no contract build or test was run for this cleanup.
+Checked against the contract source.
 
 | Component | Current source | Gap |
 | --- | --- | --- |
 | Market | Verifier-backed transfers, internal positions and a recorded fee sweep with independent legs | Complete user identity/funding/exit journey and verified recipient configuration |
-| Council | Intents revenue receipt, NFT staking, quarterly entitlements and single-use claims | A run against real funds and a real DAO |
-| Oracle | NEP-141 bond and payment paths | Intents bond/juror settlement |
+| Council | Intents revenue receipt, NFT staking, quarterly earnings and single-use claims | A run against real funds and a real DAO |
+| Oracle | Intents bond and juror payment paths | A run against real funds |
 | Treasury | Allow-list proposal and vote helpers, not yet run against a real DAO; custom governance removed | Real DAO and policy, ownership handover and integration tests |
 | Frontend | Read-oriented adapters, disabled financial writes | Final DTOs, quote/sign/receipt/recovery integration |
 
@@ -157,7 +157,7 @@ For [R-01 through R-08](spec.md#requirements-to-implementation-map), deliver:
 2. Proof of funded positions, protected backing and beneficiary/replay checks.
 3. Sell, redeem, bond, fee and reward settlement with failed-operation recovery.
 4. Reconciliation across verifier funds, positions and liabilities, including backend outages.
-5. Quarterly Council accounting and single-use claims with boundary and stake-change tests.
+5. Quarterly Council accounting and single-use claims with boundary and stake-change tests (built; real-funds run remains).
 6. Verified treasury membership and policy, and the proven DAO ownership path.
 7. A migration or fresh-deployment plan for each changed state layout and liability.
 8. Frontend integration and a demonstrated funding-to-exit journey using the selected build.

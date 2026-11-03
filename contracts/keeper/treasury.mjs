@@ -22,8 +22,6 @@ const NS_PER_DAY = 86_400n * 10n ** 9n;
 const VOID_GRACE_NS = { min: NS_PER_DAY, max: 60n * NS_PER_DAY };
 // The range the Council and the oracle accept for their reconcile wait: 10 minutes to 7 days.
 const RECONCILE_WAIT_NS = { min: 600n * 10n ** 9n, max: 7n * NS_PER_DAY };
-// The Council's grace period, 1 to 30 days (MIN_CLOSE_GRACE_NS and MAX_CLOSE_GRACE_NS in its source).
-export const CLOSE_GRACE_DAYS = { min: 1n, max: 30n };
 const U64_MAX = 2n ** 64n - 1n;
 const U128_MAX = 2n ** 128n - 1n;
 const NS_PER_MS = 1_000_000n;
@@ -309,7 +307,6 @@ export const ALLOWED = {
   council: {
     ...upgradePath,
     set_cooldown_ns: call({ cooldown_ns: u64(1n) }),
-    set_close_grace_ns: call({ close_grace_ns: u64(CLOSE_GRACE_DAYS.min * NS_PER_DAY, CLOSE_GRACE_DAYS.max * NS_PER_DAY) }),
     allow_market: call({ market: account }),
     disallow_market: call({ market: account }),
     set_max_seats_per_account: call({ max_seats_per_account: integer(U32_MAX, 1) }),
@@ -319,7 +316,7 @@ export const ALLOWED = {
     clear_token_range: call({}),
     set_allowlist_enabled: call({ enabled: flag }),
     set_reconcile_wait_ns: call({ reconcile_wait_ns: u64(RECONCILE_WAIT_NS.min, RECONCILE_WAIT_NS.max) }),
-    reconcile_claim: call({ quarter: integer(U32_MAX), token_id: text(ID_TEXT_MAX), owner: account, paid: flag }),
+    reconcile_claim: call({ id: u64(1n), paid: flag }),
   },
 };
 
@@ -532,7 +529,7 @@ export function prepareStageCode({ contracts, target, wasm }) {
 }
 
 // Estimates storage runway from an explicit workload budget. These are planning inputs, not a throughput measurement.
-// fixedBytesPerDay must include sweeps, claims and quarter/case growth not represented by new market registrations.
+// fixedBytesPerDay must include sweeps, claims and case growth not represented by new market registrations.
 export function storageRunway({ amount, storageUsage, marketsPerDay, bytesPerMarket, fixedBytesPerDay, reserve, alarmDays }) {
   for (const [name, value] of Object.entries({ marketsPerDay, bytesPerMarket, fixedBytesPerDay, alarmDays })) {
     if (!Number.isSafeInteger(value) || value < 0 || (name === "alarmDays" && value === 0)) reject(name + " must be a non-negative safe integer (alarmDays must be positive)");

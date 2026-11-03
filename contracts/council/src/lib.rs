@@ -1,9 +1,9 @@
 // Council registry for the pitch test. A seat is an NFT from one collection staked here with
 // nft_transfer_call. The registry draws juries for the oracle from the staked seats and keeps a drawn seat
-// from leaving until the oracle says its case is final. Revenue sent here belongs to the UTC calendar quarter it arrives in.
-// A seat's share of a quarter is the time it was staked inside that quarter over all the seat time of the quarter, and each
-// seat claims each quarter once, from a set time after the quarter ends. A seat staked after a quarter began earns nothing
-// from that quarter and starts with the next one.
+// from leaving until the oracle says its case is final. Revenue is paid by arrival: a seat staked on a UTC day starts
+// earning at the start of the next one, and each sweep is split equally among the seats earning when it arrives. A seat
+// never shares a sweep that came before it started. What it earned in a finished UTC quarter can be claimed for good, and
+// a seat that asks to leave before its quarter ends gives up half of that quarter's earnings to the seats still earning.
 // The JSON interface takes one argument per field, so a few methods are long on purpose.
 #![allow(clippy::too_many_arguments)]
 
@@ -17,6 +17,7 @@ use near_sdk::{
     assert_one_yocto, env, ext_contract, near, require, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault,
     Promise, PromiseError, PromiseOrValue, PublicKey,
 };
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 const MAX_SEATS: u32 = 1_000;
@@ -31,22 +32,32 @@ const NS_PER_DAY: u64 = 86_400 * NS_PER_SEC;
 const DEFAULT_RECONCILE_WAIT_NS: u64 = 3_600 * NS_PER_SEC;
 const MIN_RECONCILE_WAIT_NS: u64 = 600 * NS_PER_SEC;
 const MAX_RECONCILE_WAIT_NS: u64 = 7 * NS_PER_DAY;
-// A finished quarter waits this long before it can be finalized, so a case that crossed its end can settle first and a silent
-// juror's forfeit still counts. Claims open when the quarter is finalized. The owner can move it between the bounds.
-const DEFAULT_CLOSE_GRACE_NS: u64 = 7 * NS_PER_DAY;
-const MIN_CLOSE_GRACE_NS: u64 = NS_PER_DAY;
-const MAX_CLOSE_GRACE_NS: u64 = 30 * NS_PER_DAY;
 // A longer cooldown overflows nothing, but it locks every seat for as long as it runs.
 const MAX_COOLDOWN_NS: u64 = 365 * NS_PER_DAY;
-// Quarters one call moves seat time or a seat's weight across. A longer idle stretch needs advance_quarters or book_seat_time
-// first, in as many calls as it takes.
-const MAX_QUARTER_STEPS: u32 = 8;
-// Quarters one list_quarters call returns.
-const MAX_VIEW_QUARTERS: u32 = 50;
-// Quarters one entitlements_of call walks. Each quarter costs a lookup for every token the account has ever staked, so this
-// bounds the gas of the view for an account with many seats.
-const MAX_ENTITLEMENT_QUARTERS: u32 = 25;
-const MAX_ENTITLEMENT_LOOKUPS: usize = 250;
+// The revenue index holds units per seat times this, so a split among up to MAX_SEATS seats rounds away less than a
+// unit in a quadrillion per seat. The index only grows, so a u128 bounds the whole life of the council, not one sweep: it is
+// full once the units shared per earning seat add up to about 3.4 * 10^20, which is all the revenue the council will ever
+// take in if one seat earned every sweep. Past that a split panics.
+const ACC_SCALE: u128 = 1_000_000_000_000_000_000;
+// Days one advance_days call walks, and the most a claim or an unstake request walks on its own before it refuses, since a
+// holder can attach the gas it needs. A council nobody touched for longer waits for advance_days. Sweeps come at least daily.
+const MAX_DAY_STEPS: u32 = 100;
+// Days a revenue receipt, a draw or a release walks on its own. Those calls run on gas their caller fixed, so they take a
+// smaller bite and refuse beyond it. A guess, to be measured in the sandbox.
+const MAX_RECEIPT_CATCH_UP_DAYS: u32 = 30;
+// Basis points of the running quarter's earnings a seat gives up when it asks to leave, and the denominator they are over.
+const LEAVER_CUT_BPS: u128 = 5_000;
+const BPS_DENOMINATOR: u128 = 10_000;
+// Snapshots one quarter_snapshots call returns at most.
+const MAX_SNAPSHOT_PAGE: u32 = 50;
+// Seats one claim settles. Each is a seat record read and written inside the claim's own work.
+const MAX_CLAIM_TOKENS: usize = 10;
+// What a version 5 contract may still hold in each finalized quarter and be migrated: the remainder of splitting its
+// pool, under a unit a seat. More than that is money a seat can still claim, so the upgrade waits for it.
+const MIGRATE_DUST_PER_QUARTER: u128 = MAX_SEATS as u128;
+// Where migrate writes the UTC day it ran, which a seat record from version 5 reads when it is upgraded. Every one of those
+// seats still earning starts on the day after.
+const MIGRATED_DAY_KEY: &[u8] = b"migrated_day";
 const GAS_NFT_TRANSFER: Gas = Gas::from_tgas(15);
 // The verifier burned 3.8 TGas for a payout from a contract in the sandbox (INTENTS-PROOF.md), so this is a wide margin.
 const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
@@ -57,16 +68,16 @@ const GAS_CALLBACK: Gas = Gas::from_tgas(10);
 const GAS_NFT_TOKEN_VIEW: Gas = Gas::from_tgas(10);
 const GAS_STAKE_CALLBACK: Gas = Gas::from_tgas(20);
 // The gas floors. An unstake sends the NFT and a claim sends the payout, each with a callback, and each burns about 3 TGas
-// itself and neither depends on how many seats are staked.
+// itself and neither depends on how many seats are staked. A claim also settles up to ten seats inside its own work.
 const GAS_OWN_WORK: Gas = Gas::from_tgas(8);
 const GAS_UNSTAKE_FLOOR: Gas = Gas::from_gas(GAS_NFT_TRANSFER.as_gas() + GAS_CALLBACK.as_gas() + GAS_OWN_WORK.as_gas());
 const GAS_STAKE_FLOOR: Gas =
     Gas::from_gas(GAS_NFT_TOKEN_VIEW.as_gas() + GAS_STAKE_CALLBACK.as_gas() + GAS_OWN_WORK.as_gas());
 const GAS_CLAIM_FLOOR: Gas = Gas::from_gas(GAS_MT_TRANSFER.as_gas() + GAS_CALLBACK.as_gas() + GAS_OWN_WORK.as_gas());
-// The layout of the state below. migrate reads exactly this one and refuses any other. Version 2 is the quarterly books.
-// Version 3 keys received sweeps by market account and stores every map record behind a version tag. Version 4 counts
-// unstakes in flight. Version 5 counts only seats staked before a quarter began.
-const STATE_VERSION: u16 = 5;
+// The layout of the state below. migrate reads exactly this one and the one before it, and refuses any other. Version 5
+// split revenue by calendar quarter in proportion to seat time. Version 6 pays each sweep to the seats earning when it
+// arrives and lets a seat claim a finished quarter.
+const STATE_VERSION: u16 = 6;
 // Token ids in the verifier are exactly "nep141:<contract>". Anything else would never match a transfer.
 const NEP141_PREFIX: &str = "nep141:";
 const REVENUE_PREFIX: &str = "revenue:";
@@ -86,22 +97,10 @@ pub trait Verifier {
 }
 
 // Every record in a map is stored behind a one-byte version tag, so a later layout can be read next to this one. The
-// wrapper is what the maps hold: it reads any stored version up to the current layout (the stored enum's into_current is
-// where an upgrade from an older version goes) and always writes the current one.
+// wrapper is what the maps hold: it reads any stored version up to the current layout (an older one goes through its
+// From into the current one) and always writes the current one.
 macro_rules! versioned {
-    ($name:ident, $stored:ident, $ty:ty) => {
-        enum $stored {
-            V1($ty),
-        }
-
-        impl $stored {
-            fn into_current(self) -> $ty {
-                match self {
-                    Self::V1(value) => value,
-                }
-            }
-        }
-
+    (@wrapper $name:ident, $stored:ident, $ty:ty, $tag:expr) => {
         #[derive(Clone)]
         struct $name($ty);
 
@@ -131,37 +130,85 @@ macro_rules! versioned {
 
         impl BorshSerialize for $name {
             fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
-                0u8.serialize(writer)?;
+                $tag.serialize(writer)?;
                 self.0.serialize(writer)
             }
         }
 
         impl BorshDeserialize for $name {
             fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-                let stored = match u8::deserialize_reader(reader)? {
-                    0 => $stored::V1(<$ty>::deserialize_reader(reader)?),
-                    _ => env::panic_str("a stored record has a newer version than this code can read"),
-                };
-                Ok(Self(stored.into_current()))
+                let tag = u8::deserialize_reader(reader)?;
+                Ok(Self($stored::read(tag, reader)?.into_current()))
             }
         }
     };
+    ($name:ident, $stored:ident, $ty:ty) => {
+        enum $stored {
+            V1($ty),
+        }
+
+        impl $stored {
+            fn read<R: borsh::io::Read>(tag: u8, reader: &mut R) -> borsh::io::Result<Self> {
+                match tag {
+                    0 => Ok(Self::V1(<$ty>::deserialize_reader(reader)?)),
+                    _ => env::panic_str("a stored record has a newer version than this code can read"),
+                }
+            }
+
+            fn into_current(self) -> $ty {
+                match self {
+                    Self::V1(value) => value,
+                }
+            }
+        }
+
+        versioned!(@wrapper $name, $stored, $ty, 0u8);
+    };
+    ($name:ident, $stored:ident, $old:ty => $ty:ty) => {
+        enum $stored {
+            V1($old),
+            V2($ty),
+        }
+
+        impl $stored {
+            fn read<R: borsh::io::Read>(tag: u8, reader: &mut R) -> borsh::io::Result<Self> {
+                match tag {
+                    0 => Ok(Self::V1(<$old>::deserialize_reader(reader)?)),
+                    1 => Ok(Self::V2(<$ty>::deserialize_reader(reader)?)),
+                    _ => env::panic_str("a stored record has a newer version than this code can read"),
+                }
+            }
+
+            fn into_current(self) -> $ty {
+                match self {
+                    Self::V1(value) => value.into(),
+                    Self::V2(value) => value,
+                }
+            }
+        }
+
+        versioned!(@wrapper $name, $stored, $ty, 1u8);
+    };
 }
 
-#[near(serializers=[borsh])]
-#[derive(BorshStorageKey)]
+// Prefixes 5 to 8 held version 5's quarter books, seat time, forfeits and quarter claims. Those maps stay in storage
+// unread, since a LookupMap cannot be enumerated to delete them, so no new map may use those numbers.
+#[derive(BorshSerialize, BorshStorageKey)]
+#[borsh(crate = "near_sdk::borsh", use_discriminant = true)]
 enum Key {
-    Staked,
-    Stakes,
-    SeatsOf,
-    Juries,
-    Allowed,
-    Quarters,
-    SeatWeight,
-    Forfeits,
-    Claims,
-    Received,
-    TokensOf,
+    Staked = 0,
+    Stakes = 1,
+    SeatsOf = 2,
+    Juries = 3,
+    Allowed = 4,
+    Received = 9,
+    TokensOf = 10,
+    DayAcc = 11,
+    Accrued = 12,
+    Claims = 13,
+    QuarterAcc = 14,
+    JoinsOn = 15,
+    Pending = 16,
 }
 
 #[near(serializers=[borsh, json])]
@@ -172,137 +219,157 @@ pub struct Stake {
     unlock_requested_at: Option<U64>,
     // The case this seat was drawn for. It cannot leave or be drawn again until the oracle releases that case.
     serving: Option<U64>,
-    // The time up to which this seat's staked time is already counted in the quarters it covered. Counting is lazy: unstake,
-    // a claim, a forfeit and book_seat_time move it forward.
-    booked_to: U64,
-    // When the seat was drawn. A juror who never votes loses the seat time from here until the case is released.
+    // The UTC day (days since the epoch) the seat starts earning: the day after it was staked.
+    earn_from_day: U64,
+    // How far up the revenue index this seat is already settled into its owner's balance, or the index when it asked to
+    // leave. Below its start day's index it has no meaning, so the higher of the two counts.
     #[serde(skip)]
-    serving_from: u64,
+    settled_acc: u128,
+    // Units to take off the next settlement: what a silent juror lost and the others already share.
+    #[serde(skip)]
+    forfeited: u128,
+    // The revenue index when the seat was drawn. A juror who never votes loses what it earns after that, unless that was
+    // settled by a claim first.
+    #[serde(skip)]
+    serving_acc: u128,
     // Where the token sits in `staked`, so unstaking does not scan the list.
     #[serde(skip)]
     index: u32,
 }
 
-versioned!(VersionedStake, StoredStake, Stake);
-
-// What one quarter holds. `seat_ns` is the sum over the quarter of the number of seats still earning (staked, not asking to leave, and not fresh for that quarter), in seat nanoseconds. It only
-// moves when the seat count changes or when advance_quarters is called, so every method that changes the count moves it to
-// the present first.
+// A seat record as version 5 wrote it, read only to be upgraded.
 #[near(serializers=[borsh])]
-#[derive(Clone, Default)]
-struct QuarterBook {
-    revenue_in: u128,
-    // A quarter with no seat time rolls its whole pool into the next quarter, which holds it here until it is finalized.
-    carry_in: u128,
-    seat_ns: u128,
-    forfeit_ns: u128,
-    finalized: bool,
-    // Fixed at finalization: what the seats share, and the seat time they share it by.
-    pool: u128,
-    weight_total: u128,
-    rolled_to: Option<u32>,
-    paid: u128,
-    pending: u128,
+struct StakeV1 {
+    owner: AccountId,
+    staked_at: U64,
+    unlock_requested_at: Option<U64>,
+    serving: Option<U64>,
+    booked_to: U64,
+    serving_from: u64,
+    index: u32,
 }
 
-versioned!(VersionedQuarterBook, StoredQuarterBook, QuarterBook);
-
-#[near(serializers=[borsh, json])]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "lowercase")]
-enum ClaimStatus {
-    Pending,
-    Paid,
+thread_local! {
+    // The day migrate ran, kept for the rest of the call once the first version 5 seat record has read it. A draw reads every
+    // seat, and without this each one still on the old layout would pay for a storage read of its own.
+    static MIGRATED_DAY: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
-// The single-use record of one seat's claim on one quarter. It is written before the payout is sent and kept for good once
-// paid, which is what stops a second claim.
+fn migrated_day() -> u64 {
+    MIGRATED_DAY.with(|cached| {
+        cached.get().unwrap_or_else(|| {
+            let day = env::storage_read(MIGRATED_DAY_KEY)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map(u64::from_le_bytes)
+                .unwrap_or_else(|| env::panic_str("a version 5 seat record exists but migrate never ran"));
+            cached.set(Some(day));
+            day
+        })
+    })
+}
+
+// Version 5 had no start day. migrate counted every seat still earning as starting the day after it ran, so that is the
+// day each one starts here. A seat that had asked to leave never earns again, which no day can say.
+impl From<StakeV1> for Stake {
+    fn from(old: StakeV1) -> Self {
+        Self {
+            owner: old.owner,
+            staked_at: old.staked_at,
+            unlock_requested_at: old.unlock_requested_at,
+            serving: old.serving,
+            earn_from_day: U64(if old.unlock_requested_at.is_some() {
+                u64::MAX
+            } else {
+                migrated_day() + 1
+            }),
+            settled_acc: 0,
+            forfeited: 0,
+            serving_acc: 0,
+            index: old.index,
+        }
+    }
+}
+
+versioned!(VersionedStake, StoredStake, StakeV1 => Stake);
+
+// One payout of an account's whole balance, from the moment it is sent until its callback (or the owner) says how it went.
+// The record is removed then, so a repeated or late callback finds nothing.
 #[near(serializers=[borsh])]
 #[derive(Clone)]
 struct Claim {
+    account: AccountId,
     amount: u128,
-    status: ClaimStatus,
+    tokens: Vec<TokenId>,
     requested_at: u64,
-    paid_at: Option<u64>,
 }
 
 versioned!(VersionedClaim, StoredClaim, Claim);
+
+// What a seat that left gave up half of waits here until the quarter it left in is over, one slot to an account. A second
+// leave in the same quarter adds to it.
+#[near(serializers=[borsh])]
+#[derive(Clone)]
+struct Pending {
+    quarter: u32,
+    amount: u128,
+}
+
+versioned!(VersionedPending, StoredPending, Pending);
 
 #[near(serializers=[borsh])]
 #[derive(Clone)]
 struct Received {
     amount: u128,
+    at: u64,
+}
+
+// A received sweep as version 5 wrote it, with the quarter it was booked to.
+#[near(serializers=[borsh])]
+struct ReceivedV1 {
+    amount: u128,
     quarter: u32,
     at: u64,
 }
 
-versioned!(VersionedReceived, StoredReceived, Received);
+impl From<ReceivedV1> for Received {
+    fn from(old: ReceivedV1) -> Self {
+        Self {
+            amount: old.amount,
+            at: old.at,
+        }
+    }
+}
+
+versioned!(VersionedReceived, StoredReceived, ReceivedV1 => Received);
 
 #[near(serializers=[json])]
 pub struct ReceivedView {
     amount: U128,
-    quarter: u32,
     at: U64,
 }
 
 #[near(serializers=[json])]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
-pub enum QuarterState {
-    Open,
-    Closing,
-    Final,
+pub enum SeatState {
+    Waiting,
+    Earning,
+    Leaving,
+    Serving,
 }
 
 #[near(serializers=[json])]
-pub struct QuarterView {
-    quarter: u32,
-    label: String,
-    starts_at: U64,
-    ends_at: U64,
-    claimable_from: U64,
-    state: QuarterState,
-    revenue_in: U128,
-    carry_in: U128,
-    pool: U128,
-    seat_ns: U128,
-    forfeit_ns: U128,
-    paid: U128,
-    pending: U128,
-    rolled_to: Option<u32>,
-}
-
-#[near(serializers=[json])]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "lowercase")]
-pub enum EntitlementStatus {
-    Accruing,
-    Closing,
-    Claimable,
-    Pending,
-    Paid,
-}
-
-#[near(serializers=[json])]
-pub struct EntitlementView {
-    quarter: u32,
-    token_id: TokenId,
+pub struct SeatEarnings {
     owner: AccountId,
-    weight_ns: U128,
-    amount: U128,
-    // True while the quarter is not final: later revenue and later seat time still move the amount.
-    estimated: bool,
-    status: EntitlementStatus,
-    requested_at: Option<U64>,
-    paid_at: Option<U64>,
-}
-
-#[near(serializers=[json])]
-pub struct QuarterLabel {
-    quarter: u32,
-    label: String,
-    starts_at: U64,
-    ends_at: U64,
+    state: SeatState,
+    earning_from: U64,
+    // What a claim would pay for this seat now: its earnings up to the last finished quarter.
+    earned_closed: U128,
+    // What it has earned in the quarter still running, which a claim cannot reach until the quarter ends.
+    earned_in_progress: U128,
+    // The revenue index at the seat's start day (0 before it has started) and the index it is settled up to.
+    start_acc: U128,
+    settled_acc: U128,
 }
 
 #[near(serializers=[json])]
@@ -310,9 +377,43 @@ pub struct RewardTotals {
     total_received: U128,
     total_paid: U128,
     pending_claims: U128,
-    open_pool: U128,
-    final_unclaimed: U128,
-    rolled: U128,
+    carry: U128,
+    cut_pool: U128,
+    accrued_total: U128,
+    pending_total_slots: U128,
+}
+
+#[near(serializers=[json])]
+pub struct QuarterInfo {
+    quarter: u32,
+    starts_at: U64,
+    ends_at: U64,
+    last_closed_quarter: u32,
+    last_day: U64,
+}
+
+#[near(serializers=[json])]
+pub struct QuarterSnapshot {
+    quarter: u32,
+    acc: U128,
+}
+
+// The two parts of what a seat has earned and not settled yet, after the units it lost as a silent juror.
+struct SeatShares {
+    closed: u128,
+    running: u128,
+}
+
+// The same two parts before those units come off, with the index each is counted from and to.
+struct Earned {
+    start: u128,
+    bound: u128,
+    closed: u128,
+    running: u128,
+}
+
+fn day_of(at_ns: u64) -> u64 {
+    at_ns / NS_PER_DAY
 }
 
 // Days since 1970-01-01 to a civil date, and back (Howard Hinnant's algorithms). The year is signed in the arithmetic only.
@@ -342,7 +443,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 // The id of the UTC calendar quarter a time falls in: year * 4 + (quarter - 1), so 2026 Q4 is 8107. A time exactly on a
 // boundary belongs to the quarter that starts there.
 fn quarter_containing(at_ns: u64) -> u32 {
-    let (year, month, _) = civil_from_days((at_ns / NS_PER_DAY) as i64);
+    let (year, month, _) = civil_from_days(day_of(at_ns) as i64);
     year as u32 * 4 + (month - 1) / 3
 }
 
@@ -357,39 +458,14 @@ fn quarter_end(quarter: u32) -> u64 {
     quarter_start(quarter.saturating_add(1))
 }
 
-fn quarter_label(quarter: u32) -> String {
-    format!("{}Q{}", quarter / 4, quarter % 4 + 1)
+fn claim_data(id: u64, claim: &Claim) -> near_sdk::serde_json::Value {
+    json!({ "id": id.to_string(), "account": claim.account, "amount": claim.amount.to_string(), "tokens": claim.tokens,
+            "requested_at": claim.requested_at.to_string() })
 }
 
-// Where a seat's time stops: at `to`, or at its request to unstake if that came first.
-fn counted_until(stake: &Stake, to: u64) -> u64 {
-    stake.unlock_requested_at.map_or(to, |requested| requested.0.min(to))
-}
-
-// How much of [from, to) lies inside the quarter, in nanoseconds.
-fn overlap(quarter: u32, from: u64, to: u64) -> u64 {
-    to.min(quarter_end(quarter))
-        .saturating_sub(from.max(quarter_start(quarter)))
-}
-
-// floor(pool * weight / total) without overflowing: pool / total * weight cannot exceed pool, and the remainder part is
-// below total * weight, which is far under u128::MAX at 1,000 seats over a quarter.
-fn entitlement(pool: u128, weight: u128, total: u128) -> u128 {
-    if total == 0 {
-        return 0;
-    }
-    pool / total * weight + pool % total * weight / total
-}
-
-fn entitlement_page(limit: u32, tokens: usize) -> usize {
-    (limit.min(MAX_ENTITLEMENT_QUARTERS) as usize).min((MAX_ENTITLEMENT_LOOKUPS / tokens.max(1)).max(1))
-}
-
-// ponytail: every draw walks every staked token and reads its record. Measured directly at 1,000 seats with
-// 64-character account and token ids (contracts/tests/tests/_gas_probe.rs, since deleted): about 190 TGas
-// when every seat has its own holder, and up to 210 TGas when 21 holders share them, because the pick then
-// sets most tokens aside. The oracle reserves 250 TGas for the draw, so resolve_draw needs about 270 TGas
-// attached. Raising MAX_SEATS needs GAS_DRAW raised to match, measured again at the new cap.
+// ponytail: every draw walks every staked token and reads its record. Measured in the sandbox at 1,000 seats
+// (contracts/tests/tests/scale_council.rs): about 172 TGas, and about 168 to 170 when half the seats have asked to
+// leave. The oracle reserves 250 TGas for the draw, so resolve_draw needs about 270 TGas attached. Raising MAX_SEATS needs GAS_DRAW raised to match, measured again at the new cap.
 #[near(contract_state, contract_metadata(standard(standard = "nep297", version = "1.0.0")))]
 #[derive(PanicOnDefault)]
 pub struct CouncilContract {
@@ -431,54 +507,60 @@ pub struct CouncilContract {
     staked: Vector<TokenId>,
     stakes: LookupMap<TokenId, VersionedStake>,
     seats_of: LookupMap<AccountId, u32>,
-    // Every token an account has ever staked, so its entitlements can be listed after the seat is gone.
+    // The tokens each account has staked now. A list kept from version 5 can still name a token the account held then,
+    // which every reader skips and the account's next unstake drops.
     tokens_of: LookupMap<AccountId, Vec<TokenId>>,
     // The tokens drawn for each case still open.
     juries: LookupMap<u64, Vec<TokenId>>,
-    // How many open juries were drawn at each time, so finalize_quarter can see whether one drawn before a quarter's end is
-    // still open. One entry per open case at most.
-    open_juries: BTreeMap<u64, u32>,
-    // Staked seats that have not asked to unstake. Only these add seat time: a seat's time stops at its request, and a seat
-    // counted in `fresh` adds none for the quarter it was staked in.
-    earning: u32,
-    // How long after a quarter ends it can be finalized, and so when its claims open.
-    close_grace_ns: u64,
     // How long a claim must be pending before reconcile_claim can decide it.
     reconcile_wait_ns: u64,
-    // Seat time is counted up to here. The quarters from `next_to_finalize` on are the ones not final yet.
-    last_tick: u64,
-    next_to_finalize: u32,
-    // A quarter nobody touched has no entry, which reads as an empty book.
-    quarters: LookupMap<u32, VersionedQuarterBook>,
-    // Staked nanoseconds inside one quarter by one token for one owner, and the part of it a silent juror lost.
-    seat_weight: LookupMap<(u32, TokenId, AccountId), u64>,
-    forfeits: LookupMap<(u32, TokenId, AccountId), u64>,
-    claims: LookupMap<(u32, TokenId, AccountId), VersionedClaim>,
     // Revenue by the market account and its sweep id, so a repeated send is refused, two markets can use the same sweep id,
     // and a market can ask what arrived.
     received: LookupMap<(AccountId, u64), VersionedReceived>,
-    // Every token received as revenue, and every one paid out. Their difference less the claims in flight is what the
-    // Intents account must hold. The rest of the books below split the difference: money in quarters still open, money in
-    // finalized quarters, and money moved on from a quarter that had no seat time.
+    // Every token received as revenue, every one paid out and the claims in flight. What was received and not paid out is
+    // in flight, owed to accounts (`accrued_total`, `pending_total_slots`), earned by live seats and not settled yet, in the
+    // `cut_pool` or in `carry`.
     total_received: u128,
     total_paid: u128,
-    pending_total: u128,
-    open_pool: u128,
-    final_pool: u128,
-    rolled_total: u128,
+    pending_claims_total: u128,
     // Seats taken out of `staked` whose NFT transfer has not been answered yet. The collection cannot change while one is out,
     // or a failed transfer would restore the seat under another collection.
     unstakes_in_flight: u32,
-    // Earning seats staked after the start of the quarter that `last_tick` is in. They add no seat time to it.
-    fresh: u32,
-    // The first quarter the rule above applies to. Quarters before it keep the old rule, where every staked second counts, because
-    // their seat time and weights were already counted that way when the state was migrated.
-    rule_from_quarter: u32,
+    // The revenue index: what each seat earning since the start has been credited, times ACC_SCALE. A seat earns the
+    // index's rise from its start day (or from where it was last settled) on. It moves when a sweep arrives and when a
+    // quarter closes and shares the cut pool.
+    acc: u128,
+    // The scaled units of the last split that did not divide evenly among the seats. They go into the next one.
+    carry_scaled: u128,
+    // Revenue waiting for the next sweep: a sweep that came while no seat was earning, and what silent jurors lost.
+    carry: u128,
+    // The cut halves of the seats that left in the running quarter, shared among the seats earning when it closes.
+    cut_pool: u128,
+    // Seats earning now. Seats staked and not earning yet are counted in `joins_on` by the day they start.
+    active: u32,
+    joins_on: LookupMap<u64, u32>,
+    // The last UTC day that is folded into `active`. Anything that moves money needs it to be today.
+    last_day: u64,
+    // The index at the start of each day seats started on, which is where those seats' earnings begin.
+    day_acc: LookupMap<u64, u128>,
+    // The index at the moment each quarter closed, after the cut pool was shared, and the latest quarter that has one. A
+    // quarter's earnings are claimable from then on and never expire.
+    quarter_acc: LookupMap<u32, u128>,
+    last_closed_quarter: u32,
+    // Earnings settled to an account and not paid out yet, and their sum.
+    accrued: LookupMap<AccountId, u128>,
+    accrued_total: u128,
+    // The kept half of what leavers earned in a quarter still running, and their sum.
+    pending: LookupMap<AccountId, VersionedPending>,
+    pending_total_slots: u128,
+    next_claim_id: u64,
+    claims: LookupMap<u64, VersionedClaim>,
 }
 
-// Exact layout of state version 4, which counted every staked second of a quarter.
+// Exact layout of state version 5, which pooled revenue by calendar quarter. The quarter maps are read only for their
+// storage prefix, which is all a map keeps in the state, so their value types are left out.
 #[near(serializers=[borsh])]
-struct StateV4 {
+struct StateV5 {
     state_version: u16,
     upgrade_proven: bool,
     upgrade_in_flight: bool,
@@ -505,10 +587,10 @@ struct StateV4 {
     reconcile_wait_ns: u64,
     last_tick: u64,
     next_to_finalize: u32,
-    quarters: LookupMap<u32, VersionedQuarterBook>,
+    quarters: LookupMap<u32, ()>,
     seat_weight: LookupMap<(u32, TokenId, AccountId), u64>,
     forfeits: LookupMap<(u32, TokenId, AccountId), u64>,
-    claims: LookupMap<(u32, TokenId, AccountId), VersionedClaim>,
+    claims: LookupMap<(u32, TokenId, AccountId), ()>,
     received: LookupMap<(AccountId, u64), VersionedReceived>,
     total_received: u128,
     total_paid: u128,
@@ -517,102 +599,50 @@ struct StateV4 {
     final_pool: u128,
     rolled_total: u128,
     unstakes_in_flight: u32,
+    fresh: u32,
+    rule_from_quarter: u32,
 }
 
-// Exact layout of state version 3, which did not count unstakes in flight.
-#[near(serializers=[borsh])]
-struct StateV3 {
-    state_version: u16,
-    upgrade_proven: bool,
-    upgrade_in_flight: bool,
-    owner: AccountId,
-    pending_owner: Option<AccountId>,
-    oracle: AccountId,
-    nft_contract: Option<AccountId>,
-    allowed_markets: Vec<AccountId>,
-    verifier: AccountId,
-    collateral_token_id: String,
-    cooldown_ns: u64,
-    max_seats_per_account: u32,
-    allowlist_enabled: bool,
-    allowed_tokens: LookupSet<(AccountId, TokenId)>,
-    allowed_range: Option<(AccountId, u64, u64)>,
-    staked: Vector<TokenId>,
-    stakes: LookupMap<TokenId, VersionedStake>,
-    seats_of: LookupMap<AccountId, u32>,
-    tokens_of: LookupMap<AccountId, Vec<TokenId>>,
-    juries: LookupMap<u64, Vec<TokenId>>,
-    open_juries: BTreeMap<u64, u32>,
-    earning: u32,
-    close_grace_ns: u64,
-    reconcile_wait_ns: u64,
-    last_tick: u64,
-    next_to_finalize: u32,
-    quarters: LookupMap<u32, VersionedQuarterBook>,
-    seat_weight: LookupMap<(u32, TokenId, AccountId), u64>,
-    forfeits: LookupMap<(u32, TokenId, AccountId), u64>,
-    claims: LookupMap<(u32, TokenId, AccountId), VersionedClaim>,
-    received: LookupMap<(AccountId, u64), VersionedReceived>,
-    total_received: u128,
-    total_paid: u128,
-    pending_total: u128,
-    open_pool: u128,
-    final_pool: u128,
-    rolled_total: u128,
-}
-
-impl From<StateV3> for CouncilContract {
-    fn from(old: StateV3) -> Self {
-        Self {
-            state_version: STATE_VERSION,
-            upgrade_proven: old.upgrade_proven,
-            upgrade_in_flight: old.upgrade_in_flight,
-            owner: old.owner,
-            pending_owner: old.pending_owner,
-            oracle: old.oracle,
-            nft_contract: old.nft_contract,
-            allowed_markets: old.allowed_markets,
-            verifier: old.verifier,
-            collateral_token_id: old.collateral_token_id,
-            cooldown_ns: old.cooldown_ns,
-            max_seats_per_account: old.max_seats_per_account,
-            allowlist_enabled: old.allowlist_enabled,
-            allowed_tokens: old.allowed_tokens,
-            allowed_range: old.allowed_range,
-            staked: old.staked,
-            stakes: old.stakes,
-            seats_of: old.seats_of,
-            tokens_of: old.tokens_of,
-            juries: old.juries,
-            open_juries: old.open_juries,
-            earning: old.earning,
-            close_grace_ns: old.close_grace_ns,
-            reconcile_wait_ns: old.reconcile_wait_ns,
-            last_tick: old.last_tick,
-            next_to_finalize: old.next_to_finalize,
-            quarters: old.quarters,
-            seat_weight: old.seat_weight,
-            forfeits: old.forfeits,
-            claims: old.claims,
-            received: old.received,
-            total_received: old.total_received,
-            total_paid: old.total_paid,
-            pending_total: old.pending_total,
-            open_pool: old.open_pool,
-            final_pool: old.final_pool,
-            rolled_total: old.rolled_total,
-            unstakes_in_flight: 0,
-            fresh: 0,
-            rule_from_quarter: quarter_containing(env::block_timestamp()) + 1,
+// Revenue in quarters not finalized yet has no owner, so it waits in `carry` for the next sweep. Every seat still earning
+// starts the day after the migration, and its old stake record learns that day from MIGRATED_DAY_KEY when it is read. The
+// quarter before the running one is the last closed, with an index of 0, so nothing is claimable until the running one ends.
+// A quarter that ended and was not finalized has a pool that belongs to its seats, which this layout cannot keep, so the
+// upgrade waits for it too. The finalized quarters are counted by their books, which version 5 wrote to each one.
+// Money a seat could still claim from a finalized quarter, a claim in flight and an unstake in flight have no place in this
+// layout, so the upgrade refuses until they are gone. The quarter books, seat time, forfeits and claims of version 5 stay
+// in storage under their old prefixes, unread and never reused.
+impl From<StateV5> for CouncilContract {
+    fn from(old: StateV5) -> Self {
+        require!(
+            old.pending_total == 0,
+            "a claim is still pending, settle it before upgrading"
+        );
+        require!(
+            old.next_to_finalize >= quarter_containing(env::block_timestamp()),
+            "a finished quarter is not finalized yet, finalize it and let its holders claim before upgrading"
+        );
+        let finalized_quarters = (0..old.next_to_finalize)
+            .rev()
+            .take_while(|quarter| old.quarters.contains_key(quarter))
+            .count() as u128;
+        let unclaimed = old.final_pool - old.total_paid;
+        require!(
+            unclaimed <= finalized_quarters * MIGRATE_DUST_PER_QUARTER,
+            "a finalized quarter still has money to claim, claim it before upgrading"
+        );
+        require!(
+            old.unstakes_in_flight == 0,
+            "an unstake is still waiting for its NFT transfer"
+        );
+        let today = day_of(env::block_timestamp());
+        env::storage_write(MIGRATED_DAY_KEY, &today.to_le_bytes());
+        let mut joins_on = LookupMap::new(Key::JoinsOn);
+        if old.earning > 0 {
+            joins_on.insert(today + 1, old.earning);
         }
-    }
-}
-
-// The quarter in progress keeps the old rule, so no seat counted so far changes, and the next quarter starts the new one. Every
-// seat staked before the migration is old enough for it, and a seat staked after it and before it ends still counts in this
-// quarter. The cost is one quarter where a late seat earns as before.
-impl From<StateV4> for CouncilContract {
-    fn from(old: StateV4) -> Self {
+        let last_closed_quarter = quarter_containing(env::block_timestamp()) - 1;
+        let mut quarter_acc = LookupMap::new(Key::QuarterAcc);
+        quarter_acc.insert(last_closed_quarter, 0);
         Self {
             state_version: STATE_VERSION,
             upgrade_proven: old.upgrade_proven,
@@ -634,26 +664,28 @@ impl From<StateV4> for CouncilContract {
             seats_of: old.seats_of,
             tokens_of: old.tokens_of,
             juries: old.juries,
-            open_juries: old.open_juries,
-            earning: old.earning,
-            close_grace_ns: old.close_grace_ns,
             reconcile_wait_ns: old.reconcile_wait_ns,
-            last_tick: old.last_tick,
-            next_to_finalize: old.next_to_finalize,
-            quarters: old.quarters,
-            seat_weight: old.seat_weight,
-            forfeits: old.forfeits,
-            claims: old.claims,
             received: old.received,
             total_received: old.total_received,
             total_paid: old.total_paid,
-            pending_total: old.pending_total,
-            open_pool: old.open_pool,
-            final_pool: old.final_pool,
-            rolled_total: old.rolled_total,
-            unstakes_in_flight: old.unstakes_in_flight,
-            fresh: 0,
-            rule_from_quarter: quarter_containing(env::block_timestamp()) + 1,
+            pending_claims_total: 0,
+            unstakes_in_flight: 0,
+            acc: 0,
+            carry_scaled: 0,
+            carry: old.open_pool + unclaimed,
+            cut_pool: 0,
+            active: 0,
+            joins_on,
+            last_day: today,
+            day_acc: LookupMap::new(Key::DayAcc),
+            quarter_acc,
+            last_closed_quarter,
+            accrued: LookupMap::new(Key::Accrued),
+            accrued_total: 0,
+            pending: LookupMap::new(Key::Pending),
+            pending_total_slots: 0,
+            next_claim_id: 0,
+            claims: LookupMap::new(Key::Claims),
         }
     }
 }
@@ -719,6 +751,9 @@ impl CouncilContract {
             "the collateral token id must look like nep141:<token>"
         );
         let now = env::block_timestamp();
+        let last_closed_quarter = quarter_containing(now) - 1;
+        let mut quarter_acc = LookupMap::new(Key::QuarterAcc);
+        quarter_acc.insert(last_closed_quarter, 0);
         Self {
             state_version: STATE_VERSION,
             upgrade_proven: false,
@@ -740,26 +775,28 @@ impl CouncilContract {
             seats_of: LookupMap::new(Key::SeatsOf),
             tokens_of: LookupMap::new(Key::TokensOf),
             juries: LookupMap::new(Key::Juries),
-            open_juries: BTreeMap::new(),
-            earning: 0,
-            close_grace_ns: DEFAULT_CLOSE_GRACE_NS,
             reconcile_wait_ns: DEFAULT_RECONCILE_WAIT_NS,
-            last_tick: now,
-            next_to_finalize: quarter_containing(now),
-            quarters: LookupMap::new(Key::Quarters),
-            seat_weight: LookupMap::new(Key::SeatWeight),
-            forfeits: LookupMap::new(Key::Forfeits),
-            claims: LookupMap::new(Key::Claims),
             received: LookupMap::new(Key::Received),
             total_received: 0,
             total_paid: 0,
-            pending_total: 0,
-            open_pool: 0,
-            final_pool: 0,
-            rolled_total: 0,
+            pending_claims_total: 0,
             unstakes_in_flight: 0,
-            fresh: 0,
-            rule_from_quarter: 0,
+            acc: 0,
+            carry_scaled: 0,
+            carry: 0,
+            cut_pool: 0,
+            active: 0,
+            joins_on: LookupMap::new(Key::JoinsOn),
+            last_day: day_of(now),
+            day_acc: LookupMap::new(Key::DayAcc),
+            quarter_acc,
+            last_closed_quarter,
+            accrued: LookupMap::new(Key::Accrued),
+            accrued_total: 0,
+            pending: LookupMap::new(Key::Pending),
+            pending_total_slots: 0,
+            next_claim_id: 0,
+            claims: LookupMap::new(Key::Claims),
         }
     }
 
@@ -801,8 +838,9 @@ impl CouncilContract {
         }
     }
 
-    // Runs in the new code, in the same batch as the deploy. It reads the one layout it was written for. A later version
-    // keeps a copy of this struct as StateV1, reads that, builds its own state from it and bumps state_version.
+    // Runs in the new code, in the same batch as the deploy. It reads the one layout it was written for and the one before
+    // it. A later version keeps a copy of this struct as StateV6, reads that, builds its own state from it and bumps
+    // state_version.
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
@@ -810,8 +848,7 @@ impl CouncilContract {
         require!(bytes.len() >= 2, "invalid state");
         let mut state: Self = match u16::from_le_bytes([bytes[0], bytes[1]]) {
             STATE_VERSION => env::state_read().unwrap_or_else(|| env::panic_str("invalid current state")),
-            4 => Self::from(env::state_read::<StateV4>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
-            3 => Self::from(env::state_read::<StateV3>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
+            5 => Self::from(env::state_read::<StateV5>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
             _ => env::panic_str("unsupported state version"),
         };
         require!(state.upgrade_in_flight, "migrate runs only inside an upgrade");
@@ -879,24 +916,6 @@ impl CouncilContract {
         self.max_seats_per_account = max_seats_per_account;
     }
 
-    // How long a finished quarter waits before it can be finalized and claimed. It applies to every quarter not final yet.
-    pub fn set_close_grace_ns(&mut self, close_grace_ns: U64) {
-        self.only_owner();
-        require!(
-            (MIN_CLOSE_GRACE_NS..=MAX_CLOSE_GRACE_NS).contains(&close_grace_ns.0),
-            format!(
-                "the grace period must be between {} and {} days",
-                MIN_CLOSE_GRACE_NS / NS_PER_DAY,
-                MAX_CLOSE_GRACE_NS / NS_PER_DAY
-            )
-        );
-        emit(
-            "close_grace_set",
-            json!({ "close_grace_ns": close_grace_ns.0.to_string() }),
-        );
-        self.close_grace_ns = close_grace_ns.0;
-    }
-
     // How long a claim must be pending before the owner can decide it by hand. It applies to every claim from now on.
     pub fn set_reconcile_wait_ns(&mut self, reconcile_wait_ns: U64) {
         self.only_owner();
@@ -920,7 +939,7 @@ impl CouncilContract {
     }
 
     // Stops revenue from that market account. Sweeps it already sent stay in the books. The last one cannot be removed,
-    // because claims need a configured Council and a stranded quarter could then never be paid out.
+    // because claims need a configured Council and what the seats earned could then never be paid out.
     pub fn disallow_market(&mut self, market: AccountId) {
         self.only_owner();
         let at = self
@@ -993,12 +1012,14 @@ impl CouncilContract {
 
     // A draw marks the jury as serving. The seed is the block seed of the receipt that runs this call, so nobody can
     // know it when the call is sent, and it depends on nothing the caller passes. A repeat draw for the same case
-    // returns the same jury, so retrying after a failed callback cannot reroll it.
+    // returns the same jury, so retrying after a failed callback cannot reroll it. It walks the days first, as far as its gas
+    // margin allows and without refusing, so the index a juror serves from is not one a quarter close was about to raise.
     pub fn draw(&mut self, case_key: U64, n: u32, exclude: Vec<AccountId>) -> Vec<AccountId> {
         require!(env::predecessor_account_id() == self.oracle, "oracle only");
         if let Some(tokens) = self.juries.get(&case_key.0) {
             return tokens.iter().map(|t| self.stakes[t].owner.clone()).collect();
         }
+        self.advance_days_to(day_of(env::block_timestamp()), MAX_RECEIPT_CATCH_UP_DAYS);
         let now = env::block_timestamp();
         let eligible: Vec<(TokenId, AccountId, bool)> = self
             .staked
@@ -1033,13 +1054,11 @@ impl CouncilContract {
             eligible.into_iter().map(|c| (c.0, c.1)).collect()
         };
         let jury = pick(candidates, &env::random_seed_array(), case_key.0, n);
+        let acc = self.acc;
         for (t, _) in &jury {
             let stake = self.stakes.get_mut(t).unwrap();
             stake.serving = Some(case_key);
-            stake.serving_from = now;
-        }
-        if !jury.is_empty() {
-            *self.open_juries.entry(now).or_insert(0) += 1;
+            stake.serving_acc = acc;
         }
         let (tokens, owners): (Vec<TokenId>, Vec<AccountId>) = jury.into_iter().unzip();
         emit(
@@ -1050,13 +1069,15 @@ impl CouncilContract {
         owners
     }
 
-    // Called by the oracle once a case is final, with the jurors who never voted. A juror on that list loses the seat time
-    // from the draw to now, in every quarter that is not final yet: it leaves the seat's weight and the quarter's total, so
-    // the other seats' shares rise. A quarter already final is left alone. Nothing here can fail for want of work to do, so
-    // a case is always released. A second call for the same case does nothing, so nobody is penalised twice.
+    // Called by the oracle once a case is final, with the jurors who never voted. A juror on that list loses what its seat
+    // earned from the draw to now that no claim has settled yet, and the other seats share it at once. A juror who
+    // voted loses nothing. A case with no silent juror is always released; one with a silent juror needs the days caught up
+    // first. A second call for the same case does nothing, so nobody is penalised twice.
     pub fn unlock_case(&mut self, case_key: U64, delinquent: Vec<AccountId>) {
         require!(env::predecessor_account_id() == self.oracle, "oracle only");
-        let now = env::block_timestamp();
+        if !delinquent.is_empty() {
+            self.catch_up(MAX_RECEIPT_CATCH_UP_DAYS);
+        }
         let released = self.juries.remove(&case_key.0);
         if released.is_some() {
             emit(
@@ -1064,44 +1085,69 @@ impl CouncilContract {
                 json!({ "case_key": case_key.0.to_string(), "delinquent": delinquent }),
             );
         }
-        let jury = released.unwrap_or_default();
-        if let Some(drawn_at) = jury.first().and_then(|t| self.stakes.get(t)).map(|s| s.serving_from) {
-            self.close_open_jury(drawn_at);
-        }
-        for t in jury {
-            let Some(s) = self.stakes.get_mut(&t) else { continue };
-            let (owner, from, staked_at) = (s.owner.clone(), s.serving_from.max(s.staked_at.0), s.staked_at.0);
-            s.serving = None;
-            s.serving_from = 0;
+        for t in released.unwrap_or_default() {
+            let Some(owner) = self.stakes.get(&t).map(|s| s.owner.clone()) else {
+                continue;
+            };
             if delinquent.contains(&owner) {
-                self.forfeit_serving_time(&t, &owner, case_key.0, (from, staked_at), now);
+                self.forfeit_serving(&t, &owner, case_key.0);
             }
+            self.stakes.get_mut(&t).unwrap().serving = None;
         }
     }
 
-    pub fn request_unstake(&mut self, token_id: TokenId) {
+    // The seat stops earning here. What it earned in finished quarters is settled to its owner in full. Half of what it
+    // earned in the quarter still running goes to the cut pool, which the seats earning when the quarter closes share, and
+    // the other half waits in the owner's pending slot until the quarter closes. The numbers are fixed by this call, whenever
+    // the snapshot is taken. A seat that has not started yet comes off the count of seats starting on its day, loses nothing
+    // and never earns. Every request must say it accepts the cut, so the chain shows the holder was told.
+    pub fn request_unstake(&mut self, token_id: TokenId, accepts_cut: bool) {
+        require!(
+            accepts_cut,
+            "leaving before the quarter ends costs 50% of this quarter's earnings: pass accepts_cut true"
+        );
         let stake = self.callers_stake(&token_id);
         require!(stake.unlock_requested_at.is_none(), "unstake already requested");
         require!(stake.serving.is_none(), "this seat is serving on an open case");
-        let owner = stake.owner.clone();
-        let now = env::block_timestamp();
-        // The seat's time stops here, so everything up to now is counted before the request is written.
-        self.tick(now);
-        self.book_stake(&token_id, now, MAX_QUARTER_STEPS);
-        require!(self.stakes[&token_id].booked_to.0 >= now, "book this seat first");
-        self.earning -= 1;
-        if self.is_fresh(self.stakes[&token_id].staked_at.0, quarter_containing(now)) {
-            self.fresh -= 1;
+        let (owner, start_day) = (stake.owner.clone(), stake.earn_from_day.0);
+        self.catch_up(MAX_DAY_STEPS);
+        self.settle_closed(&token_id);
+        self.roll_pending(&owner);
+        let earned = self.shares(&self.stakes[&token_id]).running;
+        let cut = earned * LEAVER_CUT_BPS / BPS_DENOMINATOR;
+        let kept = earned - cut;
+        let quarter = self.last_closed_quarter + 1;
+        self.cut_pool += cut;
+        if kept > 0 {
+            let slot = self
+                .pending
+                .entry(owner.clone())
+                .or_insert_with(|| VersionedPending::current(Pending { quarter, amount: 0 }));
+            slot.amount += kept;
+            self.pending_total_slots += kept;
         }
-        self.stakes.get_mut(&token_id).unwrap().unlock_requested_at = Some(U64(now));
+        if start_day <= self.last_day {
+            self.active -= 1;
+        } else {
+            self.cancel_join(start_day);
+        }
+        let now = env::block_timestamp();
+        let stake = self.stakes.get_mut(&token_id).unwrap();
+        stake.unlock_requested_at = Some(U64(now));
+        stake.settled_acc = self.acc;
+        emit(
+            "seat_cut",
+            json!({ "token_id": token_id, "owner": owner, "quarter": quarter, "earned": earned.to_string(),
+                    "cut": cut.to_string(), "kept": kept.to_string() }),
+        );
         emit(
             "unstake_requested",
             json!({ "token_id": token_id, "owner": owner, "unlock_at": (now + self.cooldown_ns).to_string() }),
         );
     }
 
-    // Returns the NFT and nothing else. What the seat earned stays claimable by quarter, so leaving never touches reward money.
-    // The seat's time stopped at its request and was counted then, so nothing is left to count here.
+    // Returns the NFT and nothing else. What the seat earned was settled at its request and stays claimable, so leaving
+    // never touches reward money.
     #[payable]
     pub fn unstake(&mut self, token_id: TokenId) -> Promise {
         upgrade::require_gas(GAS_UNSTAKE_FLOOR, "an unstake returns the NFT and then settles it");
@@ -1119,6 +1165,10 @@ impl CouncilContract {
         self.return_nft(token_id, stake)
     }
 
+    // A failed transfer puts the seat back. It keeps its request, so it does not earn again and the earning count stays as
+    // it is; the earning fields the record lost on its way through the callback's JSON are never read for a leaving seat.
+    // The stake checks count unstakes still in flight against MAX_SEATS, so a restore never takes the council past it. An
+    // account can end one seat over its own cap for each unstake of its that failed, which stays until the extra seat leaves.
     #[private]
     pub fn on_unstaked(
         &mut self,
@@ -1131,171 +1181,88 @@ impl CouncilContract {
         if result.is_ok() {
             emit("unstaked", data);
         } else {
-            self.restore_stake(token_id, stake);
+            self.insert_stake(token_id, stake);
             emit("unstake_failed", data);
         }
     }
 
-    // Moves seat time forward towards now, across at most `max_steps` quarters (and never more than eight), so a stake or an
-    // unstake after a long idle stretch does not have to. Returns the quarters it moved across.
-    pub fn advance_quarters(&mut self, max_steps: Option<u32>) -> u32 {
-        let steps = max_steps.unwrap_or(MAX_QUARTER_STEPS).min(MAX_QUARTER_STEPS);
-        let moved = self.advance_seat_time(env::block_timestamp(), steps);
-        emit("quarters_advanced", json!({ "steps": moved }));
-        moved
+    // Walks the days up to today, at most `max_steps` of them (and never more than a hundred): closes the quarter that ends
+    // on a day and folds in the seats that start on it. Anyone can call it, and every call that moves money does the same
+    // first. Returns the days it moved across.
+    pub fn advance_days(&mut self, max_steps: Option<u32>) -> u32 {
+        let steps = max_steps.unwrap_or(MAX_DAY_STEPS).min(MAX_DAY_STEPS);
+        let from = self.last_day;
+        self.advance_days_to(day_of(env::block_timestamp()), steps);
+        u32::try_from(self.last_day - from).unwrap_or(u32::MAX)
     }
 
-    // Counts the staked time of a seat from where it was last counted up to now, across at most `max_quarters` quarters. It is
-    // needed only for a seat held more than eight quarters without an unstake or a claim. Returns the quarters it counted.
-    pub fn book_seat_time(&mut self, token_id: TokenId, max_quarters: Option<u32>) -> u32 {
-        require!(self.stakes.contains_key(&token_id), "not staked");
-        let steps = max_quarters.unwrap_or(MAX_QUARTER_STEPS).min(MAX_QUARTER_STEPS);
-        let quarters = self.book_stake(&token_id, env::block_timestamp(), steps);
-        emit(
-            "seat_time_booked",
-            json!({ "token_id": token_id, "quarters": quarters }),
-        );
-        quarters
-    }
-
-    // Fixes a quarter's pool and total seat time once the grace period after its end has passed, so claims can open. Quarters
-    // finalize in order. A quarter with no seat time moves its pool into the next quarter, and nobody can claim from it.
-    pub fn finalize_quarter(&mut self, quarter: u32) {
-        require!(quarter >= self.next_to_finalize, "that quarter is already final");
-        require!(quarter == self.next_to_finalize, "finalize the earlier quarter first");
-        let end = quarter_end(quarter);
-        require!(
-            env::block_timestamp() >= end.saturating_add(self.close_grace_ns),
-            "the quarter cannot be finalized yet"
-        );
-        require!(
-            self.open_juries.keys().next().is_none_or(|drawn| *drawn >= end)
-                || env::block_timestamp() >= end.saturating_add(MAX_CLOSE_GRACE_NS),
-            "a jury drawn in this quarter is still open"
-        );
-        self.tick(end);
-        let mut book = self.book(quarter);
-        let pool = book.revenue_in + book.carry_in;
-        let weight_total = book.seat_ns - book.forfeit_ns;
-        book.finalized = true;
-        book.pool = pool;
-        book.weight_total = weight_total;
-        self.open_pool -= pool;
-        if weight_total == 0 {
-            let mut next = self.book(quarter + 1);
-            next.carry_in += pool;
-            self.put_book(quarter + 1, next);
-            book.rolled_to = Some(quarter + 1);
-            self.open_pool += pool;
-            self.rolled_total += pool;
-        } else {
-            self.final_pool += pool;
-        }
-        self.put_book(quarter, book);
-        self.next_to_finalize += 1;
-        emit(
-            "quarter_finalized",
-            json!({ "quarter": quarter, "pool": pool.to_string(), "weight_ns": weight_total.to_string(),
-                    "rolled_to": (weight_total == 0).then_some(quarter + 1) }),
-        );
-    }
-
-    // Pays the caller's share of a finalized quarter for one token, once. The share is the pool times the seat's staked time
-    // in the quarter over all seat time of the quarter, rounded down. The record is written before the payout is sent and a
-    // failed payout deletes it, so a failure can be retried and a success cannot be claimed twice.
+    // Pays the caller everything it is owed in one transfer: its settled balance, the kept half of a leaver's finished
+    // quarter, and what the listed seats earned up to the last finished quarter. The seats must all be the caller's. An empty
+    // list pays what is already settled, which is how a holder who left is paid. The record is written and the balance
+    // debited before the payout is sent, and a failed payout credits it back.
     #[payable]
-    pub fn claim_quarter(&mut self, quarter: u32, token_id: TokenId) -> Promise {
+    pub fn claim(&mut self, token_ids: Vec<TokenId>) -> Promise {
         upgrade::require_gas(GAS_CLAIM_FLOOR, "a claim sends the payout and then settles it");
         assert_one_yocto();
         self.require_configured();
+        require!(token_ids.len() <= MAX_CLAIM_TOKENS, "at most 10 tokens in one claim");
         let who = env::predecessor_account_id();
-        let mut book = self
-            .quarters
-            .get(&quarter)
-            .filter(|b| b.finalized)
-            .map(|b| b.clone().into_inner())
-            .unwrap_or_else(|| env::panic_str("that quarter is not final"));
-        let key = (quarter, token_id.clone(), who.clone());
-        if let Some(claim) = self.claims.get(&key) {
-            match claim.status {
-                ClaimStatus::Pending => env::panic_str("claim is already pending"),
-                ClaimStatus::Paid => env::panic_str("already claimed"),
-            }
+        for token_id in &token_ids {
+            let owner = self
+                .stakes
+                .get(token_id)
+                .map(|s| s.owner.clone())
+                .unwrap_or_else(|| env::panic_str("not staked"));
+            require!(owner == who, "not your seat");
         }
-        let end = quarter_end(quarter);
-        if let Some(until) = self
-            .stakes
-            .get(&token_id)
-            .filter(|s| s.owner == who)
-            .map(|s| counted_until(s, end))
-            .filter(|until| self.stakes[&token_id].booked_to.0 < *until)
-        {
-            self.book_stake(&token_id, end, MAX_QUARTER_STEPS);
-            require!(self.stakes[&token_id].booked_to.0 >= until, "book this seat first");
+        self.catch_up(MAX_DAY_STEPS);
+        self.roll_pending(&who);
+        for token_id in &token_ids {
+            self.settle_closed(token_id);
         }
-        let amount = entitlement(book.pool, self.booked_weight(&key), book.weight_total);
+        let amount = self.accrued.remove(&who).unwrap_or(0);
         require!(amount > 0, "nothing to claim");
-        let now = env::block_timestamp();
-        self.claims.insert(
-            key,
-            VersionedClaim::current(Claim {
-                amount,
-                status: ClaimStatus::Pending,
-                requested_at: now,
-                paid_at: None,
-            }),
-        );
-        book.pending += amount;
-        self.pending_total += amount;
-        self.put_book(quarter, book);
-        emit(
-            "claim_requested",
-            json!({ "quarter": quarter, "token_id": token_id, "owner": who, "amount": amount.to_string(),
-                    "requested_at": now.to_string() }),
-        );
+        self.accrued_total -= amount;
+        self.pending_claims_total += amount;
+        let id = self.next_claim_id;
+        self.next_claim_id += 1;
+        let claim = Claim {
+            account: who.clone(),
+            amount,
+            tokens: token_ids,
+            requested_at: env::block_timestamp(),
+        };
+        emit("claim_requested", claim_data(id, &claim));
+        self.claims.insert(id, VersionedClaim::current(claim));
         self.pay(&who, amount).then(
             Self::ext(env::current_account_id())
                 .with_static_gas(GAS_CALLBACK)
-                .on_claim_paid(quarter, token_id, who, U64(now)),
+                .on_claim_paid(U64(id)),
         )
     }
 
     // mt_transfer returns nothing and is one verifier receipt, so an error means the payout did not happen (paused, locked,
-    // out of gas) and the seat can claim again. A claim that is already paid or no longer pending is left alone.
+    // out of gas) and the balance goes back. A claim already closed has no record and is left alone.
     #[private]
-    pub fn on_claim_paid(
-        &mut self,
-        quarter: u32,
-        token_id: TokenId,
-        owner: AccountId,
-        requested_at: U64,
-        #[callback_result] result: Result<(), PromiseError>,
-    ) {
-        let key = (quarter, token_id.clone(), owner.clone());
-        let Some(claim) = self.claims.get(&key).map(|c| c.clone().into_inner()) else {
+    pub fn on_claim_paid(&mut self, id: U64, #[callback_result] result: Result<(), PromiseError>) {
+        let Some(claim) = self.claims.get(&id.0).map(|c| c.clone().into_inner()) else {
             return;
         };
-        if claim.status != ClaimStatus::Pending || claim.requested_at != requested_at.0 {
-            return;
-        }
         let paid = result.is_ok();
-        let data = self.close_claim(quarter, token_id, owner, claim, paid);
+        let data = self.close_claim(id.0, claim, paid);
         emit(if paid { "claim_paid" } else { "claim_failed" }, data);
     }
 
-    // The owner's decision about a claim whose payout callback never arrived, so it stays pending and refuses every retry. It
-    // needs an hour after the claim, which leaves the callback time to land, and the owner checks the verifier's events first:
-    // `paid` true books the payout as made, false deletes the record so the seat can claim again. A callback that comes later
-    // finds no pending claim and changes nothing.
-    pub fn reconcile_claim(&mut self, quarter: u32, token_id: TokenId, owner: AccountId, paid: bool) {
+    // The owner's decision about a claim whose payout callback never arrived. It needs the reconcile wait after the claim,
+    // which leaves the callback time to land, and the owner checks the verifier's events first: `paid` true books the
+    // payout as made, false credits the balance back. A callback that comes later finds no record and changes nothing.
+    pub fn reconcile_claim(&mut self, id: U64, paid: bool) {
         self.only_owner();
-        let key = (quarter, token_id.clone(), owner.clone());
         let claim = self
             .claims
-            .get(&key)
-            .filter(|c| c.status == ClaimStatus::Pending)
+            .get(&id.0)
             .map(|c| c.clone().into_inner())
-            .unwrap_or_else(|| env::panic_str("no claim is pending for that seat"));
+            .unwrap_or_else(|| env::panic_str("no claim is pending with that id"));
         require!(
             env::block_timestamp() >= claim.requested_at.saturating_add(self.reconcile_wait_ns),
             &format!(
@@ -1303,50 +1270,16 @@ impl CouncilContract {
                 self.reconcile_wait_ns / (60 * NS_PER_SEC)
             )
         );
-        let mut data = self.close_claim(quarter, token_id, owner, claim, paid);
+        let mut data = self.close_claim(id.0, claim, paid);
         data["paid"] = json!(paid);
         emit("claim_reconciled", data);
     }
 
-    // Takes a pending claim out of the in-flight totals and either books it as paid or deletes the record. Both the payout
-    // callback and reconcile_claim end a claim here, so the two cannot disagree about the books. Returns the event data.
-    fn close_claim(
-        &mut self,
-        quarter: u32,
-        token_id: TokenId,
-        owner: AccountId,
-        claim: Claim,
-        paid: bool,
-    ) -> near_sdk::serde_json::Value {
-        let key = (quarter, token_id.clone(), owner.clone());
-        let mut book = self.book(quarter);
-        book.pending -= claim.amount;
-        self.pending_total -= claim.amount;
-        let data = json!({ "quarter": quarter, "token_id": token_id, "owner": owner, "amount": claim.amount.to_string(),
-                           "requested_at": claim.requested_at.to_string() });
-        if paid {
-            book.paid += claim.amount;
-            self.total_paid += claim.amount;
-            self.claims.insert(
-                key,
-                VersionedClaim::current(Claim {
-                    status: ClaimStatus::Paid,
-                    paid_at: Some(env::block_timestamp()),
-                    ..claim
-                }),
-            );
-        } else {
-            self.claims.remove(&key);
-        }
-        self.put_book(quarter, book);
-        data
-    }
-
     // Called by the verifier after an mt_transfer_call, once the money is already in this contract's Intents account. The
-    // message is "revenue:<sweep id>" and only an allowed market may send it. The money belongs to the quarter it arrives in,
-    // and a sweep id is taken once per market, so a repeated send is refused and the verifier gives it back. The answer is the amounts to hand
-    // back, so 0 keeps everything. Panicking makes the verifier refund the sender in full. A plain deposit never reaches
-    // here: it sits in the account as surplus and is never counted.
+    // message is "revenue:<sweep id>" and only an allowed market may send it. The money is split among the seats earning
+    // now, and a sweep id is taken once per market, so a repeated send is refused and the verifier gives it back. The
+    // answer is the amounts to hand back, so 0 keeps everything. Panicking makes the verifier refund the sender in full.
+    // A plain deposit never reaches here: it sits in the account as surplus and is never counted.
     pub fn mt_on_transfer(
         &mut self,
         sender_id: AccountId,
@@ -1382,22 +1315,18 @@ impl CouncilContract {
             !self.received.contains_key(&received_key),
             "that sweep was already received"
         );
+        self.catch_up(MAX_RECEIPT_CATCH_UP_DAYS);
         let amount = amounts[0].0;
         let at = env::block_timestamp();
-        let quarter = quarter_containing(at);
-        let mut book = self.book(quarter);
-        book.revenue_in += amount;
-        self.put_book(quarter, book);
-        self.received.insert(
-            received_key,
-            VersionedReceived::current(Received { amount, quarter, at }),
-        );
+        self.received
+            .insert(received_key, VersionedReceived::current(Received { amount, at }));
         self.total_received += amount;
-        self.open_pool += amount;
+        let seats = self.active;
+        let step = self.split(amount);
         emit(
             "revenue",
             json!({ "from": sender_id, "market": sender_id, "amount": amount.to_string(), "sweep_id": sweep_id.to_string(),
-                    "quarter": quarter, "seats": self.staked.len() }),
+                    "seats": seats, "per_seat": step.map(|s| (s / ACC_SCALE).to_string()), "carried": step.is_none() }),
         );
         vec![U128(0)]
     }
@@ -1417,22 +1346,109 @@ impl CouncilContract {
             .map(|r| r.clone().into_inner())
             .map(|r| ReceivedView {
                 amount: U128(r.amount),
-                quarter: r.quarter,
                 at: U64(r.at),
             })
     }
 
-    // total_received less total_paid less the claims in flight is the least this contract's Intents account must hold. The
-    // account holds more by the rounding left in finalized quarters and by any plain deposit.
+    // total_received less total_paid less the claims in flight is the least this contract's Intents account must hold. Of
+    // that, `accrued_total` and `pending_total_slots` are owed to accounts, `cut_pool` waits for the quarter to close,
+    // `carry` waits for the next sweep and the rest is earned by live seats. The account holds more by the rounding the
+    // splits left behind and by any plain deposit.
     pub fn reward_totals(&self) -> RewardTotals {
         RewardTotals {
             total_received: U128(self.total_received),
             total_paid: U128(self.total_paid),
-            pending_claims: U128(self.pending_total),
-            open_pool: U128(self.open_pool),
-            final_unclaimed: U128(self.final_pool - self.total_paid - self.pending_total),
-            rolled: U128(self.rolled_total),
+            pending_claims: U128(self.pending_claims_total),
+            carry: U128(self.carry),
+            cut_pool: U128(self.cut_pool),
+            accrued_total: U128(self.accrued_total),
+            pending_total_slots: U128(self.pending_total_slots),
         }
+    }
+
+    // What a claim of every seat the account holds would pay now: the settled balance, the kept half of a finished
+    // quarter, and the finished-quarter earnings of its seats. It does not move the days, so after a quarter ends it shows
+    // that quarter's earnings only once something has closed it.
+    pub fn claimable_of(&self, account_id: AccountId) -> U128 {
+        let slot = self
+            .pending
+            .get(&account_id)
+            .filter(|p| p.quarter <= self.last_closed_quarter)
+            .map_or(0, |p| p.amount);
+        let live: u128 = self
+            .seats_of(account_id.clone())
+            .iter()
+            .map(|t| self.shares(&self.stakes[t]).closed)
+            .sum();
+        U128(self.accrued.get(&account_id).copied().unwrap_or(0) + slot + live)
+    }
+
+    // What the account's earning seats have made in the quarter still running, and the kept half of a leaver's quarter that
+    // is not over yet. None of it can be claimed until the quarter closes.
+    pub fn in_progress_of(&self, account_id: AccountId) -> U128 {
+        let slot = self
+            .pending
+            .get(&account_id)
+            .filter(|p| p.quarter > self.last_closed_quarter)
+            .map_or(0, |p| p.amount);
+        let live: u128 = self
+            .seats_of(account_id)
+            .iter()
+            .map(|t| self.shares(&self.stakes[t]).running)
+            .sum();
+        U128(slot + live)
+    }
+
+    // Null for a token that is not staked. `earning_from` is the start of the seat's first earning day.
+    pub fn seat_earnings(&self, token_id: TokenId) -> Option<SeatEarnings> {
+        let today = day_of(env::block_timestamp());
+        self.stakes.get(&token_id).map(|s| {
+            let shares = self.shares(s);
+            SeatEarnings {
+                owner: s.owner.clone(),
+                state: if s.serving.is_some() {
+                    SeatState::Serving
+                } else if s.unlock_requested_at.is_some() {
+                    SeatState::Leaving
+                } else if s.earn_from_day.0 <= today {
+                    SeatState::Earning
+                } else {
+                    SeatState::Waiting
+                },
+                earning_from: U64(s.earn_from_day.0.saturating_mul(NS_PER_DAY)),
+                earned_closed: U128(shares.closed),
+                earned_in_progress: U128(shares.running),
+                start_acc: U128(self.day_acc.get(&s.earn_from_day.0).copied().unwrap_or(0)),
+                settled_acc: U128(s.settled_acc),
+            }
+        })
+    }
+
+    // The running quarter and the last one that has a snapshot.
+    pub fn quarter_info(&self) -> QuarterInfo {
+        let quarter = quarter_containing(env::block_timestamp());
+        QuarterInfo {
+            quarter,
+            starts_at: U64(quarter_start(quarter)),
+            ends_at: U64(quarter_end(quarter)),
+            last_closed_quarter: self.last_closed_quarter,
+            last_day: U64(self.last_day),
+        }
+    }
+
+    // The index each finished quarter closed with, oldest first, so a holder's open claim for a quarter is the rise from the
+    // seat's start to that index. From `from` on, at most `limit` (and never more than 50); with no `from`, the latest ones.
+    pub fn quarter_snapshots(&self, from: Option<u32>, limit: Option<u32>) -> Vec<QuarterSnapshot> {
+        let limit = limit.unwrap_or(MAX_SNAPSHOT_PAGE).min(MAX_SNAPSHOT_PAGE);
+        let from = from.unwrap_or_else(|| self.last_closed_quarter.saturating_sub(limit.saturating_sub(1)));
+        (from..=self.last_closed_quarter)
+            .take(limit as usize)
+            .filter_map(|quarter| self.quarter_acc.get(&quarter).map(|acc| (quarter, *acc)))
+            .map(|(quarter, acc)| QuarterSnapshot {
+                quarter,
+                acc: U128(acc),
+            })
+            .collect()
     }
 
     pub fn seat_count(&self) -> u32 {
@@ -1478,57 +1494,6 @@ impl CouncilContract {
         self.stakes.get(&token_id).map(|s| s.clone().into_inner())
     }
 
-    pub fn current_quarter(&self) -> QuarterView {
-        self.quarter_view(quarter_containing(env::block_timestamp()))
-    }
-
-    // Null for a quarter that has not started.
-    pub fn get_quarter(&self, quarter: u32) -> Option<QuarterView> {
-        (quarter <= quarter_containing(env::block_timestamp())).then(|| self.quarter_view(quarter))
-    }
-
-    // From `from_quarter` up to the current one, at most 50. A quarter with no activity shows empty.
-    pub fn list_quarters(&self, from_quarter: u32, limit: u32) -> Vec<QuarterView> {
-        let last = quarter_containing(env::block_timestamp());
-        (from_quarter..=last)
-            .take(limit.min(MAX_VIEW_QUARTERS) as usize)
-            .map(|q| self.quarter_view(q))
-            .collect()
-    }
-
-    pub fn quarter_of(&self, at: U64) -> QuarterLabel {
-        let quarter = quarter_containing(at.0);
-        QuarterLabel {
-            quarter,
-            label: quarter_label(quarter),
-            starts_at: U64(quarter_start(quarter)),
-            ends_at: U64(quarter_end(quarter)),
-        }
-    }
-
-    // What one token earned for one owner in one quarter, or null if it earned nothing there. While the quarter is not final
-    // the amount is a guess that later revenue and later seat time still move, and `estimated` says so.
-    pub fn get_entitlement(&self, quarter: u32, token_id: TokenId, account_id: AccountId) -> Option<EntitlementView> {
-        self.entitlement_view(quarter, &token_id, &account_id)
-    }
-
-    // The entitlements of every token the account has staked, for `limit` quarters from `from_quarter` (at most 25, fewer for an
-    // account with many tokens), oldest first. A token and quarter with nothing earned is left out.
-    pub fn entitlements_of(&self, account_id: AccountId, from_quarter: u32, limit: u32) -> Vec<EntitlementView> {
-        let last = quarter_containing(env::block_timestamp());
-        let tokens = self.tokens_of.get(&account_id).cloned().unwrap_or_default();
-        (from_quarter..=last)
-            .take(entitlement_page(limit, tokens.len()))
-            .flat_map(|q| tokens.iter().map(move |t| (q, t)))
-            .filter_map(|(q, t)| self.entitlement_view(q, t, &account_id))
-            .collect()
-    }
-
-    pub fn entitlements_page_quarters(&self, account_id: AccountId) -> u32 {
-        let tokens = self.tokens_of.get(&account_id).map_or(0, Vec::len);
-        entitlement_page(MAX_ENTITLEMENT_QUARTERS, tokens) as u32
-    }
-
     // Whether a wasm with this sha256 is staged here, for the members to check before they vote to deploy it.
     pub fn is_staged(&self, code_hash: Base58CryptoHash) -> bool {
         upgrade::is_staged(code_hash)
@@ -1539,12 +1504,11 @@ impl CouncilContract {
         json!({ "state_version": self.state_version, "upgrade_proven": self.upgrade_proven, "upgrade_in_flight": self.upgrade_in_flight,
                 "owner": self.owner, "pending_owner": self.pending_owner, "oracle": self.oracle, "nft_contract": self.nft_contract,
                 "markets": self.allowed_markets, "verifier": self.verifier, "collateral_token_id": self.collateral_token_id,
-                "cooldown_ns": self.cooldown_ns.to_string(), "close_grace_ns": self.close_grace_ns.to_string(),
-                "reconcile_wait_ns": self.reconcile_wait_ns.to_string(),
+                "cooldown_ns": self.cooldown_ns.to_string(), "reconcile_wait_ns": self.reconcile_wait_ns.to_string(),
                 "max_seats_per_account": self.max_seats_per_account, "allowlist_enabled": self.allowlist_enabled,
                 "allowed_range": self.current_range().map(|(first, last)| json!({ "first": first.to_string(), "last": last.to_string() })),
-                "total_received": self.total_received.to_string(), "next_to_finalize": self.next_to_finalize,
-                "last_tick": self.last_tick.to_string() })
+                "total_received": self.total_received.to_string(), "last_day": self.last_day.to_string(),
+                "active_seats": self.active, "last_closed_quarter": self.last_closed_quarter })
     }
 }
 
@@ -1619,36 +1583,27 @@ impl CouncilContract {
             return true;
         }
         let now = env::block_timestamp();
-        self.tick(now);
+        let start_day = day_of(now) + 1;
         emit("staked", json!({ "token_id": token_id, "owner": previous_owner_id }));
         let stake = Stake {
             owner: previous_owner_id,
             staked_at: U64(now),
             unlock_requested_at: None,
             serving: None,
-            booked_to: U64(now),
-            serving_from: 0,
+            earn_from_day: U64(start_day),
+            settled_acc: 0,
+            forfeited: 0,
+            serving_acc: 0,
             index: 0,
         };
         self.insert_stake(token_id, stake);
-        self.earning += 1;
-        if self.is_fresh(now, quarter_containing(now)) {
-            self.fresh += 1;
-        }
+        let joining = self.joins_on.get(&start_day).copied().unwrap_or(0);
+        self.joins_on.insert(start_day, joining + 1);
         false
     }
 }
 
 impl CouncilContract {
-    fn close_open_jury(&mut self, drawn_at: u64) {
-        if let Some(open) = self.open_juries.get_mut(&drawn_at) {
-            *open -= 1;
-            if *open == 0 {
-                self.open_juries.remove(&drawn_at);
-            }
-        }
-    }
-
     fn only_owner(&self) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
     }
@@ -1700,22 +1655,12 @@ impl CouncilContract {
     fn insert_stake(&mut self, token_id: TokenId, mut stake: Stake) {
         stake.index = self.staked.len();
         *self.seats_of.entry(stake.owner.clone()).or_insert(0) += 1;
-        let history = self.tokens_of.entry(stake.owner.clone()).or_default();
-        if !history.contains(&token_id) {
-            history.push(token_id.clone());
+        let held = self.tokens_of.entry(stake.owner.clone()).or_default();
+        if !held.contains(&token_id) {
+            held.push(token_id.clone());
         }
         self.staked.push(token_id.clone());
         self.stakes.insert(token_id, VersionedStake::current(stake));
-    }
-
-    // The seat was not counted while it was out, so the time it was out is not booked. It keeps its request, so it does not
-    // earn again and `earning` stays as it is. This runs in a callback that must not fail, so seat time moves as far as it can.
-    // The stake checks count unstakes still in flight against MAX_SEATS, so a restore never takes the council past it. An account
-    // can end one seat over its own cap for each unstake of its that failed, which stays until the extra seat leaves.
-    fn restore_stake(&mut self, token_id: TokenId, mut stake: Stake) {
-        self.advance_seat_time(env::block_timestamp(), MAX_QUARTER_STEPS);
-        stake.booked_to = U64(self.last_tick);
-        self.insert_stake(token_id, stake);
     }
 
     // Pays `amount` of the collateral to `to` inside the verifier. mt_transfer returns nothing, so an error in a callback means
@@ -1752,218 +1697,228 @@ impl CouncilContract {
         } else {
             self.seats_of.insert(stake.owner.clone(), left);
         }
+        let held = self.tokens_of.get_mut(&stake.owner).map(|held| {
+            held.retain(|t| self.stakes.get(t).is_some_and(|s| s.owner == stake.owner));
+            held.len()
+        });
+        if held == Some(0) {
+            self.tokens_of.remove(&stake.owner);
+        }
         stake
     }
 
-    fn book(&self, quarter: u32) -> QuarterBook {
-        self.quarters
-            .get(&quarter)
-            .map_or_else(QuarterBook::default, |b| b.clone().into_inner())
-    }
-
-    fn put_book(&mut self, quarter: u32, book: QuarterBook) {
-        self.quarters.insert(quarter, VersionedQuarterBook::current(book));
-    }
-
-    // Adds the seat time of the staked seats from `last_tick` towards `to`, one quarter at a time, at most `max_steps`
-    // quarters. It stops at a quarter's end, so `last_tick` is always a place the next call can carry on from.
-    fn advance_seat_time(&mut self, to: u64, max_steps: u32) -> u32 {
-        let mut steps = 0;
-        while self.last_tick < to && steps < max_steps {
-            let seats = u128::from(self.earning - self.fresh);
-            let quarter = quarter_containing(self.last_tick);
-            let until = quarter_end(quarter).min(to);
-            if seats > 0 {
-                let mut book = self.book(quarter);
-                book.seat_ns += seats * u128::from(until - self.last_tick);
-                self.put_book(quarter, book);
-            }
-            self.last_tick = until;
-            if until == quarter_end(quarter) {
-                self.fresh = 0;
-            }
-            steps += 1;
-        }
-        steps
-    }
-
-    // Whether a seat staked at `staked_at` adds nothing to `quarter` because the quarter began before it was staked.
-    fn is_fresh(&self, staked_at: u64, quarter: u32) -> bool {
-        quarter >= self.rule_from_quarter && staked_at > quarter_start(quarter)
-    }
-
-    // Must run before the seat count changes: the time since the last change belongs to the seats that were staked during it.
-    fn tick(&mut self, to: u64) {
-        self.advance_seat_time(to, MAX_QUARTER_STEPS);
-        require!(self.last_tick >= to, "call advance_quarters first");
-    }
-
-    // Adds a seat's staked time from `booked_to` towards `to` to the quarters it covers, at most `max_steps` of them.
-    fn book_stake(&mut self, token_id: &TokenId, to: u64, max_steps: u32) -> u32 {
-        let Some(stake) = self.stakes.get(token_id) else {
-            return 0;
-        };
-        let to = counted_until(stake, to);
-        let (owner, mut at, staked_at) = (stake.owner.clone(), stake.booked_to.0, stake.staked_at.0);
-        let mut steps = 0;
-        while at < to && steps < max_steps {
-            let quarter = quarter_containing(at);
-            let until = quarter_end(quarter).min(to);
-            if !self.is_fresh(staked_at, quarter) {
-                let key = (quarter, token_id.clone(), owner.clone());
-                let have = self.seat_weight.get(&key).copied().unwrap_or(0);
-                self.seat_weight.insert(key, have + (until - at));
-            }
-            at = until;
-            steps += 1;
-        }
-        self.stakes.get_mut(token_id).unwrap().booked_to = U64(at);
-        steps
-    }
-
-    // A silent juror's serving time in each quarter it touched that is not final. Quarters past the eighth are not looked
-    // at, so releasing a case never runs out of gas.
-    fn forfeit_serving_time(&mut self, token_id: &TokenId, owner: &AccountId, case: u64, span: (u64, u64), to: u64) {
-        let (from, staked_at) = span;
-        let first = quarter_containing(from);
-        for quarter in (first..first.saturating_add(MAX_QUARTER_STEPS)).take_while(|q| quarter_start(*q) < to) {
-            let span = if self.is_fresh(staked_at, quarter) {
-                0
-            } else {
-                overlap(quarter, from, to)
-            };
-            let mut book = self.book(quarter);
-            if book.finalized {
-                emit(
-                    "forfeit_skipped",
-                    json!({ "token_id": token_id, "owner": owner, "case": case.to_string(), "quarter": quarter }),
-                );
-            } else if span > 0 {
-                let key = (quarter, token_id.clone(), owner.clone());
-                let lost = self.forfeits.get(&key).copied().unwrap_or(0);
-                self.forfeits.insert(key, lost + span);
-                book.forfeit_ns += u128::from(span);
-                self.put_book(quarter, book);
-                emit(
-                    "seat_time_forfeited",
-                    json!({ "token_id": token_id, "owner": owner, "case": case.to_string(), "quarter": quarter,
-                            "forfeited_ns": span.to_string() }),
-                );
-            }
-        }
-    }
-
-    // The staked time already counted for one token and owner in a quarter, less what a silent juror lost.
-    fn booked_weight(&self, key: &(u32, TokenId, AccountId)) -> u128 {
-        let counted = self.seat_weight.get(key).copied().unwrap_or(0);
-        let lost = self.forfeits.get(key).copied().unwrap_or(0);
-        u128::from(counted.saturating_sub(lost))
-    }
-
-    // The same including the staked time not counted yet, for a view.
-    fn weight_now(&self, quarter: u32, token_id: &TokenId, owner: &AccountId) -> u128 {
-        let uncounted = self
-            .stakes
-            .get(token_id)
-            .filter(|s| s.owner == *owner && !self.is_fresh(s.staked_at.0, quarter))
-            .map_or(0, |s| {
-                overlap(quarter, s.booked_to.0, counted_until(s, env::block_timestamp()))
-            });
-        let key = (quarter, token_id.clone(), owner.clone());
-        let counted = self.seat_weight.get(&key).copied().unwrap_or(0);
-        let lost = self.forfeits.get(&key).copied().unwrap_or(0);
-        u128::from((counted + uncounted).saturating_sub(lost))
-    }
-
-    // Seat time of a quarter as of now: what is counted plus what the staked seats have added since `last_tick`.
-    fn seat_ns_now(&self, quarter: u32, book: &QuarterBook) -> u128 {
-        let seats = if quarter == quarter_containing(self.last_tick) {
-            self.earning - self.fresh
+    // Takes a pending claim out of the in-flight total and either books it as paid or credits the balance back. Both the
+    // payout callback and reconcile_claim end a claim here, so the two cannot disagree about the books. Returns the event data.
+    fn close_claim(&mut self, id: u64, claim: Claim, paid: bool) -> near_sdk::serde_json::Value {
+        self.claims.remove(&id);
+        self.pending_claims_total -= claim.amount;
+        if paid {
+            self.total_paid += claim.amount;
         } else {
-            self.earning
-        };
-        book.seat_ns + u128::from(seats) * u128::from(overlap(quarter, self.last_tick, env::block_timestamp()))
+            self.credit(&claim.account, claim.amount);
+        }
+        claim_data(id, &claim)
     }
 
-    fn quarter_view(&self, quarter: u32) -> QuarterView {
-        let book = self.book(quarter);
-        let (starts_at, ends_at) = (quarter_start(quarter), quarter_end(quarter));
-        let state = if book.finalized {
-            QuarterState::Final
-        } else if env::block_timestamp() < ends_at {
-            QuarterState::Open
+    fn credit(&mut self, account: &AccountId, amount: u128) {
+        *self.accrued.entry(account.clone()).or_insert(0) += amount;
+        self.accrued_total += amount;
+    }
+
+    // Walks the days after `last_day` up to `today`, at most `max_steps` of them. A day that opens a quarter closes the
+    // quarter before it first: the cut pool and the carry are shared among the seats earning, or the pool is carried when
+    // there are none, and the index is stored as that quarter's snapshot. Then the seats starting that day join, so they
+    // never share the pool. Nothing moved the index since the last call that did, so the index now is the index at every day
+    // walked here. A walk logs one line for all the seats it started and one for each quarter it closes, so it stays far
+    // under the logs one call may write.
+    fn advance_days_to(&mut self, today: u64, max_steps: u32) {
+        let target = today.min(self.last_day.saturating_add(u64::from(max_steps)));
+        let (mut start_days, mut started) = (0u32, 0u32);
+        for day in self.last_day + 1..=target {
+            if quarter_start(quarter_containing(day * NS_PER_DAY)) == day * NS_PER_DAY {
+                self.close_quarter(quarter_containing(day * NS_PER_DAY) - 1);
+            }
+            if let Some(count) = self.joins_on.remove(&day) {
+                self.active += count;
+                self.day_acc.insert(day, self.acc);
+                start_days += 1;
+                started += count;
+            }
+        }
+        if started > 0 {
+            emit(
+                "seats_started",
+                json!({ "from_day": (self.last_day + 1).to_string(), "to_day": target.to_string(), "start_days": start_days,
+                        "count": started }),
+            );
+        }
+        self.last_day = self.last_day.max(target);
+    }
+
+    fn close_quarter(&mut self, quarter: u32) {
+        let pool = std::mem::take(&mut self.cut_pool);
+        let (shared, carried) = if self.active > 0 {
+            let units = pool + std::mem::take(&mut self.carry);
+            self.spread(units, self.active);
+            (pool, 0)
         } else {
-            QuarterState::Closing
+            self.carry += pool;
+            (0, pool)
         };
-        let (pool, seat_ns) = if book.finalized {
-            (book.pool, book.seat_ns)
+        self.quarter_acc.insert(quarter, self.acc);
+        self.last_closed_quarter = quarter;
+        emit(
+            "quarter_closed",
+            json!({ "quarter": quarter, "acc": self.acc.to_string(), "cut_shared": shared.to_string(),
+                    "carried": carried.to_string() }),
+        );
+    }
+
+    // Anything that moves money runs this first, so a quarter that ended and a seat whose day has come are counted. It walks
+    // at most `max_days` and refuses if that is not enough.
+    fn catch_up(&mut self, max_days: u32) {
+        let today = day_of(env::block_timestamp());
+        self.advance_days_to(today, max_days);
+        require!(self.last_day == today, "call advance_days first");
+    }
+
+    fn cancel_join(&mut self, day: u64) {
+        let waiting = self
+            .joins_on
+            .get(&day)
+            .copied()
+            .unwrap_or_else(|| env::panic_str("the seat is not waiting to start"));
+        if waiting == 1 {
+            self.joins_on.remove(&day);
         } else {
-            (book.revenue_in + book.carry_in, self.seat_ns_now(quarter, &book))
-        };
-        QuarterView {
-            quarter,
-            label: quarter_label(quarter),
-            starts_at: U64(starts_at),
-            ends_at: U64(ends_at),
-            claimable_from: U64(ends_at.saturating_add(self.close_grace_ns)),
-            state,
-            revenue_in: U128(book.revenue_in),
-            carry_in: U128(book.carry_in),
-            pool: U128(pool),
-            seat_ns: U128(seat_ns),
-            forfeit_ns: U128(book.forfeit_ns),
-            paid: U128(book.paid),
-            pending: U128(book.pending),
-            rolled_to: book.rolled_to,
+            self.joins_on.insert(day, waiting - 1);
         }
     }
 
-    fn entitlement_view(&self, quarter: u32, token_id: &TokenId, owner: &AccountId) -> Option<EntitlementView> {
-        let weight = self.weight_now(quarter, token_id, owner);
-        let claim = self.claims.get(&(quarter, token_id.clone(), owner.clone()));
-        if weight == 0 && claim.is_none() {
+    // Adds `units` to the index as a rise for every earning seat, so that `seats` of them share the units equally, with the
+    // remainder of the last split. Returns the rise of the index. Needs at least one seat to share with.
+    fn spread(&mut self, units: u128, seats: u32) -> u128 {
+        let pool = units
+            .checked_mul(ACC_SCALE)
+            .and_then(|scaled| scaled.checked_add(self.carry_scaled))
+            .unwrap_or_else(|| env::panic_str("the sweep is too large to split"));
+        let seats = u128::from(seats);
+        let rise = pool / seats;
+        self.acc += rise;
+        self.carry_scaled = pool % seats;
+        rise
+    }
+
+    // Adds a sweep and the carry to the index. With no seat earning it all waits in `carry`. Returns the rise of the index.
+    fn split(&mut self, amount: u128) -> Option<u128> {
+        if self.active == 0 {
+            self.carry += amount;
             return None;
         }
-        let book = self.book(quarter);
-        let (amount, estimated, status) = match claim {
-            Some(c) if c.status == ClaimStatus::Paid => (c.amount, false, EntitlementStatus::Paid),
-            Some(c) => (c.amount, false, EntitlementStatus::Pending),
-            None if book.finalized => (
-                entitlement(book.pool, weight, book.weight_total),
-                false,
-                EntitlementStatus::Claimable,
-            ),
-            None => {
-                let status = if env::block_timestamp() < quarter_end(quarter) {
-                    EntitlementStatus::Accruing
-                } else {
-                    EntitlementStatus::Closing
-                };
-                (
-                    entitlement(
-                        book.revenue_in + book.carry_in,
-                        weight,
-                        self.seat_ns_now(quarter, &book) - book.forfeit_ns,
-                    ),
-                    true,
-                    status,
-                )
-            }
+        let units = amount + std::mem::take(&mut self.carry);
+        Some(self.spread(units, self.active))
+    }
+
+    // The index a seat's earnings count from: its start day's index, or where it was last settled if that is higher. None
+    // for a seat that has not started, which no start index exists for yet.
+    fn start_eff(&self, stake: &Stake) -> Option<u128> {
+        self.day_acc
+            .get(&stake.earn_from_day.0)
+            .map(|start| (*start).max(stake.settled_acc))
+    }
+
+    // What a seat has earned and not settled, before the units a silent juror lost come off: `closed` is what a claim can
+    // settle now, up to `bound`, and `running` is everything after it. The bound is the last finished quarter, and for a
+    // seat that is serving no further than the index when it was drawn, so a juror cannot claim what it earns while serving
+    // before its case is released. None for a seat that has not started or that asked to leave, whose earnings were
+    // settled or put in the cut when it asked.
+    fn earned_since_settled(&self, stake: &Stake) -> Option<Earned> {
+        let start = self.start_eff(stake).filter(|_| stake.unlock_requested_at.is_none())?;
+        let cap = self.quarter_acc.get(&self.last_closed_quarter).copied().unwrap_or(0);
+        let bound = if stake.serving.is_some() {
+            cap.min(stake.serving_acc)
+        } else {
+            cap
         };
-        Some(EntitlementView {
-            quarter,
-            token_id: token_id.clone(),
-            owner: owner.clone(),
-            weight_ns: U128(weight),
-            amount: U128(amount),
-            estimated,
-            status,
-            requested_at: claim.map(|c| U64(c.requested_at)),
-            paid_at: claim.and_then(|c| c.paid_at).map(U64),
+        Some(Earned {
+            bound,
+            start,
+            closed: bound.saturating_sub(start) / ACC_SCALE,
+            running: (self.acc - start.max(bound)) / ACC_SCALE,
         })
     }
-}
 
+    // What a claim could settle now and what the seat has made since, after the units a silent juror lost. Those come off the
+    // running part first, so the finished quarters are paid in full whenever the running one can absorb them.
+    fn shares(&self, stake: &Stake) -> SeatShares {
+        let Some(earned) = self.earned_since_settled(stake) else {
+            return SeatShares { closed: 0, running: 0 };
+        };
+        let from_running = stake.forfeited.min(earned.running);
+        let from_closed = (stake.forfeited - from_running).min(earned.closed);
+        SeatShares {
+            closed: earned.closed - from_closed,
+            running: earned.running - from_running,
+        }
+    }
+
+    // Moves what a seat earned up to its bound into its owner's balance. What came after stays unsettled and cannot be
+    // claimed. The fraction of a unit left over stays in the contract.
+    fn settle_closed(&mut self, token_id: &TokenId) {
+        let stake = &self.stakes[token_id];
+        let Some(earned) = self.earned_since_settled(stake).filter(|e| e.bound > e.start) else {
+            return;
+        };
+        let docked = stake.forfeited.saturating_sub(earned.running).min(earned.closed);
+        let owner = stake.owner.clone();
+        let stake = self.stakes.get_mut(token_id).unwrap();
+        stake.forfeited -= docked;
+        stake.settled_acc = earned.bound;
+        self.credit(&owner, earned.closed - docked);
+    }
+
+    // The kept half of a leaver's quarter is paid with the rest once that quarter has closed.
+    fn roll_pending(&mut self, account: &AccountId) {
+        if self
+            .pending
+            .get(account)
+            .is_some_and(|p| p.quarter <= self.last_closed_quarter)
+        {
+            let slot = self.pending.remove(account).unwrap().into_inner();
+            self.pending_total_slots -= slot.amount;
+            self.credit(account, slot.amount);
+        }
+    }
+
+    // A silent juror loses what its seat earned from the draw (or from its start, if it started later) and no claim has
+    // settled, up to what it has not settled at all. The other earning seats share that at once: the index rises for every
+    // earning seat by an equal share of it, and the juror's own share of that rise comes off the seat too, so nothing of the
+    // forfeit comes back to it. That share is rounded up, so the seat never keeps more than it lost. With no other seat
+    // earning there is nobody to share with and the units wait in `carry`. The units come off the seat's next settlements.
+    // Money already settled stays.
+    fn forfeit_serving(&mut self, token_id: &TokenId, owner: &AccountId, case_key: u64) {
+        let stake = &self.stakes[token_id];
+        let Some(start) = self.start_eff(stake) else {
+            return;
+        };
+        let unsettled = ((self.acc - start) / ACC_SCALE).saturating_sub(stake.forfeited);
+        let lost = ((self.acc - stake.serving_acc.max(start)) / ACC_SCALE).min(unsettled);
+        let others = self.active.saturating_sub(1);
+        let own_share = if lost == 0 {
+            0
+        } else if others == 0 {
+            self.carry += lost;
+            0
+        } else {
+            self.spread(lost, others).div_ceil(ACC_SCALE)
+        };
+        self.stakes.get_mut(token_id).unwrap().forfeited += lost + own_share;
+        emit(
+            "seat_earnings_forfeited",
+            json!({ "token_id": token_id, "owner": owner, "case_key": case_key.to_string(), "amount": lost.to_string() }),
+        );
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1983,11 +1938,8 @@ mod tests {
     const COOLDOWN_NS: u64 = 60_000_000_000;
     const SECOND: u64 = NS_PER_SEC;
     const DAY: u64 = NS_PER_DAY;
-    // 2026-10-01T00:00:00Z, the start of 2026 Q4 (quarter 8107). Every test begins here unless it says otherwise.
+    // 2026-10-01T00:00:00Z, the start of a UTC day. Every test begins here unless it says otherwise.
     const START: u64 = 1_790_812_800 * SECOND;
-    const Q4_2026: u32 = 8_107;
-    const Q1_2027: u32 = 8_108;
-    const Q2_2027: u32 = 8_109;
 
     fn acct(name: &str) -> AccountId {
         name.parse().unwrap()
@@ -2048,6 +2000,7 @@ mod tests {
         near_sdk::mock::with_mocked_blockchain(|b| {
             let _ = b.take_storage();
         });
+        MIGRATED_DAY.with(|day| day.set(None));
         CLOCK.with(|c| c.set(START));
         act_as(OWNER);
         CouncilContract::new(
@@ -2078,7 +2031,7 @@ mod tests {
         )
     }
 
-    // The market's sweep `sweep_id` lands in the quarter the clock is in.
+    // The market's sweep `sweep_id` arrives at the time the clock shows.
     fn revenue(c: &mut CouncilContract, sweep_id: u64, amount: u128) {
         act_as(VERIFIER);
         let _ = deliver(
@@ -2093,61 +2046,9 @@ mod tests {
     // Requests the unstake, waits out the cooldown and unstakes. Time ends a cooldown after the request.
     fn leave(c: &mut CouncilContract, token: &str, owner: &str) {
         act_paid(owner);
-        c.request_unstake(token.into());
+        c.request_unstake(token.into(), true);
         act_at(owner, now() + COOLDOWN_NS);
         let _ = c.unstake(token.into());
-    }
-
-    // Asks to leave at exactly `at`, which is where the seat's time stops, and unstakes a cooldown later.
-    fn leave_at(c: &mut CouncilContract, token: &str, owner: &str, at: u64) {
-        set_time(at);
-        leave(c, token, owner);
-        assert_eq!(now(), at + COOLDOWN_NS);
-    }
-
-    // Finalizes the next quarter at the earliest moment it can be.
-    fn finalize(c: &mut CouncilContract) -> u32 {
-        let q = c.next_to_finalize;
-        set_time(quarter_end(q) + c.close_grace_ns);
-        c.finalize_quarter(q);
-        q
-    }
-
-    fn entitlement_of(c: &CouncilContract, quarter: u32, token: &str, owner: &str) -> u128 {
-        c.get_entitlement(quarter, token.into(), acct(owner))
-            .map_or(0, |e| e.amount.0)
-    }
-
-    // Claims and reports the transfer as done, and returns what was paid.
-    fn claim(c: &mut CouncilContract, quarter: u32, token: &str, owner: &str) -> u128 {
-        let amount = claim_without_reply(c, quarter, token, owner);
-        act_as("council.near");
-        c.on_claim_paid(
-            quarter,
-            token.into(),
-            acct(owner),
-            requested_at(c, quarter, token, owner),
-            Ok(()),
-        );
-        amount
-    }
-
-    fn requested_at(c: &CouncilContract, quarter: u32, token: &str, owner: &str) -> U64 {
-        U64(c
-            .claims
-            .get(&(quarter, token.into(), acct(owner)))
-            .map_or(0, |claim| claim.requested_at))
-    }
-
-    // Claims and leaves the transfer's result unreported. Returns the amount the claim reserved.
-    fn claim_without_reply(c: &mut CouncilContract, quarter: u32, token: &str, owner: &str) -> u128 {
-        act_paid(owner);
-        let _ = c.claim_quarter(quarter, token.into());
-        let logs = near_sdk::test_utils::get_logs();
-        let requested: near_sdk::serde_json::Value =
-            near_sdk::serde_json::from_str(logs.last().unwrap().strip_prefix("EVENT_JSON:").unwrap()).unwrap();
-        assert_eq!(requested["event"], "claim_requested");
-        requested["data"]["amount"].as_str().unwrap().parse().unwrap()
     }
 
     fn stake(c: &mut CouncilContract, token: &str, owner: &str) {
@@ -2260,211 +2161,6 @@ mod tests {
         c.set_nft_contract(acct("other-nft.near"));
     }
 
-    #[test]
-    fn migrate_moves_version_three_state_to_four_with_nothing_in_flight() {
-        let mut c = council();
-        stake(&mut c, "7", "o0.near");
-        let old = StateV3 {
-            state_version: 3,
-            upgrade_proven: c.upgrade_proven,
-            upgrade_in_flight: true,
-            owner: c.owner,
-            pending_owner: c.pending_owner,
-            oracle: c.oracle,
-            nft_contract: c.nft_contract,
-            allowed_markets: c.allowed_markets,
-            verifier: c.verifier,
-            collateral_token_id: c.collateral_token_id,
-            cooldown_ns: c.cooldown_ns,
-            max_seats_per_account: c.max_seats_per_account,
-            allowlist_enabled: c.allowlist_enabled,
-            allowed_tokens: c.allowed_tokens,
-            allowed_range: c.allowed_range,
-            staked: c.staked,
-            stakes: c.stakes,
-            seats_of: c.seats_of,
-            tokens_of: c.tokens_of,
-            juries: c.juries,
-            open_juries: c.open_juries,
-            earning: c.earning,
-            close_grace_ns: c.close_grace_ns,
-            reconcile_wait_ns: c.reconcile_wait_ns,
-            last_tick: c.last_tick,
-            next_to_finalize: c.next_to_finalize,
-            quarters: c.quarters,
-            seat_weight: c.seat_weight,
-            forfeits: c.forfeits,
-            claims: c.claims,
-            received: c.received,
-            total_received: c.total_received,
-            total_paid: c.total_paid,
-            pending_total: c.pending_total,
-            open_pool: c.open_pool,
-            final_pool: c.final_pool,
-            rolled_total: c.rolled_total,
-        };
-        env::state_write(&old);
-        testing_env!(context("alice.near").build());
-        let migrated = CouncilContract::migrate();
-        assert_eq!(migrated.state_version, STATE_VERSION);
-        assert_eq!((migrated.unstakes_in_flight, migrated.seat_count()), (0, 1));
-        assert!(migrated.upgrade_proven && !migrated.upgrade_in_flight);
-    }
-
-    fn version_four(c: CouncilContract) -> StateV4 {
-        StateV4 {
-            state_version: 4,
-            upgrade_proven: c.upgrade_proven,
-            upgrade_in_flight: c.upgrade_in_flight,
-            owner: c.owner,
-            pending_owner: c.pending_owner,
-            oracle: c.oracle,
-            nft_contract: c.nft_contract,
-            allowed_markets: c.allowed_markets,
-            verifier: c.verifier,
-            collateral_token_id: c.collateral_token_id,
-            cooldown_ns: c.cooldown_ns,
-            max_seats_per_account: c.max_seats_per_account,
-            allowlist_enabled: c.allowlist_enabled,
-            allowed_tokens: c.allowed_tokens,
-            allowed_range: c.allowed_range,
-            staked: c.staked,
-            stakes: c.stakes,
-            seats_of: c.seats_of,
-            tokens_of: c.tokens_of,
-            juries: c.juries,
-            open_juries: c.open_juries,
-            earning: c.earning,
-            close_grace_ns: c.close_grace_ns,
-            reconcile_wait_ns: c.reconcile_wait_ns,
-            last_tick: c.last_tick,
-            next_to_finalize: c.next_to_finalize,
-            quarters: c.quarters,
-            seat_weight: c.seat_weight,
-            forfeits: c.forfeits,
-            claims: c.claims,
-            received: c.received,
-            total_received: c.total_received,
-            total_paid: c.total_paid,
-            pending_total: c.pending_total,
-            open_pool: c.open_pool,
-            final_pool: c.final_pool,
-            rolled_total: c.rolled_total,
-            unstakes_in_flight: c.unstakes_in_flight,
-        }
-    }
-
-    #[test]
-    fn the_version_five_layout_starts_with_the_version_four_bytes() {
-        let build = || {
-            let mut c = council();
-            stake(&mut c, "7", "o0.near");
-            c.unstakes_in_flight = 2;
-            c.upgrade_in_flight = true;
-            c
-        };
-        let five = borsh::to_vec(&build()).unwrap();
-        let four = borsh::to_vec(&version_four(build())).unwrap();
-        let appended = borsh::to_vec(&(0u32, 0u32)).unwrap().len();
-        assert_eq!(five.len(), four.len() + appended);
-        assert_eq!(
-            &five[2..four.len()],
-            &four[2..],
-            "only the version tag differs in the old part"
-        );
-    }
-
-    #[test]
-    fn migrate_moves_version_four_state_to_five_and_keeps_the_running_quarter_on_the_old_rule() {
-        let mut c = council();
-        stake(&mut c, "7", "o0.near");
-        c.unstakes_in_flight = 2;
-        c.upgrade_in_flight = true;
-        let old = version_four(c);
-        env::state_write(&old);
-        testing_env!(context("alice.near").build());
-        let migrated = CouncilContract::migrate();
-        assert_eq!(migrated.state_version, STATE_VERSION);
-        assert_eq!((migrated.unstakes_in_flight, migrated.seat_count()), (2, 1));
-        assert_eq!((migrated.fresh, migrated.rule_from_quarter), (0, Q1_2027));
-        let mut migrated = migrated;
-        set_time(day(10));
-        stake(&mut migrated, "8", "o1.near");
-        assert_eq!(
-            migrated.fresh, 0,
-            "the quarter in progress still counts every staked second"
-        );
-        set_time(quarter_start(Q1_2027) + DAY);
-        stake(&mut migrated, "9", "o2.near");
-        assert_eq!(
-            migrated.fresh, 1,
-            "from the next quarter a seat staked after its start is fresh"
-        );
-        assert!(migrated.upgrade_proven && !migrated.upgrade_in_flight);
-    }
-
-    #[test]
-    fn a_seat_staked_after_the_quarter_began_earns_nothing_until_the_next_quarter() {
-        let mut c = council();
-        stake(&mut c, "early", "early.near");
-        set_time(day(45));
-        stake(&mut c, "late", "late.near");
-        set_time(day(60));
-        revenue(&mut c, 1, 1_000_000);
-        assert_eq!(finalize(&mut c), Q4_2026);
-        let book = c.book(Q4_2026);
-        assert_eq!((book.pool, book.weight_total), (1_000_000, 92 * u128::from(DAY)));
-        assert_eq!(entitlement_of(&c, Q4_2026, "early", "early.near"), 1_000_000);
-        assert_eq!(entitlement_of(&c, Q4_2026, "late", "late.near"), 0);
-        assert_eq!(claim(&mut c, Q4_2026, "early", "early.near"), 1_000_000);
-        assert_eq!(c.reward_totals().final_unclaimed.0, 0, "nothing is stranded");
-        act_paid("late.near");
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q4_2026, "late".into()))),
-            "nothing to claim"
-        );
-
-        set_time(now() + DAY);
-        revenue(&mut c, 2, 600_000);
-        assert_eq!(finalize(&mut c), Q1_2027);
-        assert_eq!(entitlement_of(&c, Q1_2027, "early", "early.near"), 300_000);
-        assert_eq!(entitlement_of(&c, Q1_2027, "late", "late.near"), 300_000);
-        let paid = claim(&mut c, Q1_2027, "early", "early.near") + claim(&mut c, Q1_2027, "late", "late.near");
-        assert_eq!(paid, 600_000);
-    }
-
-    #[test]
-    fn a_quarter_with_only_a_late_seat_rolls_its_revenue_to_the_next_one() {
-        let mut c = council();
-        set_time(day(10));
-        stake(&mut c, "late", "late.near");
-        set_time(day(20));
-        revenue(&mut c, 1, 500_000);
-        finalize(&mut c);
-        assert_eq!(c.book(Q4_2026).rolled_to, Some(Q1_2027));
-        assert_eq!(c.book(Q1_2027).carry_in, 500_000);
-        finalize(&mut c);
-        assert_eq!(entitlement_of(&c, Q1_2027, "late", "late.near"), 500_000);
-        assert_eq!(claim(&mut c, Q1_2027, "late", "late.near"), 500_000);
-    }
-
-    #[test]
-    fn a_late_seat_that_asks_to_leave_in_its_first_quarter_leaves_the_totals_alone() {
-        let mut c = council();
-        stake(&mut c, "early", "early.near");
-        set_time(day(10));
-        stake(&mut c, "late", "late.near");
-        assert_eq!(c.fresh, 1);
-        leave_at(&mut c, "late", "late.near", day(20));
-        assert_eq!(c.fresh, 0);
-        set_time(day(60));
-        revenue(&mut c, 1, 920_000);
-        finalize(&mut c);
-        assert_eq!(c.book(Q4_2026).seat_ns, 92 * u128::from(DAY));
-        assert_eq!(entitlement_of(&c, Q4_2026, "early", "early.near"), 920_000);
-        assert_eq!(entitlement_of(&c, Q4_2026, "late", "late.near"), 0);
-    }
-
     fn owned_by_council(token: &str) -> Result<Option<Token>, PromiseError> {
         Ok(Some(held_by(env::current_account_id().as_str(), token)))
     }
@@ -2480,7 +2176,7 @@ mod tests {
     fn a_seat_counts_once_the_collection_says_the_council_owns_the_token() {
         let mut c = council();
         assert!(!check_stake(&mut c, owned_by_council("t1")), "false keeps the token");
-        assert_eq!((c.seat_count(), c.earning), (1, 1));
+        assert_eq!((c.seat_count(), earning(&c)), (1, 1));
         assert_eq!(last_event()["event"], "staked");
     }
 
@@ -2493,7 +2189,7 @@ mod tests {
         ] {
             let mut c = council();
             assert!(check_stake(&mut c, answer), "true sends the token back to its owner");
-            assert_eq!((c.seat_count(), c.earning, c.unstakes_in_flight), (0, 0, 0));
+            assert_eq!((c.seat_count(), earning(&c), c.unstakes_in_flight), (0, 0, 0));
             assert_eq!(last_event()["event"], "stake_refused");
         }
     }
@@ -2502,7 +2198,7 @@ mod tests {
     fn a_failed_ownership_check_never_counts_the_seat() {
         let mut c = council();
         assert!(check_stake(&mut c, Err(PromiseError::Failed)));
-        assert_eq!((c.seat_count(), c.earning, c.unstakes_in_flight), (0, 0, 0));
+        assert_eq!((c.seat_count(), earning(&c), c.unstakes_in_flight), (0, 0, 0));
         assert!(!c.is_seat(acct("a.near")));
     }
 
@@ -2664,677 +2360,6 @@ mod tests {
         );
     }
 
-    // ---- the calendar: pure functions ---------------------------------------------------------------------
-
-    #[test]
-    fn the_quarter_table_of_the_spec_holds() {
-        for (id, start_s, days) in [
-            (8_107u32, 1_790_812_800u64, 92u64),
-            (8_108, 1_798_761_600, 90),
-            (8_109, 1_806_537_600, 91),
-            (8_110, 1_814_400_000, 92),
-            (8_111, 1_822_348_800, 92),
-            (8_112, 1_830_297_600, 91),
-        ] {
-            assert_eq!(quarter_start(id), start_s * SECOND, "start of {id}");
-            assert_eq!(quarter_end(id) - quarter_start(id), days * DAY, "length of {id}");
-            assert_eq!(quarter_containing(start_s * SECOND), id);
-            assert_eq!(quarter_containing(start_s * SECOND - 1), id - 1);
-        }
-        assert_eq!(quarter_containing(1_798_761_599_999_999_999), Q4_2026);
-        assert_eq!(quarter_containing(1_798_761_600_000_000_000), Q1_2027);
-        assert_eq!(
-            quarter_containing(1_835_438_400_000_000_000),
-            8_112,
-            "29 February 2028 is in 2028 Q1"
-        );
-        assert_eq!(quarter_label(Q4_2026), "2026Q4");
-        assert_eq!(quarter_label(8_112), "2028Q1");
-    }
-
-    // An independent count of the days from 1970-01-01 to the first of every month, by month lengths and the leap rule.
-    #[test]
-    fn every_month_boundary_from_1970_to_2100_falls_in_the_right_quarter() {
-        let leap = |y: u64| y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
-        let mut days = 0u64;
-        let mut last_quarter = None;
-        for year in 1970u64..=2100 {
-            for month in 1u64..=12 {
-                let start = days * DAY;
-                let quarter = year as u32 * 4 + (month as u32 - 1) / 3;
-                assert_eq!(quarter_containing(start), quarter, "{year}-{month:02}-01");
-                if month % 3 == 1 {
-                    assert_eq!(quarter_start(quarter), start, "start of {year} Q{}", month / 3 + 1);
-                    if let Some(previous) = last_quarter {
-                        assert_eq!(quarter_containing(start - 1), previous);
-                        assert_eq!(quarter_end(previous), start);
-                    }
-                    last_quarter = Some(quarter);
-                } else {
-                    assert_eq!(
-                        quarter_containing(start - 1),
-                        quarter,
-                        "the day before {year}-{month:02}-01"
-                    );
-                }
-                days += match month {
-                    2 if leap(year) => 29,
-                    2 => 28,
-                    4 | 6 | 9 | 11 => 30,
-                    _ => 31,
-                };
-            }
-        }
-    }
-
-    #[test]
-    fn a_time_inside_a_quarter_belongs_to_it_and_one_nanosecond_before_its_end_still_does() {
-        for q in [Q4_2026, Q1_2027, 8_112] {
-            for at in [quarter_start(q), quarter_start(q) + 1, quarter_end(q) - 1] {
-                assert_eq!(quarter_containing(at), q);
-            }
-            assert_eq!(quarter_containing(quarter_end(q)), q + 1);
-        }
-    }
-
-    #[test]
-    fn the_overlap_of_a_span_with_a_quarter_is_clipped_to_it() {
-        let (start, end) = (quarter_start(Q1_2027), quarter_end(Q1_2027));
-        assert_eq!(overlap(Q1_2027, start - 5 * DAY, start + 3 * DAY), 3 * DAY);
-        assert_eq!(overlap(Q1_2027, end - 2 * DAY, end + 9 * DAY), 2 * DAY);
-        assert_eq!(overlap(Q1_2027, start - DAY, end + DAY), end - start);
-        assert_eq!(overlap(Q1_2027, end, end + DAY), 0);
-        assert_eq!(overlap(Q1_2027, start - DAY, start), 0);
-        assert_eq!(overlap(Q1_2027, end + DAY, start), 0, "a backwards span is empty");
-    }
-
-    #[test]
-    fn a_share_is_the_pool_times_the_weight_over_the_total_rounded_down() {
-        assert_eq!(entitlement(1_600_000, 92, 169), 871_005);
-        assert_eq!(entitlement(1_600_000, 47, 169), 444_970);
-        assert_eq!(entitlement(1_600_000, 30, 169), 284_023);
-        assert_eq!(entitlement(10, 1, 3), 3);
-        assert_eq!(entitlement(0, 5, 5), 0);
-        assert_eq!(entitlement(7, 0, 5), 0);
-        assert_eq!(entitlement(7, 5, 0), 0, "no seat time, no share");
-        // The largest a quarter can hold: 1,000 seats for 92 days, and a pool of a trillion USDC.
-        let total = 1_000 * 92 * u128::from(DAY);
-        assert_eq!(
-            entitlement(1_000_000_000_000_000_000, total, total),
-            1_000_000_000_000_000_000
-        );
-        assert_eq!(
-            entitlement(1_000_000_000_000_000_001, total / 2, total),
-            500_000_000_000_000_000
-        );
-    }
-
-    proptest! {
-        // Whatever the pool and the weights, the shares add up to at most the pool and the leftover is under one unit a seat.
-        #[test]
-        fn shares_never_exceed_the_pool_and_leave_under_a_unit_a_seat(
-            pool in 0u128..1_000_000_000_000_000_000_000,
-            weights in proptest::collection::vec(1u128..8_000_000_000_000_000, 1..40)
-        ) {
-            let total: u128 = weights.iter().sum();
-            let shares: u128 = weights.iter().map(|w| entitlement(pool, *w, total)).sum();
-            prop_assert!(shares <= pool);
-            prop_assert!(pool - shares < weights.len() as u128);
-        }
-
-        #[test]
-        fn later_times_never_fall_in_earlier_quarters(a in any::<u32>(), b in any::<u32>()) {
-            let (x, y) = (u64::from(a.min(b)) * 4_000_000_000, u64::from(a.max(b)) * 4_000_000_000);
-            prop_assert!(quarter_containing(x) <= quarter_containing(y));
-        }
-    }
-
-    // ---- the worked examples of the spec (council.md, 6.11), with the real calendar -------------------------
-
-    fn day(n: u64) -> u64 {
-        START + n * DAY
-    }
-
-    // 2026 Q4 has 92 days. Seat 1 is staked all quarter, seat 2 from 15 November (so it earns nothing until the next quarter),
-    // seat 3 from 1 to 31 October. 600,000 comes in on 20 October and 1,000,000 on 30 December.
-    fn example_one() -> CouncilContract {
-        let mut c = council();
-        stake(&mut c, "1", "seat1.near");
-        stake(&mut c, "3", "seat3.near");
-        set_time(day(19));
-        revenue(&mut c, 1, 600_000);
-        leave_at(&mut c, "3", "seat3.near", day(30));
-        set_time(day(45));
-        stake(&mut c, "2", "seat2.near");
-        set_time(day(90));
-        revenue(&mut c, 2, 1_000_000);
-        c
-    }
-
-    #[test]
-    fn example_one_the_baseline_quarter() {
-        let mut c = example_one();
-        assert_eq!(finalize(&mut c), Q4_2026);
-        let book = c.book(Q4_2026);
-        assert_eq!(
-            (book.pool, book.weight_total, book.seat_ns),
-            (1_600_000, 122 * u128::from(DAY), 122 * u128::from(DAY))
-        );
-        assert_eq!(entitlement_of(&c, Q4_2026, "1", "seat1.near"), 1_206_557);
-        assert_eq!(
-            entitlement_of(&c, Q4_2026, "2", "seat2.near"),
-            0,
-            "staked after the quarter began"
-        );
-        assert_eq!(entitlement_of(&c, Q4_2026, "3", "seat3.near"), 393_442);
-        assert_eq!(claim(&mut c, Q4_2026, "1", "seat1.near"), 1_206_557);
-        assert_eq!(
-            claim(&mut c, Q4_2026, "3", "seat3.near"),
-            393_442,
-            "a seat that left still claims"
-        );
-        let totals = c.reward_totals();
-        assert_eq!(
-            (totals.total_paid.0, totals.final_unclaimed.0, totals.pending_claims.0),
-            (1_599_999, 1, 0),
-            "one unit stays as unallocated backing"
-        );
-    }
-
-    #[test]
-    fn example_two_a_sweep_after_the_boundary_belongs_to_the_next_quarter() {
-        let mut c = example_one();
-        set_time(quarter_start(Q1_2027) + 2 * DAY);
-        revenue(&mut c, 3, 400_000);
-        assert_eq!(
-            c.received_of(acct(MARKET), U64(3)).map(|r| (r.amount.0, r.quarter)),
-            Some((400_000, Q1_2027))
-        );
-        assert_eq!(c.book(Q4_2026).revenue_in, 1_600_000);
-        assert_eq!(c.book(Q1_2027).revenue_in, 400_000);
-        finalize(&mut c);
-        assert_eq!(
-            entitlement_of(&c, Q4_2026, "1", "seat1.near"),
-            1_206_557,
-            "the late sweep did not touch it"
-        );
-    }
-
-    #[test]
-    fn example_three_a_seat_staked_at_noon_on_the_last_day_earns_nothing() {
-        let mut c = example_one();
-        set_time(day(91) + DAY / 2);
-        stake(&mut c, "4", "seat4.near");
-        finalize(&mut c);
-        assert_eq!(entitlement_of(&c, Q4_2026, "1", "seat1.near"), 1_206_557);
-        assert_eq!(entitlement_of(&c, Q4_2026, "3", "seat3.near"), 393_442);
-        assert_eq!(
-            entitlement_of(&c, Q4_2026, "4", "seat4.near"),
-            0,
-            "no sliver: it starts with the next quarter"
-        );
-        let paid: u128 = [("1", "seat1.near"), ("3", "seat3.near")]
-            .iter()
-            .map(|(t, o)| claim(&mut c, Q4_2026, t, o))
-            .sum();
-        assert_eq!(1_600_000 - paid, 1, "the dust");
-    }
-
-    // Example one, except that seat 1 is drawn on 10 December with seat 2 and the case is released on 14 December. The
-    // accounts in `delinquent` never voted.
-    fn silent_juror(delinquent: Vec<AccountId>) -> CouncilContract {
-        let mut c = council();
-        stake(&mut c, "1", "seat1.near");
-        stake(&mut c, "3", "seat3.near");
-        set_time(day(19));
-        revenue(&mut c, 1, 600_000);
-        leave_at(&mut c, "3", "seat3.near", day(30));
-        set_time(day(45));
-        stake(&mut c, "2", "seat2.near");
-        set_time(day(70));
-        act_with_seed(ORACLE, 1);
-        assert_eq!(c.draw(U64(1), 2, vec![]).len(), 2);
-        set_time(day(74));
-        act_as(ORACLE);
-        c.unlock_case(U64(1), delinquent);
-        set_time(day(90));
-        revenue(&mut c, 2, 1_000_000);
-        c
-    }
-
-    #[test]
-    fn example_four_a_silent_juror_loses_the_seat_time_of_the_case() {
-        let mut c = silent_juror(vec![acct("seat1.near")]);
-        finalize(&mut c);
-        let book = c.book(Q4_2026);
-        assert_eq!(
-            (book.weight_total, book.forfeit_ns),
-            (118 * u128::from(DAY), 4 * u128::from(DAY))
-        );
-        assert_eq!(entitlement_of(&c, Q4_2026, "1", "seat1.near"), 1_193_220);
-        assert_eq!(entitlement_of(&c, Q4_2026, "2", "seat2.near"), 0);
-        assert_eq!(entitlement_of(&c, Q4_2026, "3", "seat3.near"), 406_779);
-        assert_eq!(
-            [("1", "seat1.near"), ("3", "seat3.near")]
-                .iter()
-                .map(|(t, o)| claim(&mut c, Q4_2026, t, o))
-                .sum::<u128>(),
-            1_599_999
-        );
-    }
-
-    #[test]
-    fn jurors_who_voted_lose_nothing() {
-        let mut c = silent_juror(vec![]);
-        finalize(&mut c);
-        assert_eq!(c.book(Q4_2026).forfeit_ns, 0);
-        assert_eq!(entitlement_of(&c, Q4_2026, "1", "seat1.near"), 1_206_557);
-    }
-
-    #[test]
-    fn a_juror_is_penalised_once_and_naming_an_outsider_changes_nothing() {
-        let mut c = silent_juror(vec![acct("seat1.near"), acct("seat1.near"), acct("nobody.near")]);
-        act_as(ORACLE);
-        c.unlock_case(U64(1), vec![acct("seat1.near")]);
-        assert_eq!(c.book(Q4_2026).forfeit_ns, 4 * u128::from(DAY));
-    }
-
-    #[test]
-    fn a_forfeit_after_the_quarter_is_final_is_skipped_and_says_so() {
-        let mut c = council();
-        stake(&mut c, "1", "seat1.near");
-        stake(&mut c, "2", "seat2.near");
-        set_time(day(91));
-        act_with_seed(ORACLE, 1);
-        c.draw(U64(1), 2, vec![]);
-        revenue(&mut c, 1, 1_000);
-        // The case is still open when the longest grace period ends, and the quarter is finalized with both seats counted.
-        set_time(quarter_end(Q4_2026) + MAX_CLOSE_GRACE_NS);
-        c.finalize_quarter(Q4_2026);
-        act_as(ORACLE);
-        c.unlock_case(U64(1), vec![acct("seat1.near")]);
-        let events: Vec<String> = near_sdk::test_utils::get_logs()
-            .iter()
-            .filter_map(|l| l.strip_prefix("EVENT_JSON:"))
-            .map(|j| {
-                near_sdk::serde_json::from_str::<near_sdk::serde_json::Value>(j).unwrap()["event"]
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        assert_eq!(events, vec!["jury_released", "forfeit_skipped", "seat_time_forfeited"]);
-        assert_eq!(c.book(Q4_2026).forfeit_ns, 0);
-        assert_eq!(
-            c.book(Q1_2027).forfeit_ns,
-            u128::from(MAX_CLOSE_GRACE_NS),
-            "the seat time since the boundary is in a quarter that is still open, so it is lost there"
-        );
-    }
-
-    #[test]
-    fn a_forfeit_that_crosses_a_boundary_is_split_between_the_quarters_it_touched() {
-        let mut c = council();
-        stake(&mut c, "1", "seat1.near");
-        stake(&mut c, "2", "seat2.near");
-        set_time(quarter_end(Q4_2026) - DAY);
-        act_with_seed(ORACLE, 1);
-        c.draw(U64(1), 2, vec![]);
-        set_time(quarter_end(Q4_2026) + 2 * DAY);
-        act_as(ORACLE);
-        c.unlock_case(U64(1), vec![acct("seat1.near")]);
-        assert_eq!(c.book(Q4_2026).forfeit_ns, u128::from(DAY));
-        assert_eq!(c.book(Q1_2027).forfeit_ns, 2 * u128::from(DAY));
-        assert_eq!(
-            c.forfeits.get(&(Q4_2026, "1".to_string(), acct("seat1.near"))).copied(),
-            Some(DAY)
-        );
-    }
-
-    #[test]
-    fn example_five_a_quarter_with_no_seats_rolls_its_pool_into_the_next() {
-        let mut c = council();
-        // Nobody is staked in 2026 Q4 or 2027 Q1.
-        set_time(quarter_start(Q1_2027) + 40 * DAY);
-        revenue(&mut c, 1, 500_000);
-        assert_eq!(finalize(&mut c), Q4_2026);
-        assert_eq!(finalize(&mut c), Q1_2027);
-        let q1 = c.book(Q1_2027);
-        assert_eq!((q1.pool, q1.rolled_to), (500_000, Some(Q2_2027)));
-        assert_eq!(c.book(Q2_2027).carry_in, 500_000);
-        assert_eq!((c.open_pool, c.final_pool, c.rolled_total), (500_000, 0, 500_000));
-        set_time(quarter_start(Q2_2027));
-        stake(&mut c, "1", "seat1.near");
-        set_time(quarter_start(Q2_2027) + 30 * DAY);
-        revenue(&mut c, 2, 300_000);
-        assert_eq!(finalize(&mut c), Q2_2027);
-        assert_eq!(entitlement_of(&c, Q2_2027, "1", "seat1.near"), 800_000);
-        assert_eq!(claim(&mut c, Q2_2027, "1", "seat1.near"), 800_000);
-        act_paid("seat1.near");
-        assert_eq!(c.reward_totals().final_unclaimed.0, 0);
-        assert_eq!(c.total_received().0, c.total_paid, "every unit came back out");
-    }
-
-    #[test]
-    fn a_rolled_quarter_has_nothing_to_claim() {
-        let mut c = council();
-        stake(&mut c, "1", "seat1.near");
-        set_time(day(10));
-        leave_at(&mut c, "1", "seat1.near", day(10) + COOLDOWN_NS);
-        set_time(quarter_start(Q1_2027) + DAY);
-        revenue(&mut c, 1, 90);
-        finalize(&mut c);
-        finalize(&mut c);
-        assert_eq!(c.book(Q1_2027).rolled_to, Some(Q2_2027));
-        act_paid("seat1.near");
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q1_2027, "1".into()))),
-            "nothing to claim"
-        );
-    }
-
-    #[test]
-    fn example_six_a_failed_claim_can_be_made_again_and_a_paid_one_cannot() {
-        let mut c = example_one();
-        finalize(&mut c);
-        let reserved = claim_without_reply(&mut c, Q4_2026, "1", "seat1.near");
-        assert_eq!(reserved, 1_206_557);
-        assert_eq!(c.reward_totals().pending_claims.0, 1_206_557);
-        assert_eq!(
-            c.get_entitlement(Q4_2026, "1".into(), acct("seat1.near"))
-                .unwrap()
-                .status,
-            EntitlementStatus::Pending
-        );
-        act_paid("seat1.near");
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
-            "claim is already pending"
-        );
-        // The verifier's feature is paused: the transfer fails and the record goes.
-        let first = requested_at(&c, Q4_2026, "1", "seat1.near");
-        act_as("council.near");
-        c.on_claim_paid(
-            Q4_2026,
-            "1".into(),
-            acct("seat1.near"),
-            first,
-            Err(PromiseError::Failed),
-        );
-        assert_eq!(last_event()["event"], "claim_failed");
-        assert_eq!(
-            last_event()["data"]["requested_at"],
-            first.0.to_string(),
-            "the terminal event names its request"
-        );
-        assert_eq!((c.reward_totals().pending_claims.0, c.total_paid), (0, 0));
-        assert_eq!(
-            c.get_entitlement(Q4_2026, "1".into(), acct("seat1.near"))
-                .unwrap()
-                .status,
-            EntitlementStatus::Claimable
-        );
-        assert_eq!(claim(&mut c, Q4_2026, "1", "seat1.near"), 1_206_557);
-        assert_eq!(last_event()["event"], "claim_paid");
-        let second = requested_at(&c, Q4_2026, "1", "seat1.near");
-        assert_eq!(last_event()["data"]["requested_at"], second.0.to_string());
-        act_paid("seat1.near");
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
-            "already claimed"
-        );
-        assert_eq!(c.total_paid, 1_206_557);
-    }
-
-    #[test]
-    fn a_callback_that_runs_again_or_late_changes_nothing() {
-        let mut c = example_one();
-        finalize(&mut c);
-        claim(&mut c, Q4_2026, "1", "seat1.near");
-        let paid = requested_at(&c, Q4_2026, "1", "seat1.near");
-        act_as("council.near");
-        c.on_claim_paid(Q4_2026, "1".into(), acct("seat1.near"), paid, Err(PromiseError::Failed));
-        c.on_claim_paid(Q4_2026, "1".into(), acct("seat1.near"), paid, Ok(()));
-        let none = requested_at(&c, Q4_2026, "2", "seat2.near");
-        c.on_claim_paid(Q4_2026, "2".into(), acct("seat2.near"), none, Ok(()));
-        assert_eq!(
-            (c.total_paid, c.pending_total, c.book(Q4_2026).paid),
-            (1_206_557, 0, 1_206_557)
-        );
-        assert_eq!(
-            c.get_entitlement(Q4_2026, "1".into(), acct("seat1.near"))
-                .unwrap()
-                .status,
-            EntitlementStatus::Paid
-        );
-    }
-
-    // ---- a claim whose payout callback never arrived ----------------------------------------------------------
-
-    fn clock() -> u64 {
-        CLOCK.with(|c| c.get())
-    }
-
-    fn stuck_claim() -> CouncilContract {
-        let mut c = example_one();
-        finalize(&mut c);
-        claim_without_reply(&mut c, Q4_2026, "1", "seat1.near");
-        c
-    }
-
-    #[test]
-    fn only_the_owner_decides_a_stuck_claim_and_not_before_an_hour() {
-        let mut c = stuck_claim();
-        set_time(clock() + RECONCILE_WAIT_NS - 1);
-        assert_eq!(
-            refusal(|| c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false)),
-            "wait 60 minutes after the claim before reconciling"
-        );
-        act_as("seat1.near");
-        assert_eq!(
-            refusal(|| c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false)),
-            "owner only"
-        );
-        set_time(clock() + 1);
-        assert_eq!(
-            refusal(|| c.reconcile_claim(Q4_2026, "2".into(), acct("seat2.near"), false)),
-            "no claim is pending for that seat"
-        );
-        assert_eq!(c.reward_totals().pending_claims.0, 1_206_557, "nothing moved");
-    }
-
-    #[test]
-    fn a_stuck_claim_the_owner_finds_unpaid_can_be_claimed_again() {
-        let mut c = stuck_claim();
-        set_time(clock() + RECONCILE_WAIT_NS);
-        c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false);
-        let event = last_event();
-        assert_eq!(
-            (event["event"].as_str(), event["data"]["paid"].as_bool()),
-            (Some("claim_reconciled"), Some(false))
-        );
-        assert_eq!((c.reward_totals().pending_claims.0, c.total_paid), (0, 0));
-        assert_eq!(claim(&mut c, Q4_2026, "1", "seat1.near"), 1_206_557);
-        assert_eq!(c.total_paid, 1_206_557);
-    }
-
-    #[test]
-    fn a_stuck_claim_the_owner_finds_paid_is_booked_once_and_a_late_callback_changes_nothing() {
-        let mut c = stuck_claim();
-        set_time(clock() + RECONCILE_WAIT_NS);
-        c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), true);
-        assert_eq!(last_event()["data"]["paid"].as_bool(), Some(true));
-        assert_eq!(
-            (c.reward_totals().pending_claims.0, c.total_paid, c.book(Q4_2026).paid),
-            (0, 1_206_557, 1_206_557)
-        );
-        assert_eq!(
-            c.get_entitlement(Q4_2026, "1".into(), acct("seat1.near"))
-                .unwrap()
-                .status,
-            EntitlementStatus::Paid
-        );
-        let stuck = requested_at(&c, Q4_2026, "1", "seat1.near");
-        act_as("council.near");
-        c.on_claim_paid(Q4_2026, "1".into(), acct("seat1.near"), stuck, Ok(()));
-        c.on_claim_paid(
-            Q4_2026,
-            "1".into(),
-            acct("seat1.near"),
-            stuck,
-            Err(PromiseError::Failed),
-        );
-        assert_eq!((c.total_paid, c.book(Q4_2026).paid), (1_206_557, 1_206_557));
-        act_paid("seat1.near");
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
-            "already claimed"
-        );
-        set_time(clock() + 1);
-        assert_eq!(
-            refusal(|| c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false)),
-            "no claim is pending for that seat"
-        );
-    }
-
-    #[test]
-    fn a_late_callback_of_a_reconciled_claim_does_not_settle_the_claim_that_replaced_it() {
-        let mut c = stuck_claim();
-        let first = requested_at(&c, Q4_2026, "1", "seat1.near");
-        set_time(clock() + RECONCILE_WAIT_NS);
-        c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false);
-        let amount = claim_without_reply(&mut c, Q4_2026, "1", "seat1.near");
-        let second = requested_at(&c, Q4_2026, "1", "seat1.near");
-        assert_ne!(first, second);
-        act_as("council.near");
-        c.on_claim_paid(
-            Q4_2026,
-            "1".into(),
-            acct("seat1.near"),
-            first,
-            Err(PromiseError::Failed),
-        );
-        assert_eq!(
-            c.get_entitlement(Q4_2026, "1".into(), acct("seat1.near"))
-                .unwrap()
-                .status,
-            EntitlementStatus::Pending,
-            "the first payout's callback must not touch the second claim"
-        );
-        assert_eq!(c.reward_totals().pending_claims.0, amount);
-        c.on_claim_paid(Q4_2026, "1".into(), acct("seat1.near"), second, Ok(()));
-        assert_eq!(
-            (c.total_paid, c.book(Q4_2026).paid, c.pending_total),
-            (amount, amount, 0)
-        );
-        act_paid("seat1.near");
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
-            "already claimed"
-        );
-    }
-
-    // ---- when a quarter can be finalized and claimed ----------------------------------------------------------
-
-    #[test]
-    fn a_quarter_is_final_only_after_the_grace_period_and_in_order() {
-        let mut c = example_one();
-        let end = quarter_end(Q4_2026);
-        for (at, why) in [
-            (end - 1, "the quarter cannot be finalized yet"),
-            (end + DEFAULT_CLOSE_GRACE_NS - 1, "the quarter cannot be finalized yet"),
-        ] {
-            set_time(at);
-            assert_eq!(refusal(|| c.finalize_quarter(Q4_2026)), why);
-        }
-        assert_eq!(
-            refusal(|| c.finalize_quarter(Q1_2027)),
-            "finalize the earlier quarter first"
-        );
-        set_time(end + DEFAULT_CLOSE_GRACE_NS);
-        c.finalize_quarter(Q4_2026);
-        assert_eq!(refusal(|| c.finalize_quarter(Q4_2026)), "that quarter is already final");
-        assert_eq!(c.config()["next_to_finalize"], Q1_2027);
-    }
-
-    #[test]
-    fn a_claim_before_the_quarter_is_final_is_refused() {
-        let mut c = example_one();
-        set_time(quarter_end(Q4_2026) + DEFAULT_CLOSE_GRACE_NS - 1);
-        act_paid("seat1.near");
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
-            "that quarter is not final"
-        );
-        act_paid("seat1.near");
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q1_2027, "1".into()))),
-            "that quarter is not final"
-        );
-    }
-
-    #[test]
-    fn nobody_claims_for_a_seat_they_did_not_hold() {
-        let mut c = example_one();
-        finalize(&mut c);
-        for who in ["seat2.near", "stranger.near"] {
-            act_paid(who);
-            assert_eq!(
-                refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
-                "nothing to claim",
-                "{who}"
-            );
-        }
-        // The real owner is not blocked by the attempts.
-        assert_eq!(claim(&mut c, Q4_2026, "1", "seat1.near"), 1_206_557);
-    }
-
-    #[test]
-    fn a_claim_needs_one_yocto_and_the_gas_for_its_payout() {
-        let mut c = example_one();
-        finalize(&mut c);
-        act_as("seat1.near");
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
-            "Requires attached deposit of exactly 1 yoctoNEAR"
-        );
-        act_with_gas("seat1.near", 32);
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
-            "attach at least 33 TGas: a claim sends the payout and then settles it"
-        );
-        // The mocked chain meters gas by its own fee table, so the claim that pays is measured in the sandbox. With exactly the
-        // floor the call gets past the check and stops at the next refusal.
-        act_with_gas("seat1.near", 33);
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q1_2027, "1".into()))),
-            "that quarter is not final"
-        );
-        assert_eq!(GAS_CLAIM_FLOOR, Gas::from_tgas(33));
-    }
-
-    #[test]
-    fn unclaimed_amounts_stay_claimable_for_good() {
-        let mut c = example_one();
-        finalize(&mut c);
-        set_time(quarter_start(Q4_2026 + 40));
-        assert_eq!(claim(&mut c, Q4_2026, "3", "seat3.near"), 393_442);
-    }
-
-    #[test]
-    fn a_claim_is_one_mt_transfer_of_one_yocto_to_the_caller_and_nothing_else_pays() {
-        let mut c = example_one();
-        finalize(&mut c);
-        claim_without_reply(&mut c, Q4_2026, "1", "seat1.near");
-        let sent = near_sdk::test_utils::get_created_receipts();
-        let (args, deposit, gas) = mt_transfer_of(&sent[0]);
-        assert_eq!((deposit, gas), (1, GAS_MT_TRANSFER.as_gas()));
-        assert_eq!(args["receiver_id"], "seat1.near");
-        assert_eq!(args["token_id"], COLLATERAL_ID);
-        assert_eq!(args["amount"], "1206557");
-        assert_eq!(sent.iter().filter(|r| r.receiver_id == acct(VERIFIER)).count(), 1);
-    }
-
     #[test]
     fn claims_and_revenue_refuse_until_the_owner_has_named_the_market() {
         let mut c = unconfigured_council(Some(false));
@@ -3342,7 +2367,7 @@ mod tests {
         c.set_nft_contract(acct(NFT));
         act_paid("a.near");
         assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
+            refusal(|| drop(c.claim(vec!["1".into()]))),
             "the Council is not configured, the owner must call allow_market"
         );
         act_as(VERIFIER);
@@ -3394,10 +2419,10 @@ mod tests {
         assert_eq!(
             (
                 e["data"]["sweep_id"].as_str(),
-                e["data"]["quarter"].as_u64(),
+                e["data"]["carried"].as_bool(),
                 e["data"]["amount"].as_str()
             ),
-            (Some("7"), Some(u64::from(Q4_2026)), Some("900"))
+            (Some("7"), Some(true), Some("900"))
         );
     }
 
@@ -3481,36 +2506,11 @@ mod tests {
     #[test]
     fn received_of_tells_the_market_what_it_sent_under_an_id() {
         let mut c = council();
-        set_time(quarter_start(Q1_2027) + 5);
+        set_time(day(20) + 5);
         revenue(&mut c, 12, 321);
         let r = c.received_of(acct(MARKET), U64(12)).unwrap();
-        assert_eq!(
-            (r.amount.0, r.quarter, r.at.0),
-            (321, Q1_2027, quarter_start(Q1_2027) + 5)
-        );
+        assert_eq!((r.amount.0, r.at.0), (321, day(20) + 5));
         assert!(c.received_of(acct(MARKET), U64(13)).is_none());
-    }
-
-    // ---- seats: staking mid-quarter, leaving, restaking ----------------------------------------------------------
-
-    #[test]
-    fn a_seat_earns_for_exactly_the_time_it_was_staked_and_keeps_the_right_after_it_leaves() {
-        let mut c = council();
-        stake(&mut c, "1", "a.near");
-        stake(&mut c, "2", "b.near");
-        leave_at(&mut c, "2", "b.near", day(46));
-        set_time(day(80));
-        revenue(&mut c, 1, 920_000);
-        finalize(&mut c);
-        // a: 92 days, b: 46 days, so two thirds and one third.
-        assert_eq!(entitlement_of(&c, Q4_2026, "1", "a.near"), 613_333);
-        assert_eq!(entitlement_of(&c, Q4_2026, "2", "b.near"), 306_666);
-        assert_eq!(claim(&mut c, Q4_2026, "2", "b.near"), 306_666);
-        assert!(!is_staked(&c, "2"), "the seat is gone from the council");
-    }
-
-    fn is_staked(c: &CouncilContract, token: &str) -> bool {
-        c.stake_of(token.into()).is_some()
     }
 
     #[test]
@@ -3527,347 +2527,6 @@ mod tests {
             "no payout leaves with the NFT"
         );
         assert_eq!(c.reward_totals().total_paid.0, 0);
-    }
-
-    #[test]
-    fn the_token_restaked_by_someone_else_starts_a_span_of_its_own() {
-        let mut c = council();
-        stake(&mut c, "1", "a.near");
-        leave_at(&mut c, "1", "a.near", day(30));
-        stake(&mut c, "1", "b.near");
-        set_time(day(60));
-        revenue(&mut c, 1, 920_000);
-        finalize(&mut c);
-        // a held it 30 days until its request. b staked it later in the quarter, so b's span earns from the next quarter.
-        assert_eq!(entitlement_of(&c, Q4_2026, "1", "a.near"), 920_000);
-        assert_eq!(entitlement_of(&c, Q4_2026, "1", "b.near"), 0);
-        assert_eq!(claim(&mut c, Q4_2026, "1", "a.near"), 920_000);
-    }
-
-    #[test]
-    fn two_spans_of_one_token_by_one_owner_in_a_quarter_add_up_to_one_claim() {
-        let mut c = council();
-        stake(&mut c, "1", "a.near");
-        leave_at(&mut c, "1", "a.near", day(10));
-        set_time(day(20));
-        stake(&mut c, "1", "a.near");
-        set_time(day(50));
-        revenue(&mut c, 1, 820_000);
-        finalize(&mut c);
-        // The first span is 10 days. The second starts inside the quarter, so it adds nothing to this one.
-        assert_eq!(entitlement_of(&c, Q4_2026, "1", "a.near"), 820_000);
-        assert_eq!(claim(&mut c, Q4_2026, "1", "a.near"), 820_000);
-        act_paid("a.near");
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q4_2026, "1".into()))),
-            "already claimed"
-        );
-    }
-
-    #[test]
-    fn a_failed_unstake_restores_the_seat_and_it_does_not_earn_again() {
-        let mut c = council();
-        stake(&mut c, "1", "a.near");
-        stake(&mut c, "2", "b.near");
-        set_time(day(10));
-        act_paid("a.near");
-        c.request_unstake("1".into());
-        let before = c.stake_of("1".into()).unwrap();
-        act_at("a.near", day(10) + COOLDOWN_NS);
-        let _ = c.unstake("1".into());
-        assert_eq!(c.seat_count(), 1);
-        // The NFT transfer fails an hour later.
-        set_time(day(10) + COOLDOWN_NS + 3_600 * SECOND);
-        act_as("council.near");
-        c.on_unstaked("1".into(), before, Err(PromiseError::Failed));
-        assert_eq!(last_event()["event"], "unstake_failed");
-        assert_eq!(c.seat_count(), 2);
-        assert_eq!(c.stake_of("1".into()).unwrap().booked_to.0, now());
-        set_time(day(20));
-        revenue(&mut c, 1, 1_000_000);
-        finalize(&mut c);
-        // Seat 1 counted until its request on day 10 and still has that request, seat 2 never left.
-        let book = c.book(Q4_2026);
-        assert_eq!(book.seat_ns, (92 + 10) * u128::from(DAY));
-        assert_eq!(c.earning, 1);
-        assert_eq!(c.stake_of("1".into()).unwrap().unlock_requested_at, Some(U64(day(10))));
-        act_paid("a.near");
-        c.book_seat_time("1".into(), None);
-        c.book_seat_time("2".into(), None);
-        let weight = |t: &str, o: &str| c.booked_weight(&(Q4_2026, t.to_string(), acct(o)));
-        assert_eq!(
-            weight("1", "a.near") + weight("2", "b.near"),
-            book.seat_ns,
-            "booked weights add up to the quarter's seat time"
-        );
-    }
-
-    #[test]
-    fn asking_to_leave_after_a_long_idle_stretch_needs_the_time_moved_first() {
-        let mut c = council();
-        stake(&mut c, "1", "a.near");
-        set_time(START + 20 * 92 * DAY);
-        act_paid("a.near");
-        assert_eq!(refusal(|| c.request_unstake("1".into())), "call advance_quarters first");
-    }
-
-    #[test]
-    fn idle_time_is_moved_forward_in_steps_by_anyone() {
-        let mut c = council();
-        stake(&mut c, "1", "a.near");
-        let far = START + 20 * 92 * DAY;
-        set_time(far);
-        let target = quarter_containing(far);
-        let mut calls = 0;
-        while c.last_tick < far {
-            act_as("anyone.near");
-            let steps = c.advance_quarters(None);
-            assert!((1..=MAX_QUARTER_STEPS).contains(&steps));
-            calls += 1;
-            assert!(calls < 10);
-        }
-        assert!(calls >= 2, "twenty quarters take more than one call of eight");
-        act_paid("a.near");
-        assert_eq!(refusal(|| c.request_unstake("1".into())), "book this seat first");
-        let mut booked = 0;
-        while c.stake_of("1".into()).unwrap().booked_to.0 < far {
-            act_as("anyone.near");
-            booked += c.book_seat_time("1".into(), Some(3));
-            assert!(booked <= 3 * 10);
-        }
-        act_paid("a.near");
-        c.request_unstake("1".into());
-        act_at("a.near", far + COOLDOWN_NS);
-        let _ = c.unstake("1".into());
-        assert_eq!(c.seat_count(), 0);
-        let total_weight: u128 = (Q4_2026..=target)
-            .map(|q| c.booked_weight(&(q, "1".to_string(), acct("a.near"))))
-            .sum();
-        assert_eq!(
-            total_weight,
-            u128::from(far - START),
-            "every nanosecond was counted once"
-        );
-    }
-
-    #[test]
-    fn advance_quarters_never_goes_past_eight_steps_whatever_is_asked() {
-        let mut c = council();
-        stake(&mut c, "1", "a.near");
-        set_time(START + 30 * 92 * DAY);
-        act_as("anyone.near");
-        assert_eq!(c.advance_quarters(Some(1_000)), MAX_QUARTER_STEPS);
-        assert_eq!(c.advance_quarters(Some(0)), 0);
-    }
-
-    // ---- views --------------------------------------------------------------------------------------------------
-
-    #[test]
-    fn the_quarter_views_show_state_pool_dates_and_what_was_paid() {
-        let mut c = example_one();
-        let open = c.current_quarter();
-        assert_eq!(
-            (open.quarter, open.label.as_str(), open.state),
-            (Q4_2026, "2026Q4", QuarterState::Open)
-        );
-        assert_eq!(
-            (open.starts_at.0, open.ends_at.0, open.claimable_from.0),
-            (
-                quarter_start(Q4_2026),
-                quarter_end(Q4_2026),
-                quarter_end(Q4_2026) + DEFAULT_CLOSE_GRACE_NS
-            )
-        );
-        assert_eq!((open.revenue_in.0, open.pool.0), (1_600_000, 1_600_000));
-        set_time(quarter_end(Q4_2026) + DAY);
-        assert_eq!(c.get_quarter(Q4_2026).unwrap().state, QuarterState::Closing);
-        assert!(c.get_quarter(Q1_2027).is_some());
-        assert!(c.get_quarter(Q2_2027).is_none(), "a quarter that has not started");
-        finalize(&mut c);
-        claim(&mut c, Q4_2026, "1", "seat1.near");
-        let fin = c.get_quarter(Q4_2026).unwrap();
-        assert_eq!(
-            (fin.state, fin.pool.0, fin.paid.0, fin.pending.0, fin.rolled_to),
-            (QuarterState::Final, 1_600_000, 1_206_557, 0, None)
-        );
-        assert_eq!(fin.seat_ns.0, 122 * u128::from(DAY));
-        let listed = c.list_quarters(Q4_2026, 50);
-        assert_eq!(
-            listed.iter().map(|q| q.quarter).collect::<Vec<_>>(),
-            vec![Q4_2026, Q1_2027]
-        );
-        assert_eq!(c.list_quarters(Q4_2026, 1).len(), 1);
-        assert!(c.list_quarters(Q2_2027, 5).is_empty());
-    }
-
-    #[test]
-    fn quarter_of_names_the_quarter_of_any_time() {
-        let c = council();
-        let l = c.quarter_of(U64(1_798_761_599_999_999_999));
-        assert_eq!(
-            (l.quarter, l.label.as_str(), l.starts_at.0, l.ends_at.0),
-            (Q4_2026, "2026Q4", 1_790_812_800_000_000_000, 1_798_761_600_000_000_000)
-        );
-    }
-
-    #[test]
-    fn an_entitlement_goes_from_accruing_to_closing_to_claimable_to_pending_to_paid() {
-        let mut c = council();
-        stake(&mut c, "1", "a.near");
-        stake(&mut c, "2", "b.near");
-        set_time(day(10));
-        revenue(&mut c, 1, 1_000);
-        let e = c.get_entitlement(Q4_2026, "1".into(), acct("a.near")).unwrap();
-        assert_eq!(
-            (e.status, e.estimated, e.amount.0, e.weight_ns.0),
-            (EntitlementStatus::Accruing, true, 500, u128::from(10 * DAY))
-        );
-        set_time(quarter_end(Q4_2026) + DAY);
-        let e = c.get_entitlement(Q4_2026, "1".into(), acct("a.near")).unwrap();
-        assert_eq!(
-            (e.status, e.estimated, e.amount.0),
-            (EntitlementStatus::Closing, true, 500)
-        );
-        finalize(&mut c);
-        let e = c.get_entitlement(Q4_2026, "1".into(), acct("a.near")).unwrap();
-        assert_eq!(
-            (e.status, e.estimated, e.amount.0),
-            (EntitlementStatus::Claimable, false, 500)
-        );
-        claim_without_reply(&mut c, Q4_2026, "1", "a.near");
-        let e = c.get_entitlement(Q4_2026, "1".into(), acct("a.near")).unwrap();
-        assert_eq!(
-            (e.status, e.requested_at.is_some(), e.paid_at),
-            (EntitlementStatus::Pending, true, None)
-        );
-        act_as("council.near");
-        c.on_claim_paid(
-            Q4_2026,
-            "1".into(),
-            acct("a.near"),
-            requested_at(&c, Q4_2026, "1", "a.near"),
-            Ok(()),
-        );
-        let e = c.get_entitlement(Q4_2026, "1".into(), acct("a.near")).unwrap();
-        assert_eq!(
-            (e.status, e.paid_at.map(|t| t.0)),
-            (EntitlementStatus::Paid, Some(now()))
-        );
-        assert!(c.get_entitlement(Q4_2026, "9".into(), acct("a.near")).is_none());
-        assert!(c.get_entitlement(Q4_2026, "1".into(), acct("b.near")).is_none());
-    }
-
-    #[test]
-    fn entitlements_of_walks_at_most_25_quarters_however_many_are_asked_for() {
-        let mut c = council();
-        stake(&mut c, "1", "a.near");
-        for i in 0..30 {
-            set_time(quarter_start(Q4_2026 + i) + DAY);
-            revenue(&mut c, u64::from(i) + 1, 700);
-        }
-        let listed = c.entitlements_of(acct("a.near"), Q4_2026, 1_000);
-        assert_eq!(listed.len(), MAX_ENTITLEMENT_QUARTERS as usize);
-        assert_eq!(
-            listed.last().map(|e| e.quarter),
-            Some(Q4_2026 + MAX_ENTITLEMENT_QUARTERS - 1)
-        );
-        assert_eq!(c.entitlements_of(acct("a.near"), Q4_2026, 5).len(), 5);
-    }
-
-    #[test]
-    fn a_page_covers_fewer_quarters_the_more_tokens_an_account_has_staked_but_at_least_one() {
-        assert_eq!(entitlement_page(25, 0), 25);
-        assert_eq!(entitlement_page(25, 10), 25);
-        assert_eq!(entitlement_page(25, 20), 12);
-        assert_eq!(entitlement_page(25, 250), 1);
-        assert_eq!(entitlement_page(25, 1_000), 1);
-        assert_eq!(entitlement_page(3, 20), 3);
-        assert_eq!(entitlement_page(0, 20), 0);
-    }
-
-    #[test]
-    fn an_account_with_twenty_tokens_reads_twelve_quarters_a_page_and_the_next_page_carries_on() {
-        let mut c = council();
-        for t in 0..20 {
-            stake(&mut c, &t.to_string(), "big.near");
-        }
-        set_time(quarter_start(Q4_2026 + 20) + DAY);
-        assert_eq!(c.entitlements_page_quarters(acct("big.near")), 12);
-        assert_eq!(c.entitlements_page_quarters(acct("nobody.near")), 25);
-        let page = |from: u32| -> BTreeSet<u32> {
-            c.entitlements_of(acct("big.near"), from, 25)
-                .iter()
-                .map(|e| e.quarter)
-                .collect()
-        };
-        assert_eq!(page(Q4_2026), (Q4_2026..Q4_2026 + 12).collect());
-        assert_eq!(page(Q4_2026 + 12), (Q4_2026 + 12..=Q4_2026 + 20).collect());
-    }
-
-    #[test]
-    fn an_account_lists_its_entitlements_over_current_and_past_seats() {
-        let mut c = council();
-        stake(&mut c, "1", "a.near");
-        stake(&mut c, "2", "a.near");
-        leave_at(&mut c, "2", "a.near", day(40));
-        set_time(quarter_start(Q1_2027) + DAY);
-        revenue(&mut c, 1, 700);
-        let listed = c.entitlements_of(acct("a.near"), Q4_2026, 50);
-        let ids: Vec<(u32, &str)> = listed.iter().map(|e| (e.quarter, e.token_id.as_str())).collect();
-        assert_eq!(ids, vec![(Q4_2026, "1"), (Q4_2026, "2"), (Q1_2027, "1")]);
-        assert_eq!(c.seats_of(acct("a.near")), vec!["1".to_string()]);
-        assert!(c.entitlements_of(acct("nobody.near"), Q4_2026, 50).is_empty());
-        assert_eq!(c.entitlements_of(acct("a.near"), Q4_2026, 1).len(), 2);
-    }
-
-    #[test]
-    fn reward_totals_track_received_open_final_paid_and_rolled() {
-        let mut c = example_one();
-        let t = c.reward_totals();
-        assert_eq!(
-            (t.total_received.0, t.open_pool.0, t.final_unclaimed.0, t.rolled.0),
-            (1_600_000, 1_600_000, 0, 0)
-        );
-        finalize(&mut c);
-        let t = c.reward_totals();
-        assert_eq!((t.open_pool.0, t.final_unclaimed.0), (0, 1_600_000));
-        claim(&mut c, Q4_2026, "3", "seat3.near");
-        let t = c.reward_totals();
-        assert_eq!((t.total_paid.0, t.final_unclaimed.0), (393_442, 1_206_558));
-    }
-
-    #[test]
-    fn config_names_the_new_settings_and_none_of_the_stream() {
-        let c = council();
-        let config = c.config();
-        for field in ["stream_ns", "stream_remaining", "stream_ends_at"] {
-            assert!(config.get(field).is_none(), "{field}");
-        }
-        assert_eq!(config["markets"], near_sdk::serde_json::json!([MARKET]));
-        assert_eq!(config["nft_contract"], NFT);
-        assert_eq!(config["close_grace_ns"], DEFAULT_CLOSE_GRACE_NS.to_string());
-        assert_eq!(config["state_version"], 5);
-        assert_eq!(config["next_to_finalize"], Q4_2026);
-        assert_eq!(config["last_tick"], START.to_string());
-    }
-
-    // ---- what the owner can set -------------------------------------------------------------------------------
-
-    #[test]
-    fn the_owner_sets_the_grace_period_within_its_bounds() {
-        let mut c = council();
-        act_as(OWNER);
-        c.set_close_grace_ns(U64(MIN_CLOSE_GRACE_NS));
-        assert_eq!(last_event()["event"], "close_grace_set");
-        c.set_close_grace_ns(U64(MAX_CLOSE_GRACE_NS));
-        assert_eq!(c.config()["close_grace_ns"], MAX_CLOSE_GRACE_NS.to_string());
-        for bad in [0, MIN_CLOSE_GRACE_NS - 1, MAX_CLOSE_GRACE_NS + 1] {
-            assert_eq!(
-                refusal(|| c.set_close_grace_ns(U64(bad))),
-                "the grace period must be between 1 and 30 days",
-                "{bad}"
-            );
-        }
     }
 
     #[test]
@@ -3904,60 +2563,12 @@ mod tests {
     }
 
     #[test]
-    fn a_longer_reconcile_wait_refuses_a_reconcile_the_old_wait_would_allow() {
-        let mut c = stuck_claim();
-        act_as(OWNER);
-        c.set_reconcile_wait_ns(U64(2 * DEFAULT_RECONCILE_WAIT_NS));
-        set_time(clock() + RECONCILE_WAIT_NS);
-        assert_eq!(
-            refusal(|| c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false)),
-            "wait 120 minutes after the claim before reconciling"
-        );
-        set_time(clock() + RECONCILE_WAIT_NS);
-        c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false);
-        assert_eq!(last_event()["event"], "claim_reconciled");
-    }
-
-    #[test]
-    fn a_shorter_reconcile_wait_lets_the_owner_decide_sooner() {
-        let mut c = stuck_claim();
-        act_as(OWNER);
-        c.set_reconcile_wait_ns(U64(MIN_RECONCILE_WAIT_NS));
-        set_time(clock() + MIN_RECONCILE_WAIT_NS - 1);
-        assert!(
-            refusal(|| c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false))
-                .starts_with("wait 10 minutes")
-        );
-        set_time(clock() + 1);
-        c.reconcile_claim(Q4_2026, "1".into(), acct("seat1.near"), false);
-    }
-
-    #[test]
-    fn a_new_grace_period_applies_to_quarters_not_final_yet() {
-        let mut c = example_one();
-        act_as(OWNER);
-        c.set_close_grace_ns(U64(MAX_CLOSE_GRACE_NS));
-        set_time(quarter_end(Q4_2026) + DEFAULT_CLOSE_GRACE_NS);
-        assert_eq!(
-            refusal(|| c.finalize_quarter(Q4_2026)),
-            "the quarter cannot be finalized yet"
-        );
-        set_time(quarter_end(Q4_2026) + MAX_CLOSE_GRACE_NS);
-        c.finalize_quarter(Q4_2026);
-    }
-
-    #[test]
-    fn only_the_owner_changes_the_markets_and_the_grace_period() {
+    fn only_the_owner_changes_the_markets() {
         let mut c = council();
         for who in ["a.near", ORACLE, MARKET] {
             act_as(who);
             assert_eq!(refusal(|| c.allow_market(acct("other.near"))), "owner only", "{who}");
             assert_eq!(refusal(|| c.disallow_market(acct(MARKET))), "owner only", "{who}");
-            assert_eq!(
-                refusal(|| c.set_close_grace_ns(U64(MIN_CLOSE_GRACE_NS))),
-                "owner only",
-                "{who}"
-            );
         }
         act_as(OWNER);
         c.allow_market(acct("new-market.near"));
@@ -3971,321 +2582,6 @@ mod tests {
             "revenue comes from an allowed market only",
             "the old market no longer counts"
         );
-    }
-
-    // ---- the money identities ------------------------------------------------------------------------------------
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(80))]
-
-        // Seats stake and leave at random inside one quarter, one sweep lands in it, and the quarter is finalized. Each seat's
-        // share is exactly the pool times its staked time over everyone's, rounded down, and the shares plus the dust are the pool.
-        #[test]
-        fn a_share_is_the_staked_time_over_all_staked_time(
-            first_len in 1u64..12,
-            later in proptest::collection::vec((0u64..80, 1u64..12), 0..7),
-            pool in 1u128..10_000_000_000
-        ) {
-            let spans: Vec<(u64, u64)> = std::iter::once((0, first_len)).chain(later).collect();
-            let mut c = council();
-            let mut events: Vec<(u64, bool, usize)> = vec![];
-            for (i, (from, len)) in spans.iter().enumerate() {
-                events.push((*from * DAY, true, i));
-                events.push(((*from + *len) * DAY, false, i));
-            }
-            events.sort();
-            let mut revenue_sent = false;
-            for (at, join, i) in events {
-                if !revenue_sent && at >= 85 * DAY {
-                    set_time(START + 85 * DAY);
-                    revenue(&mut c, 1, pool);
-                    revenue_sent = true;
-                }
-                let (token, owner) = (i.to_string(), format!("seat{i}.near"));
-                if join {
-                    set_time(START + at);
-                    stake(&mut c, &token, &owner);
-                } else {
-                    leave_at(&mut c, &token, &owner, START + at);
-                }
-            }
-            if !revenue_sent {
-                set_time(START + 85 * DAY);
-                revenue(&mut c, 1, pool);
-            }
-            finalize(&mut c);
-            let total: u128 = spans.iter().filter(|(from, _)| *from == 0).map(|(_, len)| u128::from(*len * DAY)).sum();
-            let mut paid = 0u128;
-            for (i, (_, len)) in spans.iter().enumerate() {
-                let want = if spans[i].0 == 0 { pool * u128::from(*len * DAY) / total } else { 0 };
-                let got = entitlement_of(&c, Q4_2026, &i.to_string(), &format!("seat{i}.near"));
-                prop_assert_eq!(got, want, "seat {}", i);
-                paid += got;
-            }
-            prop_assert!(paid <= pool && pool - paid < spans.len() as u128);
-        }
-
-        // Stakes, leaves, sweeps, draws with forfeits, finalizations and claims in any order and over several quarters.
-        // Every unit received is in an open pool or a final pool, nothing is paid twice, the paid total is what the claims
-        // paid, and once every seat is counted the weights of a finished quarter add up to its seat time less its forfeits.
-        #[test]
-        fn quarters_conserve_every_unit_and_never_pay_a_claim_twice(
-            ops in proptest::collection::vec((0u8..10, 0u32..5, 0u32..3, 1u64..40), 1..90)
-        ) {
-            let mut c = council();
-            let mut staked: BTreeMap<u32, u32> = BTreeMap::new();
-            let mut keys: BTreeSet<(u32, u32)> = BTreeSet::new();
-            let mut paid_keys: BTreeSet<(u32, u32, u32)> = BTreeSet::new();
-            let (mut sent, mut paid, mut sweep, mut case) = (0u128, 0u128, 0u64, 0u64);
-            let mut open_cases: Vec<(u64, Vec<AccountId>)> = vec![];
-            // Seats that asked to unstake and stayed, with the time of the request.
-            let mut stayed: BTreeMap<u32, u64> = BTreeMap::new();
-            for (op, token, owner, amount) in ops {
-                let (name, who) = (token.to_string(), format!("o{owner}.near"));
-                match op {
-                    0 if !staked.contains_key(&token) => {
-                        stake(&mut c, &name, &who);
-                        staked.insert(token, owner);
-                        keys.insert((token, owner));
-                    }
-                    1 => {
-                        sweep += 1;
-                        revenue(&mut c, sweep, u128::from(amount) * 1_000_003);
-                        sent += u128::from(amount) * 1_000_003;
-                    }
-                    2 => {
-                        set_time(now() + amount * DAY);
-                        act_as("keeper.near");
-                        c.advance_quarters(None);
-                    }
-                    3 if staked.len() >= 2 => {
-                        let n = 1 + (amount % 2) as u32;
-                        act_with_seed(ORACLE, amount as u8);
-                        if let Ok(jury) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.draw(U64(case), n, vec![]))) {
-                            open_cases.push((case, jury));
-                            case += 1;
-                        }
-                    }
-                    4 if !open_cases.is_empty() => {
-                        let (id, jury) = open_cases.remove(amount as usize % open_cases.len());
-                        let silent: Vec<AccountId> = jury.iter().enumerate().filter(|(i, _)| (amount >> i) & 1 == 1).map(|(_, a)| a.clone()).collect();
-                        act_as(ORACLE);
-                        c.unlock_case(U64(id), silent);
-                    }
-                    5 if staked.contains_key(&token) && c.stake_of(name.clone()).is_some_and(|s| s.serving.is_none() && s.unlock_requested_at.is_none()) => {
-                        let owner_of = staked[&token];
-                        leave(&mut c, &name, &format!("o{owner_of}.near"));
-                        staked.remove(&token);
-                    }
-                    9 if staked.contains_key(&token) && !stayed.contains_key(&token) && c.stake_of(name.clone()).is_some_and(|s| s.serving.is_none()) => {
-                        let owner_of = staked[&token];
-                        act_paid(&format!("o{owner_of}.near"));
-                        c.request_unstake(name.clone());
-                        stayed.insert(token, now());
-                    }
-                    6 => {
-                        let q = c.next_to_finalize;
-                        let end = quarter_end(q);
-                        let no_early_jury = c.open_juries.keys().next().is_none_or(|drawn| *drawn >= end);
-                        if now() >= end + c.close_grace_ns && (no_early_jury || now() >= end + MAX_CLOSE_GRACE_NS) {
-                            act_as("keeper.near");
-                            c.advance_quarters(None);
-                            if c.last_tick >= quarter_end(q) {
-                                c.finalize_quarter(q);
-                            }
-                        }
-                    }
-                    7 | 8 => {
-                        let candidates: Vec<(u32, u32, u32)> = (c.next_to_finalize.saturating_sub(4)..c.next_to_finalize)
-                            .flat_map(|q| keys.iter().map(move |(t, o)| (q, *t, *o)))
-                            .collect();
-                        if !candidates.is_empty() {
-                            let (q, t, o) = candidates[amount as usize % candidates.len()];
-                            let view = c.get_entitlement(q, t.to_string(), acct(&format!("o{o}.near")));
-                            if view.as_ref().is_some_and(|e| e.status == EntitlementStatus::Claimable && e.amount.0 > 0) {
-                                let got = claim_without_reply(&mut c, q, &t.to_string(), &format!("o{o}.near"));
-                                let at = requested_at(&c, q, &t.to_string(), &format!("o{o}.near"));
-                                act_as("council.near");
-                                if op == 7 {
-                                    c.on_claim_paid(q, t.to_string(), acct(&format!("o{o}.near")), at, Ok(()));
-                                    prop_assert!(paid_keys.insert((q, t, o)), "claim paid twice");
-                                    paid += got;
-                                } else {
-                                    c.on_claim_paid(q, t.to_string(), acct(&format!("o{o}.near")), at, Err(PromiseError::Failed));
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                prop_assert_eq!(c.total_received, sent);
-                prop_assert_eq!(c.open_pool + c.final_pool, sent, "a unit is in no pool or in two");
-                prop_assert_eq!(c.total_paid, paid);
-                prop_assert!(c.final_pool >= c.total_paid + c.pending_total);
-            }
-            // Count every seat and every quarter, then compare the weights with the seat time.
-            act_as("keeper.near");
-            while c.last_tick < now() {
-                c.advance_quarters(None);
-            }
-            let tokens: Vec<TokenId> = staked.keys().map(|t| t.to_string()).collect();
-            for t in tokens {
-                let until = counted_until(&c.stake_of(t.clone()).unwrap(), now());
-                while c.stake_of(t.clone()).unwrap().booked_to.0 < until {
-                    c.book_seat_time(t.clone(), None);
-                }
-            }
-            for (token, requested) in &stayed {
-                prop_assert_eq!(c.earning as usize, staked.len() - stayed.len());
-                for q in quarter_containing(*requested) + 1..=quarter_containing(now()) {
-                    let owner = format!("o{}.near", staked[token]);
-                    let counted = c.seat_weight.get(&(q, token.to_string(), acct(&owner))).copied().unwrap_or(0);
-                    prop_assert_eq!(counted, 0, "a seat that asked to leave kept earning in quarter {}", q);
-                }
-            }
-            for q in Q4_2026..quarter_containing(now()) {
-                let book = c.book(q);
-                let weights: u128 = keys
-                    .iter()
-                    .flat_map(|(t, _)| (0..3).map(move |o| (*t, o)))
-                    .collect::<BTreeSet<_>>()
-                    .iter()
-                    .map(|(t, o)| c.booked_weight(&(q, t.to_string(), acct(&format!("o{o}.near")))))
-                    .sum();
-                prop_assert_eq!(weights, book.seat_ns - book.forfeit_ns, "weights of quarter {} differ from its seat time", q);
-                if book.finalized && book.weight_total > 0 {
-                    let shares: u128 = (0..5u32)
-                        .flat_map(|t| (0..3u32).map(move |o| (t, o)))
-                        .map(|(t, o)| entitlement(book.pool, c.booked_weight(&(q, t.to_string(), acct(&format!("o{o}.near")))), book.weight_total))
-                        .sum();
-                    prop_assert!(shares <= book.pool);
-                    prop_assert!(book.pool - shares < 15, "more than a unit a seat was left over");
-                }
-            }
-        }
-    }
-
-    // ---- a seat that asked to leave, and a jury still open when a quarter closes ----------------------------------
-
-    #[test]
-    fn a_seat_that_asked_to_leave_earns_only_up_to_its_request() {
-        let mut c = council();
-        stake(&mut c, "1", "a.near");
-        stake(&mut c, "2", "b.near");
-        set_time(day(10));
-        act_paid("a.near");
-        c.request_unstake("1".into());
-        assert_eq!(c.earning, 1);
-        set_time(day(40));
-        revenue(&mut c, 1, 1_020_000);
-        finalize(&mut c);
-        // Seat 1 never unstakes. It has 10 days of 102, seat 2 has all 92.
-        assert_eq!(c.book(Q4_2026).seat_ns, 102 * u128::from(DAY));
-        assert_eq!(entitlement_of(&c, Q4_2026, "1", "a.near"), 100_000);
-        assert_eq!(entitlement_of(&c, Q4_2026, "2", "b.near"), 920_000);
-        assert_eq!(claim(&mut c, Q4_2026, "1", "a.near"), 100_000);
-        assert_eq!(claim(&mut c, Q4_2026, "2", "b.near"), 920_000);
-    }
-
-    #[test]
-    fn a_leaving_seat_is_paid_nothing_in_the_quarters_after_its_request() {
-        let mut c = council();
-        for (token, owner) in [("1", "a.near"), ("2", "b.near"), ("3", "c.near")] {
-            stake(&mut c, token, owner);
-        }
-        act_paid("a.near");
-        c.request_unstake("1".into());
-        // Three seats are staked and one is leaving, so a jury of three cannot be drawn.
-        act_as(ORACLE);
-        assert_eq!(
-            refusal(|| drop(c.draw(U64(1), 3, vec![]))),
-            "not enough seat holders to draw a jury: 2 eligible, 3 needed"
-        );
-        set_time(quarter_start(Q1_2027) + DAY);
-        revenue(&mut c, 1, 920_000);
-        set_time(quarter_start(Q2_2027) + DAY);
-        finalize(&mut c);
-        finalize(&mut c);
-        assert_eq!(entitlement_of(&c, Q1_2027, "1", "a.near"), 0);
-        assert_eq!(entitlement_of(&c, Q1_2027, "2", "b.near"), 460_000);
-        assert_eq!(entitlement_of(&c, Q1_2027, "3", "c.near"), 460_000);
-        act_paid("a.near");
-        assert_eq!(
-            refusal(|| drop(c.claim_quarter(Q1_2027, "1".into()))),
-            "nothing to claim"
-        );
-    }
-
-    const CASE_DRAWN_BEFORE_END: u64 = 3 * DAY;
-
-    // A one day grace period: a juror drawn three days before the quarter ends whose case is
-    // still open after the grace.
-    fn a_juror_drawn_before_the_quarter_ends() -> (CouncilContract, AccountId) {
-        let mut c = council();
-        for (token, owner) in [("1", "a.near"), ("2", "b.near"), ("3", "c.near")] {
-            stake(&mut c, token, owner);
-        }
-        act_as(OWNER);
-        c.set_close_grace_ns(U64(MIN_CLOSE_GRACE_NS));
-        set_time(quarter_end(Q4_2026) - CASE_DRAWN_BEFORE_END);
-        act_with_seed(ORACLE, 1);
-        let juror = c.draw(U64(1), 1, vec![]).remove(0);
-        revenue(&mut c, 1, 900_000);
-        (c, juror)
-    }
-
-    #[test]
-    fn a_quarter_waits_for_a_jury_drawn_before_its_end() {
-        let (mut c, juror) = a_juror_drawn_before_the_quarter_ends();
-        set_time(quarter_end(Q4_2026) + MIN_CLOSE_GRACE_NS);
-        assert_eq!(
-            refusal(|| c.finalize_quarter(Q4_2026)),
-            "a jury drawn in this quarter is still open"
-        );
-        // The case ends with the juror silent: the forfeit still lands in the quarter and then it can be finalized.
-        act_as(ORACLE);
-        c.unlock_case(U64(1), vec![juror]);
-        assert_eq!(c.book(Q4_2026).forfeit_ns, u128::from(CASE_DRAWN_BEFORE_END));
-        c.finalize_quarter(Q4_2026);
-        assert_eq!(c.next_to_finalize, Q1_2027);
-        assert!(c.open_juries.is_empty());
-    }
-
-    #[test]
-    fn a_lost_release_cannot_hold_a_quarter_past_the_longest_grace() {
-        let (mut c, _) = a_juror_drawn_before_the_quarter_ends();
-        set_time(quarter_end(Q4_2026) + MAX_CLOSE_GRACE_NS - 1);
-        assert_eq!(
-            refusal(|| c.finalize_quarter(Q4_2026)),
-            "a jury drawn in this quarter is still open"
-        );
-        set_time(quarter_end(Q4_2026) + MAX_CLOSE_GRACE_NS);
-        c.finalize_quarter(Q4_2026);
-        assert_eq!(c.next_to_finalize, Q1_2027);
-    }
-
-    #[test]
-    fn a_jury_drawn_after_the_quarter_ends_does_not_hold_it() {
-        let (mut c, _) = a_juror_drawn_before_the_quarter_ends();
-        act_as(ORACLE);
-        c.unlock_case(U64(1), vec![]);
-        set_time(quarter_end(Q4_2026) + 1);
-        act_with_seed(ORACLE, 2);
-        c.draw(U64(2), 1, vec![]);
-        set_time(quarter_end(Q4_2026) + MIN_CLOSE_GRACE_NS);
-        c.finalize_quarter(Q4_2026);
-        assert_eq!(c.next_to_finalize, Q1_2027);
-    }
-
-    #[test]
-    fn releasing_a_case_twice_closes_it_once() {
-        let (mut c, _) = a_juror_drawn_before_the_quarter_ends();
-        act_with_seed(ORACLE, 3);
-        c.draw(U64(2), 1, vec![]);
-        act_as(ORACLE);
-        c.unlock_case(U64(1), vec![]);
-        c.unlock_case(U64(1), vec![]);
-        assert_eq!(c.open_juries.values().sum::<u32>(), 1);
     }
 
     // ---- attacks: economics -------------------------------------------------------------------------
@@ -4431,7 +2727,7 @@ mod tests {
             stake(&mut c, &i.to_string(), &format!("seat{i}.near"));
         }
         act_at("seat0.near", START + 1);
-        c.request_unstake("0".into());
+        c.request_unstake("0".into(), true);
         // Three of the four seats are drawn each time, so one draw could miss the seat by luck. Twenty cannot.
         act_as(ORACLE);
         for case in 0..20u64 {
@@ -4454,7 +2750,7 @@ mod tests {
             stake(&mut c, &i.to_string(), &format!("seat{i}.near"));
         }
         act_at("seat0.near", START + 1);
-        c.request_unstake("0".into());
+        c.request_unstake("0".into(), true);
         act_as(ORACLE);
         c.draw(U64(1), 4, vec![]);
     }
@@ -4465,7 +2761,7 @@ mod tests {
         let mut c = council();
         stake(&mut c, "t1", "a.near");
         act_at("a.near", START + 1);
-        c.request_unstake("t1".into());
+        c.request_unstake("t1".into(), true);
         act_at("a.near", START + 1 + COOLDOWN_NS - 1);
         let _ = c.unstake("t1".into());
     }
@@ -4475,7 +2771,7 @@ mod tests {
         let mut c = council();
         stake(&mut c, "t1", "a.near");
         act_at("a.near", START + 1);
-        c.request_unstake("t1".into());
+        c.request_unstake("t1".into(), true);
         act_as(OWNER);
         c.set_cooldown_ns(U64(3 * COOLDOWN_NS));
         assert_eq!(c.config()["cooldown_ns"], (3 * COOLDOWN_NS).to_string());
@@ -4633,7 +2929,7 @@ mod tests {
                 } else if !add {
                     if let Some(owner) = model.remove(&token) {
                         act_at(owner.as_str(), t);
-                        c.request_unstake(token.clone());
+                        c.request_unstake(token.clone(), true);
                         t += COOLDOWN_NS;
                         act_at(owner.as_str(), t);
                         let _ = c.unstake(token);
@@ -5260,23 +3556,1780 @@ mod tests {
         );
     }
 
-    #[test]
-    fn advancing_quarters_and_booking_seat_time_log_how_far_they_went() {
+    fn day(n: u64) -> u64 {
+        START + n * DAY
+    }
+
+    // 2026 Q4 runs 92 days from START and 2027 Q1 the next 90.
+    const Q4_2026: u32 = 8_107;
+    const Q1_2027: u32 = 8_108;
+    const Q4_DAYS: u64 = 92;
+    const Q1_DAYS: u64 = 90;
+
+    // Claims for the tokens and reports the transfer as done. Returns what was paid.
+    fn claim(c: &mut CouncilContract, owner: &str, tokens: &[&str]) -> u128 {
+        let (id, amount) = claim_without_reply(c, owner, tokens);
+        act_as("council.near");
+        c.on_claim_paid(U64(id), Ok(()));
+        amount
+    }
+
+    // Claims and leaves the transfer's result unreported. Returns the claim's id and what it reserved.
+    fn claim_without_reply(c: &mut CouncilContract, owner: &str, tokens: &[&str]) -> (u64, u128) {
+        act_paid(owner);
+        let _ = c.claim(tokens.iter().map(|t| t.to_string()).collect());
+        let requested = last_event();
+        assert_eq!(requested["event"], "claim_requested");
+        let data = &requested["data"];
+        (
+            data["id"].as_str().unwrap().parse().unwrap(),
+            data["amount"].as_str().unwrap().parse().unwrap(),
+        )
+    }
+
+    // What the account can claim now: finished quarters only.
+    fn claimable(c: &CouncilContract, owner: &str) -> u128 {
+        c.claimable_of(acct(owner)).0
+    }
+
+    // Everything the account has earned and not been paid, whether a claim can reach it yet or not.
+    fn earned(c: &CouncilContract, owner: &str) -> u128 {
+        claimable(c, owner) + c.in_progress_of(acct(owner)).0
+    }
+
+    // Seats staked and not asking to leave: the ones earning now and the ones waiting for their first day.
+    fn earning(c: &CouncilContract) -> u32 {
+        c.staked
+            .iter()
+            .filter(|t| c.stakes[*t].unlock_requested_at.is_none())
+            .count() as u32
+    }
+
+    fn advance(c: &mut CouncilContract) -> u32 {
+        act_as("anyone.near");
+        c.advance_days(None)
+    }
+
+    // Moves the clock to the first day of 2027 Q1 and closes 2026 Q4.
+    fn close_quarter(c: &mut CouncilContract) {
+        set_time(day(Q4_DAYS));
+        advance(c);
+        assert_eq!(c.last_closed_quarter, Q4_2026);
+    }
+
+    fn request(c: &mut CouncilContract, token: &str, owner: &str) {
+        act_paid(owner);
+        c.request_unstake(token.into(), true);
+    }
+
+    // Seats 1 and 2 of a.near and b.near from day 0, and 1,000 on day 1, half each.
+    fn two_seats_paid() -> CouncilContract {
         let mut c = council();
         stake(&mut c, "1", "a.near");
-        set_time(quarter_start(Q1_2027) + DAY);
+        stake(&mut c, "2", "b.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 1_000);
+        c
+    }
+
+    // The same, with the quarter closed, so each holds 500 a claim can reach.
+    fn two_seats_closed() -> CouncilContract {
+        let mut c = two_seats_paid();
+        close_quarter(&mut c);
+        c
+    }
+
+    // ---- pay by arrival ----------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_seat_staked_on_a_day_earns_nothing_from_that_day_and_its_full_share_from_the_next() {
+        let mut c = council();
+        stake(&mut c, "old", "old.near");
+        set_time(day(1));
+        stake(&mut c, "new", "new.near");
+        set_time(day(1) + DAY / 2);
+        revenue(&mut c, 1, 1_000);
+        assert_eq!((earned(&c, "old.near"), earned(&c, "new.near")), (1_000, 0));
+        set_time(day(2));
+        revenue(&mut c, 2, 1_000);
+        assert_eq!((earned(&c, "old.near"), earned(&c, "new.near")), (1_500, 500));
+    }
+
+    #[test]
+    fn a_payment_that_came_before_a_seat_started_is_never_shared_with_it() {
+        let mut c = council();
+        stake(&mut c, "old", "old.near");
+        set_time(day(3));
+        revenue(&mut c, 1, 600);
+        set_time(day(5));
+        stake(&mut c, "new", "new.near");
+        set_time(day(5) + 3_600 * SECOND);
+        revenue(&mut c, 2, 400);
+        set_time(day(9));
+        advance(&mut c);
+        let seat = c.seat_earnings("new".into()).unwrap();
+        assert_eq!(
+            (seat.state, seat.earned_closed.0, seat.earned_in_progress.0),
+            (SeatState::Earning, 0, 0)
+        );
+        revenue(&mut c, 3, 100);
+        assert_eq!((earned(&c, "old.near"), earned(&c, "new.near")), (1_050, 50));
+    }
+
+    #[test]
+    fn two_payments_are_split_by_whoever_is_earning_at_each() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        set_time(day(2));
+        stake(&mut c, "3", "c.near");
+        revenue(&mut c, 1, 900);
+        set_time(day(4));
+        revenue(&mut c, 2, 900);
+        assert_eq!(["a.near", "b.near", "c.near"].map(|o| earned(&c, o)), [750, 750, 300]);
+    }
+
+    #[test]
+    fn a_payment_with_no_earning_seat_is_carried_and_shared_at_the_next() {
+        let mut c = council();
+        revenue(&mut c, 1, 500);
+        let carried = last_event()["data"].clone();
+        assert_eq!(
+            (
+                carried["seats"].as_u64(),
+                carried["carried"].as_bool(),
+                carried["per_seat"].is_null()
+            ),
+            (Some(0), Some(true), true)
+        );
+        assert_eq!(c.reward_totals().carry.0, 500);
+        stake(&mut c, "1", "a.near");
+        set_time(day(1));
+        revenue(&mut c, 2, 100);
+        let shared = last_event()["data"].clone();
+        assert_eq!(
+            (shared["per_seat"].as_str(), shared["carried"].as_bool()),
+            (Some("600"), Some(false))
+        );
+        assert_eq!((earned(&c, "a.near"), c.reward_totals().carry.0), (600, 0));
+    }
+
+    #[test]
+    fn rounding_leaves_the_remainder_in_the_contract_and_the_next_split_uses_it() {
+        let mut c = council();
+        for i in 0..3 {
+            stake(&mut c, &i.to_string(), &format!("s{i}.near"));
+        }
+        set_time(day(1));
+        revenue(&mut c, 1, 100);
+        let owners = ["s0.near", "s1.near", "s2.near"];
+        assert_eq!(owners.map(|o| earned(&c, o)), [33, 33, 33]);
+        revenue(&mut c, 2, 2);
+        assert_eq!(
+            owners.map(|o| earned(&c, o)),
+            [34, 34, 34],
+            "the two thirds left over add up"
+        );
+        assert_eq!(c.carry_scaled, 0);
+    }
+
+    // ---- quarters ----------------------------------------------------------------------------------------------
+
+    #[test]
+    fn advance_days_closes_a_quarter_and_stores_its_snapshot() {
+        let mut c = two_seats_paid();
+        set_time(day(Q4_DAYS - 1));
+        advance(&mut c);
+        assert_eq!(c.last_closed_quarter, Q4_2026 - 1, "the quarter is not over yet");
+        set_time(day(Q4_DAYS));
+        advance(&mut c);
+        assert_eq!(c.last_closed_quarter, Q4_2026);
+        let closed = events_named("quarter_closed");
+        assert_eq!(
+            closed,
+            [
+                near_sdk::serde_json::json!({ "quarter": Q4_2026, "acc": (500 * ACC_SCALE).to_string(), "cut_shared": "0", "carried": "0" })
+            ]
+        );
+        let snapshots = c.quarter_snapshots(Some(Q4_2026), None);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!((snapshots[0].quarter, snapshots[0].acc.0), (Q4_2026, 500 * ACC_SCALE));
+        assert_eq!(c.quarter_info().last_closed_quarter, Q4_2026);
+    }
+
+    #[test]
+    fn a_seat_starting_on_the_first_day_of_a_quarter_does_not_share_the_closing_cut_pool() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "l.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 1_000);
+        set_time(day(10));
+        request(&mut c, "2", "l.near");
+        set_time(day(Q4_DAYS - 1));
+        stake(&mut c, "3", "b.near");
+        assert_eq!(c.stake_of("3".into()).unwrap().earn_from_day.0, START / DAY + Q4_DAYS);
+        set_time(day(Q4_DAYS));
+        advance(&mut c);
+        assert_eq!(
+            events_named("quarter_closed")[0]["cut_shared"],
+            "250",
+            "the leaver's cut goes to the one seat earning"
+        );
+        assert_eq!((claimable(&c, "a.near"), claimable(&c, "b.near")), (750, 0));
+        assert_eq!(
+            c.seat_earnings("3".into()).unwrap().start_acc.0,
+            c.quarter_acc.get(&Q4_2026).copied().unwrap(),
+            "it starts from the index after the pool"
+        );
+        revenue(&mut c, 2, 600);
+        assert_eq!((earned(&c, "a.near"), earned(&c, "b.near")), (1_050, 300));
+    }
+
+    #[test]
+    fn the_cut_pool_is_split_among_the_seats_earning_at_the_boundary() {
+        let mut c = council();
+        for (token, owner) in [("1", "a.near"), ("2", "b.near"), ("3", "c.near"), ("4", "l.near")] {
+            stake(&mut c, token, owner);
+        }
+        set_time(day(1));
+        revenue(&mut c, 1, 1_200);
+        set_time(day(2));
+        request(&mut c, "4", "l.near");
+        assert_eq!(c.reward_totals().cut_pool.0, 150);
+        close_quarter(&mut c);
+        assert_eq!(c.reward_totals().cut_pool.0, 0);
+        assert_eq!(
+            ["a.near", "b.near", "c.near", "l.near"].map(|o| claimable(&c, o)),
+            [350, 350, 350, 150]
+        );
+    }
+
+    #[test]
+    fn the_cut_pool_is_carried_when_nobody_is_earning_at_the_boundary() {
+        let mut c = council();
+        stake(&mut c, "1", "l.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 1_000);
+        set_time(day(5));
+        request(&mut c, "1", "l.near");
+        close_quarter(&mut c);
+        let data = &events_named("quarter_closed")[0];
+        assert_eq!(
+            (data["cut_shared"].as_str(), data["carried"].as_str()),
+            (Some("0"), Some("500"))
+        );
+        let totals = c.reward_totals();
+        assert_eq!((totals.cut_pool.0, totals.carry.0), (0, 500));
+        stake(&mut c, "2", "b.near");
+        set_time(day(Q4_DAYS + 2));
+        revenue(&mut c, 2, 100);
+        assert_eq!(
+            earned(&c, "b.near"),
+            600,
+            "the carried pool is shared at the next payment"
+        );
+    }
+
+    #[test]
+    fn a_quarter_nobody_claims_stays_claimable_two_quarters_later() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 1_000);
+        set_time(day(70));
+        advance(&mut c);
+        set_time(day(100));
+        revenue(&mut c, 2, 600);
+        set_time(day(200));
+        assert_eq!(advance(&mut c), 100);
+        assert_eq!(c.last_closed_quarter, Q1_2027);
+        assert_eq!(
+            c.quarter_snapshots(None, None).len(),
+            3,
+            "the initial one and the two closed"
+        );
+        assert_eq!(claim(&mut c, "a.near", &["1"]), 1_600);
+    }
+
+    #[test]
+    fn a_claim_in_the_middle_of_a_quarter_pays_the_closed_quarters_only() {
+        let mut c = two_seats_closed();
+        set_time(day(Q4_DAYS + 1));
+        revenue(&mut c, 2, 500);
+        assert_eq!(
+            (claimable(&c, "a.near"), c.in_progress_of(acct("a.near")).0),
+            (500, 250)
+        );
+        assert_eq!(claim(&mut c, "a.near", &["1"]), 500);
+        assert_eq!((claimable(&c, "a.near"), c.in_progress_of(acct("a.near")).0), (0, 250));
+        close_quarter_two(&mut c);
+        assert_eq!(
+            claim(&mut c, "a.near", &["1"]),
+            250,
+            "the same claim after the quarter closes includes it"
+        );
+    }
+
+    // Closes 2027 Q1, the quarter after the one close_quarter closes.
+    fn close_quarter_two(c: &mut CouncilContract) {
+        set_time(day(Q4_DAYS + Q1_DAYS));
+        advance(c);
+        assert_eq!(c.last_closed_quarter, Q1_2027);
+    }
+
+    #[test]
+    fn the_kept_half_of_a_leaver_cannot_be_claimed_until_the_quarter_closes() {
+        let mut c = two_seats_paid();
+        set_time(day(2));
+        request(&mut c, "1", "a.near");
+        assert_eq!((claimable(&c, "a.near"), c.in_progress_of(acct("a.near")).0), (0, 250));
+        act_paid("a.near");
+        assert_eq!(refusal(|| drop(c.claim(vec![]))), "nothing to claim");
+        close_quarter(&mut c);
+        assert_eq!((claimable(&c, "a.near"), c.in_progress_of(acct("a.near")).0), (250, 0));
+        assert_eq!(
+            claim(&mut c, "a.near", &[]),
+            250,
+            "an empty list pays a holder who left"
+        );
+        assert_eq!(c.reward_totals().pending_total_slots.0, 0);
+    }
+
+    // ---- leaving -----------------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_request_to_leave_is_refused_without_accepts_cut_and_for_a_seat_that_is_not_the_callers() {
+        let mut c = two_seats_paid();
+        act_paid("a.near");
+        assert_eq!(
+            refusal(|| c.request_unstake("1".into(), false)),
+            "leaving before the quarter ends costs 50% of this quarter's earnings: pass accepts_cut true"
+        );
+        assert!(c.stake_of("1".into()).unwrap().unlock_requested_at.is_none());
+        act_paid("b.near");
+        assert_eq!(refusal(|| c.request_unstake("1".into(), true)), "not your seat");
+        act_paid("a.near");
+        assert_eq!(refusal(|| c.request_unstake("9".into(), true)), "not staked");
+        c.request_unstake("1".into(), true);
+        assert_eq!(
+            refusal(|| c.request_unstake("1".into(), true)),
+            "unstake already requested"
+        );
+    }
+
+    #[test]
+    fn a_leaver_loses_half_of_the_running_quarter_and_nothing_from_earlier_ones() {
+        let mut c = two_seats_closed();
+        set_time(day(Q4_DAYS + 1));
+        revenue(&mut c, 2, 999);
+        request(&mut c, "1", "a.near");
+        assert_eq!(
+            c.accrued.get(&acct("a.near")).copied(),
+            Some(500),
+            "the finished quarter is paid in full"
+        );
+        let slot = c.pending.get(&acct("a.near")).unwrap().clone().into_inner();
+        assert_eq!((slot.quarter, slot.amount), (Q1_2027, 250));
+        assert_eq!(c.reward_totals().cut_pool.0, 249);
+        let cut = &events_named("seat_cut")[0];
+        assert_eq!(
+            (
+                cut["quarter"].as_u64(),
+                cut["earned"].as_str(),
+                cut["cut"].as_str(),
+                cut["kept"].as_str()
+            ),
+            (Some(u64::from(Q1_2027)), Some("499"), Some("249"), Some("250")),
+            "an odd amount rounds the cut down, so cut plus kept is what was earned"
+        );
+    }
+
+    #[test]
+    fn a_second_leave_in_the_same_quarter_adds_to_the_same_slot() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "a.near");
+        stake(&mut c, "3", "b.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 900);
+        set_time(day(2));
+        request(&mut c, "1", "a.near");
+        request(&mut c, "2", "a.near");
+        let slot = c.pending.get(&acct("a.near")).unwrap().clone().into_inner();
+        assert_eq!((slot.quarter, slot.amount, c.pending_total_slots), (Q4_2026, 300, 300));
+        assert_eq!(c.reward_totals().cut_pool.0, 300);
+    }
+
+    #[test]
+    fn an_older_closed_slot_is_paid_into_the_balance_before_a_new_one_is_written() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "a.near");
+        stake(&mut c, "3", "b.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 900);
+        set_time(day(2));
+        request(&mut c, "1", "a.near");
+        close_quarter(&mut c);
+        set_time(day(Q4_DAYS + 1));
+        revenue(&mut c, 2, 300);
+        request(&mut c, "2", "a.near");
+        assert_eq!(
+            c.accrued.get(&acct("a.near")).copied(),
+            Some(375 + 150),
+            "seat 2's finished quarter (300 and 75 of the cut) and the old slot (150) are in the balance"
+        );
+        let slot = c.pending.get(&acct("a.near")).unwrap().clone().into_inner();
+        assert_eq!(
+            (slot.quarter, slot.amount),
+            (Q1_2027, 75),
+            "150 earned this quarter, half kept"
+        );
+    }
+
+    #[test]
+    fn a_seat_that_never_started_loses_nothing_and_earns_nothing() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 100);
+        stake(&mut c, "3", "c.near");
+        request(&mut c, "3", "c.near");
+        let cut = &events_named("seat_cut")[0];
+        assert_eq!(
+            (cut["earned"].as_str(), cut["cut"].as_str(), cut["kept"].as_str()),
+            (Some("0"), Some("0"), Some("0"))
+        );
+        assert!(c.joins_on.get(&(START / DAY + 2)).is_none(), "its start day is gone");
+        assert!(c.pending.get(&acct("c.near")).is_none());
+        set_time(day(2));
+        revenue(&mut c, 2, 100);
+        assert_eq!(earned(&c, "c.near"), 0);
+        assert_eq!((c.active, earning(&c)), (2, 2));
+        assert_eq!(c.reward_totals().cut_pool.0, 0);
+    }
+
+    #[test]
+    fn a_leavers_amounts_are_the_same_whether_the_snapshot_is_taken_on_time_or_days_late() {
+        let run = |on_time: bool| {
+            let mut c = two_seats_paid();
+            set_time(day(70));
+            advance(&mut c);
+            set_time(day(Q4_DAYS - 1));
+            revenue(&mut c, 2, 600);
+            set_time(day(Q4_DAYS));
+            if on_time {
+                advance(&mut c);
+            }
+            set_time(day(Q4_DAYS + 8));
+            request(&mut c, "1", "a.near");
+            let totals = c.reward_totals();
+            (
+                c.accrued.get(&acct("a.near")).copied(),
+                c.pending.get(&acct("a.near")).is_none(),
+                totals.cut_pool.0,
+                c.quarter_acc.get(&Q4_2026).copied(),
+            )
+        };
+        assert_eq!(run(true), run(false));
+        assert_eq!(
+            run(false).0,
+            Some(800),
+            "all of the finished quarter, though its snapshot came late"
+        );
+    }
+
+    #[test]
+    fn an_unstake_request_settles_the_seat_and_it_stops_earning() {
+        let mut c = two_seats_paid();
+        set_time(day(2));
+        request(&mut c, "1", "a.near");
+        assert_eq!((c.active, c.pending_total_slots, c.cut_pool), (1, 250, 250));
+        set_time(day(3));
+        revenue(&mut c, 2, 1_000);
+        assert_eq!((earned(&c, "a.near"), earned(&c, "b.near")), (250, 1_500));
+        let leaving = c.seat_earnings("1".into()).unwrap();
+        assert_eq!(
+            (leaving.state, leaving.earned_closed.0, leaving.earned_in_progress.0),
+            (SeatState::Leaving, 0, 0)
+        );
+        close_quarter(&mut c);
+        assert_eq!((claimable(&c, "a.near"), claimable(&c, "b.near")), (250, 1_750));
+    }
+
+    #[test]
+    fn a_seat_that_asks_to_leave_on_the_day_it_would_start_earns_only_what_came_that_day() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        set_time(day(1));
+        request(&mut c, "1", "a.near");
+        assert_eq!(
+            (c.active, c.last_day),
+            (1, START / DAY + 1),
+            "it had started, so it leaves the count"
+        );
+        revenue(&mut c, 1, 800);
+        assert_eq!((earned(&c, "a.near"), earned(&c, "b.near")), (0, 800));
+
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 800);
+        request(&mut c, "1", "a.near");
+        set_time(day(1) + DAY / 2);
+        revenue(&mut c, 2, 800);
+        assert_eq!((earned(&c, "a.near"), earned(&c, "b.near")), (200, 1_200));
+    }
+
+    #[test]
+    fn a_seat_leaving_mid_day_does_not_change_the_other_shares_of_earlier_payments() {
+        let mut c = council();
+        for (token, owner) in [("1", "a.near"), ("2", "b.near"), ("3", "c.near")] {
+            stake(&mut c, token, owner);
+        }
+        set_time(day(1) + DAY / 2);
+        revenue(&mut c, 1, 900);
+        set_time(day(1) + DAY / 2 + 3_600 * SECOND);
+        request(&mut c, "3", "c.near");
+        set_time(day(1) + DAY - 1);
+        revenue(&mut c, 2, 600);
+        assert_eq!(["a.near", "b.near", "c.near"].map(|o| earned(&c, o)), [600, 600, 150]);
+    }
+
+    #[test]
+    fn a_token_unstaked_and_restaked_the_same_day_starts_again_the_next_day() {
+        let mut c = two_seats_paid();
+        set_time(day(2));
+        leave(&mut c, "1", "a.near");
+        assert!(c.stake_of("1".into()).is_none());
+        stake(&mut c, "1", "c.near");
+        assert_eq!(c.stake_of("1".into()).unwrap().earn_from_day.0, START / DAY + 3);
+        set_time(day(2) + DAY / 2);
+        revenue(&mut c, 2, 1_000);
+        set_time(day(3));
+        revenue(&mut c, 3, 1_000);
+        assert_eq!(["a.near", "b.near", "c.near"].map(|o| earned(&c, o)), [250, 2_000, 500]);
+        close_quarter(&mut c);
+        assert_eq!(
+            claim(&mut c, "a.near", &[]),
+            250,
+            "an account with no seat left claims its kept half"
+        );
+    }
+
+    #[test]
+    fn a_failed_unstake_restores_the_seat_and_it_does_not_earn_again() {
+        let mut c = two_seats_paid();
+        set_time(day(2));
+        request(&mut c, "1", "a.near");
+        let before = c.stake_of("1".into()).unwrap();
+        act_at("a.near", day(2) + COOLDOWN_NS);
+        let _ = c.unstake("1".into());
+        assert_eq!(c.seat_count(), 1);
+        set_time(day(2) + COOLDOWN_NS + 3_600 * SECOND);
+        act_as("council.near");
+        c.on_unstaked("1".into(), before, Err(PromiseError::Failed));
+        assert_eq!(last_event()["event"], "unstake_failed");
+        assert_eq!((c.seat_count(), c.active), (2, 1));
+        assert_eq!(c.seats_of(acct("a.near")), vec!["1".to_string()]);
+        set_time(day(3));
+        revenue(&mut c, 2, 1_000);
+        close_quarter(&mut c);
+        assert_eq!(
+            (claimable(&c, "a.near"), claimable(&c, "b.near")),
+            (250, 1_750),
+            "the restored seat earns nothing and a claim cannot settle it again"
+        );
+        assert_eq!(claim(&mut c, "a.near", &["1"]), 250);
+    }
+
+    // ---- self-healing ------------------------------------------------------------------------------------------
+
+    // One seat from day 0 with a sweep on day 1, then the clock on day 95: 2026 Q4 is over and nobody has advanced.
+    fn overdue() -> CouncilContract {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 1_000);
+        set_time(day(95));
+        assert_eq!(c.last_closed_quarter, Q4_2026 - 1);
+        c
+    }
+
+    #[test]
+    fn revenue_request_unstake_and_claim_run_the_overdue_snapshot_themselves() {
+        let mut c = overdue();
+        set_time(day(80));
+        advance(&mut c);
+        set_time(day(95));
+        revenue(&mut c, 2, 100);
+        assert_eq!(c.last_closed_quarter, Q4_2026);
+        assert_eq!(events_named("quarter_closed").len(), 1);
+        let mut c = overdue();
+        request(&mut c, "1", "a.near");
+        assert_eq!(c.last_closed_quarter, Q4_2026);
+        assert_eq!(c.accrued.get(&acct("a.near")).copied(), Some(500));
+        let mut c = overdue();
+        assert_eq!(claim(&mut c, "a.near", &["1"]), 500);
+        assert_eq!(c.last_closed_quarter, Q4_2026);
+    }
+
+    // The mock chain keeps what a refused call changed, so each refusal gets a council of its own.
+    fn a_day_too_far_behind() -> CouncilContract {
+        let c = two_seats_paid();
+        set_time(day(1) + (u64::from(MAX_DAY_STEPS) + 1) * DAY);
+        c
+    }
+
+    #[test]
+    fn a_claim_and_an_unstake_refuse_only_when_the_council_is_more_than_a_hundred_days_behind() {
+        let mut c = two_seats_paid();
+        set_time(day(1) + u64::from(MAX_DAY_STEPS) * DAY);
+        request(&mut c, "1", "a.near");
+        assert_eq!(c.last_day, START / DAY + 1 + u64::from(MAX_DAY_STEPS));
+
+        let mut c = a_day_too_far_behind();
+        act_as(VERIFIER);
+        assert_eq!(
+            refusal(|| drop(deliver(&mut c, MARKET, vec![COLLATERAL_ID], vec![900], "revenue:2"))),
+            "call advance_days first"
+        );
+        let mut c = a_day_too_far_behind();
+        act_paid("a.near");
+        assert_eq!(
+            refusal(|| c.request_unstake("1".into(), true)),
+            "call advance_days first"
+        );
+        let mut c = a_day_too_far_behind();
+        act_paid("a.near");
+        assert_eq!(refusal(|| drop(c.claim(vec!["1".into()]))), "call advance_days first");
+        let mut c = a_day_too_far_behind();
+        assert_eq!(advance(&mut c), MAX_DAY_STEPS);
+        revenue(&mut c, 2, 100);
+        assert_eq!(c.total_received().0, 1_100);
+    }
+
+    // One seat of two is drawn, then the clock is `days` past the day the sweep came in.
+    fn drawn_and_behind(days: u64) -> CouncilContract {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        act_with_seed(ORACLE, 1);
+        c.draw(U64(1), 2, vec![]);
+        set_time(day(days));
+        c
+    }
+
+    #[test]
+    fn a_receipt_and_a_release_walk_at_most_thirty_days_and_a_claim_or_an_unstake_a_hundred() {
+        let thirty = u64::from(MAX_RECEIPT_CATCH_UP_DAYS);
+        let behind = |days: u64| {
+            let c = two_seats_paid();
+            set_time(day(1) + days * DAY);
+            c
+        };
+        let mut c = behind(thirty);
+        revenue(&mut c, 2, 100);
+        assert_eq!(c.last_day, START / DAY + 1 + thirty);
+        let mut c = drawn_and_behind(thirty);
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![acct("a.near")]);
+        assert!(c.jury_of(U64(1)).is_empty());
+
+        let mut c = behind(thirty + 1);
+        act_as(VERIFIER);
+        assert_eq!(
+            refusal(|| drop(deliver(&mut c, MARKET, vec![COLLATERAL_ID], vec![900], "revenue:2"))),
+            "call advance_days first"
+        );
+        let mut c = drawn_and_behind(thirty + 1);
+        act_as(ORACLE);
+        assert_eq!(
+            refusal(|| c.unlock_case(U64(1), vec![acct("a.near")])),
+            "call advance_days first"
+        );
+        let mut c = behind(thirty + 1);
+        request(&mut c, "1", "a.near");
+        assert_eq!(c.last_day, START / DAY + 1 + thirty + 1);
+        let mut c = behind(thirty + 1);
+        act_paid("a.near");
+        assert_eq!(
+            refusal(|| drop(c.claim(vec!["1".into()]))),
+            "nothing to claim",
+            "the claim got past the catch-up"
+        );
+    }
+
+    #[test]
+    fn a_hundred_days_of_joiners_log_one_summary_for_the_walk_and_the_capped_paths_leave_it_to_advance_days() {
+        let hundred = u64::from(MAX_DAY_STEPS);
+        let behind = || {
+            let mut c = council();
+            for d in 0..hundred {
+                set_time(day(d));
+                stake(&mut c, &d.to_string(), &format!("s{d}.near"));
+            }
+            set_time(day(hundred));
+            c
+        };
+        let mut c = behind();
+        act_as(VERIFIER);
+        assert_eq!(
+            refusal(|| drop(deliver(&mut c, MARKET, vec![COLLATERAL_ID], vec![900], "revenue:1"))),
+            "call advance_days first"
+        );
+        let mut c = behind();
+        assert_eq!(advance(&mut c), MAX_DAY_STEPS);
+        assert!(
+            near_sdk::test_utils::get_logs().len() < 100,
+            "a walk can never log a line a day"
+        );
+        let started = events_named("seats_started");
+        assert_eq!(started.len(), 1);
+        assert_eq!(
+            (started[0]["count"].as_u64(), started[0]["start_days"].as_u64()),
+            (Some(hundred), Some(hundred))
+        );
+        assert_eq!(events_named("quarter_closed").len(), 1);
+        assert_eq!((c.active, c.last_day), (MAX_DAY_STEPS, START / DAY + hundred));
+        revenue(&mut c, 1, 900);
+        assert_eq!(c.total_received().0, 900);
+    }
+
+    #[test]
+    fn advance_days_walks_at_most_a_hundred_days_a_call_and_as_many_as_it_is_asked() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        set_time(day(250));
         act_as("anyone.near");
-        let moved = c.advance_quarters(None);
+        assert_eq!(c.advance_days(Some(0)), 0);
+        assert_eq!(c.advance_days(Some(5)), 5);
+        assert_eq!(c.advance_days(Some(1_000)), MAX_DAY_STEPS);
+        assert_eq!(c.advance_days(None), MAX_DAY_STEPS);
+        assert_eq!(c.advance_days(None), 45);
+        assert_eq!(c.advance_days(None), 0);
+        assert_eq!((c.last_day, c.active), (START / DAY + 250, 1));
+        assert_eq!(c.last_closed_quarter, Q1_2027, "two quarters closed on the way");
+    }
+
+    #[test]
+    fn advance_days_logs_one_summary_of_the_seats_it_started_and_each_quarter_it_closes() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        set_time(day(1));
+        stake(&mut c, "2", "b.near");
+        set_time(day(Q4_DAYS + 3));
+        act_as("anyone.near");
+        assert_eq!(c.advance_days(Some(1)), 1);
+        let first_day = START / DAY + 1;
         assert_eq!(
-            events_named("quarters_advanced"),
-            [near_sdk::serde_json::json!({ "steps": moved })]
+            events_named("seats_started"),
+            [
+                near_sdk::serde_json::json!({ "from_day": first_day.to_string(), "to_day": first_day.to_string(),
+                                           "start_days": 1, "count": 1 })
+            ]
         );
-        assert!(moved > 0);
-        let booked = c.book_seat_time("1".into(), None);
+        assert_eq!(c.advance_days(None), Q4_DAYS as u32 + 2);
+        let started = events_named("seats_started");
+        assert_eq!(started.len(), 2, "one more summary for the second walk");
         assert_eq!(
-            events_named("seat_time_booked"),
-            [near_sdk::serde_json::json!({ "token_id": "1", "quarters": booked })]
+            started[1],
+            near_sdk::serde_json::json!({ "from_day": (first_day + 1).to_string(),
+                                          "to_day": (START / DAY + Q4_DAYS + 3).to_string(), "start_days": 1, "count": 1 })
         );
+        assert_eq!(events_named("quarter_closed").len(), 1);
+        assert_eq!(c.active, 2);
+        assert!(c.joins_on.get(&(START / DAY + 2)).is_none());
+    }
+
+    // ---- claims ------------------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_claim_pays_once_and_a_failed_transfer_puts_the_balance_back() {
+        let mut c = two_seats_closed();
+        let (first, amount) = claim_without_reply(&mut c, "a.near", &["1"]);
+        assert_eq!(amount, 500);
+        let totals = c.reward_totals();
+        assert_eq!((totals.pending_claims.0, totals.accrued_total.0), (500, 0));
+        assert_eq!(claimable(&c, "a.near"), 0);
+        act_paid("a.near");
+        assert_eq!(refusal(|| drop(c.claim(vec!["1".into()]))), "nothing to claim");
+        act_as("council.near");
+        c.on_claim_paid(U64(first), Err(PromiseError::Failed));
+        let failed = last_event();
+        assert_eq!(failed["event"], "claim_failed");
+        assert_eq!(
+            (failed["data"]["id"].as_str(), failed["data"]["amount"].as_str()),
+            (Some(first.to_string().as_str()), Some("500"))
+        );
+        assert_eq!(failed["data"]["tokens"], near_sdk::serde_json::json!(["1"]));
+        assert_eq!(
+            (c.pending_claims_total, c.total_paid, claimable(&c, "a.near")),
+            (0, 0, 500)
+        );
+        let (second, again) = claim_without_reply(&mut c, "a.near", &["1"]);
+        assert_ne!(first, second);
+        act_as("council.near");
+        c.on_claim_paid(U64(second), Ok(()));
+        assert_eq!((last_event()["event"].as_str(), again), (Some("claim_paid"), 500));
+        c.on_claim_paid(U64(second), Ok(()));
+        c.on_claim_paid(U64(second), Err(PromiseError::Failed));
+        c.on_claim_paid(U64(first), Ok(()));
+        let totals = c.reward_totals();
+        assert_eq!(
+            (totals.total_paid.0, totals.pending_claims.0, totals.accrued_total.0),
+            (500, 0, 0),
+            "a late or repeated callback changes nothing"
+        );
+        assert_eq!(claimable(&c, "a.near"), 0);
+    }
+
+    #[test]
+    fn nobody_claims_for_a_seat_they_do_not_hold() {
+        let mut c = two_seats_closed();
+        for who in ["b.near", "stranger.near"] {
+            act_paid(who);
+            assert_eq!(refusal(|| drop(c.claim(vec!["1".into()]))), "not your seat", "{who}");
+        }
+        act_paid("a.near");
+        assert_eq!(refusal(|| drop(c.claim(vec!["9".into()]))), "not staked");
+        act_paid("stranger.near");
+        assert_eq!(refusal(|| drop(c.claim(vec![]))), "nothing to claim");
+        assert_eq!(
+            claim(&mut c, "a.near", &["1"]),
+            500,
+            "the attempts did not touch the seat"
+        );
+    }
+
+    #[test]
+    fn a_claim_needs_one_yocto_and_the_gas_for_its_payout_and_takes_at_most_ten_tokens() {
+        let mut c = two_seats_closed();
+        act_as("a.near");
+        assert_eq!(
+            refusal(|| drop(c.claim(vec!["1".into()]))),
+            "Requires attached deposit of exactly 1 yoctoNEAR"
+        );
+        act_with_gas("a.near", 32);
+        assert_eq!(
+            refusal(|| drop(c.claim(vec!["1".into()]))),
+            "attach at least 33 TGas: a claim sends the payout and then settles it"
+        );
+        act_with_gas("a.near", 33);
+        let eleven: Vec<TokenId> = (0..=MAX_CLAIM_TOKENS).map(|i| i.to_string()).collect();
+        assert_eq!(refusal(|| drop(c.claim(eleven))), "at most 10 tokens in one claim");
+        assert_eq!(GAS_CLAIM_FLOOR, Gas::from_tgas(33));
+    }
+
+    #[test]
+    fn one_claim_settles_ten_seats_into_one_payout() {
+        let mut c = council();
+        let tokens: Vec<String> = (0..MAX_CLAIM_TOKENS).map(|i| format!("t{i}")).collect();
+        for t in &tokens {
+            stake(&mut c, t, "big.near");
+        }
+        stake(&mut c, "other", "other.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 1_100);
+        close_quarter(&mut c);
+        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let (_, amount) = claim_without_reply(&mut c, "big.near", &refs);
+        assert_eq!(amount, 1_000);
+        let sent = near_sdk::test_utils::get_created_receipts();
+        let (args, deposit, gas) = mt_transfer_of(&sent[0]);
+        assert_eq!((deposit, gas), (1, GAS_MT_TRANSFER.as_gas()));
+        assert_eq!(
+            (
+                args["receiver_id"].as_str(),
+                args["token_id"].as_str(),
+                args["amount"].as_str()
+            ),
+            (Some("big.near"), Some(COLLATERAL_ID), Some("1000"))
+        );
+        assert_eq!(sent.iter().filter(|r| r.receiver_id == acct(VERIFIER)).count(), 1);
+    }
+
+    fn stuck_claim() -> (CouncilContract, u64) {
+        let mut c = two_seats_closed();
+        let (id, _) = claim_without_reply(&mut c, "a.near", &["1"]);
+        (c, id)
+    }
+
+    #[test]
+    fn only_the_owner_decides_a_stuck_claim_and_not_before_the_wait() {
+        let (mut c, id) = stuck_claim();
+        set_time(now() + RECONCILE_WAIT_NS - 1);
+        assert_eq!(
+            refusal(|| c.reconcile_claim(U64(id), false)),
+            "wait 60 minutes after the claim before reconciling"
+        );
+        set_time(now() + 1);
+        act_as("a.near");
+        assert_eq!(refusal(|| c.reconcile_claim(U64(id), false)), "owner only");
+        act_as(OWNER);
+        assert_eq!(
+            refusal(|| c.reconcile_claim(U64(id + 1), false)),
+            "no claim is pending with that id"
+        );
+        assert_eq!(c.reward_totals().pending_claims.0, 500, "nothing moved");
+    }
+
+    #[test]
+    fn a_stuck_claim_the_owner_finds_unpaid_goes_back_to_the_balance() {
+        let (mut c, id) = stuck_claim();
+        set_time(now() + RECONCILE_WAIT_NS);
+        c.reconcile_claim(U64(id), false);
+        let event = last_event();
+        assert_eq!(
+            (event["event"].as_str(), event["data"]["paid"].as_bool()),
+            (Some("claim_reconciled"), Some(false))
+        );
+        assert_eq!(
+            (c.pending_claims_total, c.total_paid, claimable(&c, "a.near")),
+            (0, 0, 500)
+        );
+        assert_eq!(claim(&mut c, "a.near", &[]), 500);
+    }
+
+    #[test]
+    fn a_stuck_claim_the_owner_finds_paid_is_booked_once_and_a_late_callback_changes_nothing() {
+        let (mut c, id) = stuck_claim();
+        set_time(now() + RECONCILE_WAIT_NS);
+        c.reconcile_claim(U64(id), true);
+        assert_eq!(last_event()["data"]["paid"].as_bool(), Some(true));
+        act_as("council.near");
+        c.on_claim_paid(U64(id), Err(PromiseError::Failed));
+        c.on_claim_paid(U64(id), Ok(()));
+        assert_eq!(
+            (c.pending_claims_total, c.total_paid, claimable(&c, "a.near")),
+            (0, 500, 0)
+        );
+        act_as(OWNER);
+        assert_eq!(
+            refusal(|| c.reconcile_claim(U64(id), false)),
+            "no claim is pending with that id"
+        );
+    }
+
+    #[test]
+    fn a_longer_reconcile_wait_refuses_a_reconcile_the_old_wait_would_allow() {
+        let (mut c, id) = stuck_claim();
+        act_as(OWNER);
+        c.set_reconcile_wait_ns(U64(2 * DEFAULT_RECONCILE_WAIT_NS));
+        set_time(now() + RECONCILE_WAIT_NS);
+        assert_eq!(
+            refusal(|| c.reconcile_claim(U64(id), false)),
+            "wait 120 minutes after the claim before reconciling"
+        );
+        set_time(now() + RECONCILE_WAIT_NS);
+        c.reconcile_claim(U64(id), false);
+        assert_eq!(last_event()["event"], "claim_reconciled");
+    }
+
+    #[test]
+    fn a_shorter_reconcile_wait_lets_the_owner_decide_sooner() {
+        let (mut c, id) = stuck_claim();
+        act_as(OWNER);
+        c.set_reconcile_wait_ns(U64(MIN_RECONCILE_WAIT_NS));
+        set_time(now() + MIN_RECONCILE_WAIT_NS - 1);
+        assert!(refusal(|| c.reconcile_claim(U64(id), false)).starts_with("wait 10 minutes"));
+        set_time(now() + 1);
+        c.reconcile_claim(U64(id), false);
+    }
+
+    // ---- silent jurors -----------------------------------------------------------------------------------------
+
+    // Three seats from day 0 and 900 on day 1. All three are drawn on day 2, another 900 comes on day 3 and the case is
+    // released on day 4 with `delinquent` silent.
+    fn released_case(delinquent: &[&str]) -> CouncilContract {
+        let mut c = council();
+        for (token, owner) in [("1", "a.near"), ("2", "b.near"), ("3", "c.near")] {
+            stake(&mut c, token, owner);
+        }
+        set_time(day(1));
+        revenue(&mut c, 1, 900);
+        set_time(day(2));
+        act_with_seed(ORACLE, 1);
+        assert_eq!(c.draw(U64(1), 3, vec![]).len(), 3);
+        set_time(day(3));
+        revenue(&mut c, 2, 900);
+        set_time(day(4));
+        act_as(ORACLE);
+        c.unlock_case(U64(1), delinquent.iter().map(|o| acct(o)).collect());
+        c
+    }
+
+    #[test]
+    fn a_silent_juror_loses_what_its_seat_earned_while_serving_and_only_the_others_share_it() {
+        let mut c = released_case(&["a.near"]);
+        assert_eq!(
+            c.reward_totals().carry.0,
+            0,
+            "the others' shares went into the index at the release"
+        );
+        assert_eq!(
+            events_named("seat_earnings_forfeited"),
+            [near_sdk::serde_json::json!({ "token_id": "1", "owner": "a.near", "case_key": "1", "amount": "300" })]
+        );
+        assert_eq!(["a.near", "b.near", "c.near"].map(|o| earned(&c, o)), [300, 750, 750]);
+        set_time(day(5));
+        revenue(&mut c, 3, 300);
+        assert_eq!(
+            ["a.near", "b.near", "c.near"].map(|o| earned(&c, o)),
+            [400, 850, 850],
+            "the juror does not get a third of its own forfeit back"
+        );
+    }
+
+    #[test]
+    fn a_silent_juror_that_is_the_only_seat_earning_leaves_its_forfeit_in_the_carry() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        set_time(day(1));
+        request(&mut c, "2", "b.near");
+        act_with_seed(ORACLE, 1);
+        c.draw(U64(1), 1, vec![]);
+        revenue(&mut c, 1, 200);
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![acct("a.near")]);
+        assert_eq!(c.reward_totals().carry.0, 200, "nobody else is earning to share it");
+        assert_eq!(earned(&c, "a.near"), 0);
+    }
+
+    #[test]
+    fn jurors_who_voted_lose_nothing() {
+        let c = released_case(&[]);
+        assert_eq!(c.reward_totals().carry.0, 0);
+        assert_eq!(["a.near", "b.near", "c.near"].map(|o| earned(&c, o)), [600, 600, 600]);
+    }
+
+    #[test]
+    fn a_case_is_forfeited_once_and_naming_an_outsider_changes_nothing() {
+        let mut c = released_case(&["a.near", "a.near", "nobody.near"]);
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![acct("a.near")]);
+        assert_eq!(c.reward_totals().carry.0, 0);
+        assert_eq!(["a.near", "b.near", "c.near"].map(|o| earned(&c, o)), [300, 750, 750]);
+    }
+
+    // Two seats from day 0, 1,000 on day 1, both drawn, 1,000 more, and the quarter closed with each seat at 1,000.
+    fn serving_pair() -> CouncilContract {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 1_000);
+        act_with_seed(ORACLE, 1);
+        c.draw(U64(1), 2, vec![]);
+        revenue(&mut c, 2, 1_000);
+        close_quarter(&mut c);
+        c
+    }
+
+    #[test]
+    fn what_a_silent_juror_has_not_settled_is_forfeited_and_comes_off_its_next_claim() {
+        let mut c = serving_pair();
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![acct("a.near")]);
+        assert_eq!(c.reward_totals().carry.0, 0);
+        assert_eq!((claimable(&c, "a.near"), claimable(&c, "b.near")), (500, 1_000));
+        assert_eq!(claim(&mut c, "a.near", &["1"]), 500);
+        assert_eq!(
+            c.stakes["1"].forfeited, 500,
+            "the part its share of the others' split still owes comes off the running quarter"
+        );
+        assert_eq!(claimable(&c, "a.near"), 0);
+    }
+
+    #[test]
+    fn a_claim_while_serving_pays_only_what_came_before_the_draw_and_the_rest_waits_for_the_release() {
+        let mut c = serving_pair();
+        assert_eq!(
+            (claimable(&c, "a.near"), earned(&c, "a.near")),
+            (500, 1_000),
+            "what it earned after the draw is held back, not gone"
+        );
+        assert_eq!(claim(&mut c, "a.near", &["1"]), 500);
+        assert_eq!(earned(&c, "a.near"), 500);
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![acct("a.near")]);
+        assert_eq!(events_named("seat_earnings_forfeited")[0]["amount"], "500");
+        assert_eq!(
+            (claimable(&c, "a.near"), claimable(&c, "b.near")),
+            (0, 1_000),
+            "the silent juror could not claim the serving period before the release"
+        );
+        let mut c = serving_pair();
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![]);
+        assert_eq!(
+            claim(&mut c, "a.near", &["1"]),
+            1_000,
+            "a juror who voted is paid all of it"
+        );
+    }
+
+    #[test]
+    fn a_seat_drawn_before_it_started_forfeits_only_what_came_after_its_start() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        act_with_seed(ORACLE, 1);
+        c.draw(U64(1), 2, vec![]);
+        set_time(day(1));
+        revenue(&mut c, 1, 600);
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![acct("a.near")]);
+        assert_eq!((c.reward_totals().carry.0, earned(&c, "b.near")), (0, 600));
+        assert_eq!(earned(&c, "a.near"), 0);
+    }
+
+    // Two seats from day 0 and 1,000 on day 1, the quarter closed at 500 each, 400 more, both drawn, 400 more, and a.near
+    // silent: it lost the 200 it earned after the draw.
+    fn silent_in_the_running_quarter() -> CouncilContract {
+        let mut c = two_seats_closed();
+        set_time(day(Q4_DAYS + 1));
+        revenue(&mut c, 2, 400);
+        act_with_seed(ORACLE, 1);
+        c.draw(U64(1), 2, vec![]);
+        revenue(&mut c, 3, 400);
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![acct("a.near")]);
+        c
+    }
+
+    #[test]
+    fn a_forfeit_comes_off_the_running_quarter_first_so_the_finished_one_is_paid_in_full() {
+        let c = silent_in_the_running_quarter();
+        assert_eq!(
+            (claimable(&c, "a.near"), c.in_progress_of(acct("a.near")).0),
+            (500, 200),
+            "its 200 and the 200 it got of the others' split come off the running 600"
+        );
+        assert_eq!(
+            (claimable(&c, "b.near"), c.in_progress_of(acct("b.near")).0),
+            (500, 600)
+        );
+        assert_eq!(held(&c), 1_800);
+    }
+
+    #[test]
+    fn a_leaver_is_cut_on_what_its_quarter_earned_after_the_forfeit() {
+        let mut c = silent_in_the_running_quarter();
+        request(&mut c, "1", "a.near");
+        let cut = &events_named("seat_cut")[0];
+        assert_eq!(
+            (cut["earned"].as_str(), cut["cut"].as_str(), cut["kept"].as_str()),
+            (Some("200"), Some("100"), Some("100"))
+        );
+        assert_eq!(c.accrued.get(&acct("a.near")).copied(), Some(500));
+    }
+
+    #[test]
+    fn the_carry_is_shared_when_a_quarter_closes_even_if_no_sweep_comes() {
+        let mut c = council();
+        revenue(&mut c, 1, 500);
+        assert_eq!(c.reward_totals().carry.0, 500);
+        stake(&mut c, "1", "a.near");
+        close_quarter(&mut c);
+        assert_eq!(c.reward_totals().carry.0, 0);
+        assert_eq!(claimable(&c, "a.near"), 500);
+    }
+
+    #[test]
+    fn a_draw_on_the_first_day_of_a_quarter_closes_the_quarter_first_so_the_juror_keeps_what_the_pool_gave_it() {
+        let mut c = council();
+        for (token, owner) in [("1", "a.near"), ("2", "b.near"), ("3", "l.near")] {
+            stake(&mut c, token, owner);
+        }
+        set_time(day(1));
+        revenue(&mut c, 1, 900);
+        set_time(day(2));
+        request(&mut c, "3", "l.near");
+        set_time(day(70));
+        advance(&mut c);
+        set_time(day(Q4_DAYS));
+        act_with_seed(ORACLE, 1);
+        assert_eq!(c.draw(U64(1), 2, vec![]).len(), 2);
+        assert_eq!(c.last_closed_quarter, Q4_2026, "the draw walked the days first");
+        set_time(day(Q4_DAYS + 1));
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![acct("a.near")]);
+        assert_eq!(events_named("seat_earnings_forfeited")[0]["amount"], "0");
+        assert_eq!(claimable(&c, "a.near"), 375, "300 earned and 75 of the leaver's cut");
+    }
+
+    #[test]
+    fn a_release_with_a_silent_juror_needs_the_days_caught_up_and_one_without_never_does() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        act_with_seed(ORACLE, 1);
+        c.draw(U64(1), 2, vec![]);
+        set_time(day(u64::from(MAX_DAY_STEPS) + 5));
+        act_as(ORACLE);
+        assert_eq!(
+            refusal(|| c.unlock_case(U64(1), vec![acct("a.near")])),
+            "call advance_days first"
+        );
+        assert_eq!(c.jury_of(U64(1)).len(), 2, "the refused release changed nothing");
+        c.unlock_case(U64(1), vec![]);
+        assert!(c.jury_of(U64(1)).is_empty());
+    }
+
+    // ---- views and totals --------------------------------------------------------------------------------------
+
+    #[test]
+    fn seat_earnings_shows_waiting_earning_serving_and_leaving() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        let state = |c: &CouncilContract| c.seat_earnings("1".into()).unwrap();
+        assert_eq!(
+            (state(&c).state, state(&c).earning_from.0, state(&c).owner),
+            (SeatState::Waiting, day(1), acct("a.near"))
+        );
+        set_time(day(1));
+        assert_eq!(state(&c).state, SeatState::Earning);
+        act_with_seed(ORACLE, 1);
+        c.draw(U64(1), 2, vec![]);
+        assert_eq!(state(&c).state, SeatState::Serving);
+        act_as(ORACLE);
+        c.unlock_case(U64(1), vec![]);
+        request(&mut c, "1", "a.near");
+        assert_eq!(state(&c).state, SeatState::Leaving);
+        assert!(c.seat_earnings("9".into()).is_none());
+    }
+
+    #[test]
+    fn seat_earnings_splits_the_closed_quarters_from_the_running_one() {
+        let mut c = two_seats_closed();
+        set_time(day(Q4_DAYS + 1));
+        revenue(&mut c, 2, 400);
+        let seat = c.seat_earnings("1".into()).unwrap();
+        assert_eq!((seat.earned_closed.0, seat.earned_in_progress.0), (500, 200));
+        assert_eq!(
+            (seat.start_acc.0, seat.settled_acc.0),
+            (0, 0),
+            "the index at its start day and where it is settled to"
+        );
+        assert_eq!(claim(&mut c, "a.near", &["1"]), 500);
+        let seat = c.seat_earnings("1".into()).unwrap();
+        assert_eq!(
+            (seat.earned_closed.0, seat.earned_in_progress.0, seat.settled_acc.0),
+            (0, 200, 500 * ACC_SCALE)
+        );
+    }
+
+    #[test]
+    fn quarter_info_and_the_snapshots_follow_the_calendar() {
+        let mut c = council();
+        let info = c.quarter_info();
+        assert_eq!(
+            (
+                info.quarter,
+                info.starts_at.0,
+                info.ends_at.0,
+                info.last_closed_quarter,
+                info.last_day.0
+            ),
+            (Q4_2026, START, day(Q4_DAYS), Q4_2026 - 1, START / DAY)
+        );
+        stake(&mut c, "1", "a.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 1_000);
+        set_time(day(Q4_DAYS + Q1_DAYS + 5));
+        advance(&mut c);
+        advance(&mut c);
+        let info = c.quarter_info();
+        assert_eq!((info.quarter, info.last_closed_quarter), (Q1_2027 + 1, Q1_2027));
+        let all: Vec<(u32, u128)> = c
+            .quarter_snapshots(None, None)
+            .iter()
+            .map(|s| (s.quarter, s.acc.0))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                (Q4_2026 - 1, 0),
+                (Q4_2026, 1_000 * ACC_SCALE),
+                (Q1_2027, 1_000 * ACC_SCALE)
+            ]
+        );
+        let last: Vec<u32> = c.quarter_snapshots(None, Some(1)).iter().map(|s| s.quarter).collect();
+        assert_eq!(last, [Q1_2027], "no start means the latest ones");
+        let page: Vec<u32> = c
+            .quarter_snapshots(Some(Q4_2026), Some(1))
+            .iter()
+            .map(|s| s.quarter)
+            .collect();
+        assert_eq!(page, [Q4_2026]);
+    }
+
+    #[test]
+    fn claimable_of_adds_the_balance_and_every_closed_seat_the_account_holds() {
+        let mut c = council();
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "a.near");
+        stake(&mut c, "3", "b.near");
+        set_time(day(1));
+        revenue(&mut c, 1, 900);
+        close_quarter(&mut c);
+        request(&mut c, "2", "a.near");
+        assert_eq!(claimable(&c, "a.near"), 600);
+        assert_eq!(claim(&mut c, "a.near", &["1"]), 600);
+        assert_eq!(claimable(&c, "nobody.near"), 0);
+    }
+
+    #[test]
+    fn reward_totals_track_received_paid_pending_owed_cut_and_carried() {
+        let mut c = council();
+        revenue(&mut c, 1, 100);
+        stake(&mut c, "1", "a.near");
+        stake(&mut c, "2", "b.near");
+        set_time(day(1));
+        revenue(&mut c, 2, 900);
+        request(&mut c, "2", "b.near");
+        let t = c.reward_totals();
+        assert_eq!(
+            (t.cut_pool.0, t.pending_total_slots.0, t.carry.0, t.accrued_total.0),
+            (250, 250, 0, 0)
+        );
+        close_quarter(&mut c);
+        let (id, _) = claim_without_reply(&mut c, "a.near", &["1"]);
+        let t = c.reward_totals();
+        assert_eq!(
+            (
+                t.total_received.0,
+                t.total_paid.0,
+                t.pending_claims.0,
+                t.cut_pool.0,
+                t.accrued_total.0,
+                t.pending_total_slots.0
+            ),
+            (1_000, 0, 750, 0, 0, 250)
+        );
+        act_as("council.near");
+        c.on_claim_paid(U64(id), Ok(()));
+        let t = c.reward_totals();
+        assert_eq!((t.total_paid.0, t.pending_claims.0, t.accrued_total.0), (750, 0, 0));
+    }
+
+    #[test]
+    fn config_names_the_day_cursor_and_none_of_the_old_quarter_books() {
+        let c = council();
+        let config = c.config();
+        for field in ["close_grace_ns", "next_to_finalize", "last_tick", "stream_ns"] {
+            assert!(config.get(field).is_none(), "{field}");
+        }
+        assert_eq!(config["markets"], near_sdk::serde_json::json!([MARKET]));
+        assert_eq!(config["nft_contract"], NFT);
+        assert_eq!(config["state_version"], 6);
+        assert_eq!(config["last_day"], (START / DAY).to_string());
+        assert_eq!(config["active_seats"], 0);
+        assert_eq!(config["last_closed_quarter"], Q4_2026 - 1);
+    }
+
+    // ---- the calendar ------------------------------------------------------------------------------------------
+
+    #[test]
+    fn the_quarter_table_holds() {
+        for (id, start_s, days) in [
+            (8_107u32, 1_790_812_800u64, 92u64),
+            (8_108, 1_798_761_600, 90),
+            (8_109, 1_806_537_600, 91),
+            (8_110, 1_814_400_000, 92),
+            (8_112, 1_830_297_600, 91),
+        ] {
+            assert_eq!(quarter_start(id), start_s * SECOND, "start of {id}");
+            assert_eq!(quarter_end(id) - quarter_start(id), days * DAY, "length of {id}");
+            assert_eq!(quarter_containing(start_s * SECOND), id);
+            assert_eq!(quarter_containing(start_s * SECOND - 1), id - 1);
+        }
+        assert_eq!(
+            quarter_containing(1_835_438_400_000_000_000),
+            8_112,
+            "29 February 2028 is in 2028 Q1"
+        );
+    }
+
+    // An independent count of the days from 1970-01-01 to the first of every month, by month lengths and the leap rule.
+    #[test]
+    fn every_month_boundary_from_1970_to_2100_falls_in_the_right_quarter() {
+        let leap = |y: u64| y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
+        let mut days = 0u64;
+        for year in 1970u64..=2100 {
+            for month in 1u64..=12 {
+                let start = days * DAY;
+                let quarter = year as u32 * 4 + (month as u32 - 1) / 3;
+                assert_eq!(quarter_containing(start), quarter, "{year}-{month:02}-01");
+                if month % 3 == 1 {
+                    assert_eq!(quarter_start(quarter), start, "start of {year} Q{}", month / 3 + 1);
+                    assert_eq!(quarter_end(quarter - 1), start);
+                }
+                days += match month {
+                    2 if leap(year) => 29,
+                    2 => 28,
+                    4 | 6 | 9 | 11 => 30,
+                    _ => 31,
+                };
+            }
+        }
+    }
+
+    // ---- the money identity ------------------------------------------------------------------------------------
+
+    // Everything each staked seat could still be paid out of the index, finished quarters and running one.
+    fn live_earnings(c: &CouncilContract) -> u128 {
+        c.staked
+            .iter()
+            .map(|t| c.shares(&c.stakes[t]))
+            .map(|s| s.closed + s.running)
+            .sum()
+    }
+
+    // Every unit the books place somewhere. It is what was received, less the rounding left in the contract.
+    fn held(c: &CouncilContract) -> u128 {
+        c.total_paid
+            + c.pending_claims_total
+            + c.accrued_total
+            + c.pending_total_slots
+            + c.cut_pool
+            + c.carry
+            + live_earnings(c)
+    }
+
+    #[test]
+    fn with_round_numbers_every_unit_is_in_exactly_one_place() {
+        let mut c = council();
+        for (token, owner) in [("1", "a.near"), ("2", "b.near"), ("3", "c.near"), ("4", "l.near")] {
+            stake(&mut c, token, owner);
+        }
+        set_time(day(1));
+        revenue(&mut c, 1, 1_200);
+        assert_eq!(held(&c), 1_200);
+        set_time(day(2));
+        request(&mut c, "4", "l.near");
+        assert_eq!(held(&c), 1_200);
+        set_time(day(3));
+        revenue(&mut c, 2, 600);
+        assert_eq!(held(&c), 1_800);
+        close_quarter(&mut c);
+        assert_eq!(held(&c), 1_800);
+        let (id, paid) = claim_without_reply(&mut c, "a.near", &["1"]);
+        assert_eq!((paid, held(&c)), (550, 1_800));
+        act_as("council.near");
+        c.on_claim_paid(U64(id), Ok(()));
+        assert_eq!(held(&c), 1_800);
+        claim(&mut c, "l.near", &[]);
+        assert_eq!((held(&c), c.total_paid), (1_800, 700));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        // Stakes, unstake requests, unstakes, sweeps, draws, releases with silent jurors and claims that pay or fail, in any
+        // order over weeks and quarters. What was paid, what is in flight, what accounts are owed, what the cut pool and
+        // the carry hold and what live seats earned never add up to more than was received, and fall short of it only by
+        // rounding: a unit or two for each settlement, and the split remainder. Every claim pays what claimable_of said.
+        #[test]
+        fn every_unit_received_is_placed_once_and_never_more(
+            ops in proptest::collection::vec((0u8..9, 0u32..6, 0u32..3, 1u64..5_000), 1..80)
+        ) {
+            let mut c = council();
+            let (mut sent, mut sweep, mut case, mut slack) = (0u128, 0u64, 0u64, 12u128);
+            let mut open_cases: Vec<(u64, Vec<AccountId>)> = vec![];
+            for (op, token, owner, amount) in ops {
+                let (name, who) = (token.to_string(), format!("o{owner}.near"));
+                let seat = c.stake_of(name.clone());
+                slack += 8;
+                match op {
+                    0 if seat.is_none() && c.unstakes_in_flight == 0 => stake(&mut c, &name, &who),
+                    1 => {
+                        sweep += 1;
+                        let paid_in = u128::from(amount) * 7_919;
+                        revenue(&mut c, sweep, paid_in);
+                        sent += paid_in;
+                    }
+                    2 => {
+                        set_time(now() + amount % 40 * DAY + 1);
+                        advance(&mut c);
+                    }
+                    3 if seat.as_ref().is_some_and(|s| s.serving.is_none() && s.unlock_requested_at.is_none()) => {
+                        request(&mut c, &name, seat.unwrap().owner.as_str());
+                    }
+                    4 if seat.as_ref().is_some_and(|s| s.unlock_requested_at.is_some()) => {
+                        let s = seat.unwrap();
+                        act_at(s.owner.as_str(), now().max(s.unlock_requested_at.unwrap().0 + COOLDOWN_NS));
+                        let _ = c.unstake(name.clone());
+                        act_as("council.near");
+                        let result = if amount % 2 == 0 { Ok(()) } else { Err(PromiseError::Failed) };
+                        c.on_unstaked(name, s, result);
+                    }
+                    5 if c.seat_count() >= 2 => {
+                        act_with_seed(ORACLE, amount as u8);
+                        let n = 1 + (amount % 2) as u32;
+                        if let Ok(jury) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.draw(U64(case), n, vec![]))) {
+                            open_cases.push((case, jury));
+                            case += 1;
+                        }
+                    }
+                    6 if !open_cases.is_empty() => {
+                        let (id, jury) = open_cases.remove(amount as usize % open_cases.len());
+                        let silent: Vec<AccountId> = jury.iter().enumerate().filter(|(i, _)| (amount >> i) & 1 == 1).map(|(_, a)| a.clone()).collect();
+                        act_as(ORACLE);
+                        c.unlock_case(U64(id), silent);
+                    }
+                    7 | 8 => {
+                        let owed = claimable(&c, &who);
+                        if owed > 0 {
+                            let tokens = c.seats_of(acct(&who));
+                            let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+                            let paid_before = c.total_paid;
+                            let (id, got) = claim_without_reply(&mut c, &who, &refs);
+                            prop_assert_eq!(got, owed, "the claim pays what the ledger said");
+                            let (args, _, _) = mt_transfer_of(&near_sdk::test_utils::get_created_receipts()[0]);
+                            prop_assert_eq!(args["amount"].clone(), json!(got.to_string()));
+                            act_as("council.near");
+                            c.on_claim_paid(U64(id), if op == 7 { Ok(()) } else { Err(PromiseError::Failed) });
+                            let want = if op == 7 { paid_before + got } else { paid_before };
+                            prop_assert_eq!(c.total_paid, want);
+                        }
+                    }
+                    _ => {}
+                }
+                let owed_total: u128 = (0..3).map(|o| c.accrued.get(&acct(&format!("o{o}.near"))).copied().unwrap_or(0)).sum();
+                prop_assert_eq!(owed_total, c.accrued_total);
+                let slots: u128 = (0..3).map(|o| c.pending.get(&acct(&format!("o{o}.near"))).map_or(0, |p| p.amount)).sum();
+                prop_assert_eq!(slots, c.pending_total_slots);
+                prop_assert_eq!(c.total_received, sent);
+                let held = held(&c);
+                prop_assert!(held <= c.total_received, "{} held of {} received", held, c.total_received);
+                let dust = c.total_received - held;
+                prop_assert!(dust <= slack, "{} lost to rounding, allowed {}", dust, slack);
+            }
+        }
+    }
+
+    // ---- migration from version 5 ------------------------------------------------------------------------------
+
+    fn write_v5_stake(token: &str, old: StakeV1) {
+        let key = [bytes_of(&Key::Stakes), bytes_of(&token.to_string())].concat();
+        env::storage_write(&key, &[vec![0u8], bytes_of(&old)].concat());
+    }
+
+    fn v5_stake(owner: &str, index: u32, unlock: Option<u64>, serving: Option<u64>) -> StakeV1 {
+        StakeV1 {
+            owner: acct(owner),
+            staked_at: U64(START),
+            unlock_requested_at: unlock.map(U64),
+            serving: serving.map(U64),
+            booked_to: U64(START),
+            serving_from: START,
+            index,
+        }
+    }
+
+    // A version 5 contract with three seats: 1 earning, 2 asking to leave and 3 serving on case 9. It received 1,000, paid
+    // 400 of the 500 in finalized quarters (one, the quarter before the running one), and 500 is in quarters still open.
+    fn version_five(adjust: impl FnOnce(&mut StateV5)) -> CouncilContract {
+        let mut c = council();
+        for (token, owner) in [("1", "a.near"), ("2", "b.near"), ("3", "c.near")] {
+            stake(&mut c, token, owner);
+        }
+        c.juries.insert(9, vec!["3".to_string()]);
+        c.stakes.flush();
+        let mut quarters = LookupMap::new(b"q5".to_vec());
+        quarters.insert(Q4_2026 - 1, ());
+        write_v5_stake("1", v5_stake("a.near", 0, None, None));
+        write_v5_stake("2", v5_stake("b.near", 1, Some(START + 1), None));
+        write_v5_stake("3", v5_stake("c.near", 2, None, Some(9)));
+        let mut old = StateV5 {
+            state_version: 5,
+            upgrade_proven: false,
+            upgrade_in_flight: true,
+            owner: c.owner,
+            pending_owner: c.pending_owner,
+            oracle: c.oracle,
+            nft_contract: c.nft_contract,
+            allowed_markets: c.allowed_markets,
+            verifier: c.verifier,
+            collateral_token_id: c.collateral_token_id,
+            cooldown_ns: c.cooldown_ns,
+            max_seats_per_account: c.max_seats_per_account,
+            allowlist_enabled: c.allowlist_enabled,
+            allowed_tokens: c.allowed_tokens,
+            allowed_range: c.allowed_range,
+            staked: c.staked,
+            stakes: c.stakes,
+            seats_of: c.seats_of,
+            tokens_of: c.tokens_of,
+            juries: c.juries,
+            open_juries: BTreeMap::from([(START, 1)]),
+            earning: 2,
+            close_grace_ns: 7 * DAY,
+            reconcile_wait_ns: c.reconcile_wait_ns,
+            last_tick: START,
+            next_to_finalize: 8_107,
+            quarters,
+            seat_weight: LookupMap::new(b"w5".to_vec()),
+            forfeits: LookupMap::new(b"f5".to_vec()),
+            claims: LookupMap::new(b"c5".to_vec()),
+            received: c.received,
+            total_received: 1_000,
+            total_paid: 400,
+            pending_total: 0,
+            open_pool: 500,
+            final_pool: 500,
+            rolled_total: 0,
+            unstakes_in_flight: 0,
+            fresh: 1,
+            rule_from_quarter: 8_107,
+        };
+        adjust(&mut old);
+        env::state_write(&old);
+        drop(old);
+        testing_env!(context("alice.near").build());
+        CouncilContract::migrate()
+    }
+
+    #[test]
+    fn migrate_moves_version_five_to_six_keeps_the_seats_and_carries_the_open_revenue() {
+        let mut c = version_five(|_| {});
+        let today = START / DAY;
+        assert_eq!(
+            (c.state_version, c.upgrade_proven, c.upgrade_in_flight),
+            (6, true, false)
+        );
+        assert_eq!(c.seat_count(), 3);
+        assert_eq!(
+            (c.carry, c.active, c.last_day),
+            (600, 0, today),
+            "open revenue and the dust wait for the seats"
+        );
+        assert_eq!(c.joins_on.get(&(today + 1)).copied(), Some(2));
+        assert_eq!(
+            (
+                c.cut_pool,
+                c.accrued_total,
+                c.pending_total_slots,
+                c.pending_claims_total
+            ),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(
+            (c.last_closed_quarter, c.quarter_acc.get(&(Q4_2026 - 1)).copied()),
+            (Q4_2026 - 1, Some(0)),
+            "the quarter before the running one is closed at zero"
+        );
+        let first = c.stake_of("1".into()).unwrap();
+        assert_eq!((first.owner, first.earn_from_day.0), (acct("a.near"), today + 1));
+        let leaver = c.stake_of("2".into()).unwrap();
+        assert!(leaver.unlock_requested_at.is_some());
+        assert_eq!(
+            leaver.earn_from_day.0,
+            u64::MAX,
+            "a seat that asked to leave never earns"
+        );
+        assert_eq!(c.seat_earnings("3".into()).unwrap().state, SeatState::Serving);
+        set_time(day(1));
+        revenue(&mut c, 1, 300);
+        assert_eq!(
+            (earned(&c, "a.near"), earned(&c, "b.near"), earned(&c, "c.near")),
+            (450, 0, 450)
+        );
+        act_as(ORACLE);
+        c.unlock_case(U64(9), vec![]);
+        act_paid("b.near");
+        let _ = c.unstake("2".into());
+        assert_eq!(
+            c.seat_count(),
+            2,
+            "the seat that asked to leave in version 5 still leaves"
+        );
+    }
+
+    #[test]
+    fn migrate_refuses_while_a_finalized_quarter_has_money_to_claim() {
+        for (adjust, why) in [
+            (
+                (|s: &mut StateV5| s.final_pool = 1_500) as fn(&mut StateV5),
+                "a finalized quarter still has money to claim, claim it before upgrading",
+            ),
+            (
+                |s: &mut StateV5| {
+                    s.pending_total = 50;
+                    s.total_paid = 350;
+                },
+                "a claim is still pending, settle it before upgrading",
+            ),
+            (
+                |s: &mut StateV5| s.unstakes_in_flight = 1,
+                "an unstake is still waiting for its NFT transfer",
+            ),
+        ] {
+            assert_eq!(refusal(|| drop(version_five(adjust))), why);
+        }
+    }
+
+    #[test]
+    fn migrate_refuses_while_a_finished_quarter_is_not_finalized() {
+        assert_eq!(
+            refusal(|| drop(version_five(|s| s.next_to_finalize = Q4_2026 - 1))),
+            "a finished quarter is not finalized yet, finalize it and let its holders claim before upgrading"
+        );
+    }
+
+    #[test]
+    fn migrate_allows_a_rounding_leftover_for_each_finalized_quarter() {
+        let c = version_five(|s| {
+            s.quarters.insert(Q4_2026 - 2, ());
+            s.final_pool = 1_900;
+        });
+        assert_eq!(
+            c.carry, 2_000,
+            "1,500 left in two quarters' pools wait with the open 500"
+        );
+        let why = "a finalized quarter still has money to claim, claim it before upgrading";
+        assert_eq!(refusal(|| drop(version_five(|s| s.final_pool = 1_900))), why);
+        assert_eq!(
+            refusal(|| drop(version_five(|s| {
+                s.quarters.insert(Q4_2026 - 2, ());
+                s.final_pool = 2_401;
+            }))),
+            why
+        );
+    }
+
+    #[test]
+    fn a_version_five_seat_record_costs_one_read_of_the_migrated_day_for_the_whole_call() {
+        let c = version_five(|_| {});
+        let start_day = START / DAY + 1;
+        assert_eq!(c.stake_of("1".into()).unwrap().earn_from_day.0, start_day);
+        env::storage_remove(MIGRATED_DAY_KEY);
+        assert_eq!(
+            c.stake_of("3".into()).unwrap().earn_from_day.0,
+            start_day,
+            "the second record did not read the day again"
+        );
+    }
+
+    #[test]
+    fn the_version_six_layout_starts_with_the_version_bytes() {
+        let bytes = bytes_of(&council());
+        assert_eq!(&bytes[..2], STATE_VERSION.to_le_bytes().as_slice());
+        assert_eq!(STATE_VERSION, 6);
+    }
+
+    #[test]
+    fn a_new_council_starts_at_the_current_state_version() {
+        assert_eq!(council().state_version, STATE_VERSION);
     }
 
     // ---- version tags -------------------------------------------------------------------------------------------
@@ -5291,53 +5344,43 @@ mod tests {
             staked_at: U64(5),
             unlock_requested_at: Some(U64(9)),
             serving: Some(U64(3)),
-            booked_to: U64(6),
-            serving_from: 4,
+            earn_from_day: U64(6),
+            settled_acc: 7,
+            forfeited: 4,
+            serving_acc: 8,
             index: 2,
         }
     }
 
     fn sample_claim() -> Claim {
         Claim {
+            account: acct("a.near"),
             amount: 5,
-            status: ClaimStatus::Paid,
+            tokens: vec!["1".into()],
             requested_at: 1,
-            paid_at: Some(2),
         }
     }
 
     fn sample_received() -> Received {
-        Received {
-            amount: 9,
-            quarter: Q1_2027,
-            at: 3,
-        }
+        Received { amount: 9, at: 3 }
     }
 
-    fn sample_book() -> QuarterBook {
-        QuarterBook {
-            revenue_in: 1,
-            carry_in: 2,
-            seat_ns: 3,
-            forfeit_ns: 4,
-            finalized: true,
-            pool: 5,
-            weight_total: 6,
-            rolled_to: Some(7),
-            paid: 8,
-            pending: 9,
+    fn sample_pending() -> Pending {
+        Pending {
+            quarter: Q4_2026,
+            amount: 6,
         }
     }
 
     macro_rules! tagged_round_trip {
-        ($wrapper:ident, $value:expr) => {{
+        ($wrapper:ident, $value:expr, $tag:expr) => {{
             let value = $value;
             let bytes = bytes_of(&$wrapper::current(value.clone()));
-            assert_eq!(bytes[0], 0, stringify!($wrapper));
+            assert_eq!(bytes[0], $tag, stringify!($wrapper));
             assert_eq!(&bytes[1..], bytes_of(&value).as_slice(), stringify!($wrapper));
             assert_eq!(bytes_of(&$wrapper::try_from_slice(&bytes).unwrap()), bytes);
             let mut newer = bytes;
-            newer[0] = 1;
+            newer[0] = $tag + 1;
             let message = refusal(|| {
                 let _ = $wrapper::try_from_slice(&newer);
             });
@@ -5346,11 +5389,37 @@ mod tests {
     }
 
     #[test]
-    fn every_stored_record_starts_with_version_byte_zero_round_trips_and_refuses_a_newer_one() {
-        tagged_round_trip!(VersionedStake, sample_stake());
-        tagged_round_trip!(VersionedQuarterBook, sample_book());
-        tagged_round_trip!(VersionedClaim, sample_claim());
-        tagged_round_trip!(VersionedReceived, sample_received());
+    fn every_stored_record_carries_its_version_tag_round_trips_and_refuses_a_newer_one() {
+        tagged_round_trip!(VersionedStake, sample_stake(), 1);
+        tagged_round_trip!(VersionedClaim, sample_claim(), 0);
+        tagged_round_trip!(VersionedReceived, sample_received(), 1);
+        tagged_round_trip!(VersionedPending, sample_pending(), 0);
+    }
+
+    #[test]
+    fn a_version_five_seat_record_reads_with_the_day_migrate_wrote() {
+        MIGRATED_DAY.with(|day| day.set(None));
+        env::storage_write(MIGRATED_DAY_KEY, &42u64.to_le_bytes());
+        let staying = [vec![0u8], bytes_of(&v5_stake("a.near", 3, None, None))].concat();
+        let read = VersionedStake::try_from_slice(&staying).unwrap().into_inner();
+        assert_eq!((read.earn_from_day.0, read.index, read.forfeited), (43, 3, 0));
+        let leaving = [vec![0u8], bytes_of(&v5_stake("a.near", 3, Some(1), None))].concat();
+        let read = VersionedStake::try_from_slice(&leaving).unwrap().into_inner();
+        assert_eq!(read.earn_from_day.0, u64::MAX);
+    }
+
+    #[test]
+    fn a_new_council_has_the_quarter_before_the_running_one_closed() {
+        let c = council();
+        assert_eq!(c.last_closed_quarter, Q4_2026 - 1);
+        assert_eq!(c.quarter_acc.get(&(Q4_2026 - 1)).copied(), Some(0));
+    }
+
+    #[test]
+    fn a_version_five_received_record_reads_without_its_quarter() {
+        let old = [vec![0u8], bytes_of(&(9u128, 8_107u32, 3u64))].concat();
+        let read = VersionedReceived::try_from_slice(&old).unwrap().into_inner();
+        assert_eq!((read.amount, read.at), (9, 3));
     }
 
     #[test]
@@ -5359,30 +5428,18 @@ mod tests {
         stake(&mut c, "1", "a.near");
         send_revenue(&mut c, MARKET2, 1, 100);
         c.stakes.flush();
-        c.quarters.flush();
         c.received.flush();
         let stored = near_sdk::mock::with_mocked_blockchain(|b| b.take_storage());
         let want = [
             bytes_of(&VersionedStake::current(c.stake_of("1".into()).unwrap())),
-            bytes_of(&VersionedQuarterBook::current(c.book(quarter_containing(START)))),
-            bytes_of(&VersionedReceived::current(Received {
-                amount: 100,
-                quarter: quarter_containing(START),
-                at: START,
-            })),
+            bytes_of(&VersionedReceived::current(Received { amount: 100, at: START })),
         ];
         for bytes in want {
-            assert_eq!(bytes[0], 0);
+            assert_eq!(bytes[0], 1);
             assert!(
                 stored.values().any(|v| *v == bytes),
                 "a record is stored as the tagged bytes"
             );
         }
-    }
-
-    #[test]
-    fn a_new_council_starts_at_the_current_state_version() {
-        assert_eq!(council().state_version, STATE_VERSION);
-        assert_eq!(STATE_VERSION, 5);
     }
 }

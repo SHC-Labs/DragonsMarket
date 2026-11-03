@@ -125,6 +125,14 @@ funding and withdrawal flow. The remaining limits and decisions are in the contr
 
 &nbsp;
 
+## Built during the hackathon
+
+The hackathon was announced on 19 October 2026. The repository at the end of that day (commit `c15a5a8`) held the first version of the market, oracle and Council contracts (Council state version 1), the keeper, the contract tests and an early website. The rounds contract and the backend did not exist yet.
+
+Everything after that is work done during the hackathon: the rounds contract and the backend, Council v6 (revenue paid as it arrives and claimed per calendar quarter, with a cut when a seat leaves early), the oracle gas change, the keeper's RPC handling and checks, the stake page, the contract manuals, and the tests for all of it. The commit history is the record.
+
+&nbsp;
+
 ## How this was built
 
 The code and tests here were reviewed with AI coding assistants (Claude Code and Codex), directed,

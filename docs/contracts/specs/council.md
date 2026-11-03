@@ -1,41 +1,14 @@
-# Dragons Market: council contract implementation spec and quarterly accounting proposal
+# Dragons Market: council contract implementation spec, version 6 accounting
 
-**The complete function set the Council needs for NFT seats, juries and quarterly holder rewards, with a concrete accounting proposal that replaces the 30-day stream.**
+**The complete function set the Council needs for NFT seats, juries and holder revenue, with the version 6 accounting ("pay by arrival, claim by quarter") that replaced the version 5 quarter books.**
 
 | Field | Value |
 | --- | --- |
-| Date | 2026-10-21 |
-| Status | The quarterly model in section 6 is built. Rows marked NEW or CHANGED describe what was built, and the error and field tables were checked against the source on 2026-10-22 |
+| Date | 2026-10-31 |
+| Status | Describes state version 6, built in `contracts/council/src/lib.rs`. Checked against the source on 2026-10-31 (working tree, uncommitted) |
 | Scope | `contracts/council/src/lib.rs` |
-| Source | Working tree on top of commit `6cad02e`, read 2026-10-21 09:00 to 09:22 |
-| Revision checked | `council/src/lib.rs` sha256 prefix `cc840f4fdbe5caf9` (2510 lines, unchanged between copies, 267 lines differ from `HEAD`) |
+| Replaces | The version 5 model: seat-time quarter books, `finalize_quarter`, `advance_quarters`, `book_seat_time`, `claim_quarter` and the claim grace period. All were removed in version 6 |
 | Index | [README.md](README.md) |
-
-**Build status, 2026-10-21.** BUILT in `contracts/council/src/lib.rs` (state version 3; version 3 added the market allow-list, sweeps keyed by market account and version-tagged records, 2026-10-23): sections 4.2, 5, 6, 7.2, 8 and 9, with the changes below. Sections 2, 3, 10 and 11 hold as written.
-
-| Item | Built as | Tests |
-| --- | --- | --- |
-| Calendar (6.1, I-C7) | `quarter_containing`, `quarter_start`, `quarter_end`, pure | `the_quarter_table_of_the_spec_holds`, `every_month_boundary_from_1970_to_2100_falls_in_the_right_quarter`, `later_times_never_fall_in_earlier_quarters` |
-| Revenue by sweep id from the market only (5) | `mt_on_transfer` with `revenue:<sweep id>`, `received_of` | `a_sweep_id_is_taken_once_and_the_repeat_is_refused`, `only_the_market_sends_revenue`, `a_message_that_is_not_a_sweep_is_unknown`, sandbox `a_sweep_id_is_taken_once_and_only_the_market_sends_revenue_and_the_verifier_gives_back_the_rest` (I-C6) |
-| Worked examples 1 to 6 (6.11) | unit tests with the real calendar | `example_one_the_baseline_quarter`, `example_two_a_sweep_after_the_boundary_belongs_to_the_next_quarter`, `example_three_a_seat_staked_at_noon_on_the_last_day_earns_a_sliver`, `example_four_a_silent_juror_loses_the_seat_time_of_the_case`, `example_five_a_quarter_with_no_seats_rolls_its_pool_into_the_next`, `example_six_a_failed_claim_can_be_made_again_and_a_paid_one_cannot`. Example 7 is the market's: sandbox `a_council_leg_that_fails_leaves_the_treasury_leg_alone_and_is_retried_once` |
-| Seat weights, stake changes (6.4) | `advance_quarters`, `book_seat_time`, lazy per-seat booking | `a_share_is_the_staked_time_over_all_staked_time`, `two_spans_of_one_token_by_one_owner_in_a_quarter_add_up_to_one_claim`, `the_token_restaked_by_someone_else_starts_a_span_of_its_own`, `idle_time_is_moved_forward_in_steps_by_anyone`, `a_failed_unstake_restores_the_seat_and_it_counts_again_from_the_restore` |
-| Forfeits as removed weight (6.5) | `unlock_case`, with the forfeit kept in its own map | `a_forfeit_after_the_quarter_is_final_is_skipped_and_says_so`, `a_forfeit_that_crosses_a_boundary_is_split_between_the_quarters_it_touched`, `a_juror_is_penalised_once_and_naming_an_outsider_changes_nothing` |
-| Finalization and the claim window (6.7) | `finalize_quarter`, in order, after the grace period | `a_quarter_is_final_only_after_the_grace_period_and_in_order`, `a_claim_before_the_quarter_is_final_is_refused`, `unclaimed_amounts_stay_claimable_for_good` |
-| Single-use claim record (6.8, I-C4, I-C5) | `claim_quarter`, `on_claim_paid` | `a_callback_that_runs_again_or_late_changes_nothing`, `nobody_claims_for_a_seat_they_did_not_hold`, guard `the_council_pays_reward_money_only_in_a_quarter_claim`, sandbox `a_payout_the_verifier_refuses_leaves_the_claim_open_and_a_paid_claim_cannot_be_made_again`, `fees_go_from_a_sweep_to_a_quarter_to_one_claim_per_seat_and_a_late_claim_is_still_paid` |
-| Conservation, entitlement bound, weight conservation (I-C1 to I-C3) | proptests | `quarters_conserve_every_unit_and_never_pay_a_claim_twice`, `shares_never_exceed_the_pool_and_leave_under_a_unit_a_seat` |
-| Views (8) and events (9) | all of section 8 | `the_quarter_views_show_state_pool_dates_and_what_was_paid`, `an_entitlement_goes_from_accruing_to_closing_to_claimable_to_pending_to_paid`, `an_account_lists_its_entitlements_over_current_and_past_seats`, `reward_totals_track_received_open_final_paid_and_rolled` |
-
-Changes against the text above:
-
-| Item | Spec | Built |
-| --- | --- | --- |
-| `new` | Adds `market_id` and `close_grace_ns`, keeps `nft_contract` | `new` takes none of the three. The collection is `None` and the market allow-list is empty until `set_nft_contract` and `allow_market`; staking, revenue and claims refuse until then. The grace period starts at 7 days (`set_close_grace_ns`, 1 to 30 days) |
-| Revenue receipt | Ticks seat time and refuses more than 8 quarters of backlog | It only books the revenue to the quarter of receipt. Seat time is moved by stakes, unstakes, `finalize_quarter` and `advance_quarters`, so a late sweep is never refused for idle time |
-| First quarter | `first_quarter` and gap-free books | `next_to_finalize` starts at the quarter of `new`; a quarter nobody touched has no entry and reads as empty, so there are no gaps to keep |
-| Forfeit storage | Subtract from `seat_weight` | A separate `forfeits` map, so releasing a case never needs the seat's whole history counted first and cannot fail |
-| `unstake` | Refuses when more than 8 quarters need booking | The same, `book this seat first`. The gas floor is 33 TGas |
-| `entitlements_of` | Over the account's seats and past seats | Over a list of every token the account has staked (`tokens_of`) |
-| Silent juror | "Goes to the next quarter's pool" in the build brief | The spec text is built: the seat time leaves the quarter's weights, so the other seats' shares in that quarter rise. A quarter already final is not changed |
 
 ---
 
@@ -46,30 +19,29 @@ Changes against the text above:
 3. [Money flows in Intents terms](#3-money-flows-in-intents-terms)
 4. [State](#4-state)
 5. [Message grammar](#5-message-grammar)
-6. [The quarterly accounting proposal](#6-the-quarterly-accounting-proposal)
+6. [The version 6 accounting](#6-the-version-6-accounting)
 7. [Methods](#7-methods)
 8. [Views the website and keeper need](#8-views-the-website-and-keeper-need)
 9. [Events](#9-events)
 10. [Invariants](#10-invariants)
 11. [Errors](#11-errors)
-12. [Test evidence required](#12-test-evidence-required)
+12. [Test evidence](#12-test-evidence)
 
 ---
 
 ## 1. Summary
 
-The Council already holds staked NFT seats, draws juries, locks a drawn seat until its case is final, and keeps its reward backing in its own Intents account. Revenue arrives by `mt_on_transfer` and payouts leave by `mt_transfer` (Checked in source: `council/src/lib.rs:633-660`, `:835-840`).
+The Council holds staked NFT seats, draws juries, locks a drawn seat until its case is final, and keeps its reward backing in its own Intents account. Revenue arrives by `mt_on_transfer` and payouts leave by `mt_transfer`.
 
-It does not implement quarterly claims. Rewards stream to staked seats over 30 days and a seat may claim at any time (`:26-29`, `:93-160`, `:576-605`). The accepted decision says eligible holders claim quarterly, each entitlement once, through Council-authorised Intents settlement, and that the same allocation must never be claimable through two paths. R-05 is therefore MISSING.
+Section 6 is the accounting. In one paragraph: a seat staked on UTC day D starts earning at the start of day D+1. Each revenue sweep is split equally among the seats earning when it arrives, so a seat never shares a sweep that came before it started. Quarters are UTC calendar quarters. What a seat earned in a finished quarter is claimable once the quarter closes, with `claim`, and never expires. The quarter still running cannot be claimed. A seat that asks to leave before its quarter ends gives up 50% of that running quarter's earnings only: the cut half goes to a pool shared at quarter close among the seats earning then, and the kept half is paid at quarter close. A silent juror forfeits its earnings while serving, and the other earning seats share them. The cut is fixed (`LEAVER_CUT_BPS` is 5000) and not configurable.
 
-Section 6 is the concrete proposal. In one paragraph: quarters are UTC calendar quarters. Every revenue arrival is attributed to the quarter in which the Council receives it. A seat's share of a quarter is the time it was staked inside that quarter divided by the total seat time of that quarter, so staking just before the quarter ends earns a sliver and not the whole pool. A quarter becomes claimable seven days after it ends. Each seat claims each quarter once. Unclaimed amounts stay claimable with no expiry. A quarter with no seats rolls its pool forward. The 30-day stream and the old `claim` method are removed.
-
-| Change | Section |
+| Change in version 6 | Section |
 | --- | --- |
-| Quarter books, seat weights, forfeits as removed weight, claim records, sweep id dedupe | 6, 7.2 |
-| Revenue accepted only from the market | 5, 7.2 |
-| `unstake` no longer pays, so unstaking never touches reward money | 7.2 |
-| Views for quarters, entitlements, seats of an account, reward totals | 8 |
+| Revenue index and day cursor replace quarter books and seat weights | 4, 6 |
+| `claim(token_ids)` replaces `claim_quarter`; `request_unstake` takes `accepts_cut` | 6.5, 6.6, 7 |
+| Anyone can call `advance_days`; every money call walks the days first | 6.2, 7 |
+| `finalize_quarter`, `advance_quarters`, `book_seat_time`, `set_close_grace_ns` removed | 7 |
+| Views for earnings, claimable and in-progress amounts, quarter calendar and snapshots | 8 |
 
 ---
 
@@ -77,15 +49,15 @@ Section 6 is the concrete proposal. In one paragraph: quarters are UTC calendar 
 
 | Role | Set by | Powers |
 | --- | --- | --- |
-| Owner | `new`, `propose_owner` and `accept_owner`. DECIDED: the DAO | `upgrade`, `seal`, `propose_owner`, `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract` (only with nothing staked), `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`. NEW: `set_close_grace_ns`, `allow_market`, `disallow_market`, `set_reconcile_wait_ns` |
+| Owner | `new`, `propose_owner` and `accept_owner`. DECIDED: the DAO | `upgrade`, `seal`, `remove_verifier_key`, `propose_owner`, `set_cooldown_ns`, `set_max_seats_per_account`, `set_nft_contract` (only with nothing staked), `allow_tokens`, `set_token_range`, `clear_token_range`, `set_allowlist_enabled`, `allow_market`, `disallow_market`, `set_reconcile_wait_ns`, `reconcile_claim` |
 | Oracle | `new`, no setter | `draw` and `unlock_case` only |
-| Seat owner | Staking | `request_unstake`, `unstake`, and the claim of their own seats |
-| NFT contract | `new`, `set_nft_contract` | `nft_on_transfer` only |
+| Seat owner | Staking | `request_unstake`, `unstake`, and `claim` |
+| NFT contract | `set_nft_contract` | `nft_on_transfer` only |
 | Verifier | `new`, no setter | `mt_on_transfer` only |
-| Market | NEW `new` argument | The only account whose revenue the Council accepts |
-| Anyone | none | `stage_code`, NEW `advance_quarters`, `finalize_quarter`, `book_seat_time`, every view |
+| Market | `allow_market` | The only accounts whose revenue the Council accepts |
+| Anyone | none | `stage_code`, `advance_days`, every view |
 
-Eligibility rules stay as built: only a staked NFT of the configured collection that passes the allowlist earns or enters a jury draw. Treasury membership grants no holder reward (`spec.md:180-181`, `:204-205`). A seat belongs to the previous owner of the token, not to the account that relayed it (`:733-766`).
+Eligibility rules stay as built: only a staked NFT of the configured collection that passes the allowlist earns or enters a jury draw. Treasury membership grants no holder reward. A seat belongs to the previous owner of the token, not to the account that relayed it.
 
 ---
 
@@ -96,7 +68,7 @@ The Council has its own Intents account `C`, with no key registered in the verif
 | Money | Path | Verifier call |
 | --- | --- | --- |
 | 25% of earned fees | Market `M` to `C` | The market calls `mt_transfer_call(receiver_id=C, token_id, amount, null, null, msg="revenue:<sweep_id>")`. The verifier credits `C`, then calls `C.mt_on_transfer` |
-| A holder's quarterly payout | `C` to the holder's own Intents account | The Council calls `mt_transfer(receiver_id=owner, token_id, amount, null, null)` with 1 yocto |
+| A holder's payout | `C` to the holder's own Intents account | The Council calls `mt_transfer(receiver_id=owner, token_id, amount, null, null)` with 1 yocto |
 | NFT return on unstake | NFT contract | `nft_transfer`, no collateral involved |
 
 Surplus: a plain deposit into `C` credits `C` and calls nothing. It is never counted and no method credits it (Reported in `INTENTS-PROOF.md`, tested in `intents_verifier.rs`).
@@ -107,58 +79,42 @@ The reconciliation identity for `C`, with no claim in flight: `mt_balance_of(C, 
 
 ## 4. State
 
-### 4.1 Fields today
-
-EXISTING (`council/src/lib.rs:169-213`).
+`state_version` is 6. The fields below are the ones that matter to accounting. The upgrade, allowlist, owner and counterparty fields are unchanged from earlier versions.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `state_version`, `upgrade_proven`, `upgrade_in_flight` | `u16`, `bool`, `bool` | Upgrade path marks |
-| `owner`, `pending_owner` | `AccountId`, `Option<AccountId>` | The DAO and a pending handover |
-| `oracle`, `nft_contract`, `verifier` | `AccountId` | Counterparties |
-| `collateral_token_id` | `String` | Exact `nep141:<contract>` string |
-| `cooldown_ns` | `u64` | Wait between `request_unstake` and `unstake`. Must be at least the oracle's challenge window plus panel deadline |
-| `max_seats_per_account` | `u32` | Seat cap per account |
-| `allowlist_enabled`, `allowed_tokens`, `allowed_range` | `bool`, set, optional range | Per collection token allowlist |
-| `staked` | `Vector<TokenId>` | Every staked token, stable order, at most 1,000 |
-| `stakes` | `LookupMap<TokenId, Stake>` | One record per staked token |
-| `seats_of` | `LookupMap<AccountId, u32>` | Seat count per account |
-| `juries` | `LookupMap<u64, Vec<TokenId>>` | Seats held for each open case |
-| `acc_per_seat`, `stream` | `u128`, `Stream` | The 30-day stream. REMOVED by this proposal |
-| `total_received` | `u128` | Every unit of revenue taken in |
-
-`Stake` as built: `owner`, `staked_at`, `unlock_requested_at`, `serving`, `booked_to`, and two fields hidden from JSON, `serving_from` and `index`. Before the quarterly change it held `serving_since_acc` and `reward_debt` instead of `booked_to` and `serving_from`.
-
-### 4.2 Fields after the change (PROPOSED)
-
-`state_version` becomes 2, and 3 with the market allow-list and the version tags. Nothing is deployed, so no migration is needed.
-
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `allowed_markets` | `Vec<AccountId>` | BUILT. The accounts that may send revenue. Replaces the single `market`. The last one cannot be removed |
-| `close_grace_ns` | `u64` | NEW. Wait after a quarter ends before it can be finalized. Default 7 days, bounds 1 to 30 days |
-| `reconcile_wait_ns` | `u64` | NEW. How long a claim must be pending before `reconcile_claim`. Default 1 hour, owner range 10 minutes to 7 days |
-| `last_tick` | `u64` | NEW. Nanosecond time up to which seat time has been added to the quarter books |
-| `first_quarter`, `next_to_finalize` | `u32` | NEW. Oldest quarter with a book and the next one to finalize |
-| `quarters` | `LookupMap<u32, QuarterBook>` | NEW. One book per quarter from `first_quarter` to the current one, with no gaps |
-| `seat_weight` | `LookupMap<(u32, TokenId, AccountId), u64>` | NEW. Booked nanoseconds of one staking span of one token by one owner inside one quarter |
-| `claims` | `LookupMap<(u32, TokenId, AccountId), Claim>` | NEW. The single-use claim record |
-| `received` | `LookupMap<(AccountId, u64), VersionedReceived>` | BUILT. Revenue by market account and sweep id. Every map record (`Stake`, `QuarterBook`, `Claim`, `Received`) is stored behind a one-byte version tag, 0 today, read through `into_current` and always written current |
-| `seats_by_owner` | `LookupMap<AccountId, Vec<TokenId>>` | NEW. Replaces the bare count, at most `max_seats_per_account` entries |
-| `total_paid` | `u128` | NEW. Sum of confirmed claim payouts |
-| `acc_per_seat`, `stream`, `Stake.reward_debt`, `Stake.serving_since_acc` | | REMOVED |
-| `Stake.booked_to` | `u64` | NEW. Time up to which this stake's weight is booked. Starts at `staked_at` |
-| `Stake.serving_from` | `Option<u64>` | NEW. Time the seat was drawn |
+| `allowed_markets` | `Vec<AccountId>` | The accounts that may send revenue. The last one cannot be removed |
+| `reconcile_wait_ns` | `u64` | How long a claim must be pending before `reconcile_claim`. Default 1 hour, owner range 10 minutes to 7 days |
+| `received` | `LookupMap<(AccountId, u64), VersionedReceived>` | Revenue by market account and sweep id. `Received` is `{amount, at}` (version 5 also held the quarter) |
+| `total_received`, `total_paid`, `pending_claims_total` | `u128` | Everything taken in, everything paid, and claims in flight |
+| `acc` | `u128` | The revenue index: the units credited to one earning seat so far, times `ACC_SCALE` (10^18). It only grows |
+| `carry_scaled` | `u128` | The scaled remainder of the last split, added to the next |
+| `carry` | `u128` | Revenue waiting for the next split: a sweep that came while no seat was earning, and what silent jurors lost with no other seat earning |
+| `cut_pool` | `u128` | The cut halves of seats that left in the running quarter |
+| `active` | `u32` | Seats earning now |
+| `joins_on` | `LookupMap<u64, u32>` | Seats staked and not yet earning, counted by the UTC day they start |
+| `last_day` | `u64` | The last UTC day folded into `active`. Money calls need it to be today |
+| `day_acc` | `LookupMap<u64, u128>` | The index at the start of each day on which seats started |
+| `quarter_acc` | `LookupMap<u32, u128>` | The index at the moment each quarter closed, after the cut pool was shared |
+| `last_closed_quarter` | `u32` | The latest quarter with a snapshot |
+| `accrued`, `accrued_total` | `LookupMap<AccountId, u128>`, `u128` | Earnings settled to an account and claimable now, and their sum |
+| `pending`, `pending_total_slots` | `LookupMap<AccountId, Pending>`, `u128` | The kept half of a leaver's running-quarter earnings, one slot for each account, and their sum |
+| `next_claim_id`, `claims` | `u64`, `LookupMap<u64, Claim>` | Claims in flight |
+| `unstakes_in_flight` | `u32` | Seats taken out of `staked` whose NFT transfer has not been answered. They count against the 1,000 seat cap |
 
 ```text
-QuarterBook { revenue_in: u128, carry_in: u128, seat_ns: u128, forfeit_ns: u128,
-              finalized: bool, pool: u128, weight_total: u128,
-              rolled_to: Option<u32>, paid: u128, pending: u128 }
-Claim       { amount: u128, status: Pending | Paid, requested_at: u64, paid_at: Option<u64> }
-Received    { amount: u128, quarter: u32, at: u64 }
+Stake    { owner, staked_at, unlock_requested_at, serving, earn_from_day,
+           settled_acc, forfeited, serving_acc, index }
+Pending  { quarter: u32, amount: u128 }
+Claim    { account, amount: u128, tokens: Vec<TokenId>, requested_at: u64 }
+Received { amount: u128, at: u64 }
 ```
 
-Storage grows with seats times quarters touched. Each `seat_weight` entry is about 100 bytes and each `claims` entry about 120 bytes. A full council of 1,000 seats over a year is under 4,000 entries of each, near 0.9 MB, so about 9 NEAR paid from the Council's NEAR balance. The keeper's storage margin check covers it.
+`settled_acc`, `forfeited`, `serving_acc` and `index` are hidden from JSON. Every map record is stored behind a one-byte version tag, read through `into_current` and always written current.
+
+The version 5 maps (quarter books, seat weights, forfeits, quarter claims) stay in storage under prefixes 5 to 8, unread, and no new map may use those prefixes.
+
+Storage grows with the days on which seats started, the closed quarters, and the accounts holding a balance or a pending slot. Sizes were not measured for version 6.
 
 ---
 
@@ -166,29 +122,28 @@ Storage grows with seats times quarters touched. Each `seat_weight` entry is abo
 
 | Message | Sender | Effect |
 | --- | --- | --- |
-| `revenue` | any (today) | Adds the amount to the stream. Accepted from anyone (`:633-660`). CHANGED, see below |
-| `revenue:<sweep_id>` | the market only | NEW. Attributes the amount to the quarter of the receipt, records `received[(market, sweep_id)]`, adds to `total_received` |
+| `revenue:<sweep_id>` | an allowed market only | Walks the days (at most 30), splits the amount among the seats earning, records `received[(market, sweep_id)]`, adds to `total_received` |
 
-`<sweep_id>` is a `u64` decimal. After the change:
+`<sweep_id>` is a `u64` decimal. The checks:
 
-1. The caller must be the verifier, with exactly one token and one amount, and the token id must equal `collateral_token_id` (existing checks).
+1. The caller must be the verifier, the money must come from the sender's own balance, with exactly one token and one amount, and the token id must equal `collateral_token_id`.
 2. `sender_id` must be on the allow-list (`revenue comes from an allowed market only`). A different sender panics and the verifier refunds it in full.
-3. A `sweep_id` already in `received` panics (`that sweep was already received`) and the verifier refunds it. This makes a repeated send harmless.
+3. A `sweep_id` already in `received` for that market panics (`that sweep was already received`) and the verifier refunds it. This makes a repeated send harmless.
 4. Any other text panics (`unknown action`).
 
-Staking uses NEP-171 `nft_transfer_call` to the Council. `msg` is ignored (`:735-766`). The website sends an empty string.
+Staking uses NEP-171 `nft_transfer_call` to the Council. `msg` is ignored. The website sends an empty string.
 
 ---
 
-## 6. The quarterly accounting proposal
+## 6. The version 6 accounting
 
-PROPOSED throughout this section. It uses the accepted decisions only: quarterly claims, each entitlement claimable once, Council-authorised Intents settlement, the 25% leg held in Intents, juror pay and bonds separate, and no second payout path. The numbers in the examples are computed and the arithmetic was checked.
+This section is built. Every sentence here was checked against the source.
 
 ### 6.1 Quarter boundaries
 
-A quarter is a UTC calendar quarter: January to March, April to June, July to September, October to December. The quarter starts at 00:00:00.000000000 UTC on the first day of its first month and ends, exclusive, where the next quarter starts. A timestamp exactly on a boundary belongs to the new quarter.
+A quarter is a UTC calendar quarter: January to March, April to June, July to September, October to December. The quarter starts at 00:00:00 UTC on the first day of its first month and ends, exclusive, where the next quarter starts. A timestamp exactly on a boundary belongs to the new quarter.
 
-The quarter id is `year * 4 + (quarter - 1)` as a `u32`, so 2026 Q4 is 8107. Views also return the label `"2026Q4"`.
+The quarter id is `year * 4 + (quarter - 1)` as a `u32`, so 2026 Q4 is 8107.
 
 | Quarter | Id | Starts (UTC) | Starts (ns) | Days |
 | --- | --- | --- | --- | --- |
@@ -201,99 +156,83 @@ The quarter id is `year * 4 + (quarter - 1)` as a `u32`, so 2026 Q4 is 8107. Vie
 
 Test vectors: `1798761599999999999` (2026-12-31T23:59:59.999999999Z) is in 8107. `1798761600000000000` is in 8108. `1835438400000000000` (2028-02-29T12:00:00Z) is in 8112.
 
-The contract needs no date library. It converts days since 1970-01-01 to a civil year and month with the standard integer algorithm, then derives the quarter. The function is pure and gets a unit test over the vectors above and over every month boundary from 2026 to 2100.
+The contract needs no date library. It converts days since 1970-01-01 to a civil year and month with the standard integer algorithm, then derives the quarter. The function is pure and is tested at every month boundary from 1970 to 2100.
 
-### 6.2 Accrual, vesting and claimability
+### 6.2 The day cursor
 
-| Term | Meaning | Visible as |
-| --- | --- | --- |
-| Accruing | The quarter is still running. A seat has a provisional share that moves with later revenue and later seat time | `EntitlementView.status = "accruing"`, `estimated = true`. Display only, never promised |
-| Closing | The quarter ended but `close_grace_ns` has not passed. Forfeits can still change weights | `"closing"` |
-| Claimable | The quarter is finalized. The pool and total weight are fixed. The seat's amount is `floor(pool * weight / total weight)` | `"claimable"` |
-| Pending | A claim was requested and the verifier transfer has not reported | `"pending"` |
-| Paid | The verifier transfer succeeded | `"paid"` |
+`advance_days(max_steps)` is permissionless and walks `last_day + 1` up to today, at most `MAX_DAY_STEPS` (100) days a call. For each day, in this order:
 
-There is no vesting schedule across quarters and no cliff. A seat that was staked for part of a quarter earns for exactly that part, and keeps the right to claim it after unstaking. "Vesting" here is only the moment the quarter finalizes.
+1. If the day is the first day of a new quarter, close the previous quarter. With seats earning, share the cut pool and then the carry like a sweep. With none, move the cut pool to the carry. Then store the index as that quarter's snapshot, set `last_closed_quarter` and emit `quarter_closed`.
+2. Start the seats whose first earning day it is: add their count to `active` and store the index in `day_acc` for that day.
 
-### 6.3 How revenue is attributed
+The order matters. A seat that starts on the first day of a quarter starts after the pool was shared, so it does not share the pool.
 
-Every `revenue:<sweep_id>` arrival is credited to the quarter that contains the block time of the Council's receipt. Fees earned in December but swept on 2 January belong to the new quarter. The Council cannot know when fees were earned, because the market sends one lump. A keeper that sweeps shortly before a boundary keeps the attribution close to the earning period (README section 4, journey J7). This is the late-arrival rule: late fees are attributed to the current quarter, never back-dated.
+A walk emits one `seats_started` at its end (only if a seat started) and one `quarter_closed` for each quarter it closed, so it never writes the 100 logs a call is allowed.
 
-Juror forfeits are not money. They remove weight (6.5), so they need no attribution.
+Every call that changes the index, the seat count, a seat or a balance first walks the days itself and then requires `last_day` to be today, panicking with `call advance_days first` if it is too far behind. `request_unstake` and `claim` walk up to 100 days, because the holder can attach the gas. The revenue receipt and `unlock_case` (with a silent juror) walk up to `MAX_RECEIPT_CATCH_UP_DAYS` (30) and refuse beyond it. `draw` walks up to 30 first and does not refuse. Sweeps come at least daily, so the cap is reached only when the keeper and every holder have been idle for a month. The keeper job is a convenience, not a dependency, and the keeper calls only `advance_days`.
 
-### 6.4 Weights and stake changes
+### 6.3 Sharing a sweep
 
-A seat's weight in a quarter is the number of nanoseconds, inside that quarter, that the stake existed. Staking, unstaking and re-staking only change which spans exist. The weight does not depend on when revenue arrived. This is what stops a late staker from taking a full share, which the 30-day stream existed to prevent (finding C-07).
+A sweep of `R` units with `active > 0` raises the index by `(R + carry) * ACC_SCALE / active`, rounded down, with the scaled remainder kept in `carry_scaled` for the next split. The carry is spent. With `active == 0` the sweep goes to `carry` and waits for the next sweep or the next quarter close, whichever comes first. Total credited therefore never exceeds total received.
 
-Rules:
+A seat's earnings are the rise of the index from its start (the index stored for its first earning day, or the index where it was last settled if higher) divided by `ACC_SCALE`, rounded down. A sweep that arrived before the seat started is never part of that rise.
 
-1. A seat counts from the block it is staked until the block it is unstaked. It keeps counting while it serves on a case. It stops counting at `request_unstake`, so a seat waiting out the cooldown, or one that asked to leave and stayed, earns nothing after the request (README OD-03, reversed 2026-10-22).
-2. A new stake of the same token by another owner starts a new span with its own weights. The weights are keyed by quarter, token and owner, so both owners can claim their own spans.
-3. Total weight of a quarter, `seat_ns`, is the integral of the staked seat count over the quarter. The contract adds `earning_count * (to - last_tick)` to the right quarter at every stake, unstake and revenue arrival, and once per quarter boundary crossed. `advance_quarters` lets anyone move it forward.
-4. Per seat weights are booked lazily from `Stake.booked_to`. `unstake`, `claim_quarter`, forfeits and `book_seat_time` book the span up to a point, splitting it across the quarters it covers. A single call books at most 8 quarters, so one span longer than two years needs `book_seat_time` first.
-5. The sum of booked weights of a quarter equals `seat_ns - forfeit_ns` once every seat is booked.
+The index only grows, so its `u128` bounds the whole life of the council, not one sweep: it is full once the units shared per earning seat reach about 3.4 * 10^20.
 
-### 6.5 Juror forfeits
+### 6.4 Settling finished quarters
 
-Today a juror who never votes forfeits the revenue the seat earned while serving, and that money goes back into the stream (`:472-491`). In the quarterly model the seat loses the weight of the serving span instead.
+`settle_closed` moves a seat's earnings up to the last closed quarter's snapshot into its owner's `accrued` balance and sets the seat's `settled_acc` to that snapshot. Earnings after the snapshot stay unsettled and cannot be claimed. For a seat that is serving, the bound is the lower of the snapshot and the index at the draw, so a juror cannot claim what its seat earns while serving before its case is released. Money earned before the draw stays claimable. The units a silent juror lost (`forfeited`) come off the running quarter's earnings first, so finished quarters are paid in full whenever the running quarter can absorb the forfeit.
 
-When the oracle calls `unlock_case` with a delinquent juror, the Council books the seat up to now. For each quarter that overlaps `[serving_from, now)` and is not finalized, it subtracts that overlap from `seat_weight` and adds it to `QuarterBook.forfeit_ns`. Total weight shrinks by the same amount, so every other seat's share rises. A quarter that is already finalized is not changed, and the Council emits `forfeit_skipped`.
+### 6.5 Leaving
 
-`close_grace_ns` exists for this. A case lasts at most a few days plus keeper retries, so finalizing seven days after the boundary lets almost every case that crossed the boundary settle first.
+`request_unstake(token_id, accepts_cut: bool)` refuses unless `accepts_cut` is true (`leaving before the quarter ends costs 50% of this quarter's earnings: pass accepts_cut true`). The flag is required on every request. After the days are walked:
 
-A juror who committed but had no chance to reveal because a majority settled first is not delinquent. That rule lives in the oracle and is unchanged.
+1. Settle finished quarters and move a pending slot whose quarter has closed into `accrued`. Earnings of earlier quarters are never cut.
+2. The running-quarter earnings `E` are the seat's earnings since its start or last settlement, less what is still to come off for a forfeit. They are zero if the seat has not started.
+3. `cut = E * LEAVER_CUT_BPS / BPS_DENOMINATOR` (5000 over 10000, rounded down) and `kept = E - cut`. The cut joins `cut_pool`. The kept half joins the owner's `pending` slot for the running quarter (a second leave in the same quarter adds to the same slot).
+4. The seat stops earning: `active` goes down by one, or the seat is taken off `joins_on` if it has not started. `unlock_requested_at` is set to now and `settled_acc` to the current index.
+5. Events `seat_cut` and `unstake_requested`.
 
-### 6.6 Periods with no seats
+The leave date is the request date. The numbers are fixed at the call, so a late snapshot cannot change them. A seat serving on an open case cannot request. A seat that requested is not drawn.
 
-Seat time with zero seats adds zero weight. The pool is not tied to time slices, so revenue that arrived while no seat was staked is still shared among the seats that were staked at any point in the quarter.
+The cut half is shared among the seats earning when the quarter closes. The kept half becomes claimable when the quarter closes. Unstakes are never blocked.
 
-If total weight of a quarter is zero at finalization, the whole pool rolls into the next quarter: `quarters[q + 1].carry_in += pool`, `rolled_to = q + 1`. The money never leaves `C`. A rolled quarter has nothing to claim.
+### 6.6 Claiming
 
-### 6.7 Finalization, claim window and unclaimed amounts
-
-`finalize_quarter(q)` is public. It needs `now >= ends_at + close_grace_ns`, `q == next_to_finalize`, and it fixes `pool = revenue_in + carry_in` and `weight_total = seat_ns - forfeit_ns`. Quarters finalize in order, so a roll always lands in a quarter that is not final yet.
-
-A claim opens when its quarter is finalized. There is no deadline. An unclaimed amount stays claimable indefinitely (PROPOSED default, README OD-04). The alternatives and their cost:
-
-| Alternative | Effect | Why not the default |
-| --- | --- | --- |
-| Expiry after N quarters, unclaimed returns to a later pool | Bounds liabilities and dormant accounts | Takes money a holder is owed. Needs notice, a legal view and a keeper reminder. Not in the accepted decision |
-| Expiry to the treasury | Same, but money leaves the holder allocation | Changes the 75/25 meaning |
-
-Rounding: each seat gets `floor(pool * weight / weight_total)`. The sum is at most the pool, and the leftover is under one unit per seat. The leftover stays in `C` as unallocated backing. No method moves it in the first release (OPEN, README OD-07). It is at most 1,000 units, so at most 0.001 USDC per quarter.
-
-### 6.8 The single-use claim record
-
-`claim_quarter(quarter, token_id)` needs exactly 1 yocto and at least 33 TGas.
+`claim(token_ids)` is payable (exactly 1 yocto) with a gas floor of 33 TGas, and takes at most `MAX_CLAIM_TOKENS` (10) tokens, every one staked by the caller. After the days are walked it moves a closed pending slot into `accrued`, settles each listed seat, and pays `accrued[caller]` in full with one `mt_transfer`. An empty list pays what is already in `accrued`, which is how a holder who has left collects.
 
 | Step | State change | Failure |
 | --- | --- | --- |
-| 1 | Refuse unless the quarter is finalized. Book the caller's span if the caller owns the staked token. Read `seat_weight[(q, token, caller)]` | `nothing to claim` when the weight is zero. `claim is already pending` or `already claimed` when a record exists |
-| 2 | Compute `amount = floor(pool * weight / weight_total)`. Refuse zero. Write `claims[key] = Pending {amount}`. Add `amount` to `QuarterBook.pending` | none |
-| 3 | Send `mt_transfer(caller, token_id, amount)` from `C`, then `on_claim_paid` | The verifier receipt fails (paused, locked, out of gas) |
-| 4a | Success: `status = Paid`, `paid_at = now`, `pending -= amount`, `paid += amount`, `total_paid += amount`. Emit `claim_paid` | |
-| 4b | Failure: delete the record, `pending -= amount`. Emit `claim_failed`. The seat can claim again | |
+| 1 | Check every listed token is staked by the caller. Walk the days. Settle | `not staked`, `not your seat`, `at most 10 tokens in one claim`, `call advance_days first` |
+| 2 | Remove `accrued[caller]`. Refuse zero | `nothing to claim` |
+| 3 | Subtract the amount from `accrued_total`, add it to `pending_claims_total`. Write `claims[id] = {account, amount, tokens, requested_at}`. Emit `claim_requested` | none |
+| 4 | Send `mt_transfer(caller, token_id, amount)` from `C`, then `on_claim_paid(id)` | The verifier receipt fails (paused, locked, out of gas) |
+| 5a | Success: remove the record, `pending_claims_total -= amount`, `total_paid += amount`. Emit `claim_paid` | |
+| 5b | Failure: remove the record, `pending_claims_total -= amount`, credit `accrued` and `accrued_total`. Emit `claim_failed` | |
 
-The key is quarter, token and caller. A different caller has a different key, so another account cannot claim or block this one. The record is never deleted once `Paid`, which is what makes the claim single use. `mt_transfer` returns nothing and is one verifier receipt, so an error means nothing moved. This is the same reasoning the market uses for `withdraw`. The event `claim_requested` is emitted at step 2 and replaces today's `revenue_claimed`, which is emitted before the transfer succeeds and so reads as a payment (`:596-599`).
+A callback that runs again or late finds no record and changes nothing. `reconcile_claim(id, paid)` (owner only, after `reconcile_wait_ns`) decides a claim whose callback never came, through the same closing step. Claims never expire.
 
-There is no second path. The old `claim(token_id)` and the payout inside `unstake` are removed, so a holder can never draw the same allocation twice.
+The record is debited before the transfer is sent, the same pattern the rounds contract uses for withdrawals. `mt_transfer` returns nothing and is one verifier receipt, so an error means nothing moved. There is no other path: `unstake` pays nothing, so a holder can never draw the same earnings twice.
 
-### 6.9 How the 30-day stream maps onto this
+### 6.7 Silent jurors
 
-It does not map. It is replaced.
+`draw` walks the days first, then stores `serving_acc` (the index) on each drawn seat. `unlock_case(case_key, delinquent)` forfeits, for a delinquent owner, what the seat earned from `max(serving_acc, start)` to now, capped at what it has not settled. The other earning seats share that at once and only they: with `others = active - 1 > 0` the index rises by `lost * ACC_SCALE / others`, and the seat is docked its own share of that rise (rounded up), so it keeps nothing of what it lost. With no other seat earning, the units go to `carry` and the seat is docked `lost`. The units come off the seat's next settlements. A voter forfeits nothing, and settled money is never touched. Event `seat_earnings_forfeited`. A second call for the same case does nothing.
 
-| Old element | Fate |
-| --- | --- |
-| `Stream`, `STREAM_NS`, `top_up`, `advanced`, `acc_per_seat` | Removed |
-| `Stake.reward_debt`, `serving_since_acc` | Removed |
-| `claim(token_id)` | Removed. `claim_quarter` replaces it |
-| `unstake` paying earned revenue | Removed. Unstake returns the NFT only. Earnings stay claimable by quarter |
-| `pending_reward(token_id)` | Removed. `get_entitlement` replaces it |
-| `config.stream_remaining`, `stream_ends_at`, `stream_ns` | Removed |
-| `total_received` | Kept, now also counted per quarter |
-| Forfeit adds to the stream | Replaced by removed weight (6.5) |
+### 6.8 Periods with no seats
 
-C-07 asked that a one-block stake not earn a full share of a large arrival. With time weighting over the whole quarter, a seat staked one second before the quarter ends in a 92-day quarter has a weight of 1 second out of 7,948,800 seconds per seat, which is 0.0000126% of one full-quarter seat.
+Revenue that arrives while no seat is earning goes to `carry` and is shared at the next sweep or at the next quarter close, whichever comes first. A cut pool at a quarter close with no seat earning moves to `carry` too. Nothing leaves `C`.
+
+### 6.9 Worked examples
+
+All amounts are in the six-decimal collateral unit.
+
+**Example 1: arrival.** Seats 1 and 2 are earning. Seat 3 is staked on 20 November, so it starts earning on 21 November. A sweep of 600,000 arrives on 20 November and is shared by two seats: 300,000 each. A sweep of 900,000 arrives on 21 November and is shared by three: 300,000 each. Seat 3 has earned 300,000.
+
+**Example 2: leaving.** Seat 1 has earned 100,001 in the running quarter and 800,000 in earlier quarters. It requests to leave with `accepts_cut` true. The 800,000 is settled to its balance in full. The cut is `floor(100,001 * 5000 / 10000)` = 50,000 and the kept half is 50,001. When the quarter closes, four seats are earning and share the cut pool: 12,500 each. The 50,001 becomes claimable at the same moment.
+
+**Example 3: nobody claims.** A quarter closes and nobody claims. Two quarters later the earnings are still claimable, with the same amounts.
+
+**Example 4: a silent juror.** Seat 1 is drawn, then the case is released with seat 1 on the delinquent list. Seat 1 earned 40,000 since the draw. Three other seats are earning, so they share the 40,000, and seat 1 is docked those 40,000 plus its own rounded-up share of the rise. Seat 1 keeps nothing of them.
 
 ### 6.10 The 75/25 split and its legs
 
@@ -303,182 +242,116 @@ Rounding rule, exact: `council = floor(total * 2500 / 10000)`, `treasury = floor
 
 The two legs are independent. The Council leg is a transfer call whose result the market reads. The treasury leg is a plain transfer. A refusal of either leg returns that amount to its own due bucket and changes nothing in the other. With sweep ids, a lost Council result is settled by asking the Council's `received_of(sweep_id)`, so the amount can be neither dropped nor paid twice.
 
-### 6.11 Worked examples
+### 6.11 Constants and gas
 
-All amounts are in the six-decimal collateral unit. Weights below are in days because only ratios matter. The contract uses nanoseconds.
-
-**Example 1: baseline.** 2026 Q4 has 92 days. Seat 1 is staked all quarter (92 days). Seat 2 stakes on 15 November and stays (47 days). Seat 3 stakes on 1 October and unstakes on 31 October (30 days). Total weight is 169. The quarter receives 600,000 on 20 October and 1,000,000 on 30 December, so the pool is 1,600,000.
-
-| Seat | Weight | Exact share | Entitlement |
-| --- | --- | --- | --- |
-| 1 | 92 | 871,005.917 | 871,005 |
-| 2 | 47 | 444,970.414 | 444,970 |
-| 3 | 30 | 284,023.669 | 284,023 |
-| Total | 169 | | 1,599,998 |
-
-Two units stay in `C` as unallocated backing.
-
-**Example 2: late arrival.** A sweep of 400,000 reaches the Council on 3 January 2027. It is credited to 2027 Q1, not to 2026 Q4. The 2026 Q4 entitlements above do not change.
-
-**Example 3: staking just before the end.** A fourth seat stakes at noon on 31 December and stays 0.5 day. In half days the weights are 184, 94, 60 and 1, total 339.
-
-| Seat | Entitlement |
+| Item | Value |
 | --- | --- |
-| 1 | 868,436 |
-| 2 | 443,657 |
-| 3 | 283,185 |
-| 4 | 4,719 |
-
-Seat 4 earns 4,719 of 1,600,000, not a quarter of it. Dust is 3.
-
-**Example 4: a silent juror.** Seat 1 is drawn on 10 December and the case is released on 14 December. The juror never voted. Four days are removed from seat 1, so its weight is 88 and total weight is 165.
-
-| Seat | Entitlement |
-| --- | --- |
-| 1 | 853,333 |
-| 2 | 455,757 |
-| 3 | 290,909 |
-
-The sum is 1,599,999 and dust is 1. Seats 2 and 3 each earn more than in Example 1.
-
-**Example 5: a quarter with no seats.** In 2027 Q1 every seat has unstaked and 500,000 arrives. At finalization total weight is zero, so 500,000 rolls into 2027 Q2 as `carry_in`. In 2027 Q2 one seat is staked all 91 days and 300,000 arrives. The pool is 800,000 and that seat claims 800,000.
-
-**Example 6: a failed claim.** Seat 1 calls `claim_quarter(8107, "1")`. The Council records `Pending` with 871,005 and sends the transfer. The verifier's `mt_transfer` feature is paused, so the receipt fails. `on_claim_paid` deletes the record and emits `claim_failed`. After the verifier is unpaused the seat claims again and is paid. A third call is refused with `already claimed`.
-
-**Example 7: a refused Council leg.** The market holds 1,095,193 in `fees`. Sweep 41 splits it into 273,798 for the Council and 821,394 for the treasury, with 1 unit left in `fees`. The treasury transfer succeeds. The Council refuses (for example because its account is locked). The verifier refunds the market. Sweep 41 shows the Council leg `refused` and the treasury leg `settled`. The 273,798 returns to `revenue_due`. The next sweep, id 42, finds 500,001 in `fees`, splits it into 125,000 and 375,000 with 1 left over, adds the 273,798 carried, and sends 398,798 to the Council and 375,000 to the treasury. The treasury was paid once and the Council once.
-
-### 6.12 Constants and gas
-
-| Item | Value | Status |
-| --- | --- | --- |
-| `close_grace_ns` | 7 days, owner may set 1 to 30 days | PROPOSED |
-| Quarters advanced or booked per call | 8 | PROPOSED |
-| `claim_quarter` floor | 33 TGas (15 transfer, 10 callback, 8 own work), same as today's `claim` | PROPOSED. The tests assert 33 for `claim` (`gas_floors.rs:287`) |
-| `unstake` floor | 33 TGas (15 NFT transfer, 10 callback, 8 own work), down from 58 because no payout is sent | PROPOSED |
-| Gas the market reserves for the Council receipt | 20 TGas today (`market lib.rs:57`). The receipt now ticks up to 8 quarters and writes a `received` record | OPEN. Measure in the sandbox. Estimate 30 TGas. UNVERIFIED |
-| `finalize_quarter` | no floor. One storage write per quarter and no transfer. About 10 TGas. UNVERIFIED | PROPOSED |
+| `LEAVER_CUT_BPS` | 5000 of 10000 |
+| `MAX_DAY_STEPS` | 100 (public `advance_days`, `claim`, `request_unstake`) |
+| `MAX_RECEIPT_CATCH_UP_DAYS` | 30 (revenue receipt, `unlock_case`, `draw`) |
+| `MAX_CLAIM_TOKENS` | 10 |
+| `MAX_SNAPSHOT_PAGE` | 50 |
+| `ACC_SCALE` | 10^18 |
+| `claim` floor | 33 TGas (15 transfer, 10 callback, 8 own work). Own burn 5.3, 6.2 and 7.4 for 1, 5 and 10 tokens. The first claim after about 100 idle days burns about 65 in all, so attach 100 |
+| `unstake` floor | 33 TGas (15 NFT transfer, 10 callback, 8 own work) |
+| Stake (`nft_on_transfer`) floor | 38 TGas (10 ownership view, 20 callback, 8 own work) |
+| `request_unstake` | 2.6 to 4.7 TGas, no floor |
+| Revenue receipt | 2.0 to 11.7 TGas, up to 30 days behind. |
+| `draw` at 1,000 seats | About 172 TGas. The oracle reserves 250, so `resolve_draw` needs about 275 attached |
+| `unlock_case`, 21 silent jurors after a 30 day gap | 20.2 TGas. The oracle reserves 25 |
 
 ---
 
 ## 7. Methods
 
-### 7.1 Methods that exist today
-
-Gas floors are enforced with `upgrade::require_gas` (`council/src/lib.rs:35-44`).
+Gas floors are enforced with `upgrade::require_gas`.
 
 | Method | Caller | Args | Returns | Yocto | Gas | Behaviour and refusals | Events |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `new` (`:256`) | The account itself | `owner_id`, `oracle_id`, `nft_contract`, `verifier_id: AccountId`, `collateral_token_id: String`, `cooldown_ns: U64`, `max_seats_per_account: u32`, `allowlist_enabled: Option<bool>` | contract | none | n/a | Refuses a zero cooldown, a zero seat cap, an id without `nep141:`. The allowlist defaults to on. CHANGED: add `market_id: AccountId`, `close_grace_ns: U64` | none |
-| `stage_code` (`:306`), `upgrade` (`:318`), `migrate` (`:331`), `seal` (`:342`), `propose_owner` (`:350`), `accept_owner` (`:356`) | as the market | | | | 100 TGas for `upgrade` | as the market | `code_staged`, `upgrade_sent`, `migrated`, `seal_sent`, `owner_proposed`, `owner_changed` |
-| `set_cooldown_ns` (`:365`) | Owner | `cooldown_ns: U64` | none | none | none | Refuses zero. Applies to requests already made | `cooldown_set` |
-| `set_max_seats_per_account` (`:372`) | Owner | `u32` | none | none | none | Refuses zero. Does not remove seats already held | `max_seats_per_account_set` |
-| `set_nft_contract` (`:387`) | Owner | `nft_contract: AccountId` | none | none | none | Refuses while any seat is staked | none. NEW event `nft_contract_set` |
-| `allow_tokens` (`:398`) | Owner | `token_ids: Vec<String>` | none | none | none | 1 to 100 ids | `tokens_allowed` |
-| `set_token_range` (`:414`), `clear_token_range` (`:424`) | Owner | `first: U64`, `last: U64` | none | none | none | Plain decimal ids only | `token_range_set`, `token_range_cleared` |
-| `set_allowlist_enabled` (`:431`) | Owner | `enabled: bool` | none | none | none | Does not unstake anything | `allowlist_set` |
-| `draw` (`:440`) | Oracle | `case_key: U64`, `n: u32`, `exclude: Vec<AccountId>` | `Vec<AccountId>` | none | 250 TGas reserved by the oracle | Reads the block seed itself. A repeat returns the cached jury. Skips seats that serve, are leaving, or are excluded. Marks the jury serving | none |
-| `unlock_case` (`:472`) | Oracle | `case_key: U64`, `delinquent: Vec<AccountId>` | none | none | 15 TGas reserved | Releases the seats. CHANGED: forfeits weight instead of stream revenue (6.5) | `revenue_forfeited` today, NEW `seat_time_forfeited` |
-| `request_unstake` (`:493`) | Seat owner | `token_id: String` | none | none | none | Refuses a seat that serves or already asked | `unstake_requested` |
-| `unstake` (`:507`) | Seat owner | `token_id: String` | `Promise` | exactly 1 | 58 TGas floor | Today pays the earned revenue, then returns the NFT. CHANGED: returns the NFT only, books the span, 33 TGas floor | `revenue_claimed`, `unstaked`, `unstake_failed` |
-| `on_unstake_paid` (`:539`), `on_unstaked` (`:559`) | The account itself | | | | 35 and 10 TGas | Restore the stake when a transfer fails. CHANGED: `on_unstake_paid` removed | |
-| `claim` (`:577`) | Seat owner | `token_id: String` | `Promise` | exactly 1 | 33 TGas floor | Pays `(acc - reward_debt) / PRECISION`. REMOVED by this proposal | `revenue_claimed`, `claim_failed` |
-| `on_claimed` (`:608`) | The account itself | | | none | 10 TGas | REMOVED | |
-| `mt_on_transfer` (`:633`) | The verifier | `sender_id`, `previous_owner_ids: Vec<AccountId>`, `token_ids: Vec<String>`, `amounts: Vec<U128>`, `msg: String` | `Vec<U128>`, always `["0"]` | none | attached gas minus about 20.5 | CHANGED, section 5 | `revenue` |
-| `nft_on_transfer` (`:735`) | The NFT contract | `sender_id`, `previous_owner_id: AccountId`, `token_id: String`, `msg: String` | `PromiseOrValue<bool>`, always false | none (the user attaches 1 yocto to `nft_transfer_call` on the NFT contract) | n/a | Stakes the seat for `previous_owner_id`. Refuses a wrong contract, a token off the allowlist, a staked token, a full council, a capped account | `staked` |
+| `new` | The account itself | `owner_id`, `oracle_id`, `verifier_id: AccountId`, `collateral_token_id: String`, `cooldown_ns: U64`, `max_seats_per_account: u32`, `allowlist_enabled: Option<bool>` | contract | none | n/a | Refuses a zero cooldown, a zero seat cap, an id without `nep141:`. The allowlist defaults to on. Takes neither the collection nor a market | none |
+| `stage_code`, `upgrade`, `migrate`, `seal`, `remove_verifier_key`, `propose_owner`, `accept_owner` | as the market | | | | 100 TGas for `upgrade` | as the market. `migrate` accepts state versions 5 and 6 | `code_staged`, `upgrade_sent`, `upgrade_failed`, `migrated`, `seal_sent`, `verifier_key_removal_sent`, `owner_proposed`, `owner_changed` |
+| `set_cooldown_ns` | Owner | `cooldown_ns: U64` | none | none | none | Above zero, at most a year. Applies to requests already made | `cooldown_set` |
+| `set_max_seats_per_account` | Owner | `u32` | none | none | none | Refuses zero. Does not remove seats already held | `max_seats_per_account_set` |
+| `set_nft_contract` | Owner | `nft_contract: AccountId` | none | none | none | Refuses while any seat is staked | `nft_contract_set` |
+| `allow_tokens` | Owner | `token_ids: Vec<String>` | none | none | none | 1 to 100 ids | `tokens_allowed` |
+| `set_token_range`, `clear_token_range` | Owner | `first: U64`, `last: U64` | none | none | none | Plain decimal ids only | `token_range_set`, `token_range_cleared` |
+| `set_allowlist_enabled` | Owner | `enabled: bool` | none | none | none | Does not unstake anything | `allowlist_set` |
+| `allow_market`, `disallow_market` | Owner | `market: AccountId` | none | none | none | Adds or removes a revenue sender. What a removed market sent stays. The last one cannot be removed | `market_allowed`, `market_disallowed` |
+| `set_reconcile_wait_ns` | Owner | `reconcile_wait_ns: U64` | none | none | none | 10 minutes to 7 days. Live. `reconcile_claim` reads it | `reconcile_wait_set` |
+| `draw` | Oracle | `case_key: U64`, `n: u32`, `exclude: Vec<AccountId>` | `Vec<AccountId>` | none | 250 TGas reserved by the oracle | Reads the block seed itself. A repeat returns the cached jury. Walks up to 30 days. Skips seats that serve, are leaving, or are excluded, and sets aside seats staked within the last cooldown unless the older seats cannot make a jury of distinct accounts. Marks the jury serving and records the index | `jury_drawn` |
+| `unlock_case` | Oracle | `case_key: U64`, `delinquent: Vec<AccountId>` | none | none | 25 TGas reserved by the oracle | Releases the seats. With a silent juror it walks up to 30 days first and forfeits that seat's earnings (6.7) | `jury_released`, `seat_earnings_forfeited` |
+| `request_unstake` | Seat owner | `token_id: String`, `accepts_cut: bool` | none | none | none | 6.5. Refuses a missing `accepts_cut`, a seat that serves, or one that already asked | `seat_cut`, `unstake_requested` |
+| `unstake` | Seat owner | `token_id: String` | `Promise` | exactly 1 | 33 TGas floor | Removes the stake and returns the NFT, no payout. Refuses before the cooldown has passed | `unstaked`, `unstake_failed` |
+| `on_unstaked` | The account itself | | | | 10 TGas | Restores the stake when a transfer fails | |
+| `claim` | Seat owner | `token_ids: Vec<TokenId>` (at most 10) | `Promise` | exactly 1 | 33 TGas floor, attach 100 | 6.6 | `claim_requested`, `claim_paid`, `claim_failed` |
+| `on_claim_paid` | The account itself | `id: U64` | none | none | 10 TGas | Closes the claim record. A repeat or late callback changes nothing | `claim_paid`, `claim_failed` |
+| `reconcile_claim` | Owner | `id: U64`, `paid: bool` | none | none | none | Decides a claim whose payout callback never arrived, after `reconcile_wait_ns`. A late callback changes nothing | `claim_reconciled` |
+| `advance_days` | Anyone | `max_steps: Option<u32>` (at most 100) | `u32` days moved | none | none | 6.2 | `seats_started`, `quarter_closed` |
+| `mt_on_transfer` | The verifier | `sender_id`, `previous_owner_ids: Vec<AccountId>`, `token_ids: Vec<String>`, `amounts: Vec<U128>`, `msg: String` | `Vec<U128>`, always `["0"]` | none | attached gas minus about 20.5 | Section 5 | `revenue` |
+| `nft_on_transfer` | The NFT contract | `sender_id`, `previous_owner_id: AccountId`, `token_id: String`, `msg: String` | `PromiseOrValue<bool>` | none (the user attaches 1 yocto to `nft_transfer_call` on the NFT contract) | 38 TGas floor | Checks the collection, the allowlist, the seat limits, then asks the collection who owns the token. `on_stake_checked` records the seat for `previous_owner_id` and its start day | `staked`, `stake_refused` |
 
-Views today: `total_received` (`:665`), `seat_count` (`:669`), `jury_of(case_key)` (`:675`), `is_allowed(token_id)` (`:680`), `is_seat(account_id)` (`:684`), `staked_tokens(from_index, limit)` (`:688`), `stake_of(token_id)` (`:697`), `pending_reward(token_id)` (`:703`), `is_staged(code_hash)` (`:714`), `config()` (`:719`).
+Removed in version 6: `claim_quarter`, `finalize_quarter`, `advance_quarters`, `book_seat_time`, `set_close_grace_ns`, `get_quarter`, `list_quarters`, `get_entitlement`, `entitlements_of`, `entitlements_page_quarters`, `current_quarter`, `quarter_of`.
 
-### 7.2 Methods and changes required
-
-| Method | Caller | Args | Returns | Yocto | Gas | Behaviour and refusals | Events |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `mt_on_transfer` CHANGED | The verifier | as above | `["0"]` | none | 30 TGas estimate | Section 5. Ticks seat time to now, creates quarter books as needed, credits the quarter of the receipt, records `received[(market, sweep_id)]`. Refuses another sender, a repeated sweep id, more than 8 quarters of backlog (`call advance_quarters first`) | `revenue` with `sweep_id`, `quarter` |
-| `advance_quarters(max_steps: Option<u32>)` NEW | Anyone | steps up to 8 | `u32` quarters advanced | none | 30 TGas | Moves `last_tick` towards now, adding seat time and creating empty books. Does nothing when current | none |
-| `finalize_quarter(quarter: u32)` NEW | Anyone | quarter id | none | none | none | Ticks seat time to the end of the quarter first. Refuses before `ends_at + close_grace_ns`, a quarter that is not `next_to_finalize`, and one already final. Fixes pool and weight, rolls an empty quarter forward | `quarter_finalized` |
-| `claim_quarter(quarter: u32, token_id: TokenId)` NEW | Seat owner | quarter id, token | `Promise` | exactly 1 | 33 TGas floor | Section 6.8 | `claim_requested`, `claim_paid`, `claim_failed` |
-| `reconcile_claim(quarter: u32, token_id: TokenId, owner: AccountId, paid: bool)` NEW | Owner | quarter id, token, claim owner, whether the payout was made | none | none | none | Decides a claim whose payout callback never arrived, an hour after the claim. A late callback changes nothing | `claim_reconciled` |
-| `on_claim_paid(quarter, token_id, owner, requested_at)` NEW | The account itself | | none | none | 10 TGas | Settles the claim record written at `requested_at`. A callback for an earlier record under the same key, one `reconcile_claim` deleted, changes nothing | `claim_paid`, `claim_failed` |
-| `book_seat_time(token_id: TokenId, max_quarters: Option<u32>)` NEW | Anyone | token, steps up to 8 | `u32` quarters booked | none | 30 TGas | Books the span of a staked token up to the last finished quarter. Needed only for spans longer than 8 quarters | none |
-| `unstake` CHANGED | Seat owner | `token_id` | `Promise` | exactly 1 | 33 TGas floor | Books the span, removes the stake, returns the NFT, no payout. Refuses `book this seat first` when the span exceeds 8 quarters | `unstaked`, `unstake_failed` |
-| `unlock_case` CHANGED | Oracle | as above | none | none | 15 TGas | Forfeits weight (6.5) | `seat_time_forfeited`, `forfeit_skipped` |
-| `set_close_grace_ns(close_grace_ns: U64)` NEW | Owner | nanoseconds | none | none | none | Between 1 day and 30 days | `close_grace_set` |
-| `set_reconcile_wait_ns(reconcile_wait_ns: U64)` NEW | Owner | nanoseconds | none | none | none | Between 10 minutes and 7 days. Live. `reconcile_claim` reads it | `reconcile_wait_set` |
-| `allow_market(market: AccountId)` BUILT | Owner | account | none | none | none | Adds a revenue sender. Refused if present | `market_allowed` |
-| `disallow_market(market: AccountId)` BUILT | Owner | account | none | none | none | Removes a revenue sender; what it sent stays. Refused for the last one | `market_disallowed` |
-
-Every owner row is a plain `AccountId` check. No row names or calls a governance contract (guard test `guards.rs:179-191`).
+Every owner row is a plain `AccountId` check. No row names or calls a governance contract.
 
 ---
 
 ## 8. Views the website and keeper need
 
-R-08 asks for accrued, claimable and paid amounts, operation states and quarters. All new views are PROPOSED.
-
 | Quantity | View | Returns |
 | --- | --- | --- |
-| Quarter now and its bounds | `current_quarter()` | `QuarterView` |
-| Any quarter | `get_quarter(quarter: u32)`, `list_quarters(from_quarter: u32, limit: u32)` | `Option<QuarterView>`, `Vec<QuarterView>` (limit at most 50) |
-| Which quarter a time belongs to | `quarter_of(at: U64)` | `{quarter: u32, label: String, starts_at: U64, ends_at: U64}` |
-| A seat's entitlement | `get_entitlement(quarter: u32, token_id: String, account_id: AccountId)` | `Option<EntitlementView>` |
-| All of an account's entitlements | `entitlements_of(account_id: AccountId, from_quarter: u32, limit: u32)` | `Vec<EntitlementView>` over the account's seats and past seats, `min(limit, entitlements_page_quarters)` quarters a page |
-| An account's page length | `entitlements_page_quarters(account_id: AccountId)` | `u32`, at most 25, fewer so a page stays within 250 lookups, at least 1 |
-| An account's staked seats | `seats_of(account_id: AccountId)` | `Vec<TokenId>` |
-| Revenue by sweep | `received_of(market: AccountId, sweep_id: U64)` | `Option<{amount: U128, quarter: u32, at: U64}>` |
-| Totals for reconciliation | `reward_totals()` | `{total_received, total_paid, pending_claims, open_pool, final_unclaimed, rolled: U128}` |
-| Stake record | `stake_of(token_id)` EXISTING | `Option<Stake>` with NEW `booked_to` |
-| Case jury | `jury_of(case_key)` EXISTING | `Vec<TokenId>` |
+| What a claim would pay now | `claimable_of(account_id)` | `U128`: the settled balance, a pending slot whose quarter is closed, and the finished-quarter earnings of the account's seats. It does not walk the days |
+| What is earning but not claimable | `in_progress_of(account_id)` | `U128`: the running-quarter earnings of the account's earning seats plus a pending slot that is not yet closed |
+| One seat | `seat_earnings(token_id)` | `Option<SeatEarnings>` |
+| The running quarter | `quarter_info()` | `{quarter, starts_at: U64, ends_at: U64, last_closed_quarter, last_day: U64}` |
+| Open claims by quarter | `quarter_snapshots(from: Option<u32>, limit: Option<u32>)` | `Vec<{quarter, acc: U128}>`, oldest first, at most 50 |
+| An account's staked seats | `seats_of(account_id)` | `Vec<TokenId>` |
+| Revenue by sweep | `received_of(market: AccountId, sweep_id: U64)` | `Option<{amount: U128, at: U64}>` |
+| Totals for reconciliation | `reward_totals()` | `{total_received, total_paid, pending_claims, carry, cut_pool, accrued_total, pending_total_slots}`, all `U128` |
+| Stake record | `stake_of(token_id)` | `Option<Stake>` with `earn_from_day` |
+| Case jury | `jury_of(case_key)` | `Vec<TokenId>` |
 
 ```text
-QuarterView      { quarter: u32, label: String, starts_at: U64, ends_at: U64, claimable_from: U64,
-                   state: "open" | "closing" | "final",
-                   revenue_in: U128, carry_in: U128, pool: U128, seat_ns: U128, forfeit_ns: U128,
-                   paid: U128, pending: U128, rolled_to: Option<u32> }
-EntitlementView  { quarter: u32, token_id: String, owner: AccountId, weight_ns: U128, amount: U128,
-                   estimated: bool,
-                   status: "accruing" | "closing" | "claimable" | "pending" | "paid",
-                   requested_at: Option<U64>, paid_at: Option<U64> }
+SeatEarnings { owner: AccountId, state: "waiting" | "earning" | "leaving" | "serving",
+               earning_from: U64 (ns), earned_closed: U128, earned_in_progress: U128,
+               start_acc: U128, settled_acc: U128 }
 ```
 
-| UI label (README R-08) | Source |
+| UI label | Source |
 | --- | --- |
-| Accrued | `EntitlementView.amount` with `estimated = true`, status `accruing` or `closing` |
-| Claimable | Status `claimable`, sum of `amount` |
-| Pending | Status `pending` |
-| Paid | Status `paid` and the `claim_paid` events |
-| Quarters | `QuarterView.state`, `claimable_from` |
+| Claimable | `claimable_of` |
+| In progress | `in_progress_of`, and `seat_earnings.earned_in_progress` for one seat |
+| Paid | `claim_paid` events and `reward_totals.total_paid` |
+| Quarter | `quarter_info`, and `quarter_snapshots` for the quarters already closed |
 
-The `amount` of an open quarter uses `floor((revenue_in + carry_in) * weight_so_far / seat_ns_so_far)` and is a guess, because later revenue and later seat time both change it. The view says so with `estimated`.
+`claimable_of` shows a finished quarter only once something has walked the days past its end. Before that, the same earnings show as in progress.
 
 ---
 
 ## 9. Events
 
-Envelope: `EVENT_JSON:{"standard":"council","version":"1.0.0","event":"<name>","data":{...}}` (Checked in source: `council/src/lib.rs:215-220`).
+Envelope: `EVENT_JSON:{"standard":"council","version":"1.0.0","event":"<name>","data":{...}}`.
 
-| Event | Data | Status |
-| --- | --- | --- |
-| `staked` | `token_id`, `owner` | EXISTING |
-| `unstake_requested` | `token_id`, `owner`, `unlock_at` (string ns) | EXISTING |
-| `unstaked` | `token_id`, `owner` | EXISTING |
-| `unstake_failed` | `token_id`, `owner` | EXISTING |
-| `revenue` | `from`, `amount`, `seats` today. NEW `sweep_id`, `quarter`, `market` (the sender) | EXISTING, CHANGED |
-| `revenue_forfeited` | `token_id`, `owner`, `amount`, `case` | EXISTING. Replaced by `seat_time_forfeited` |
-| `revenue_claimed` | `token_id`, `owner`, `amount` | EXISTING. Replaced by `claim_requested` and `claim_paid`. It is emitted before the transfer succeeds today |
-| `claim_failed` | `token_id`, `owner`, `amount` | EXISTING, CHANGED: add `quarter` |
-| `seat_time_forfeited` | `token_id`, `owner`, `case`, `quarter`, `forfeited_ns` | NEW |
-| `forfeit_skipped` | `token_id`, `owner`, `case`, `quarter` | NEW |
-| `quarter_finalized` | `quarter`, `pool`, `weight_ns`, `rolled_to` (null or id) | NEW |
-| `claim_requested` | `quarter`, `token_id`, `owner`, `amount` | NEW |
-| `claim_paid` | `quarter`, `token_id`, `owner`, `amount` | NEW |
-| `close_grace_set`, `nft_contract_set` | the new value | NEW |
-| `market_allowed`, `market_disallowed` | `market` | BUILT |
-| `jury_drawn` | `case_key`, `tokens`, `owners` | BUILT |
-| `jury_released` | `case_key`, `delinquent` | BUILT |
-| `quarters_advanced` | `steps` | BUILT |
-| `seat_time_booked` | `token_id`, `quarters` | BUILT |
-| `reconcile_wait_set` | `reconcile_wait_ns` | NEW |
-| `cooldown_set`, `max_seats_per_account_set`, `tokens_allowed`, `token_range_set`, `token_range_cleared`, `allowlist_set` | the changed value | EXISTING |
-| `owner_proposed`, `owner_changed`, `code_staged`, `upgrade_sent`, `migrated`, `seal_sent` | as the market | EXISTING |
+| Event | Data |
+| --- | --- |
+| `staked` | `token_id`, `owner` |
+| `stake_refused` | `token_id`, `owner`, `owned` |
+| `unstake_requested` | `token_id`, `owner`, `unlock_at` (string ns) |
+| `unstaked`, `unstake_failed` | `token_id`, `owner` |
+| `seat_cut` | `token_id`, `owner`, `quarter`, `earned`, `cut`, `kept` |
+| `revenue` | `from`, `market` (the same account), `amount`, `sweep_id`, `seats`, `per_seat`, `carried` |
+| `seats_started` | `from_day`, `to_day`, `start_days`, `count` (one for each walk) |
+| `quarter_closed` | `quarter`, `acc`, `cut_shared`, `carried` |
+| `claim_requested`, `claim_paid`, `claim_failed` | `id`, `account`, `amount`, `tokens`, `requested_at` |
+| `claim_reconciled` | as above, plus `paid` |
+| `seat_earnings_forfeited` | `token_id`, `owner`, `case_key`, `amount` |
+| `jury_drawn` | `case_key`, `tokens`, `owners` |
+| `jury_released` | `case_key`, `delinquent` |
+| `market_allowed`, `market_disallowed` | `market` |
+| `nft_contract_set` | `nft_contract` |
+| `reconcile_wait_set` | `reconcile_wait_ns` |
+| `cooldown_set`, `max_seats_per_account_set`, `tokens_allowed`, `token_range_set`, `token_range_cleared`, `allowlist_set` | the changed value |
+| `owner_proposed`, `owner_changed`, `code_staged`, `upgrade_sent`, `upgrade_failed`, `migrated`, `seal_sent`, `verifier_key_removal_sent` | as the market |
 
 ---
 
@@ -486,15 +359,14 @@ Envelope: `EVENT_JSON:{"standard":"council","version":"1.0.0","event":"<name>","
 
 | Invariant | Statement | Test status |
 | --- | --- | --- |
-| I-C1 revenue conservation | Everything received is in `total_received`. Everything paid is in `total_paid`. `mt_balance_of(C) >= total_received - total_paid` with no claim in flight | Today's stream version: proptest `council lib.rs:1333` (not run). NEW test for the quarterly version |
-| I-C2 entitlement bound | For a final quarter, the sum of all possible entitlements is at most `pool` and the leftover is under one unit per seat | NEW proptest |
-| I-C3 weight conservation | After booking every seat, the sum of `seat_weight` of a quarter equals `seat_ns - forfeit_ns` | NEW proptest with random stake, unstake and forfeit sequences |
-| I-C4 single use | A claim record is `Paid` at most once per quarter, token and owner, and a failed transfer leaves the seat able to claim again | NEW. Sandbox `claim_failed` path |
-| I-C5 no second path | No method other than `claim_quarter` sends reward money to a holder | NEW source guard: `mt_transfer` appears only in the claim payout |
-| I-C6 one receipt per sweep | `received` holds each sweep id at most once, and a repeat is refused so the verifier refunds it | NEW sandbox test with the real verifier |
-| I-C7 calendar | `quarter_of` matches the vectors in 6.1 and is monotonic | NEW unit test over every month to 2100 |
-| I-C8 jury integrity | A drawn seat cannot leave until its case is final, and a seat that asked to leave is not drawn | `staking.rs:187`, `:227`, unit `council lib.rs:1493-1527` (exist, not run) |
-| I-C9 separation | `C` never holds bonds or market backing. `O` and `M` never hold holder revenue | NEW reconciliation test over all three accounts |
+| I-C1 revenue conservation | `total_paid + pending_claims_total + accrued_total + pending_total_slots + cut_pool + carry + (earnings of live seats) <= total_received`, with equality up to rounding dust that stays in the contract. `mt_balance_of(C) >= total_received - total_paid` with no claim in flight | Property test over random stakes, leaves, sweeps, draws, releases and claims, and `with_round_numbers_every_unit_is_in_exactly_one_place` |
+| I-C2 no early share | A seat never earns from a sweep that arrived before its start day | `a_payment_that_came_before_a_seat_started_is_never_shared_with_it` |
+| I-C3 single use | A claim record is closed once. A failed transfer credits the balance back, and a late or repeated callback changes nothing | `a_claim_pays_once_and_a_failed_transfer_puts_the_balance_back` |
+| I-C4 no second path | No method other than `claim` sends reward money to a holder. `unstake` pays nothing | Source: `mt_transfer` is sent only by the claim payout |
+| I-C5 one receipt per sweep | `received` holds each `(market, sweep id)` at most once, and a repeat is refused so the verifier refunds it | `a_sweep_id_is_taken_once_and_the_repeat_is_refused` |
+| I-C6 calendar | The quarter function matches the vectors in 6.1 and is monotonic | `the_quarter_table_holds`, `every_month_boundary_from_1970_to_2100_falls_in_the_right_quarter` |
+| I-C7 jury integrity | A drawn seat cannot leave until its case is final, and a seat that asked to leave is not drawn | `a_seat_that_asked_to_unstake_is_never_drawn` |
+| I-C8 separation | `C` never holds bonds or market backing. `O` and `M` never hold holder revenue | Reconciliation test over all three accounts is still to write |
 
 ---
 
@@ -505,28 +377,32 @@ Exact panic strings as built (checked in source: `council/src/lib.rs`).
 | Group | Strings |
 | --- | --- |
 | Access | `owner only`, `oracle only`, `not the proposed owner`, `not your seat`, `not staked`, `wrong NFT contract`, `only the verifier can deliver money` |
-| Delivery | `exactly one token and amount`, `wrong token`, `unknown action` |
-| Staking | `that token is not on the allowlist`, `already staked`, `the council is full`, `that account already holds the most seats allowed` |
-| Unstake and claim | `unstake already requested`, `this seat is serving on an open case`, `request an unstake first`, `the cooldown has not passed`, `nothing to claim`, and the gas refusals `attach at least 33 TGas: an unstake returns the NFT and then settles it` and `attach at least 33 TGas: a claim sends the payout and then settles it` |
-| Settings | `the cooldown must be positive`, `an account must be allowed at least one seat`, `unstake every seat before changing the NFT contract`, `name at least one token`, `at most 100 tokens in one call`, `the first id must not be above the last`, `the collateral token id must look like nep141:<token>` |
+| Delivery | `the money must come from the sender's own balance`, `exactly one token and amount`, `wrong token`, `unknown action`, `revenue comes from an allowed market only`, `that sweep was already received` |
+| Staking | `that token is not on the allowlist`, `already staked`, `the council is full`, `that account already holds the most seats allowed`, `attach at least 38 TGas: a stake checks the token's owner and then records the seat` |
+| Leaving and claiming | `leaving before the quarter ends costs 50% of this quarter's earnings: pass accepts_cut true`, `unstake already requested`, `this seat is serving on an open case`, `request an unstake first`, `the cooldown has not passed`, `at most 10 tokens in one claim`, `nothing to claim`, `no claim is pending with that id`, and the gas refusals `attach at least 33 TGas: an unstake returns the NFT and then settles it` and `attach at least 33 TGas: a claim sends the payout and then settles it` |
+| Days | `call advance_days first` |
+| Markets | `already an allowed market`, `not an allowed market`, `keep at least one allowed market`, `the Council is not configured, the owner must call allow_market`, `the NFT collection is not set, the owner must call set_nft_contract` |
+| Settings | `the cooldown must be positive`, `the cooldown must be positive and at most a year`, `an account must be allowed at least one seat`, `unstake every seat before changing the NFT contract`, `name at least one token`, `at most 100 tokens in one call`, `the first id must not be above the last`, `the reconcile wait must be between 10 minutes and 7 days`, `the collateral token id must look like nep141:<token>` |
 | Draw | `not enough seat holders to draw a jury: {} eligible, {} needed` |
-| Upgrade | `there is no state to migrate`, `migrate runs only inside an upgrade`, `prove the upgrade path before deleting keys` |
-
-Strings added with the quarterly model: `revenue comes from an allowed market only`, `already an allowed market`, `not an allowed market`, `keep at least one allowed market`, `a stored record has a newer version than this code can read`, `that sweep was already received`, `call advance_quarters first`, `that quarter is not final`, `the quarter cannot be finalized yet`, `finalize the earlier quarter first`, `claim is already pending`, `already claimed`, `book this seat first`, `the grace period must be between 1 and 30 days`, `a jury drawn in this quarter is still open`.
+| Upgrade | `there is no state to migrate`, `unsupported state version`, `migrate runs only inside an upgrade`, `prove the upgrade path before deleting keys`, `a stored record has a newer version than this code can read` |
+| Version 5 to 6 migration | `a finished quarter is not finalized yet, finalize it and let its holders claim before upgrading`, `a claim is still pending, settle it before upgrading`, `a finalized quarter still has money to claim, claim it before upgrading`, `an unstake is still waiting for its NFT transfer` |
 
 ---
 
-## 12. Test evidence required
+## 12. Test evidence
 
-Existing tests were not run in this task.
+The version 6 rules are covered by unit tests in `contracts/council/src/lib.rs` with controlled block times.
 
-| Requirement | Evidence that exists | Evidence still required |
-| --- | --- | --- |
-| R-04 eligibility, jury, case locks | `staking.rs`, `council.rs`, `hardening.rs:267-433` (allowlist), unit tests `council lib.rs:1016-1530` | Seat weight keeps counting while a seat serves and stops at its unstake request (OD-03 reversed) |
-| R-05 quarterly accounting | None. The stream tests (`revenue.rs:188`, `:253`, `attacks.rs:1341`, unit `council lib.rs:1216`, `:1603-1700`) test behaviour that is removed | Every example in 6.11 as a unit test with controlled block times. Boundary vectors in 6.1. Proptests for I-C2 and I-C3. Late arrival, no-seat roll, forfeit before and after finalization, `finalize_quarter` ordering, claim states including a refused transfer with a paused verifier (`pause_transfers` helper exists in `common/mod.rs:414`). Sweep id dedupe against the real verifier. Reconciliation of `C` after a full quarter |
-| R-05 timing in the sandbox | none | A real boundary is about 72 days away and the sandbox cannot skip that far (the audit measured a 72 hour skip as too slow). Use unit tests with controlled timestamps for the calendar, and patch stored timestamps in the sandbox as `relock_seat` does for the money path. Label such runs accelerated. Do not add a test-only constant to the shipped wasm: the audit rejected that |
-| R-03 Council receipt | `revenue.rs:95`, `hardening.rs:606` | A repeated sweep id is refused and refunded. A sender other than the market is refused and refunded |
-| R-08 views | `config`, `stake_of`, `pending_reward` tests | Every view in section 8 with exact JSON shapes |
-| R-07 owner is a DAO account | owner fixture only | A real SputnikDAO calling `allow_tokens`, `set_close_grace_ns` and `upgrade` |
+| Requirement | Evidence |
+| --- | --- |
+| Earning by arrival | `a_seat_staked_on_a_day_earns_nothing_from_that_day_and_its_full_share_from_the_next`, `two_payments_are_split_by_whoever_is_earning_at_each`, `a_payment_with_no_earning_seat_is_carried_and_shared_at_the_next`, `rounding_leaves_the_remainder_in_the_contract_and_the_next_split_uses_it` |
+| Quarter close | `advance_days_closes_a_quarter_and_stores_its_snapshot`, `a_seat_starting_on_the_first_day_of_a_quarter_does_not_share_the_closing_cut_pool`, `the_cut_pool_is_split_among_the_seats_earning_at_the_boundary`, `the_cut_pool_is_carried_when_nobody_is_earning_at_the_boundary`, `a_quarter_nobody_claims_stays_claimable_two_quarters_later` |
+| Leaving | `a_request_to_leave_is_refused_without_accepts_cut_and_for_a_seat_that_is_not_the_callers`, `a_leaver_loses_half_of_the_running_quarter_and_nothing_from_earlier_ones`, `the_kept_half_of_a_leaver_cannot_be_claimed_until_the_quarter_closes`, `a_leavers_amounts_are_the_same_whether_the_snapshot_is_taken_on_time_or_days_late` |
+| Self-healing and caps | `revenue_request_unstake_and_claim_run_the_overdue_snapshot_themselves`, `a_receipt_and_a_release_walk_at_most_thirty_days_and_a_claim_or_an_unstake_a_hundred`, `advance_days_walks_at_most_a_hundred_days_a_call_and_as_many_as_it_is_asked` |
+| Claims | `a_claim_pays_once_and_a_failed_transfer_puts_the_balance_back`, `nobody_claims_for_a_seat_they_do_not_hold`, `one_claim_settles_ten_seats_into_one_payout`, `only_the_owner_decides_a_stuck_claim_and_not_before_the_wait` |
+| Juries | `a_silent_juror_loses_what_its_seat_earned_while_serving_and_only_the_others_share_it`, `a_claim_while_serving_pays_only_what_came_before_the_draw_and_the_rest_waits_for_the_release`, `a_forfeit_comes_off_the_running_quarter_first_so_the_finished_one_is_paid_in_full`, `jurors_who_voted_lose_nothing` |
+| Migration | `migrate_moves_version_five_to_six_keeps_the_seats_and_carries_the_open_revenue`, `migrate_refuses_while_a_finalized_quarter_has_money_to_claim`, `migrate_refuses_while_a_finished_quarter_is_not_finalized`, `migrate_allows_a_rounding_leftover_for_each_finalized_quarter` |
+| Owner is a DAO account | Owner fixture only. A real SputnikDAO calling `allow_tokens` and `upgrade` is still required |
+| Sandbox | Real contracts on the sandbox chain, with the day ledger edited to end a quarter: `quarter_claims.rs` (claims, leaving, reconcile), `pay_by_arrival.rs` (earning by arrival, carry, refused payout), `juror_pay.rs` (silent jurors, claim while serving), `council_migration.rs` (version 5 to 6), `council_gas.rs` and `gas_floors.rs` (gas), `staking.rs`, `revenue.rs` and `upgrade.rs` |
 
-The build rule from the previous spec (section 20) applies: break each new rule on purpose and confirm its test fails.
+The build rule from the previous spec applies: break each new rule on purpose and confirm its test fails.

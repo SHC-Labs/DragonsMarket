@@ -22,7 +22,7 @@ Implemented since source validation: bounded mainnet following/backfill with ret
 
 `backend/test/local-chain.test.ts` compiles and deploys the unchanged rounds WASM on NEAR Sandbox 2.13.4. Three successful configuration calls and two rejected calls produce real receipt outcomes. The test checks exact stored receipt IDs/payloads, exclusion of rejected execution logs from events, HTTP reads of actual successful events and rejected receipt outcomes, final contract settings, checkpoint progression and replay after reopening the database pool. It cleans up its own chain and database schema.
 
-The bounded `local_capture` source verifies loopback RPC, rejects public chain IDs, requires finalized transaction results and walks block ancestry from a finalized head to the explicit pre-test anchor. It uses only known harness transactions. This proves the actual contract-event boundary, not arbitrary activity discovery, full block receipt coverage, funding, payouts or production operation. The live follower and keeper exporter remain unbuilt.
+The bounded `local_capture` source verifies loopback RPC, rejects public chain IDs, requires finalized transaction results and walks block ancestry from a finalized head to the explicit pre-test anchor. It uses only known harness transactions. This proves the actual contract-event boundary, not arbitrary activity discovery, full block receipt coverage, funding, payouts or production operation.
 
 ## Mainnet source verification
 
@@ -50,7 +50,7 @@ Planned: a periodic reconciliation job compares scheduled/open entities against 
 
 ## Keeper feed contract
 
-Planned: export append-only JSONL from committed database blocks in contiguous predecessor order, including empty blocks. Each line has this shape; `receipts` includes only selected receiver outcomes, with their real statuses and logs:
+The exporter writes append-only JSONL from committed database blocks in contiguous predecessor order, including empty blocks. Each line has this shape; `receipts` includes only selected receiver outcomes, with their real statuses and logs:
 
 ```json
 {

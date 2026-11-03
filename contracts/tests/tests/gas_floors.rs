@@ -171,8 +171,8 @@ async fn the_settling_floor_covers_the_largest_case_there_is() -> anyhow::Result
     }
     let last = &second[10];
     refused(
-        reveal_with(&w, last, id, "salt-10", 79).await?.into_result(),
-        &format!("attach at least 80 TGas: {SETTLE_REASON}"),
+        reveal_with(&w, last, id, "salt-10", 99).await?.into_result(),
+        &format!("attach at least 100 TGas: {SETTLE_REASON}"),
     );
     assert_eq!(
         case_json(&w, id).await["stage"],
@@ -180,10 +180,10 @@ async fn the_settling_floor_covers_the_largest_case_there_is() -> anyhow::Result
         "a refused reveal changed nothing"
     );
     assert_eq!(case_json(&w, id).await["votes"].as_array().unwrap().len(), 10);
-    let r = reveal_with(&w, last, id, "salt-10", 80).await?;
+    let r = reveal_with(&w, last, id, "salt-10", 100).await?;
     assert_clean("the settling reveal at its floor", &r);
     println!(
-        "reveal_vote that settles round 1 of 21: floor 80, oracle burnt {:.1} TGas, {} TGas in all",
+        "reveal_vote that settles round 1 of 21: floor 100, oracle burnt {:.1} TGas, {} TGas in all",
         burned_by(&r, w.oracle.id()),
         r.total_gas_burnt.as_tgas()
     );
@@ -204,10 +204,10 @@ async fn the_settling_floor_covers_the_largest_case_there_is() -> anyhow::Result
             .transact()
     };
     refused(
-        retry(34).await?.into_result(),
-        "attach at least 35 TGas: each jury's release gets an equal share of what is attached",
+        retry(54).await?.into_result(),
+        "attach at least 55 TGas: each jury's release gets an equal share of what is attached",
     );
-    assert_clean("retry_unlock after a second round", &retry(35).await?);
+    assert_clean("retry_unlock after a second round", &retry(55).await?);
 
     // Finalize that settles a no-decision with 10 revealed and 22 jurors at fault, at the floor.
     let (id, second) = second_round_of_21(&w, &all).await?;
@@ -229,13 +229,13 @@ async fn the_settling_floor_covers_the_largest_case_there_is() -> anyhow::Result
     )
     .await;
     refused(
-        finalize_with(&w, id, 79).await?.into_result(),
-        &format!("attach at least 80 TGas: {SETTLE_REASON}"),
+        finalize_with(&w, id, 99).await?.into_result(),
+        &format!("attach at least 100 TGas: {SETTLE_REASON}"),
     );
     assert_eq!(case_json(&w, id).await["stage"], "disputed");
-    let r = finalize_with(&w, id, 80).await?;
+    let r = finalize_with(&w, id, 100).await?;
     assert_clean("finalize at its floor", &r);
-    println!("finalize that settles a no-decision, 10 revealed, 22 at fault: floor 80, oracle burnt {:.1} TGas, {} TGas in all", burned_by(&r, w.oracle.id()), r.total_gas_burnt.as_tgas());
+    println!("finalize that settles a no-decision, 10 revealed, 22 at fault: floor 100, oracle burnt {:.1} TGas, {} TGas in all", burned_by(&r, w.oracle.id()), r.total_gas_burnt.as_tgas());
     assert_eq!(case_json(&w, id).await["stage"], "final");
     assert_all_released(&w, &all).await;
     Ok(())
@@ -267,13 +267,13 @@ async fn a_retry_with_exactly_the_floor_frees_a_seat_a_failed_unlock_left_held()
             .gas(Gas::from_tgas(tgas))
             .transact()
     };
-    refused(retry(34).await?.into_result(), "attach at least 35 TGas");
+    refused(retry(54).await?.into_result(), "attach at least 55 TGas");
     assert_eq!(
         stake_of(&w, &token).await["serving"],
         council_key(&w, id).await,
         "a refused retry changed nothing"
     );
-    assert_clean("retry_unlock at its floor", &retry(35).await?);
+    assert_clean("retry_unlock at its floor", &retry(55).await?);
     assert!(stake_of(&w, &token).await["serving"].is_null());
     Ok(())
 }
@@ -282,6 +282,7 @@ async fn a_retry_with_exactly_the_floor_frees_a_seat_a_failed_unlock_left_held()
 async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_work_with_exactly_that(
 ) -> anyhow::Result<()> {
     let w = setup().await?;
+    back_date(&w, 1).await?;
     let id = new_market(&w, 600).await?;
     buy(&w, &w.alice, id, "yes", SWEEP_BUY).await?;
 
@@ -318,20 +319,15 @@ async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_w
     let j = &w.jurors[0];
     let token = j.id().to_string();
     send_revenue(&w, 100 * USD).await?;
-    let quarter = age_current_quarter(&w).await?;
-    finalize_quarter(&w, quarter).await?;
-    let claim_with = |tgas: u64| {
-        j.call(w.council.id(), "claim_quarter")
-            .args_json(json!({ "quarter": quarter, "token_id": token }))
-            .deposit(NearToken::from_yoctonear(1))
-            .gas(Gas::from_tgas(tgas))
-            .transact()
-    };
+    end_quarters(&w, 1).await?;
+    advance_days(&w).await?;
+    let r = claim_with_gas(&w, j, &[&token], 32).await?;
     refused(
-        claim_with(32).await?.into_result(),
+        r.into_result(),
         "attach at least 33 TGas: a claim sends the payout and then settles it",
     );
-    let r = claim_with(33).await?;
+    assert!(claimable_of(&w, j.id()).await > 0, "a refused claim changed nothing");
+    let r = claim_with_gas(&w, j, &[&token], 33).await?;
     assert_clean("claim at its floor", &r);
     println!(
         "claim: floor 33, council burnt {:.1} TGas, {} TGas in all",
@@ -366,9 +362,9 @@ async fn the_sweep_the_claim_and_the_unstake_refuse_less_than_their_floors_and_w
     Ok(())
 }
 
-// settle_leg asks the Council one view and reads the answer in a callback; finalize_quarter writes one book and sends nothing.
+// settle_leg asks the Council one view and reads the answer in a callback.
 #[tokio::test]
-async fn settling_a_lost_leg_and_finalizing_a_quarter_take_the_gas_they_reserve() -> anyhow::Result<()> {
+async fn settling_a_lost_leg_takes_the_gas_it_reserves() -> anyhow::Result<()> {
     let w = setup().await?;
     let id = new_market(&w, 600).await?;
     buy(&w, &w.alice, id, "yes", SWEEP_BUY).await?;
@@ -414,22 +410,6 @@ async fn settling_a_lost_leg_and_finalizing_a_quarter_take_the_gas_they_reserve(
         record["council"]["status"], "refused",
         "the settle at the floor finished its callback"
     );
-
-    send_revenue(&w, 10 * USD).await?;
-    let quarter = age_current_quarter(&w).await?;
-    let r = w
-        .bob
-        .call(w.council.id(), "finalize_quarter")
-        .args_json(json!({ "quarter": quarter }))
-        .gas(Gas::from_tgas(30))
-        .transact()
-        .await?;
-    assert_clean("finalize_quarter with 30 TGas", &r);
-    println!(
-        "finalize_quarter: no floor, council burnt {:.1} TGas, {} TGas in all",
-        burned_by(&r, w.council.id()),
-        r.total_gas_burnt.as_tgas()
-    );
     Ok(())
 }
 
@@ -446,11 +426,11 @@ async fn the_deadline_answer_refuses_less_than_the_settling_floor() -> anyhow::R
             .transact()
     };
     refused(
-        call(79).await?.into_result(),
-        &format!("attach at least 80 TGas: {SETTLE_REASON}"),
+        call(99).await?.into_result(),
+        &format!("attach at least 100 TGas: {SETTLE_REASON}"),
     );
     assert_eq!(market_json(&w, id).await["outcome"], serde_json::Value::Null);
-    assert_clean("resolve_by_deadline at its floor", &call(80).await?);
+    assert_clean("resolve_by_deadline at its floor", &call(100).await?);
     assert_eq!(market_json(&w, id).await["outcome"], "void");
     Ok(())
 }

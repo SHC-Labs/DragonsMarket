@@ -1,12 +1,11 @@
 # rounds
 
-**Up and Down rounds, 2026-10-26; stakes inside the round, 2026-10-28.** A contract for the short crypto markets (5-minute
+A contract for the short crypto markets (5-minute
 BTC, ETH and NEAR). A round takes stakes while it runs, until `close_before` ahead of its end, and prices each stake by
 dynamic parimutuel: a stake buys shares of its side at the price the round has reached, and the side that was right
 shares the pool less a fee. There is no seed and the treasury is never the counterparty. Prices come from publishers
-signing the price at fixed moments, checked k of n, with no bond, challenge or jury. State version 1; never deployed, so
-the 2026-10-28 layout replaced the first one in place. Not yet in the reproducible build or the release; see "Not built
-yet".
+signing the price at fixed moments, checked k of n, with no bond, challenge or jury. State version 2. It is in the
+reproducible build and the release list.
 
 Source: `rounds/src/lib.rs`. The pricing maths is the `dpm` crate (`dpm/src/lib.rs`), the same one the market prices
 with. The publisher signature check is `price-signatures/src/lib.rs`, the same check the oracle makes on a signed price.
@@ -33,8 +32,8 @@ interval. Both limits are checked in `add_series`, the only place a series is ma
   Every stake names the fewest shares it takes, and `quote_stake` says how many an amount buys now.
 - **Prices.** The price at the start of round `r` is the start price of `r` and the end price of `r - 1`, so one signed
   price serves two rounds and is stored once. It can be recorded from that moment until `price_window` later, by
-  anyone, with signatures from at least `price_threshold` publishers, while one of the two rounds holds open stakes. The
-  first quorum recorded is final. When the round before had no stakes, a round's start price can be recorded only after
+  anyone, with signatures from at least `price_threshold` publishers (2 on the deployed contract), while one of the two
+  rounds holds open stakes. The first quorum recorded is final. When the round before had no stakes, a round's start price can be recorded only after
   its first stake, inside the same window.
 - **Outcome.** Up if the end price is above the start price, Down if below. A tie, a round with an empty side when its
   stakes close, or a round whose start or end price was not recorded inside its window is a Refund: every stake comes
@@ -47,17 +46,18 @@ interval. Both limits are checked in `add_series`, the only place a series is ma
 
 | Role | Can |
 | --- | --- |
-| Owner (the DAO) | Everything below, plus the upgrade, `seal`, ownership handover, the operator, `set_fee_bps`, `set_registration_fee`, `add_publisher`, `set_price_threshold`, `reconcile_withdrawal` |
+| Owner (the DAO) | Everything below, plus the upgrade, `seal`, `remove_verifier_key`, ownership handover, the operator, `set_fee_bps`, `set_registration_fee`, `set_treasury`, `add_publisher`, `set_price_threshold`, `reconcile_withdrawal` |
 | Operator | `add_series`, `set_paused`, `remove_publisher` (cutting off a leaked key needs no vote) |
 | The verifier | `mt_on_transfer` (money in) and `on_auth` (signed actions) |
-| Anyone | `record_price` with valid signatures, `settle_round`, `claim` for any account, the views |
+| Anyone | `record_price` with valid signatures, `settle_round`, `claim` for any account, `sweep_fees`, the views |
 
 ## Starting it up: `new`
 
 `new(owner_id, operator_id, verifier_id, collateral_token_id, network, price_threshold)`, callable only by the contract
 account. `collateral_token_id` must be `nep141:<token>`, `network` a short lowercase word (it is part of every signed
 message), and `price_threshold` at least 1. Publishers are added after, by the owner, and series by the operator with
-`add_series(asset, decimals, first_start, interval, price_window, close_before)`.
+`add_series(asset, decimals, first_start, interval, price_window, close_before)`. `price_window` is between 1 minute and
+1 day. The deployed series use 120 seconds (series 1) and 290 seconds (series 2 and 3).
 
 ## Money in: `mt_on_transfer`
 
@@ -89,10 +89,21 @@ moves a payout into the stake's own balance, so a relayer or keeper can claim fo
 
     round-price:v1:<this contract>:<network>:<asset>:<moment in ns>:<price>:<decimals>
 
-so a signature is good for one price of one asset at one moment on one contract and network. It is refused before its
-moment, after its window, once that moment has a price, with fewer than the threshold of valid signatures, with any
-malformed, repeated or unknown entry, or when neither its round nor the round before holds open stakes. Two rounds that
-use the same moment always get the same price, because it is stored once.
+so a signature is good for one price of one asset at one moment on one contract and network. The call is refused:
+
+| When | Refusal |
+| --- | --- |
+| Before its moment | "that moment has not come" |
+| After its window | "too late to record that price" |
+| That moment already has a price | "that price is already recorded" |
+| Neither its round nor the round before holds open stakes | "no open round needs that price" |
+| Fewer valid signatures than the threshold | "not enough valid publisher signatures" |
+| A key that is not a publisher | "not a publisher" |
+| One publisher listed twice | "a publisher signed twice" |
+| A signature over any other message | "a signature does not match" |
+
+Any bad entry refuses the whole submission. Two rounds that use the same moment always get the same price, because it is
+stored once.
 
 ## Settling and claiming
 
@@ -105,6 +116,18 @@ a round refunds for a missing price is decided by the deadline itself and never 
 
 `fee_bps` starts at 300 (3% of what the losing side paid) and the owner can set 0 to 1,000. A round pays the rate in
 force when it took its first stake. Registration fees and round fees collect in `fees`, counted in `total_owed`.
+
+The owner names a treasury with `set_treasury`. `sweep_fees` is open to anyone and needs at least 60 TGas attached. It
+moves all fees to the treasury's balance and pays them out as an ordinary withdrawal. It is refused with "the owner has
+not named a treasury" before one is set and with "no fees to sweep" when the treasury has nothing to send. If the
+transfer fails, the money stays on the treasury's balance for the next sweep.
+
+## Upgrading
+
+`stage_code` takes the wasm as its call input and holds about 1 NEAR per 100 KB of code in the contract. The deposit is
+not refunded when the upgrade runs. `upgrade` is owner only and needs at least 100 TGas attached. A failed or rolled-back upgrade consumes the staged
+code, so stage it again. `migrate` accepts state versions 1 and 2 and runs only inside an upgrade. Version 1 had no
+treasury. It refuses while the price threshold is not more than half of the publishers. `seal` needs a proven upgrade.
 
 ## Storage
 
@@ -138,8 +161,8 @@ Standard `rounds`, version 1.0.0: `registered`, `deposit`, `staked` (with the sh
 after it), `price_recorded` (with the signers), `round_settled` (outcome, reason `price`, `tie`, `one_sided` or
 `no_price`, and fee), `claimed` (with the stake's shares), `withdraw`, `withdraw_confirmed`, `withdraw_failed`,
 `withdrawal_reconciled`, `series_added`, `publisher_added`, `publisher_removed`, `price_threshold_set`, `fee_set`,
-`registration_fee_set`, `paused_set`, `operator_set`, `owner_proposed`, `owner_changed`, `code_staged`, `upgrade_sent`,
-`migrated`, `seal_sent`.
+`registration_fee_set`, `treasury_set`, `fees_swept`, `paused_set`, `operator_set`, `owner_proposed`, `owner_changed`,
+`code_staged`, `upgrade_sent`, `upgrade_failed`, `migrated`, `seal_sent`, `verifier_key_removal_sent`.
 
 ## Operator note: one-sided rounds
 
@@ -167,10 +190,6 @@ accept that risk. The contract does nothing about it.
 
 ## Not built yet
 
-- **The fee sweep.** Fees collect and are counted, but nothing sends them to the Council and the treasury yet. That
-  is why this contract is not in the reproducible build or the release.
-- **The publisher service.** The tests sign fixed prices with fixture keys. The backend collects closed one-minute
-  candles from Coinbase, Kraken and Bitstamp in USD and Binance in USDC; nothing signs or submits them yet.
 - **Selling.** A stake is held to the end of its round.
 - **Pruning.** Settled rounds and their prices stay stored after every stake is claimed, and a losing stake stays until
   someone claims it (paying nothing). A keeper can clear losers with `claim`; deleting empty rounds is not built.
