@@ -5,7 +5,7 @@ import type { Config } from './config.js';
 import {
   parseAgentAction, planAgentAction, type AgentAction, type EventProof, type Plan,
 } from './agent-actions.js';
-import type { ContractEvent, FinalTransaction } from './agent-chain.js';
+import type { FinalTransaction } from './agent-chain.js';
 import {
   expectedOf, finalRefusal, refusalCode, sentNothing, settled, type AgentApiError, type AgentGrant, type AgentStatus,
   type Expected, type GrantCalls, type NativeCall,
@@ -57,18 +57,22 @@ function sentAs(tx: FinalTransaction, call: NativeCall, agent: string) {
     && canonical(only.args) === canonical(call.args);
 }
 
-function eventOutcome(proof: EventProof, events: ContractEvent[], txHash: string, evidence: Record<string, unknown>):
+function eventOutcome(proof: EventProof, tx: FinalTransaction, txHash: string, evidence: Record<string, unknown>):
   Outcome {
   const { contract: target, standard, name, match, inFlight } = proof;
-  const logged = (event: string) => events.find(e => e.executor === target && e.standard === standard
+  const logged = (event: string) => tx.events.find(e => e.executor === target && e.standard === standard
     && e.event === event && Object.entries(match).every(([k, v]) => e.data[k] === v));
   const found = logged(name);
   if (found) return { to: 'confirmed', txHash, evidence: { ...evidence, event: { name, data: found.data } } };
-  if (inFlight && logged(inFlight.started) && !logged(inFlight.failed)) {
+  const reported = inFlight && logged(inFlight.failed);
+  if (inFlight && logged(inFlight.started) && !reported) {
     return { to: 'reconcile', txHash, evidence: { ...evidence, reason: 'callback_not_seen' } };
   }
-  const seen = events.filter(e => e.executor === target).map(e => e.event);
-  return { to: 'failed', txHash, evidence: { ...evidence, reason: 'contract_did_not_take_it', events: seen } };
+  const events = tx.events.filter(e => e.executor === target).map(e => e.event);
+  if (!reported && !tx.failed.includes(target)) {
+    return { to: 'reconcile', txHash, evidence: { ...evidence, reason: 'no_proof_either_way', events } };
+  }
+  return { to: 'failed', txHash, evidence: { ...evidence, reason: 'contract_did_not_take_it', events } };
 }
 
 async function proven({ r, op, plan }: Run, status: AgentStatus): Promise<Outcome> {
@@ -81,7 +85,7 @@ async function proven({ r, op, plan }: Run, status: AgentStatus): Promise<Outcom
   if (!('native' in send) || !sentAs(tx, send.native, op.agent)) {
     return { to: 'reconcile', txHash: null, evidence: { ...evidence, reason: 'transaction_not_this_call' } };
   }
-  return eventOutcome(proof, tx.events, txHash, evidence);
+  return eventOutcome(proof, tx, txHash, evidence);
 }
 
 function withoutProof(plan: Plan, status: AgentStatus): Outcome | null {

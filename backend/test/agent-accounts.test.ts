@@ -190,6 +190,11 @@ test('the API reaches the agent worker and holds neither of its keys', () => {
   for (const url of ['ftp://agent-worker', 'http://user:pass@agent-worker', 'http://agent-worker/path']) {
     assert.throws(() => readConfig({ ...SHARED, ...link, AGENT_WORKER_URL: url }), /AGENT_WORKER_URL/, url);
   }
+  for (const url of ['http://127.0.0.1:3510', 'http://agents.railway.internal:3510', 'https://agents.example.com']) {
+    assert.equal(readConfig({ ...SHARED, ...link, AGENT_WORKER_URL: url }).agentWorker?.url, url, url);
+  }
+  assert.throws(() => readConfig({ ...SHARED, ...link, AGENT_WORKER_URL: 'http://agents.example.com' }),
+    /must be https/, 'the link carries the service token and every agent token');
 });
 
 test('the agent worker needs its partner key, its grant key and the custody contract', () => {

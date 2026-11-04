@@ -53,6 +53,9 @@ example DAO names and sandbox keys are not production configuration.
 - [ ] Deploy rounds and the oracle with `price_threshold` of at least 2. `add_publisher` keeps the threshold above half
       of the publishers and `set_price_threshold` cannot go above how many there are, so a contract started at 1 stays
       on one publisher until an upgrade. Start at 2, which takes up to 3 publishers, and raise it as more join.
+- [ ] Build the site with `NEXT_PUBLIC_AGENT_WALLET_CONTRACT` set to the worker's `AGENT_API_WALLET_CONTRACT` and
+      `NEXT_PUBLIC_AGENT_API_HOST` set to the host of its `AGENT_API_URL`. Without them the site refuses every agent
+      request before the wallet, so nobody can open an agent.
 - [ ] Run at least `price_threshold` publishers (`keeper/publisher.mjs`), each on its own host with its own key, and
       have the DAO add each key with `add_publisher`. Run `keeper/resolver.mjs run` on a schedule from an account that
       holds only the bond float in Intents, and answer event markets with `resolver.mjs propose` (see "Publishing and

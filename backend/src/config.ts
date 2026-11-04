@@ -31,6 +31,7 @@ const DEFAULT_SESSION_IDLE_SECONDS = 12 * 3600;
 const MIN_SESSION_SECONDS = 300;
 const MAX_SESSION_SECONDS = 30 * 24 * 3600;
 const MIN_OPERATOR_TOKEN_LENGTH = 32;
+const PRIVATE_HOST = /^(127\.0\.0\.1|[a-z0-9-]+|[a-z0-9.-]+\.internal)$/;
 
 function integer(value: string, name: string, min: number, max: number): number {
   if (!/^\d+$/.test(value) || Number(value) < min || Number(value) > max) throw new Error(`Invalid ${name}`);
@@ -55,6 +56,9 @@ function readAgentWorkerLink(env: NodeJS.ProcessEnv): AgentWorkerLink | null {
   if (!env.AGENT_WORKER_URL && !env.AGENT_WORKER_TOKEN) return null;
   const link = url(env.AGENT_WORKER_URL ?? '', 'AGENT_WORKER_URL', ['http:', 'https:']);
   if (link.origin !== env.AGENT_WORKER_URL) throw new Error('AGENT_WORKER_URL must be an exact origin');
+  if (link.protocol === 'http:' && !PRIVATE_HOST.test(link.hostname)) {
+    throw new Error('AGENT_WORKER_URL must be https outside a private network');
+  }
   return { url: link.origin, token: agentWorkerToken(env.AGENT_WORKER_TOKEN) };
 }
 

@@ -94,7 +94,8 @@ export async function signAccess(s: AgentAccounts, owner: Owner, agentId: string
   }
   const token = `dmk_${randomBytes(32).toString('base64url')}`, expiresAt = new Date(Date.now() + LIFETIME_MS);
   const { rowCount } = await s.db.query(`UPDATE agent_access_tokens SET token_hash=$2,expires_at=$3
-    WHERE id=$1 AND token_hash IS NULL`, [tokenId, tokenHash(token), expiresAt]);
+    WHERE id=$1 AND token_hash IS NULL AND revoked_at IS NULL AND expires_at>now()`,
+  [tokenId, tokenHash(token), expiresAt]);
   if (rowCount !== 1) throw new ReadError(404, 'access_request_not_found');
   return { id: tokenId, token, label: asked.label, max_spend: asked.max_spend, daily_limit: asked.daily_limit,
     expires_at: expiresAt.toISOString() };

@@ -4,6 +4,7 @@ vi.mock("../config", () => ({
   config: {
     backendUrl: "https://api.example.com", verifierId: "intents.near", collateralTokenId: "nep141:usdc.example.near",
     tokenId: "", marketId: "market.example.near", oracleId: "oracle.example.near", councilId: "", nftId: "",
+    agentWalletContract: "wallets.example.near", agentApiHost: "agents.example.com",
   },
 }));
 
@@ -82,6 +83,9 @@ describe("a request that could move the owner's funds never reaches the wallet",
     ["a call to NEAR Intents", "nep366", delegate({ receiverId: "intents.near" })],
     ["a call to the collateral token", "nep366", delegate({ receiverId: "usdc.example.near" })],
     ["a call to the market", "nep366", delegate({ receiverId: "market.example.near" })],
+    ["a call to the rounds contract", "nep366", delegate({ receiverId: "rounds.example.near" })],
+    ["a call to any other contract", "nep366", delegate({ receiverId: "swap.example.near" })],
+    ["a message for any other site", "nep413", message({ recipient: "phish.example.com" })],
     ["a plain NEAR transfer", "nep366", delegate({ actions: [{ type: "Transfer", params: { deposit: "1" } }] })],
     ["more than 1 NEAR attached", "nep366", delegate({ actions: [call("store_wallet_policy", OVER_ONE_NEAR)] })],
     ["no actions", "nep366", delegate({ actions: [] })],

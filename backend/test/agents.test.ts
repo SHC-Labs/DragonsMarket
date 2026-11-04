@@ -313,7 +313,7 @@ function fake(opts: FakeOptions): Fake {
       const call = sent[0] && 'native' in sent[0].send ? sent[0].send.native : STAKE_CALL;
       return { signer: AGENT, receiver: call.receiver_id,
         calls: [{ method: call.method_name, args: call.args, deposit: call.deposit }], events: opts.events ?? [],
-        ...opts.tx };
+        failed: [], ...opts.tx };
     },
     operations: {
       seen: async () => opts.existing !== undefined,
@@ -353,7 +353,9 @@ const staked: ContractEvent = { executor: 'rounds.fixture.near', standard: 'roun
 const run = (f: Fake, action: AgentAction = STAKE) => runAgentAction(f.runner, grant, { agent: AGENT, key: 'stake-1', action });
 const settledWith = (events: ContractEvent[], last = status('SUCCESS', { tx_hash: 'tx1' })) =>
   fake({ replies: [status('PROCESSING'), last], events });
-const resend = (sendError: unknown) => fake({ replies: [], sendError, existing: { state: 'prepared', sent: true } });
+const refusedWith = (events: ContractEvent[], last = status('SUCCESS', { tx_hash: 'tx1' })) =>
+  fake({ replies: [status('PROCESSING'), last], events, tx: { failed: ['rounds.fixture.near', 'market.fixture.near'] } });
+const resend =(sendError: unknown) => fake({ replies: [], sendError, existing: { state: 'prepared', sent: true } });
 
 test('a stake is sent once under the operation key and done only when the round logged it for the agent', async () => {
   const f = settledWith([staked]);
@@ -435,7 +437,7 @@ test('a FAILED or REFUNDED status alone never fails an operation', async () => {
     [status('REFUNDED'), [], 'reconcile'],
     [status('FAILED', { never_executed: true }), [], 'failed'],
     [status('FAILED', { never_submitted: true }), [], 'failed'],
-    [status('FAILED', { tx_hash: 'tx1' }), [], 'failed'],
+    [status('FAILED', { tx_hash: 'tx1' }), [], 'reconcile'],
     [status('FAILED', { tx_hash: 'tx1' }), [staked], 'confirmed'],
     [status('NEEDS_REVIEW'), [], 'reconcile'],
     [status('UNCERTAIN'), [], 'unknown'],
@@ -444,6 +446,8 @@ test('a FAILED or REFUNDED status alone never fails an operation', async () => {
     const result = await run(settledWith(events, last));
     assert.equal(result.state, state, JSON.stringify(last.details) + last.status);
   }
+  assert.equal((await run(refusedWith([], status('FAILED', { tx_hash: 'tx1' })))).state, 'failed',
+    'a contract that refused it on chain is the proof');
   const out = fake({ replies: [status('PROCESSING'), { ...status('FAILED', { tx_hash: 'tx1' }), type: 'withdraw' }] });
   const cashOut = { kind: 'cash_out', amount: '5', recipient: 'alice.near' } as const;
   assert.equal((await run(out, cashOut)).state, 'reconcile', 'a failed withdrawal has no transaction to read');
@@ -479,17 +483,17 @@ test('a trade is proven only by its own market, side and size, logged by the mar
     [{ event: 'sell' }, 'another event'],
   ];
   for (const [change, what] of wrong) {
-    assert.equal((await run(settledWith([{ ...bought, ...change }]), BUY)).state, 'failed', what);
+    assert.equal((await run(settledWith([{ ...bought, ...change }]), BUY)).state, 'reconcile', what);
   }
   const sell = { kind: 'sell', market: '7', side: 'yes', shares: '500', minCollateral: '400' } as const;
   const sold: ContractEvent = { ...bought, event: 'sell', data: { market_id: '7', account: AGENT, side: 'yes',
     shares: '500', collateral: '420', fee: '8' } };
   assert.equal((await run(settledWith([sold]), sell)).state, 'confirmed');
-  assert.equal((await run(settledWith([{ ...sold, data: { ...sold.data, shares: '499' } }]), sell)).state, 'failed');
+  assert.equal((await run(settledWith([{ ...sold, data: { ...sold.data, shares: '499' } }]), sell)).state, 'reconcile');
   const redeem = { kind: 'redeem', market: '7' } as const;
   const paid: ContractEvent = { ...bought, event: 'redeemed', data: { market_id: '7', account: AGENT, amount: '9' } };
   assert.equal((await run(settledWith([paid]), redeem)).state, 'confirmed');
-  assert.equal((await run(settledWith([]), redeem)).state, 'failed', 'a redeem that paid nothing out');
+  assert.equal((await run(refusedWith([]), redeem)).state, 'failed', 'a redeem the market refused');
 });
 
 test('the fence runs before anything is prepared, and never between a retry and its own send', async () => {
@@ -510,18 +514,28 @@ test('the fence runs before anything is prepared, and never between a retry and 
   assert.equal(retry.sent.length, 1);
 });
 
-test('a stake the round did not take fails with what the contract logged, though the API reports success', async () => {
+test('a stake the round refused fails with what the contract logged, though the API reports success', async () => {
   const someoneElse: ContractEvent = { ...staked, data: { ...staked.data, account: 'other.near' } };
-  const result = await run(settledWith([someoneElse]));
+  const result = await run(refusedWith([someoneElse]));
   assert.equal(result.state, 'failed');
   assert.deepEqual(result.evidence, { correlation_id: 'op_1', status: 'SUCCESS', tx_hash: 'tx1',
     reason: 'contract_did_not_take_it', events: ['staked'] });
 });
 
+test('a transaction that went through with no proof either way stops for the owner and never frees the limit', async () => {
+  const result = await run(settledWith([]));
+  assert.equal(result.state, 'reconcile', 'only a refusal on chain may read as failed');
+  assert.deepEqual(result.evidence, { correlation_id: 'op_1', status: 'SUCCESS', tx_hash: 'tx1',
+    reason: 'no_proof_either_way', events: [] });
+  const elsewhere = fake({ replies: [status('PROCESSING'), status('SUCCESS', { tx_hash: 'tx1' })],
+    tx: { failed: ['usdc.fixture.near'] } });
+  assert.equal((await run(elsewhere)).state, 'reconcile', 'another contract\'s failure says nothing about this one');
+});
+
 test('a stake is proven only by its own round, series, side and amount', async () => {
   for (const other of [{ round: '41' }, { series_id: 1 }, { side: 'down' }, { amount: '4999999' }]) {
     const result = await run(settledWith([{ ...staked, data: { ...staked.data, ...other } }]));
-    assert.equal(result.state, 'failed', JSON.stringify(other));
+    assert.equal(result.state, 'reconcile', JSON.stringify(other));
   }
 });
 
@@ -531,8 +545,8 @@ test('leaving is proven by the round closing the agent\'s account, and only by t
     data: { account: AGENT, deposit_to: 'alice.near' } };
   assert.equal((await run(settledWith([closed]), leave)).state, 'confirmed');
   const elsewhere = { ...closed, executor: 'market.fixture.near' };
-  assert.equal((await run(settledWith([elsewhere]), leave)).state, 'failed');
-  assert.equal((await run(settledWith([]), leave)).state, 'failed', 'a call that closed nothing');
+  assert.equal((await run(settledWith([elsewhere]), leave)).state, 'reconcile');
+  assert.equal((await run(settledWith([]), leave)).state, 'reconcile', 'a call that closed nothing');
   const noHash = settledWith([closed], status('SUCCESS'));
   assert.equal((await run(noHash, leave)).state, 'reconcile');
 });
@@ -631,6 +645,7 @@ test('a final transaction is its signer, receiver and calls, with events only fr
     assert.deepEqual(tx.calls, [{ method: 'stake', args: STAKE_CALL.args, deposit: '1' }, null, null]);
     assert.deepEqual(tx.events.map(e => [e.executor, e.event]), [['rounds.fixture.near', 'deposit']],
       'a failed receipt keeps its logs, and they prove nothing');
+    assert.deepEqual(tx.failed, ['rounds.fixture.near']);
     await assert.rejects(finalTransaction(reply({ actions, hash: 'tx2' }), 'tx1', AGENT), /invalid_transaction_outcome/,
       'an answer about another transaction');
     await assert.rejects(finalTransaction(reply({ actions: null }), 'tx1', AGENT), /invalid_transaction_outcome/);

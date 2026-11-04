@@ -96,14 +96,16 @@ function fakeAgentApi() {
         storage_unregister: ['unregistered', {}],
       };
       const [event, data] = logged[String(call.method_name)]!;
-      return { signer: sender, receiver: MARKET, calls, events: state.event === 'nothing' ? []
-        : [{ executor: MARKET, standard: 'market', event, data: { account: sender, ...data } }] };
+      return { signer: sender, receiver: MARKET, calls, failed: state.event === 'nothing' ? [MARKET] : [],
+        events: state.event === 'nothing' ? []
+          : [{ executor: MARKET, standard: 'market', event, data: { account: sender, ...data } }] };
     }
     const data = call.method_name === 'claim' ? { account: sender, series_id: args.series_id, round: args.round }
       : { account: sender, series_id: 0, round: args.round ?? '42', side: 'up',
         amount: typeof args.amount === 'string' ? args.amount : '5000000' };
     const event = call.method_name === 'claim' ? 'claimed' : state.event;
     return { signer: sender, receiver: String(call.receiver_id), calls,
+      failed: state.event === 'nothing' ? ['rounds.test.near'] : [],
       events: [{ executor: 'rounds.test.near', standard: 'rounds', event, data }] };
   };
   const transport: typeof fetch = async (input, init) => {
@@ -382,7 +384,7 @@ test('an owner creates an agent, authorizes Dragons Market and has it stake and 
     assert.equal((await h.call(bob.token, 'GET', `/v1/agents/${agentId}/claimable`)).status, 404);
     const operations = (await h.call(alice.token, 'GET', `/v1/agents/${agentId}/operations`)).body.data as Body[];
     assert.deepEqual(operations.map(o => o.state), ['confirmed', 'confirmed']);
-    assert.equal((await act(alice, 'leave-0001', { kind: 'leave', venue: 'rounds' })).body.state, 'failed',
+    assert.equal((await act(alice, 'leave-0001', { kind: 'leave', venue: 'rounds' })).body.state, 'reconcile',
       'an owner may leave rounds, and this test chain logged no unregistered event');
     assert.equal(sentTo(`/v1/agents/${agentId}/native/near/call`).at(-1)!.body!.method_name, 'storage_unregister');
   }));

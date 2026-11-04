@@ -191,17 +191,20 @@ test('made-up tokens stop at their budget, and an agent already connected keeps 
     assert.equal(agent.agent_id, AGENT_ID);
   }, new TokenBudget(3)));
 
-test('the token budget refills each minute and remembers only what the backend accepted', () => {
+test('the token budget refills each minute, and a real token cannot flood the server either', () => {
   let now = 1000;
-  const budget = new TokenBudget(1, () => now);
+  const budget = new TokenBudget(1, 2, () => now);
   assert.equal(budget.allows('one'), true);
   assert.equal(budget.allows('two'), false);
   budget.accepted('good');
-  assert.equal(budget.allows('good'), true, 'a known token spends no budget');
+  assert.equal(budget.allows('good'), true, 'a known token spends none of the new tokens\' budget');
+  assert.equal(budget.allows('good'), false, 'and it has a limit of its own');
   budget.refused('good');
   assert.equal(budget.allows('good'), false, 'a revoked token is new again');
   now += 60000;
   assert.equal(budget.allows('three'), true);
+  budget.accepted('good');
+  assert.equal(budget.allows('good'), true);
 });
 
 test('the widest slippage a quote offers clears the backend\'s 10% limit', () =>

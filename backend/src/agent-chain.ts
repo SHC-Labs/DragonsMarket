@@ -6,7 +6,7 @@ type Rpc = Pick<ReadRpcClient, 'call'>;
 export interface ContractEvent { executor: string; standard: string; event: string; data: Record<string, unknown> }
 export interface CallAction { method: string; args: unknown; deposit: string }
 export interface FinalTransaction {
-  signer: string; receiver: string; calls: (CallAction | null)[]; events: ContractEvent[];
+  signer: string; receiver: string; calls: (CallAction | null)[]; events: ContractEvent[]; failed: string[];
 }
 
 function callAction(action: unknown): CallAction | null {
@@ -19,13 +19,14 @@ function callAction(action: unknown): CallAction | null {
   } catch { return null; }
 }
 
-function receiptEvents(receipts: unknown[]) {
-  const events: ContractEvent[] = [];
+function receiptResults(receipts: unknown[]) {
+  const events: ContractEvent[] = [], failed: string[] = [];
   for (const receipt of receipts) {
     const o = object(receipt) && object(receipt.outcome) ? receipt.outcome : null;
     if (!o || typeof o.executor_id !== 'string' || !Array.isArray(o.logs) || !object(o.status)) {
       throw new Error('invalid_receipt_outcome');
     }
+    if (Object.hasOwn(o.status, 'Failure')) failed.push(o.executor_id);
     if (!Object.hasOwn(o.status, 'SuccessValue') && !Object.hasOwn(o.status, 'SuccessReceiptId')) continue;
     for (const log of o.logs) {
       if (typeof log !== 'string' || !log.startsWith('EVENT_JSON:')) continue;
@@ -37,7 +38,7 @@ function receiptEvents(receipts: unknown[]) {
       }
     }
   }
-  return events;
+  return { events, failed };
 }
 
 export function finalTransaction(rpc: Rpc, transactionHash: string, sender: string): Promise<FinalTransaction> {
@@ -49,7 +50,7 @@ export function finalTransaction(rpc: Rpc, transactionHash: string, sender: stri
       throw new Error('invalid_transaction_outcome');
     }
     return { signer: tx.signer_id, receiver: tx.receiver_id, calls: tx.actions.map(callAction),
-      events: receiptEvents(outcome.receipts_outcome) };
+      ...receiptResults(outcome.receipts_outcome) };
   });
 }
 

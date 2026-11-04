@@ -95,8 +95,10 @@ const guardedContracts = () => new Set(["intents.near", "intents.far", config.ve
   config.collateralTokenId.slice("nep141:".length), config.tokenId, config.marketId, config.oracleId, config.councilId,
   config.nftId].filter((id) => id !== ""));
 
+const pinned = (value: unknown, expected: string): value is string => expected !== "" && value === expected;
+
 function messageIsSafe(payload: Record<string, unknown>) {
-  return typeof payload.message === "string" && typeof payload.recipient === "string"
+  return typeof payload.message === "string" && pinned(payload.recipient, config.agentApiHost)
     && !guardedContracts().has(payload.recipient) && typeof payload.nonce === "string" && NONCE.test(payload.nonce);
 }
 
@@ -108,8 +110,8 @@ function delegateIsSafe(payload: Record<string, unknown>) {
       && typeof params.deposit === "string" && /^\d{1,39}$/.test(params.deposit);
     return fine ? BigInt(params.deposit as string) : null;
   });
-  return typeof payload.receiverId === "string" && !guardedContracts().has(payload.receiverId) && deposits.length > 0
-    && !deposits.includes(null) && deposits.reduce<bigint>((sum, d) => sum + d!, 0n) <= NEAR;
+  return pinned(payload.receiverId, config.agentWalletContract) && !guardedContracts().has(payload.receiverId)
+    && deposits.length > 0 && !deposits.includes(null) && deposits.reduce<bigint>((sum, d) => sum + d!, 0n) <= NEAR;
 }
 
 export function safeToSign(standard: string, payload: Record<string, unknown>) {

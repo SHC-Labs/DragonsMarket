@@ -7,6 +7,8 @@
 //   NEXT_PUBLIC_BACKEND_URL          the backend's public origin; leave empty to run without it
 //   NEXT_PUBLIC_NFT_ID               the Council seat NFT collection
 //   NEXT_PUBLIC_TOKEN_ID             the NEP-141 contract itself; only the test faucet calls it
+//   NEXT_PUBLIC_AGENT_WALLET_CONTRACT  the only contract an owner signs an agent request for
+//   NEXT_PUBLIC_AGENT_API_HOST       the only recipient an owner signs an agent message for
 export type Network = "sandbox" | "testnet" | "mainnet";
 
 const network = (process.env.NEXT_PUBLIC_NETWORK ?? "testnet") as Network;
@@ -29,6 +31,8 @@ export const config = {
   collateralTokenId: process.env.NEXT_PUBLIC_COLLATERAL_TOKEN_ID ?? "",
   nftId: process.env.NEXT_PUBLIC_NFT_ID ?? "",
   tokenId: process.env.NEXT_PUBLIC_TOKEN_ID ?? "",
+  agentWalletContract: process.env.NEXT_PUBLIC_AGENT_WALLET_CONTRACT ?? "",
+  agentApiHost: process.env.NEXT_PUBLIC_AGENT_API_HOST ?? "",
   // The Dragons Market backend (sessions, synced watchlist, settlement status). Empty keeps the site working from the chain alone.
   backendUrl: (process.env.NEXT_PUBLIC_BACKEND_URL ?? "").replace(/\/+$/, ""),
   mcpUrl: process.env.NEXT_PUBLIC_MCP_URL ?? "",

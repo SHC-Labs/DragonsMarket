@@ -22,7 +22,7 @@ export function createMcpApp(config: McpConfig, backend: Backend, skill: string,
         return Promise.reject(new OAuthError(OAuthErrorCode.InvalidToken, 'Not a Dragons Market access token'));
       }
       if (!budget.allows(token)) {
-        return Promise.reject(new OAuthError(OAuthErrorCode.TemporarilyUnavailable, 'Too many new tokens, try again soon'));
+        return Promise.reject(new OAuthError(OAuthErrorCode.TemporarilyUnavailable, 'Too many requests, try again soon'));
       }
       return backend.session(token).then(session => {
         budget.accepted(token);
