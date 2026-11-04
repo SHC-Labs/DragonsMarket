@@ -53,6 +53,9 @@ example DAO names and sandbox keys are not production configuration.
 - [ ] Deploy rounds and the oracle with `price_threshold` of at least 2. `add_publisher` keeps the threshold above half
       of the publishers and `set_price_threshold` cannot go above how many there are, so a contract started at 1 stays
       on one publisher until an upgrade. Start at 2, which takes up to 3 publishers, and raise it as more join.
+- [ ] Give the API and the agent worker two RPC providers run by different people: `RPC_URL` and `RPC_SECOND_URL`, each
+      with its own bearer token. Both must agree a wallet key is a full access key, and on mainnet nobody can sign in or
+      connect an AI agent until the second is set.
 - [ ] Build the site with `NEXT_PUBLIC_AGENT_WALLET_CONTRACT` set to the worker's `AGENT_API_WALLET_CONTRACT` and
       `NEXT_PUBLIC_AGENT_API_HOST` set to the host of its `AGENT_API_URL`. Without them the site refuses every agent
       request before the wallet, so nobody can open an agent.

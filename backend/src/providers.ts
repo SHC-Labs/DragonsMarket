@@ -6,6 +6,8 @@ export interface RpcSettings {
   primaryUrl: string;
   archivalUrl: string | null;
   primaryBearerToken: string | null;
+  secondUrl: string | null;
+  secondBearerToken: string | null;
   timeoutMs: number;
   intervalMs: number;
 }
@@ -37,8 +39,12 @@ export function readRpcSettings(env: NodeJS.ProcessEnv, network: Network): RpcSe
   const archivalUrl = archive ? endpoint(archive, 'RPC_ARCHIVAL_URL') : null;
   const primaryBearerToken = env.RPC_PRIMARY_BEARER_TOKEN || null;
   if (primaryBearerToken && (/[\r\n]/.test(primaryBearerToken) || !primaryUrl.startsWith('https://'))) throw new Error('RPC bearer token requires HTTPS and must not contain newlines');
+  const secondUrl = env.RPC_SECOND_URL ? endpoint(env.RPC_SECOND_URL, 'RPC_SECOND_URL') : null;
+  const secondBearerToken = env.RPC_SECOND_BEARER_TOKEN || null;
+  if (secondUrl && new URL(secondUrl).hostname === new URL(primaryUrl).hostname) throw new Error('RPC_SECOND_URL must be a different provider from RPC_URL');
+  if (secondBearerToken && (/[\r\n]/.test(secondBearerToken) || !secondUrl?.startsWith('https://'))) throw new Error('RPC bearer token requires HTTPS and must not contain newlines');
   return {
-    primaryUrl, archivalUrl, primaryBearerToken,
+    primaryUrl, archivalUrl, primaryBearerToken, secondUrl, secondBearerToken,
     timeoutMs: bounded(env.RPC_TIMEOUT_MS || '10000', 'RPC_TIMEOUT_MS', 100, 60000),
     intervalMs: bounded(env.RPC_INTERVAL_MS || '1000', 'RPC_INTERVAL_MS', 1000, 60000),
   };
