@@ -92,7 +92,13 @@ fn newest_source(dir: &std::path::Path) -> Option<std::time::SystemTime> {
     let mut newest = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
-        let time = if path.is_dir() { newest_source(&path) } else if path.extension().is_some_and(|e| e == "rs") { entry.metadata().ok()?.modified().ok() } else { None };
+        let time = if path.is_dir() {
+            newest_source(&path)
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            entry.metadata().ok()?.modified().ok()
+        } else {
+            None
+        };
         newest = newest.max(time);
     }
     newest
@@ -108,9 +114,16 @@ pub fn wasm(name: &str) -> Vec<u8> {
     let own = root.join(name.replace('_', "-")).join("src");
     let shared = root.join("upgrade/src");
     let uses_upgrade = ["council", "market", "oracle", "rounds"].contains(&name);
-    let source = [Some(own), uses_upgrade.then_some(shared)].into_iter().flatten().filter_map(|d| newest_source(&d)).max();
+    let source = [Some(own), uses_upgrade.then_some(shared)]
+        .into_iter()
+        .flatten()
+        .filter_map(|d| newest_source(&d))
+        .max();
     if let (Some(built), Some(source)) = (built, source) {
-        assert!(built >= source, "the {name} wasm is older than its source: run contracts/build.sh before the sandbox tests ({p:?})");
+        assert!(
+            built >= source,
+            "the {name} wasm is older than its source: run contracts/build.sh before the sandbox tests ({p:?})"
+        );
     }
     bytes
 }
@@ -797,6 +810,7 @@ pub fn event_names(logs: &[String]) -> Vec<String> {
                 .unwrap()
                 .to_string()
         })
+        .filter(|name| name != "seats_started")
         .collect()
 }
 

@@ -46,7 +46,7 @@ async fn only_the_contract_account_can_initialise_each_contract() -> anyhow::Res
         let version = match name {
             "market" => 8,
             "oracle" => 3,
-            _ => 5,
+            _ => 6,
         };
         assert_eq!(
             config["state_version"], version,

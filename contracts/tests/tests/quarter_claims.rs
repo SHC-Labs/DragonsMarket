@@ -170,8 +170,8 @@ async fn a_quarter_nobody_claims_stays_claimable_and_a_gap_of_several_quarters_i
     send_revenue(&w, 500 * USD).await?;
     end_quarters(&w, 3).await?;
     let behind = running_quarter(&w).await;
-    let days_behind = now(&w.worker).await / NS_PER_DAY
-        - u64::from_str_radix(config(&w.council).await["last_day"].as_str().unwrap(), 10)?;
+    let days_behind =
+        now(&w.worker).await / NS_PER_DAY - config(&w.council).await["last_day"].as_str().unwrap().parse::<u64>()?;
     assert!(
         days_behind > MAX_DAY_STEPS,
         "{days_behind} days behind, quarter {behind}"

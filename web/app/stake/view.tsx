@@ -191,7 +191,7 @@ export function StakeView() {
               })}
             </ul>
           )}
-          <p className="portfolio-note">A staked Dragon can be drawn for a dispute jury and earns a revenue share from the day after it is staked. Revenue is paid per quarter. Asking to unstake starts a cooldown and cuts half of the running quarter's earnings, and a seat on a jury stays locked until its case ends.</p>
+          <p className="portfolio-note">A staked Dragon can be drawn for a dispute jury and earns a revenue share from the day after it is staked. Revenue is paid per quarter. Asking to unstake starts a cooldown and cuts half of the running quarter&apos;s earnings, and a seat on a jury stays locked until its case ends.</p>
           {leaving !== null && (
             <UnstakeCutDialog
               token={leaving}
