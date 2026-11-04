@@ -121,10 +121,16 @@ export function readConfig(env: NodeJS.ProcessEnv): Config {
   };
 }
 
+export function agentCashOut(deployment: NonNullable<Config['deployment']>) {
+  const unit = 10n ** BigInt(deployment.collateralDecimals);
+  return { perTransaction: String(100n * unit), daily: String(500n * unit) };
+}
+
 // Deliberate allowlist: never spread process.env or expose database credentials.
 export function publicConfig(config: Config) {
   return {
     apiVersion: 'v1', network: config.network, deployment: config.deployment,
+    agentCashOut: config.deployment && agentCashOut(config.deployment),
     capabilities: { trading: false, funding: false, indexing: config.network === 'mainnet' && config.deployment !== null, walletSessions: true,
       agents: config.agentApi !== null && config.agentAccounts !== null && config.deployment !== null },
   };

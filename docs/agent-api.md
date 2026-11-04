@@ -31,10 +31,18 @@ are an example to adjust:
 {
   "actions": ["withdraw"],
   "assets": ["nep141:<token>", "nep141:wrap.near"],
-  "limits": { "per_transaction": { "nep141:wrap.near": "100000000000000000000000" } },
+  "limits": {
+    "per_transaction": { "nep141:<token>": "100000000", "nep141:wrap.near": "100000000000000000000000" },
+    "daily": { "nep141:<token>": "500000000", "nep141:wrap.near": "500000000000000000000000" }
+  },
   "destinations": {
     "mode": "only",
-    "list": [{ "action": "withdraw", "chain": "near", "address": "<agent>", "memo": null }]
+    "list": [
+      { "action": "withdraw", "chain": "near", "address": "<agent>", "memo": null },
+      { "action": "withdraw", "chain": "near", "address": "<token>", "memo": null },
+      { "action": "withdraw", "chain": "near", "address": "<rounds>", "memo": null },
+      { "action": "withdraw", "chain": "near", "address": "<market>", "memo": null }
+    ]
   },
   "native": {
     "near": { "sign_message": [], "transfer": false, "call": ["<token>", "<rounds>", "<market>"] },
@@ -46,7 +54,11 @@ are an example to adjust:
 
 What it fences and what it does not:
 
-- `destinations` lets the NEAR Intents balance leave only for `<agent>` itself.
+- `destinations` lets the NEAR Intents balance leave only for the accounts listed. The Agent API checks the NEAR a
+  native call attaches against the same list, so every contract a call below pays a deposit to must be on it. That
+  also allows a plain withdrawal to those contracts, and money sent that way arrives with no message, so nothing
+  credits it and it is lost. The token caps in `limits` bound what one such mistake can cost; set them to what the
+  agent needs.
 - `native.near.call` lists contracts, not methods. Listing `<token>` lets the agent call any method of the token,
   `ft_transfer` to anyone included, for the token on `<agent>`'s NEAR account, so keep there only what is about to be
   staked. Listing `<rounds>` and `<market>` costs the owner nothing: their withdrawals pay only the caller's own NEAR

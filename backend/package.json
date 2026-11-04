@@ -34,7 +34,7 @@
     "test:local-chain": "npm run build:local-contract && npm run build && node --env-file-if-exists=.env --test dist/test/local-chain.test.js dist/test/rounds-price.test.js"
   },
   "dependencies": {
-    "@near-intents-agent-api/sdk": "0.7.2",
+    "@near-intents-agent-api/sdk": "0.7.3",
     "pg": "8.23.1"
   },
   "devDependencies": {

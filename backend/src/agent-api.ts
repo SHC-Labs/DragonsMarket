@@ -74,8 +74,8 @@ export const settled = (status: Status) => SETTLED[status];
 
 const SENT_NOTHING = new Set([
   'policy_action_denied', 'policy_destination_denied', 'policy_asset_denied', 'policy_schedule_denied',
-  'spend_budget_exceeded', 'spend_price_unavailable', 'policy_limit_exceeded', 'policy_action_limit_exceeded',
-  'policy_usage_unavailable', 'insufficient_balance', 'provider_refused', 'wallet_busy',
+  'spend_budget_exceeded', 'spend_price_unavailable', 'policy_transaction_limit_exceeded', 'policy_limit_exceeded',
+  'policy_action_limit_exceeded', 'policy_usage_unavailable', 'insufficient_balance', 'provider_refused', 'wallet_busy',
 ]);
 const client4xx = (e: AgentApiError) => e.status >= 400 && e.status < 500;
 export const sentNothing = (e: unknown) => e instanceof AgentApiError && client4xx(e) && SENT_NOTHING.has(e.code);

@@ -356,7 +356,7 @@ test('a run waits while another holds the operation, and acts on the state it re
 
 test('only a refusal documented as sending nothing fails an operation before it is sent', async () => {
   for (const code of ['policy_destination_denied', 'spend_budget_exceeded', 'insufficient_balance', 'wallet_busy',
-    'provider_refused']) {
+    'provider_refused', 'policy_transaction_limit_exceeded']) {
     const f = fake({ replies: [], sendError: apiError(403, code) });
     const result = await run(f);
     assert.deepEqual([result.state, f.transitions], ['failed', ['prepared>failed']], code);

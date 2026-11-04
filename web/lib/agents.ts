@@ -38,7 +38,8 @@ export interface AgentOperation {
   action: AgentAction | null;
   updated_at: string;
 }
-export interface AgentsSetup { rounds: string | null; token: string }
+export interface CashOutLimits { perTransaction: bigint; daily: bigint }
+export interface AgentsSetup { rounds: string | null; token: string; cashOut: CashOutLimits | null }
 export interface AccessToken {
   id: string;
   label: string;
@@ -118,14 +119,23 @@ export async function depositedFor(txHash: string, owner: string, rounds: string
   return typeof amount === "string" && /^\d{1,39}$/.test(amount) ? BigInt(amount) : null;
 }
 
+const units = (value: unknown) => (typeof value === "string" && /^\d{1,39}$/.test(value) ? BigInt(value) : null);
+
+function cashOutLimits(published: { perTransaction?: unknown; daily?: unknown } | null | undefined) {
+  const [perTransaction, daily] = [units(published?.perTransaction), units(published?.daily)];
+  return perTransaction && daily ? { perTransaction, daily } : null;
+}
+
 export function agentsSetup(): Promise<AgentsSetup | null> {
   if (!backendEnabled()) return Promise.resolve(null);
   type Published = {
     capabilities?: { agents?: boolean };
     deployment?: { collateralTokenId: string; contracts: { rounds?: string } };
+    agentCashOut?: { perTransaction?: unknown; daily?: unknown } | null;
   };
   return backend<Published>("/v1/config").then((c) => (c.capabilities?.agents && c.deployment
-    ? { rounds: c.deployment.contracts.rounds ?? null, token: c.deployment.collateralTokenId.slice("nep141:".length) }
+    ? { rounds: c.deployment.contracts.rounds ?? null, token: c.deployment.collateralTokenId.slice("nep141:".length),
+      cashOut: cashOutLimits(c.agentCashOut) }
     : null));
 }
 
@@ -219,15 +229,18 @@ const MESSAGES: Record<string, string> = {
   agent_api_rate_limited: "The agent service is busy. Try again in a minute.",
   intent_expired: "That request expired before it was signed. Start it again.",
   policy_destination_denied: "The agent's rules do not allow sending there.",
+  policy_transaction_limit_exceeded: "That is more than the agent's rules allow at once. Try a smaller amount.",
+  policy_limit_exceeded: "That would pass the agent's limit for 24 hours. Try a smaller amount, or wait.",
   native_method_denied: "The agent's rules do not allow that call.",
   insufficient_balance: "The agent does not hold enough for that.",
   access_token_limit_reached: "This agent already has five connections. Revoke one first.",
   daily_limit_below_max_stake: "The limit for 24 hours must be at least the limit for one stake.",
 };
 
+export const refusalMessage = (code: unknown) =>
+  (typeof code === "string" && Object.hasOwn(MESSAGES, code) ? MESSAGES[code]! : null);
+
 export function agentError(e: unknown): string {
-  if (e instanceof BackendError) {
-    return Object.hasOwn(MESSAGES, e.code) ? MESSAGES[e.code]! : `The request was refused (${e.code}).`;
-  }
+  if (e instanceof BackendError) return refusalMessage(e.code) ?? `The request was refused (${e.code}).`;
   return e instanceof Error ? e.message : "Something went wrong.";
 }

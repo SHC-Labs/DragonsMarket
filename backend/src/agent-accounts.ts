@@ -3,7 +3,7 @@ import type pg from 'pg';
 import type { GenerateIntentRequest, IntentType, Policy } from '@near-intents-agent-api/sdk';
 import { canonical, object } from './ingestion/block.js';
 import { isAccount as account } from './validate.js';
-import type { Config } from './config.js';
+import { agentCashOut, type Config } from './config.js';
 import { transaction } from './database.js';
 import { LOCK } from './locks.js';
 import { ReadError } from './read-api.js';
@@ -37,16 +37,23 @@ const GRANT_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const OWNER_KINDS: readonly ActionKind[] = ['stake', 'claim', 'withdraw', 'cash_out'];
 const WHILE_FROZEN = new Set<ActionKind>(['claim', 'withdraw', 'cash_out']);
 
+const nearDestination = (address: string) => ({ action: 'withdraw' as const, chain: 'near', address, memo: null });
+
 export function dragonsPolicy(d: Deployment, owner: string): Policy {
+  const rounds = d.contracts.rounds ? [d.contracts.rounds] : [];
+  const cashOut = agentCashOut(d);
   return {
     frozen: false, actions: ['withdraw'], confidential: false, owner_approval: false,
     assets: [...new Set([d.collateralTokenId, WRAPPED_NEAR])],
-    limits: { per_transaction: { [WRAPPED_NEAR]: String(NEAR / 10n) }, daily: { [WRAPPED_NEAR]: String(NEAR / 2n) } },
+    limits: {
+      per_transaction: { [d.collateralTokenId]: cashOut.perTransaction, [WRAPPED_NEAR]: String(NEAR / 10n) },
+      daily: { [d.collateralTokenId]: cashOut.daily, [WRAPPED_NEAR]: String(NEAR / 2n) },
+    },
     max_actions_per_hour: 60,
-    destinations: { mode: 'only', list: [{ action: 'withdraw', chain: 'near', address: owner, memo: null }] },
+    destinations: { mode: 'only', list: [owner, ...rounds].map(nearDestination) },
     budget: { daily_usd: null, weekly_usd: null, monthly_usd: null }, timelock_ms: 0,
     native: {
-      near: { sign_message: [], transfer: false, call: d.contracts.rounds ? [d.contracts.rounds] : [] },
+      near: { sign_message: [], transfer: false, call: rounds },
       evm: { sign_typed_data: [], sign_message: false, sign_transaction: false },
       solana: { sign_message: false, sign_transaction: false },
     },

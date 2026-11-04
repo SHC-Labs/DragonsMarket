@@ -10,8 +10,8 @@ import { formatMoney, minSharesWithSlippage, toMicro } from "@/lib/format";
 import { usePoll } from "@/lib/hooks";
 import { nearBalance, txPanics, view } from "@/lib/rpc";
 import {
-  actionKey, agentOperations, depositedFor, outcomeOf, runAction, stakeBlock, type ActionOutcome, type AgentAction,
-  type AgentOperation, type AgentsSetup, type RoundRules,
+  actionKey, agentOperations, depositedFor, outcomeOf, refusalMessage, runAction, stakeBlock, type ActionOutcome,
+  type ActionResult, type AgentAction, type AgentOperation, type AgentsSetup, type CashOutLimits, type RoundRules,
 } from "@/lib/agents";
 
 interface RoundsAccount { registered: boolean; available: string; pending_withdrawals: string; open_stakes: number }
@@ -30,9 +30,9 @@ const STOPPED = "Dragons Market could not prove whether it went through, so it s
   + "agent's balances before trying again.";
 const UNREAD = "Your wallet sent it, but its result could not be read. Check the agent's balances before sending again.";
 
-function report(state: string, done: string, refused = `That did not go through. ${SEE_HISTORY}`) {
-  const outcome = outcomeOf(state);
-  if (outcome === "refused") throw new Error(refused);
+function report(result: ActionResult, done: string, refused = `That did not go through. ${SEE_HISTORY}`) {
+  const outcome = outcomeOf(result.state);
+  if (outcome === "refused") throw new Error(refusalMessage(result.evidence?.code) ?? refused);
   if (outcome === "review") throw new Error(STOPPED);
   return outcome === "done" ? done : SETTLING;
 }
@@ -176,7 +176,7 @@ function Stake({ rounds, agentId, account, available, openStakes, onDone }: Stak
     const result = await runAction(agentId, actionKey(), action);
     setAmount("");
     onDone();
-    return report(result.state, `Staked ${money(micro!)} on ${side === "up" ? "Up" : "Down"} in round `
+    return report(result, `Staked ${money(micro!)} on ${side === "up" ? "Up" : "Down"} in round `
       + `${picked!.round}.`, LEFT_IN_ROUNDS);
   });
   if (!market?.choices.length) return <p className="text-muted">No rounds are open yet.</p>;
@@ -219,7 +219,7 @@ function Act({ label, agentId, action, onDone, variant = "secondary" }: ActProps
   const act = () => step.run(async () => {
     const result = await runAction(agentId, actionKey(), action);
     onDone();
-    return report(result.state, "Done.");
+    return report(result, "Done.");
   });
   return <div>
     <Button variant={variant} onClick={act} disabled={step.busy}>{step.busy ? "Working" : label}</Button>
@@ -283,18 +283,30 @@ function History({ agentId, rounds, onDone }: { agentId: string; rounds: string 
   </div>;
 }
 
-interface LeaveProps { agentId: string; inRounds: bigint; inIntents: bigint; onDone: () => void }
+interface LeaveProps {
+  agentId: string;
+  inRounds: bigint;
+  inIntents: bigint;
+  limits: CashOutLimits | null;
+  onDone: () => void;
+}
 
-function Leave({ agentId, inRounds, inIntents, onDone }: LeaveProps) {
+function Leave({ agentId, inRounds, inIntents, limits, onDone }: LeaveProps) {
   if (inRounds === 0n && inIntents === 0n) return null;
+  const out = limits && inIntents > limits.perTransaction ? limits.perTransaction : inIntents;
   const withdraw: AgentAction = { kind: "withdraw", contract: "rounds", amount: inRounds.toString() };
-  const cashOut: AgentAction = { kind: "cash_out", amount: inIntents.toString() };
-  return <div className="agent-panel agent-row">
-    {inRounds > 0n &&
-      <Act label={`Withdraw ${money(inRounds)} from rounds`} agentId={agentId} action={withdraw} onDone={onDone} />}
-    {inIntents > 0n &&
-      <Act label={`Cash out ${money(inIntents)} to your wallet`} agentId={agentId} action={cashOut} onDone={onDone} />}
-  </div>;
+  const cashOut: AgentAction = { kind: "cash_out", amount: out.toString() };
+  return <>
+    <div className="agent-panel agent-row">
+      {inRounds > 0n &&
+        <Act label={`Withdraw ${money(inRounds)} from rounds`} agentId={agentId} action={withdraw} onDone={onDone} />}
+      {out > 0n &&
+        <Act label={`Cash out ${money(out)} to your wallet`} agentId={agentId} action={cashOut} onDone={onDone} />}
+    </div>
+    {limits && out < inIntents && <p className="text-muted">
+      The agent pays out at most {money(limits.perTransaction)} at a time and {money(limits.daily)} in 24 hours.
+    </p>}
+  </>;
 }
 
 interface DeskProps { agentId: string; account: string; owner: string; setup: AgentsSetup; frozen: boolean }
@@ -325,7 +337,7 @@ export function AgentDesk({ agentId, account, owner, setup, frozen }: DeskProps)
       {registered && <Stake rounds={setup.rounds} agentId={agentId} account={account} available={inRounds}
         openStakes={data.rounds!.open_stakes} onDone={reload} />}
     </>}
-    <Leave agentId={agentId} inRounds={inRounds} inIntents={inIntents} onDone={reload} />
+    <Leave agentId={agentId} inRounds={inRounds} inIntents={inIntents} limits={setup.cashOut} onDone={reload} />
     <History agentId={agentId} rounds={setup.rounds} onDone={reload} />
   </div>;
 }

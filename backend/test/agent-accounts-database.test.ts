@@ -212,8 +212,10 @@ test('an owner creates an agent, authorizes Dragons Market and has it stake and 
       'the owner is the signed-in wallet and the key it signed in with');
     const policy = asked.body!.policy as { destinations: unknown; native: { near: { call: string[] } } };
     assert.deepEqual(policy.native.near.call, ['rounds.test.near'], 'the agent is not given the token to call');
-    assert.deepEqual(policy.destinations,
-      { mode: 'only', list: [{ action: 'withdraw', chain: 'near', address: 'alice.near', memo: null }] });
+    assert.deepEqual(policy.destinations, { mode: 'only', list: [
+      { action: 'withdraw', chain: 'near', address: 'alice.near', memo: null },
+      { action: 'withdraw', chain: 'near', address: 'rounds.test.near', memo: null },
+    ] });
 
     const crossSite = await h.call(alice.token, 'POST', '/v1/agents', { name: 'x' }, 'https://attacker.example');
     assert.equal(crossSite.status, 403);

@@ -8,8 +8,8 @@ vi.mock("../config", () => ({
 }));
 
 import {
-  agentError, agentsSetup, createAgent, depositedFor, freezeAgent, outcomeOf, revokeGrants, runAction, safeToSign,
-  signAndFollow, signIntent, stakeBlock, type OwnerIntent, type OwnerSigner,
+  agentError, agentsSetup, createAgent, depositedFor, freezeAgent, outcomeOf, refusalMessage, revokeGrants, runAction,
+  safeToSign, signAndFollow, signIntent, stakeBlock, type OwnerIntent, type OwnerSigner,
 } from "../agents";
 import { BackendError } from "../backend";
 
@@ -158,7 +158,23 @@ describe("the backend and its refusals", () => {
     expect(await agentsSetup()).toBeNull();
     const deployment = { collateralTokenId: "nep141:usdc.example.near", contracts: { rounds: "rounds.example.near" } };
     replies([200, { capabilities: { agents: true }, deployment }]);
-    expect(await agentsSetup()).toEqual({ rounds: "rounds.example.near", token: "usdc.example.near" });
+    expect(await agentsSetup()).toEqual({ rounds: "rounds.example.near", token: "usdc.example.near", cashOut: null });
+  });
+
+  it("reads the cash out limits only when both are whole amounts", async () => {
+    const deployment = { collateralTokenId: "nep141:usdc.example.near", contracts: {} };
+    replies([200, { capabilities: { agents: true }, deployment,
+      agentCashOut: { perTransaction: "100000000", daily: "500000000" } }]);
+    expect((await agentsSetup())?.cashOut).toEqual({ perTransaction: 100000000n, daily: 500000000n });
+    replies([200, { capabilities: { agents: true }, deployment, agentCashOut: { perTransaction: "1e9", daily: "5" } }]);
+    expect((await agentsSetup())?.cashOut).toBeNull();
+  });
+
+  it("names a limit the agent's rules refused, and keeps the generic line for anything else", () => {
+    expect(refusalMessage("policy_transaction_limit_exceeded")).toMatch(/at once/);
+    expect(refusalMessage("policy_limit_exceeded")).toMatch(/24 hours/);
+    expect(refusalMessage("toString")).toBeNull();
+    expect(refusalMessage(undefined)).toBeNull();
   });
 });
 

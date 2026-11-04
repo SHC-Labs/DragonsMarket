@@ -28,19 +28,34 @@ const message = (overrides: Record<string, unknown> = {}) => ({ message: '{"gran
 const apiError = (status: number, code: string) =>
   new AgentApiError(status, { errors: [{ status: String(status), code, layer: 'policy', title: code }], meta: {} });
 
-test('the owner\'s agent may call only the rounds contract, and pay out only to the owner', () => {
+test('the owner\'s agent calls only rounds, and its money goes only to the owner or as a deposit to rounds', () => {
   const policy = dragonsPolicy(deployment, 'alice.near');
   assert.deepEqual(policy.native!.near, { sign_message: [], transfer: false, call: ['rounds.fixture.near'] },
     'the agent never holds the token, and the market is not part of the owner flow, so it can call neither');
-  assert.deepEqual(policy.destinations,
-    { mode: 'only', list: [{ action: 'withdraw', chain: 'near', address: 'alice.near', memo: null }] });
+  assert.deepEqual(policy.destinations, { mode: 'only', list: [
+    { action: 'withdraw', chain: 'near', address: 'alice.near', memo: null },
+    { action: 'withdraw', chain: 'near', address: 'rounds.fixture.near', memo: null },
+  ] }, 'the API checks the yoctoNEAR that stake and withdraw attach against the same list');
   assert.deepEqual([policy.actions, policy.assets], [['withdraw'], ['nep141:usdc.fixture.near', 'nep141:wrap.near']]);
-  assert.deepEqual(policy.limits, { per_transaction: { 'nep141:wrap.near': '100000000000000000000000' },
-    daily: { 'nep141:wrap.near': '500000000000000000000000' } }, 'at most 0.1 NEAR a call and 0.5 NEAR a day');
+  assert.deepEqual(policy.limits, {
+    per_transaction: { 'nep141:usdc.fixture.near': '100000000', 'nep141:wrap.near': '100000000000000000000000' },
+    daily: { 'nep141:usdc.fixture.near': '500000000', 'nep141:wrap.near': '500000000000000000000000' },
+  }, 'a payout sent to rounds is lost, so collateral leaves at most 100 at a time and 500 a day, NEAR 0.1 and 0.5');
   assert.equal(policy.max_actions_per_hour, 60);
   const { evm, solana } = policy.native!;
   assert.deepEqual([evm.sign_message, evm.sign_transaction, evm.sign_typed_data, solana],
     [false, false, [], { sign_message: false, sign_transaction: false }]);
+});
+
+test('without rounds the agent calls nothing and pays only the owner, and wNEAR collateral keeps the NEAR caps', () => {
+  const owner = { action: 'withdraw', chain: 'near', address: 'alice.near', memo: null };
+  const bare = dragonsPolicy({ ...deployment, contracts: {} }, 'alice.near');
+  assert.deepEqual([bare.native!.near.call, bare.destinations], [[], { mode: 'only', list: [owner] }]);
+  const wrapped = { ...deployment, collateralTokenId: 'nep141:wrap.near', collateralDecimals: 24 };
+  assert.deepEqual(dragonsPolicy(wrapped, 'alice.near').limits, {
+    per_transaction: { 'nep141:wrap.near': '100000000000000000000000' },
+    daily: { 'nep141:wrap.near': '500000000000000000000000' },
+  }, 'the tighter cap wins when the collateral is wNEAR');
 });
 
 test('a policy the API shows back may not grant the agent more than the one sent', () => {
@@ -59,6 +74,8 @@ test('a policy the API shows back may not grant the agent more than the one sent
     ['NEAR transfers', { ...sent, native: { ...native, near: { ...native.near, transfer: true } } }],
     ['EVM transactions', { ...sent, native: { ...native, evm: { ...native.evm, sign_transaction: true } } }],
     ['a higher limit', { ...sent, limits: { per_transaction: { 'nep141:wrap.near': String(10n ** 24n) } } }],
+    ['no cap on the collateral', { ...sent, limits: { ...sent.limits,
+      per_transaction: { 'nep141:wrap.near': sent.limits.per_transaction!['nep141:wrap.near'] } } }],
     ['no hourly cap', { ...sent, max_actions_per_hour: null }],
     ['no policy at all', undefined],
   ];
@@ -152,6 +169,8 @@ test('agent accounts need the grant key and the custody contract together, and s
   assert.deepEqual(config.agentAccounts,
     { grantKey: Buffer.from(key, 'base64'), walletContract: 'wallets.example.near' });
   assert.equal(publicConfig(config).capabilities.agents, true);
+  assert.deepEqual(publicConfig(config).agentCashOut, { perTransaction: '100000000', daily: '500000000' },
+    'the web caps a cash out at what the policy allows');
   assert.equal(publicConfig(readConfig(base)).capabilities.agents, false);
   assert.ok(!JSON.stringify(publicConfig(config)).includes(key), 'the key is never public');
   assert.ok(!JSON.stringify(publicConfig(config)).includes(base.AGENT_API_KEY), 'the partner key is never public');
