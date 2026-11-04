@@ -2,12 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { grantCommitment, type IntentType } from '@near-intents-agent-api/sdk';
-import { dragonsPolicy, fitsOwnerFlow, grantsNoMore } from '../src/agent-accounts.js';
+import { dragonsPolicy, fitsOwnerFlow, grantsNoMore } from '../src/agent-policy.js';
 import { openGrant, sealNewGrant } from '../src/agent-grants.js';
 import { publicConfig, readConfig } from '../src/config.js';
+import { readAgentWorkerConfig } from '../src/agent-worker-config.js';
 import { AgentApiError, AgentApiUnavailable, type OwnerIntent } from '../src/agent-api.js';
-import { InvalidAction } from '../src/agents.js';
+import { InvalidAction } from '../src/agent-actions.js';
 import { refusal } from '../src/agent-routes.js';
+import { OperationRefused } from '../src/operations.js';
 import { ReadError } from '../src/read-api.js';
 
 const deployment = {
@@ -28,14 +30,16 @@ const message = (overrides: Record<string, unknown> = {}) => ({ message: '{"gran
 const apiError = (status: number, code: string) =>
   new AgentApiError(status, { errors: [{ status: String(status), code, layer: 'policy', title: code }], meta: {} });
 
-test('the owner\'s agent calls only rounds, and its money goes only to the owner or as a deposit to rounds', () => {
+test('the owner\'s agent calls only rounds and the market, and its money goes only to the owner or to them', () => {
   const policy = dragonsPolicy(deployment, 'alice.near');
-  assert.deepEqual(policy.native!.near, { sign_message: [], transfer: false, call: ['rounds.fixture.near'] },
-    'the agent never holds the token, and the market is not part of the owner flow, so it can call neither');
+  assert.deepEqual(policy.native!.near,
+    { sign_message: [], transfer: false, call: ['rounds.fixture.near', 'market.fixture.near'] },
+    'the agent never holds the token, so it has no reason to call it, and calling it would allow ft_transfer');
   assert.deepEqual(policy.destinations, { mode: 'only', list: [
     { action: 'withdraw', chain: 'near', address: 'alice.near', memo: null },
     { action: 'withdraw', chain: 'near', address: 'rounds.fixture.near', memo: null },
-  ] }, 'the API checks the yoctoNEAR that stake and withdraw attach against the same list');
+    { action: 'withdraw', chain: 'near', address: 'market.fixture.near', memo: null },
+  ] }, 'the API checks the yoctoNEAR that a trade or withdrawal attaches against the same list');
   assert.deepEqual([policy.actions, policy.assets], [['withdraw'], ['nep141:usdc.fixture.near', 'nep141:wrap.near']]);
   assert.deepEqual(policy.limits, {
     per_transaction: { 'nep141:usdc.fixture.near': '100000000', 'nep141:wrap.near': '100000000000000000000000' },
@@ -144,8 +148,10 @@ test('each failure reaches the owner as the code the page acts on, and only a bu
     try { refusal(error); } catch (e) { return e instanceof ReadError ? [e.status, e.code] : e; }
   };
   assert.deepEqual(answered(new InvalidAction('invalid_round')), [400, 'invalid_round']);
-  assert.deepEqual(answered(new Error('operation_idempotency_conflict')), [409, 'operation_idempotency_conflict']);
-  assert.deepEqual(answered(new Error('operation_state_conflict')), [409, 'operation_in_progress'],
+  assert.deepEqual(answered(new OperationRefused('operation_idempotency_conflict')),
+    [409, 'operation_idempotency_conflict']);
+  assert.deepEqual(answered(new OperationRefused('daily_limit_reached')), [409, 'daily_limit_reached']);
+  assert.deepEqual(answered(new OperationRefused('operation_state_conflict')), [409, 'operation_in_progress'],
     'the same operation busy in another request is waited out by the page, not shown as a failure');
   assert.deepEqual(answered(apiError(403, 'policy_asset_denied')), [409, 'policy_asset_denied']);
   assert.deepEqual(answered(apiError(403, 'Evil <b>code</b>')), [409, 'agent_api_refused']);
@@ -158,27 +164,52 @@ test('each failure reaches the owner as the code the page acts on, and only a bu
   assert.equal(answered(unexpected), unexpected, 'anything else stays an internal error');
 });
 
-test('agent accounts need the grant key and the custody contract together, and switch the capability on', () => {
-  const base = { DATABASE_URL: 'postgresql://localhost/test', AGENT_API_URL: 'https://agents.example.com',
-    AGENT_API_KEY: `naa_${'k'.repeat(43)}`, DEPLOYMENT_ID: 'agents', DEPLOYMENT_START_BLOCK: '1',
-    ROUNDS_CONTRACT_ID: 'rounds.fixture.near', VERIFIER_CONTRACT_ID: 'intents.fixture.near',
-    COLLATERAL_TOKEN_ID: 'nep141:usdc.fixture.near' };
-  const key = randomBytes(32).toString('base64');
-  const both = { ...base, AGENT_GRANT_KEY: key, AGENT_API_WALLET_CONTRACT: 'wallets.example.near' };
-  const config = readConfig(both);
-  assert.deepEqual(config.agentAccounts,
-    { grantKey: Buffer.from(key, 'base64'), walletContract: 'wallets.example.near' });
+const SHARED = { DATABASE_URL: 'postgresql://localhost/test', DEPLOYMENT_ID: 'agents', DEPLOYMENT_START_BLOCK: '1',
+  ROUNDS_CONTRACT_ID: 'rounds.fixture.near', MARKET_CONTRACT_ID: 'market.fixture.near',
+  VERIFIER_CONTRACT_ID: 'intents.fixture.near', COLLATERAL_TOKEN_ID: 'nep141:usdc.fixture.near' };
+const TOKEN = 'w'.repeat(32);
+
+test('the API reaches the agent worker and holds neither of its keys', () => {
+  const link = { AGENT_WORKER_URL: 'http://agent-worker:3510', AGENT_WORKER_TOKEN: TOKEN };
+  const config = readConfig({ ...SHARED, ...link });
+  assert.deepEqual(config.agentWorker, { url: 'http://agent-worker:3510', token: TOKEN });
   assert.equal(publicConfig(config).capabilities.agents, true);
   assert.deepEqual(publicConfig(config).agentCashOut, { perTransaction: '100000000', daily: '500000000' },
     'the web caps a cash out at what the policy allows');
-  assert.equal(publicConfig(readConfig(base)).capabilities.agents, false);
-  assert.ok(!JSON.stringify(publicConfig(config)).includes(key), 'the key is never public');
-  assert.ok(!JSON.stringify(publicConfig(config)).includes(base.AGENT_API_KEY), 'the partner key is never public');
-  assert.throws(() => readConfig({ ...base, AGENT_GRANT_KEY: key }), /go together/);
-  assert.throws(() => readConfig({ ...both, AGENT_GRANT_KEY: randomBytes(16).toString('base64') }), /32 bytes/);
-  assert.throws(() => readConfig({ ...both, AGENT_GRANT_KEY: `${key.slice(0, -2)}!!` }), /32 bytes/);
-  assert.throws(() => readConfig({ ...both, AGENT_API_WALLET_CONTRACT: 'intents.near' }), /WALLET_CONTRACT/);
-  assert.throws(() => readConfig({ ...both, AGENT_API_WALLET_CONTRACT: 'Wallets..near' }), /WALLET_CONTRACT/);
-  const { AGENT_API_URL: _url, AGENT_API_KEY: _key, ...noApi } = both;
-  assert.throws(() => readConfig(noApi), /go together/);
+  assert.deepEqual(publicConfig(config).agentSpend, { perTransaction: '100000000', daily: '1000000000' },
+    'the web says what a session may spend');
+  assert.ok(!JSON.stringify(publicConfig(config)).includes(TOKEN), 'the service token is never public');
+  assert.equal(publicConfig(readConfig(SHARED)).capabilities.agents, false);
+  for (const secret of [{ AGENT_API_KEY: `naa_${'k'.repeat(43)}` }, { AGENT_GRANT_KEY: 'a' }]) {
+    assert.throws(() => readConfig({ ...SHARED, ...link, ...secret }), /belong to the agent worker/);
+    assert.throws(() => readConfig({ ...SHARED, ...secret }), /belong to the agent worker/);
+  }
+  assert.throws(() => readConfig({ ...SHARED, AGENT_WORKER_URL: link.AGENT_WORKER_URL }), /AGENT_WORKER_TOKEN/);
+  assert.throws(() => readConfig({ ...SHARED, AGENT_WORKER_TOKEN: TOKEN }), /AGENT_WORKER_URL/);
+  assert.throws(() => readConfig({ ...SHARED, ...link, AGENT_WORKER_TOKEN: 'short' }), /at least 32/);
+  for (const url of ['ftp://agent-worker', 'http://user:pass@agent-worker', 'http://agent-worker/path']) {
+    assert.throws(() => readConfig({ ...SHARED, ...link, AGENT_WORKER_URL: url }), /AGENT_WORKER_URL/, url);
+  }
+});
+
+test('the agent worker needs its partner key, its grant key and the custody contract', () => {
+  const key = randomBytes(32).toString('base64');
+  const all = { ...SHARED, AGENT_API_URL: 'https://agents.example.com', AGENT_API_KEY: `naa_${'k'.repeat(43)}`,
+    AGENT_GRANT_KEY: key, AGENT_API_WALLET_CONTRACT: 'wallets.example.near', AGENT_WORKER_TOKEN: TOKEN };
+  const config = readAgentWorkerConfig(all);
+  assert.deepEqual([config.grantKey, config.walletContract, config.token, config.host, config.port],
+    [Buffer.from(key, 'base64'), 'wallets.example.near', TOKEN, '127.0.0.1', 3510]);
+  assert.equal(config.shared.agentWorker, null, 'the worker does not call itself');
+  assert.throws(() => readAgentWorkerConfig({ ...all, AGENT_GRANT_KEY: randomBytes(16).toString('base64') }), /32 bytes/);
+  assert.throws(() => readAgentWorkerConfig({ ...all, AGENT_GRANT_KEY: `${key.slice(0, -2)}!!` }), /32 bytes/);
+  assert.throws(() => readAgentWorkerConfig({ ...all, AGENT_GRANT_KEY: '' }), /32 bytes/);
+  assert.throws(() => readAgentWorkerConfig({ ...all, AGENT_API_WALLET_CONTRACT: 'intents.near' }), /WALLET_CONTRACT/);
+  assert.throws(() => readAgentWorkerConfig({ ...all, AGENT_API_WALLET_CONTRACT: 'Wallets..near' }), /WALLET_CONTRACT/);
+  assert.throws(() => readAgentWorkerConfig({ ...all, AGENT_WORKER_TOKEN: 'short' }), /at least 32/);
+  assert.throws(() => readAgentWorkerConfig({ ...all, AGENT_WORKER_PORT: '0' }), /AGENT_WORKER_PORT/);
+  const { AGENT_API_URL: _url, AGENT_API_KEY: _key, ...noApi } = all;
+  assert.throws(() => readAgentWorkerConfig(noApi), /AGENT_API_URL and AGENT_API_KEY/);
+  const { DEPLOYMENT_ID: _id, DEPLOYMENT_START_BLOCK: _block, COLLATERAL_TOKEN_ID: _token,
+    ROUNDS_CONTRACT_ID: _rounds, MARKET_CONTRACT_ID: _market, VERIFIER_CONTRACT_ID: _verifier, ...noDeployment } = all;
+  assert.throws(() => readAgentWorkerConfig(noDeployment), /needs a deployment/);
 });

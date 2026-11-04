@@ -95,12 +95,14 @@ work. Measured in the sandbox, 84 TGas on the token call is the least that clear
 
 `storage_deposit(account_id)` with 0.05 NEAR registers `account_id`, or the caller, and takes no registration fee.
 Anyone can pay for another account. Whatever is attached above 0.05 goes back to the payer, all of it for an account
-that is already registered. `storage_balance_bounds` is 0.05 both ways, so nothing is ever available to
-`storage_withdraw`.
+that is already registered. The contract records who paid; a deposit the verifier relays counts as paid by the account
+it was for, so nothing is ever sent to the verifier. `storage_balance_bounds` is 0.05 both ways, so nothing is ever
+available to `storage_withdraw`.
 
 `storage_unregister` with exactly 1 yocto closes an account with no open stakes, no balance and no withdrawal in flight.
-The 0.05 NEAR goes back to whoever paid it, and an account that registered with the fee gets only its yocto: the fee is
-never returned. `force` is refused. A pause refuses `storage_deposit` like every other way in.
+The 0.05 NEAR goes back to the recorded payer. An account with no recorded payer, one that registered with the fee or
+before version 3, gets only its yocto: the fee is never returned. `force` is refused. A pause refuses `storage_deposit`
+like every other way in.
 
 ## Signed actions: `on_auth`
 
@@ -168,14 +170,14 @@ Measured by `measure_an_account_at_its_open_stake_limit`, keys and record overhe
 
 | Record | Bytes | NEAR at 1e19 per byte |
 | --- | --- | --- |
-| A registration with the fee, account, record and balance, at the longest account id | 348 | 0.00348 |
-| A registration in NEAR another account paid, with its balance, at the longest account ids | 416 | 0.00416 |
+| A registration with the fee, account and balance, at the longest account id | 238 | 0.00238 |
+| A registration in NEAR, with who paid and its balance, at the longest account ids | 415 | 0.00415 |
 | A stake at the longest account id | 154 | 0.00154 |
 | A round at its largest | 140 | 0.0014 |
 | A price | 69 | 0.00069 |
 
-An account holds at most 20 open stakes. One that registered with the fee costs the contract at most 3,428 bytes (about
-0.034 NEAR), which the registration fee is set to cover. One that registered in NEAR takes at most 3,496 bytes (about
+An account holds at most 20 open stakes. One that registered with the fee costs the contract at most 3,318 bytes (about
+0.033 NEAR), which the registration fee is set to cover. One that registered in NEAR takes at most 3,495 bytes (about
 0.035 NEAR), inside its 0.05 NEAR deposit; the test checks that it fits. Rounds are stored only once someone stakes,
 and a price only while a round with stakes needs it. Every new record must leave a 1 NEAR reserve after storage; the
 operator tops the account up.
@@ -183,7 +185,10 @@ operator tops the account up.
 ## Views
 
 `config`, `get_series(series_id)`, `next_round(series_id)` (the round taking stakes now, or the next to open),
-`get_round(series_id, round)` (shares and what each side paid), `get_price(series_id, round)` (the price at its start),
+`open_rounds(from_index, limit)` (that round for each series, with the asset and the moments it opens and closes),
+`get_round(series_id, round)` (shares, what each side paid, and the outcome once a call has settled it),
+`round_outcome(series_id, round)` (the outcome a claim would settle now, or null, and it settles nothing),
+`get_price(series_id, round)` (the price at its start),
 `quote_stake(series_id, round, side, amount)` (the shares that amount buys now), `get_stake(series_id, round,
 account_id)`, `get_account(account_id)`, `get_balance(account_id)`, `is_registered(account_id)`, `total_owed`,
 `owed_breakdown`, `is_staged(code_hash)`, `storage_balance_of(account_id)`, `storage_balance_bounds`. `config` includes

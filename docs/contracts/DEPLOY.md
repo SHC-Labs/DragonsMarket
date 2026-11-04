@@ -43,10 +43,16 @@ example DAO names and sandbox keys are not production configuration.
 - [ ] Prove external funding reaches the correct authenticated beneficiary and collateral asset.
 - [ ] Register the market account with the collateral token (`storage_deposit` on the token, once)
       and send a small token `deposit`. Until then the token refuses `ft_transfer_call` to the market,
-      so only the Intents path can fund it, and `keeper.mjs check` reports it.
+      so only the Intents path can fund it and an agent cannot be funded to trade, and `keeper.mjs check` reports it.
+- [ ] Register the rounds account with the collateral token the same way, and send a small token `deposit`. Until then
+      every `deposit` and `deposit_for` by token is refused, so an agent cannot be funded. `keeper.mjs check --rounds <id>`
+      reports it.
 - [ ] Show committed backing remains controlled inside Intents and reconciles with positions.
 - [ ] Verify buy, sell, Yes/No/Void redemption and available-balance withdrawal.
 - [ ] Prove oracle bonds and juror pay end to end through Intents (`mt_on_transfer` with `propose:` and `challenge:`).
+- [ ] Deploy rounds and the oracle with `price_threshold` of at least 2. `add_publisher` keeps the threshold above half
+      of the publishers and `set_price_threshold` cannot go above how many there are, so a contract started at 1 stays
+      on one publisher until an upgrade. Start at 2, which takes up to 3 publishers, and raise it as more join.
 - [ ] Run at least `price_threshold` publishers (`keeper/publisher.mjs`), each on its own host with its own key, and
       have the DAO add each key with `add_publisher`. Run `keeper/resolver.mjs run` on a schedule from an account that
       holds only the bond float in Intents, and answer event markets with `resolver.mjs propose` (see "Publishing and
@@ -121,7 +127,7 @@ every contract, that its policy matches the
   | market | 8 | 5, 6, 7, 8 |
   | oracle | 3 | 2, 3 |
   | council | 6 | 5, 6 |
-  | rounds | 2 | 1, 2 |
+  | rounds | 3 | 1, 2, 3 |
 
 - [ ] Council version 5 to 6. `migrate` refuses, and the whole upgrade reverts, unless every quarter that has ended
   is finalized, no claim is pending, no unstake is waiting for its NFT transfer, and the money of finalized quarters

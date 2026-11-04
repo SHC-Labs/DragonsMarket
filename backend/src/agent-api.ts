@@ -76,6 +76,10 @@ const SENT_NOTHING = new Set([
   'policy_action_denied', 'policy_destination_denied', 'policy_asset_denied', 'policy_schedule_denied',
   'spend_budget_exceeded', 'spend_price_unavailable', 'policy_transaction_limit_exceeded', 'policy_limit_exceeded',
   'policy_action_limit_exceeded', 'policy_usage_unavailable', 'insufficient_balance', 'provider_refused', 'wallet_busy',
+  'policy_denied', 'policy_not_ready', 'provider_policy_mismatch', 'authorization_stale', 'agent_archived',
+  'wallet_frozen', 'agent_grant_required', 'native_method_denied', 'custody_native_balance_required',
+  'invalid_request', 'invalid_address', 'amount_too_low', 'route_unavailable', 'quote_unavailable',
+  'refund_address_required', 'unsupported_chain', 'unsupported_token',
 ]);
 const client4xx = (e: AgentApiError) => e.status >= 400 && e.status < 500;
 export const sentNothing = (e: unknown) => e instanceof AgentApiError && client4xx(e) && SENT_NOTHING.has(e.code);
@@ -184,11 +188,19 @@ export class AgentApiClient {
     };
   }
 
-  status(correlationId: string, waitMs: number, expected: Expected): Promise<AgentStatus> {
+  status(correlationId: string, waitMs: number, expected: Expected, refresh = false): Promise<AgentStatus> {
     if (!CORRELATION.test(correlationId)) return Promise.reject(new Error('invalid_correlation_id'));
     const wait = Math.min(Math.max(0, Math.trunc(waitMs)), MAX_WAIT_MS);
-    return answer(this.api.getStatus(correlationId, { waitMs: wait, signal: this.deadline(wait) }))
+    return answer(this.api.getStatus(correlationId, { waitMs: wait, refresh, signal: this.deadline(wait) }))
       .then(v => statusOf(v, { ...expected, correlationId }));
+  }
+
+  frozen(agentId: string): Promise<boolean> {
+    if (!AGENT_ID.test(agentId)) return Promise.reject(new Error('invalid_agent_id'));
+    return answer(this.api.getPolicy(agentId, { signal: this.deadline() })).then(v => {
+      if (!object(v) || !object(v.policy) || typeof v.policy.frozen !== 'boolean') return untrusted('policy');
+      return v.policy.frozen;
+    });
   }
 
   wallet(agentId: string): Promise<{ near_account_id: string }> {

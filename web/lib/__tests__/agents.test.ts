@@ -8,8 +8,9 @@ vi.mock("../config", () => ({
 }));
 
 import {
-  agentError, agentsSetup, createAgent, depositedFor, freezeAgent, outcomeOf, refusalMessage, revokeGrants, runAction,
-  safeToSign, signAndFollow, signIntent, stakeBlock, type OwnerIntent, type OwnerSigner,
+  agentClaimable, agentError, agentsSetup, createAgent, depositedFor, freezeAgent, heldPositions, openMarkets,
+  outcomeOf, refusalMessage, requestAccess, revokeGrants, roundWait, runAction, safeToSign, signAccess, signAndFollow,
+  signIntent, stakeBlock, type AccessRequest, type OwnerIntent, type OwnerSigner,
 } from "../agents";
 import { BackendError } from "../backend";
 
@@ -118,6 +119,51 @@ describe("a stake the round would refuse is stopped before its money moves", () 
   });
 });
 
+describe("a round says when it can take a stake", () => {
+  const ms = (at: number) => String(BigInt(at) * 1_000_000n);
+  it("says nothing while the round is open", () => {
+    expect(roundWait(ms(1000), ms(9000), 5000)).toBeNull();
+    expect(roundWait(ms(1000), ms(9000), 1000)).toBeNull();
+  });
+  it("counts down to a round that has not started, in seconds and then minutes", () => {
+    expect(roundWait(ms(10_000), ms(90_000), 1000)).toBe("This round opens in 9 sec.");
+    expect(roundWait(ms(200_000), ms(290_000), 1000)).toBe("This round opens in 4 min.");
+  });
+  it("does not offer a round that has closed", () => {
+    expect(roundWait(ms(1000), ms(9000), 9000)).toMatch(/has closed/);
+  });
+});
+
+describe("access for an AI agent takes the owner's wallet", () => {
+  const origin = "https://dragons.example.com";
+  const asked: AccessRequest = { id: "11111111-1111-4111-8111-111111111111", nonce, recipient: origin,
+    message: "Give an AI agent access to a Dragons Market agent account\nMost for one stake: 5 nep141:usdc" };
+  const agent = "a".repeat(64);
+
+  it("asks for a request, signs its exact words and only then gets a token", async () => {
+    const seen = replies([200, asked], [200, { id: asked.id, token: "dmk_token", label: "Bot" }]);
+    const request = await requestAccess(agent, "Bot", "5000000", "20000000");
+    expect(JSON.parse(String(seen[0]!.init.body))).toEqual({ label: "Bot", max_spend: "5000000", daily_limit: "20000000" });
+    const s = signer();
+    const issued = await signAccess(agent, request, s, origin);
+    expect(issued.token).toBe("dmk_token");
+    const signed = s.calls[0] as { message: string; recipient: string; nonce: Uint8Array };
+    expect([signed.message, signed.recipient, Array.from(signed.nonce)])
+      .toEqual([asked.message, origin, Array(32).fill(7)]);
+    expect(seen[1]!.url).toBe(`https://api.example.com/v1/agents/${agent}/access/${asked.id}/sign`);
+    expect(JSON.parse(String(seen[1]!.init.body))).toEqual({ public_key: "ed25519:key", signature: "c2ln" });
+  });
+
+  it.each([
+    ["another site", { ...asked, recipient: "https://evil.example.com" }],
+    ["other words", { ...asked, message: "Sign in to Dragons Market" }],
+  ])("stops a request for %s before the wallet", async (_why, bad) => {
+    const s = signer();
+    await expect(signAccess(agent, bad, s, origin)).rejects.toThrow(/did not match this site/);
+    expect(s.calls).toEqual([]);
+  });
+});
+
 describe("the backend and its refusals", () => {
   it("reads the backend's error code and puts it in words", async () => {
     const seen = replies([409, { error: { code: "agent_limit_reached", requestId: "r" } }]);
@@ -156,9 +202,20 @@ describe("the backend and its refusals", () => {
   it("offers agents only when the backend has them on", async () => {
     replies([200, { capabilities: { agents: false } }]);
     expect(await agentsSetup()).toBeNull();
-    const deployment = { collateralTokenId: "nep141:usdc.example.near", contracts: { rounds: "rounds.example.near" } };
+    const deployment = { collateralTokenId: "nep141:usdc.example.near",
+      contracts: { rounds: "rounds.example.near", market: "market.example.near" } };
     replies([200, { capabilities: { agents: true }, deployment }]);
-    expect(await agentsSetup()).toEqual({ rounds: "rounds.example.near", token: "usdc.example.near", cashOut: null });
+    expect(await agentsSetup()).toEqual({ rounds: "rounds.example.near", market: "market.example.near",
+      token: "usdc.example.near", cashOut: null, spend: null });
+  });
+
+  it("reads what a session may spend only when both limits are whole amounts", async () => {
+    const deployment = { collateralTokenId: "nep141:usdc.example.near", contracts: {} };
+    replies([200, { capabilities: { agents: true }, deployment,
+      agentSpend: { perTransaction: "100000000", daily: "500000000" } }]);
+    expect((await agentsSetup())?.spend).toEqual({ perTransaction: 100000000n, daily: 500000000n });
+    replies([200, { capabilities: { agents: true }, deployment, agentSpend: { perTransaction: "1e9", daily: "5" } }]);
+    expect((await agentsSetup())?.spend).toBeNull();
   });
 
   it("reads the cash out limits only when both are whole amounts", async () => {
@@ -173,8 +230,17 @@ describe("the backend and its refusals", () => {
   it("names a limit the agent's rules refused, and keeps the generic line for anything else", () => {
     expect(refusalMessage("policy_transaction_limit_exceeded")).toMatch(/at once/);
     expect(refusalMessage("policy_limit_exceeded")).toMatch(/24 hours/);
+    expect(refusalMessage("wallet_frozen")).toMatch(/nothing moves until you unfreeze/);
+    expect(refusalMessage("custody_native_balance_required")).toMatch(/more NEAR for gas/);
     expect(refusalMessage("toString")).toBeNull();
     expect(refusalMessage(undefined)).toBeNull();
+  });
+
+  it("reads what the agent can claim from the backend", async () => {
+    const stake = { series: 0, round: "6", side: "up", amount: "5000000", outcome: "up" };
+    const seen = replies([200, { data: [stake] }]);
+    expect(await agentClaimable("a".repeat(64))).toEqual([stake]);
+    expect(seen[0]!.url).toBe(`https://api.example.com/v1/agents/${"a".repeat(64)}/claimable`);
   });
 });
 
@@ -240,6 +306,14 @@ describe("a funding transaction", () => {
   it("counts only a deposit rounds credited to the agent in a receipt that succeeded", async () => {
     vi.stubGlobal("fetch", chain([receipt(rounds, [deposit({ account: agent, amount: "5000000", from: "alice.near" })])]));
     expect(await depositedFor("tx1", "alice.near", rounds, agent)).toBe(5000000n);
+    const market = "market.example.near";
+    const inMarket = deposit({ account: agent, amount: "7" }).replace('"standard":"rounds"', '"standard":"market"');
+    vi.stubGlobal("fetch", chain([receipt(market, [inMarket])]));
+    expect(await depositedFor("tx1", "alice.near", market, agent, "market")).toBe(7n);
+    expect(await depositedFor("tx1", "alice.near", rounds, agent, "market"), "the market's own receipt").toBeNull();
+    vi.stubGlobal("fetch", chain([receipt(market, [deposit({ account: agent, amount: "7" })])]));
+    expect(await depositedFor("tx1", "alice.near", market, agent, "market"), "the wrong standard").toBeNull();
+    vi.stubGlobal("fetch", chain([receipt(rounds, [deposit({ account: agent, amount: "5000000", from: "alice.near" })])]));
     for (const receipts of [
       [receipt(rounds, [deposit({ account: agent, amount: "5000000" })], { Failure: {} })],
       [receipt("market.example.near", [deposit({ account: agent, amount: "5000000" })])],
@@ -251,5 +325,46 @@ describe("a funding transaction", () => {
       vi.stubGlobal("fetch", chain(receipts));
       expect(await depositedFor("tx1", "alice.near", rounds, agent), JSON.stringify(receipts)).toBeNull();
     }
+  });
+});
+
+describe("the desk reads markets from the contract the deployment names", () => {
+  const market = "market.example.near";
+  const answering = (table: Record<string, (args: Record<string, unknown>) => unknown>) => {
+    const asked: { contract: string; method: string; args: Record<string, unknown> }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init: RequestInit) => {
+      const { params } = JSON.parse(String(init.body));
+      const args = JSON.parse(atob(params.args_base64)) as Record<string, unknown>;
+      asked.push({ contract: params.account_id, method: params.method_name, args });
+      const result = [...Buffer.from(JSON.stringify(table[params.method_name]!(args)))];
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: "pm", result: { result } }));
+    }));
+    return asked;
+  };
+
+  it("offers only the open markets among the newest fifty", async () => {
+    const asked = answering({
+      config: () => ({ markets: "120" }),
+      list_markets: () => [{ id: "118", status: "open" }, { id: "119", status: "closed" }, { id: "70", status: "open" }],
+    });
+    expect((await openMarkets(market)).map((m) => m.id)).toEqual(["118", "70"]);
+    expect(asked.map((a) => a.contract)).toEqual([market, market]);
+    expect(asked[1]!.args).toEqual({ from_index: "70", limit: "50" });
+    answering({ config: () => ({ markets: "3" }), list_markets: (args) => {
+      expect(args.from_index).toBe("0");
+      return [];
+    } });
+    expect(await openMarkets(market)).toEqual([]);
+  });
+
+  it("names each position, and says which market it is when the market is gone", async () => {
+    const held = { yes: "5", no: "0", status: "open", redeemable: "0" };
+    const asked = answering({
+      get_positions: () => [{ ...held, market_id: "7" }, { ...held, market_id: "8" }],
+      get_market: (args) => (args.market_id === "7" ? { title: "Will it rain?" } : null),
+    });
+    expect(await heldPositions(market, "agent.near")).toEqual([{ ...held, market_id: "7", title: "Will it rain?" },
+      { ...held, market_id: "8", title: "Market 8" }]);
+    expect(asked[0]!.args).toEqual({ account_id: "agent.near", limit: "100" });
   });
 });

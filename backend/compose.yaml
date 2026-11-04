@@ -62,6 +62,7 @@ services:
       INDEXER_DB_PASSWORD: ${INDEXER_DB_PASSWORD:-dragons_indexer_local_only}
       WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:-dragons_worker_local_only}
       PUBLISHER_DB_PASSWORD: ${PUBLISHER_DB_PASSWORD:-dragons_publisher_local_only}
+      AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD:-dragons_agent_local_only}
     volumes:
       - ./ops/roles.sql:/roles.sql:ro
       - ./ops/login-roles.sh:/login-roles.sh:ro
@@ -75,10 +76,8 @@ services:
     cap_drop: [ALL]
     environment:
       <<: *backend_environment
-      AGENT_API_URL: ${AGENT_API_URL:-}
-      AGENT_API_KEY: ${AGENT_API_KEY:-}
-      AGENT_GRANT_KEY: ${AGENT_GRANT_KEY:-}
-      AGENT_API_WALLET_CONTRACT: ${AGENT_API_WALLET_CONTRACT:-}
+      AGENT_WORKER_URL: ${AGENT_WORKER_URL:-}
+      AGENT_WORKER_TOKEN: ${AGENT_WORKER_TOKEN:-}
     ports:
       - "127.0.0.1:${PORT:-3500}:3500"
     depends_on:
@@ -86,6 +85,29 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3500/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+    restart: unless-stopped
+  agent-worker:
+    build: .
+    profiles: [agents]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    env_file:
+      - path: .env.agent-worker
+        required: false
+    environment:
+      <<: *backend_environment
+      DATABASE_URL: postgresql://dm_agent_login:${AGENT_DB_PASSWORD:-dragons_agent_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
+      AGENT_WORKER_HOST: 0.0.0.0
+      AGENT_WORKER_TOKEN: ${AGENT_WORKER_TOKEN:-}
+    command: [node, dist/src/agent-worker.js]
+    depends_on:
+      roles:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3510/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
       timeout: 4s
       retries: 12

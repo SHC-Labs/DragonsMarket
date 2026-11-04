@@ -145,7 +145,7 @@ test('receipt migration backfills existing journals without changing block check
   await pool.query('DROP TRIGGER deployments_immutable ON deployments');
   await pool.query('DROP FUNCTION refuse_deployment_change()');
   await pool.query('DROP TABLE indexed_receipts');
-  await pool.query('DROP TABLE agent_access_stakes,agent_access_tokens,agent_intents,agent_grants,agent_accounts,chain_integrity_reports,source_heads,feed_exports,backend_jobs,user_operations,price_evidence,signing_decisions,reconciliation_reports,wallet_challenges,wallet_sessions,wallet_watchlist,policy_acknowledgements');
+  await pool.query('DROP TABLE agent_access_tokens,agent_intents,agent_grants,agent_accounts,chain_integrity_reports,source_heads,feed_exports,backend_jobs,user_operations,price_evidence,signing_decisions,reconciliation_reports,wallet_challenges,wallet_sessions,wallet_watchlist,policy_acknowledgements');
   await pool.query('DROP INDEX raw_events_read_page');
   await pool.query("DELETE FROM schema_migrations WHERE version >= '004_receipt_reads.sql'");
   assert.equal(await migrate(pool), 10);

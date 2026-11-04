@@ -41,7 +41,7 @@ function SignInPrompt({ onSignedIn }: { onSignedIn: () => Promise<void> }) {
     <h2 className="section-title">Trade through an agent</h2>
     <p>
       An agent account is a NEAR Intents wallet that your wallet owns. You sign the rules it follows; Dragons Market
-      then stakes, claims and cashes out for it within them.
+      then trades, stakes, claims and cashes out for it within them.
     </p>
     <p className="text-muted">
       First, sign a message to start a Dragons Market session. It does not authorize any transaction.

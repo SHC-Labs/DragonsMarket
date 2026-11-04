@@ -183,7 +183,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     const network = config.network === "mainnet" ? "mainnet" : "testnet";
     return {
       signMessage: (params) => wallet.signMessage({ ...params, signerId, network }),
-      signDelegateActions: (params) => wallet.signDelegateActions({ ...params, signerId, network }),
+      signDelegateActions: (params) => (wallet.manifest.features?.signDelegateActions
+        ? wallet.signDelegateActions({ ...params, signerId, network })
+        : Promise.reject(new Error(`${wallet.manifest.name} cannot sign this: it does not sign NEAR delegate actions. Connect a wallet that does.`))),
     };
   }), [connectedWallet]);
 

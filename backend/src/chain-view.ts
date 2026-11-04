@@ -21,24 +21,34 @@ export async function finalizedHead(config: Config, rpc: Rpc) {
   return { hash: block.header.hash, height: String(block.header.height), timestampNs: String(block.header.timestamp_nanosec ?? '') };
 }
 
+const callFunction = (contract: string, method: string, args: unknown) => ({
+  request_type: 'call_function',
+  account_id: contract,
+  method_name: method,
+  args_base64: Buffer.from(JSON.stringify(args)).toString('base64'),
+});
+
+const viewBytes = (result: unknown) =>
+  (object(result) && Array.isArray(result.result) && result.result.length <= MAX_VIEW_RESULT_BYTES
+    && !result.result.some(b => !Number.isInteger(b) || b < 0 || b > 255) ? result.result as number[] : null);
+
+const decoded = (bytes: number[]) => parseJson(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bytes)));
+
 /** Contract views pinned to one block hash, so every number in a report comes from the same state. */
 export function viewAt(rpc: Rpc, blockHash: string): View {
   return async (contract, method, args) => {
-    const result = await rpc.call('query', {
-      request_type: 'call_function',
-      block_id: blockHash,
-      account_id: contract,
-      method_name: method,
-      args_base64: Buffer.from(JSON.stringify(args)).toString('base64'),
-    });
-    if (
-      !object(result) ||
-      result.block_hash !== blockHash ||
-      !Array.isArray(result.result) ||
-      result.result.length > MAX_VIEW_RESULT_BYTES ||
-      result.result.some(b => !Number.isInteger(b) || b < 0 || b > 255)
-    )
-      throw new Error('invalid_finalized_view');
-    return parseJson(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(result.result)));
+    const result = await rpc.call('query', { ...callFunction(contract, method, args), block_id: blockHash });
+    const bytes = viewBytes(result);
+    if (!object(result) || result.block_hash !== blockHash || !bytes) throw new Error('invalid_finalized_view');
+    return decoded(bytes);
   };
+}
+
+export function finalView(rpc: Rpc): View {
+  return (contract, method, args) => rpc.call('query', { ...callFunction(contract, method, args), finality: 'final' })
+    .then(result => {
+      const bytes = viewBytes(result);
+      if (!bytes) throw new Error('invalid_view');
+      return decoded(bytes);
+    });
 }

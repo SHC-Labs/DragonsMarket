@@ -57,11 +57,12 @@ function Rules({ owner }: { owner: string }) {
   return <>
     <p>Your wallet owns the account and signs the rules it follows. Within them, Dragons Market acts for it:</p>
     <ul className="agent-rules">
-      <li>It calls only the rounds contract, from the agent&apos;s NEAR account. It never holds {symbol}.</li>
+      <li>It calls only the market and rounds contracts, from the agent&apos;s NEAR account. It never holds {symbol}.</li>
       <li>
-        Your wallet sends {symbol} straight into the agent&apos;s rounds balance. That pays out only into its NEAR
-        Intents balance, and that pays out to <span className="mono">{owner}</span> and nowhere else.
+        Your wallet sends {symbol} straight into the agent&apos;s market and rounds balances. Those pay out only into
+        its NEAR Intents balance, and that pays out to <span className="mono">{owner}</span> and nowhere else.
       </li>
+      <li>What you fund into those balances is what its trades can lose, so fund only what it should trade.</li>
       <li>You can stop Dragons Market or freeze the agent at any time, from this page.</li>
     </ul>
     <Notice tone="warning">{NATIVE_WARNING}</Notice>

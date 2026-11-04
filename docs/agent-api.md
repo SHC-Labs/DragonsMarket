@@ -96,8 +96,9 @@ as native NEAR (that needs `<agent>` in `destinations`, as above).
      "gas": "30000000000000", "deposit": "50000000000000000000000" }
    ```
 
-4. Pick the round. `next_round({ "series_id": 0 })` is the round taking stakes now; a round takes stakes from its start
-   until `close_before` ahead of its end. `quote_stake({ "series_id": 0, "round": "<round>", "side": "up", "amount": "5000000" })`
+4. Pick the round. `open_rounds({ "from_index": 0, "limit": 12 })` names each series' round taking stakes now, or the
+   next to open, with `opens_at` and `closes_at` in nanoseconds; a round takes no stake outside them, and at least half
+   of every interval is outside them. `quote_stake({ "series_id": 0, "round": "<round>", "side": "up", "amount": "5000000" })`
    is the shares that amount buys now. Ask for a little less as the minimum, since others may stake first.
 
 5. Stake by token:
@@ -115,14 +116,16 @@ as native NEAR (that needs `<agent>` in `destinations`, as above).
    message, then call `stake` with `{ "series_id": 0, "round": "<round>", "side": "up", "amount": "5000000",
    "min_shares": "<min shares>" }` and a deposit of 1 yocto.
 
-6. After the round, `claim({ "series_id": 0, "round": "<round>", "account_id": "<agent>" })` with no deposit moves the
-   payout into the balance. Anyone may call it, and a keeper may have already.
+6. After the round, `round_outcome({ "series_id": 0, "round": "<round>" })` turns from null to the outcome, and
+   `claim({ "series_id": 0, "round": "<round>", "account_id": "<agent>" })` with no deposit moves the payout into the
+   balance. Do not wait on `get_round`: its outcome stays null until the first claim settles the round. Anyone may call
+   `claim`.
 
 7. `withdraw({ "amount": "<get_balance>" })` with a deposit of 1 yocto and 50 TGas pays the balance into `<agent>`'s
    NEAR Intents balance.
 
 8. To leave, `storage_unregister({})` with a deposit of 1 yocto, once the account holds no open stake, no balance and no
-   withdrawal in flight. The 0.05 NEAR goes back to `<agent>`.
+   withdrawal in flight. The 0.05 NEAR goes back to whoever paid it.
 
 ## A market trade
 
@@ -130,6 +133,20 @@ The same pattern with `<market>`: `storage_deposit` with 0.05 NEAR, then `ft_tra
 or `buy:<market id>:<yes|no>:<min shares>` to buy with the money sent (`quote_buy` says how many shares an amount buys;
 the minimum must be above zero). From the balance, `buy`, `sell` and `withdraw` each take a deposit of 1 yocto, and
 `redeem({ "market_id": "<id>" })` takes none. The [market manual](contracts/market.md) has every message and refusal.
+
+An agent does not need to hold the token at all. Its owner can register it with `storage_deposit({ "account_id":
+"<agent>" })`, paying the 0.05 NEAR, and fund it from their own wallet with `ft_transfer_call` and the message
+`deposit_for:<agent>`, on `<market>` or on `<rounds>`. The policy can then leave `<token>` out of `native.near.call` and
+out of `destinations`, which closes the `ft_transfer` risk above. This is how the agent accounts on the Dragons Market
+site work: the agent calls `buy`, `sell`, `redeem`, `stake` and `claim` from its balances, and a withdrawal lands in its
+NEAR Intents balance, from where the policy lets it pay only its owner.
+
+A policy cannot see the size of a trade. The Agent API and its wallet provider judge a contract call by its receiver and
+the NEAR it attaches, and a `buy` attaches 1 yocto whatever it spends from the balance. What a policy does bound is which
+contracts the agent can call, where money can leave to, how much can leave, how many actions it takes an hour, and
+whether it is frozen. The most a compromised agent can lose in trades is what its owner funded into `<market>` and
+`<rounds>`, so fund only what it should trade. On the site, Dragons Market's agent worker also limits each trade and each
+24 hours, and refuses a trade that accepts more than 10% worse than the on-chain quote.
 
 ## Reading the outcome
 
@@ -147,8 +164,10 @@ has no amount part, unlike the signed one in the [rounds manual](contracts/round
 The sandbox tests run these calls against the real NEAR Intents verifier and a test token:
 `a_token_holder_registers_in_near_stakes_wins_and_leaves`, `a_refused_token_transfer_comes_back_whole`,
 `a_token_stake_that_just_clears_the_floor_completes` and `a_token_stake_the_round_refuses_stays_a_balance` for rounds,
-and `a_token_holder_registers_in_near_deposits_trades_and_exits` for the market. Nothing here has run through the Agent
-API, its wallet provider or the real collateral token.
+and `a_token_holder_registers_in_near_deposits_trades_and_exits` and
+`an_owner_funds_an_agent_that_never_holds_the_token_and_it_trades` for the market. The backend's `agent-chain` test runs
+the site's own actions against the real contracts, with a fake Agent API that enforces the policy. Nothing here has run
+through the real Agent API, its wallet provider or the real collateral token.
 
 ## Defaults until decided
 

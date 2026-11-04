@@ -1,4 +1,5 @@
 import { isPrivateRoute, type PrivateHandler } from './private-api.js';
+import { isAgentAccessRoute } from './agent-paths.js';
 import { createServer, type IncomingMessage } from 'node:http';
 import { BlockList, isIP } from 'node:net';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -36,6 +37,15 @@ function withinLimit(counters: Counters, client: string, max: number, now: numbe
     return true;
   }
   return ++entry.count <= max;
+}
+
+function pathOf(url: string | undefined) {
+  if ((url?.length ?? 0) > 8192) return null;
+  try {
+    return new URL(url ?? '/', 'http://localhost').pathname;
+  } catch {
+    return null;
+  }
 }
 
 // An IPv6 client usually holds a whole /64, so each address in it would otherwise get a fresh budget.
@@ -121,7 +131,8 @@ export function createApp(
     };
     const client = clientAddress(req, config.trustedProxyHops, proxies);
     const now = Date.now();
-    const access = (req.url ?? '').startsWith('/v1/agent-access/');
+    const privatePath = pathOf(req.url);
+    const access = privatePath !== null && isAgentAccessRoute(privatePath);
     const token = access ? createHash('sha256').update(String(req.headers.authorization)).digest('hex') : '';
     if (
       !withinLimit(limits, client, access ? ACCESS_REQUESTS_PER_WINDOW : REQUESTS_PER_WINDOW, now) ||
@@ -131,14 +142,7 @@ export function createApp(
       reply(429, { error: { code: 'rate_limited', requestId } });
       return;
     }
-    if ((req.url?.length ?? 0) > 8192) {
-      reply(400, { error: { code: 'invalid_url', requestId } });
-      return;
-    }
-    let privatePath: string;
-    try {
-      privatePath = new URL(req.url ?? '/', 'http://localhost').pathname;
-    } catch {
+    if (privatePath === null) {
       reply(400, { error: { code: 'invalid_url', requestId } });
       return;
     }

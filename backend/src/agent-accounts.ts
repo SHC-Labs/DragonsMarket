@@ -1,97 +1,42 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import type { GenerateIntentRequest, IntentType, Policy } from '@near-intents-agent-api/sdk';
+import type { GenerateIntentRequest, IntentType } from '@near-intents-agent-api/sdk';
 import { canonical, object } from './ingestion/block.js';
-import { isAccount as account } from './validate.js';
-import { agentCashOut, type Config } from './config.js';
+import { agentSpend, type Config } from './config.js';
+import type { CheckAccessKey } from './auth.js';
+import type { View } from './chain-view.js';
 import { transaction } from './database.js';
-import { LOCK } from './locks.js';
+import { agentLock } from './locks.js';
 import { ReadError } from './read-api.js';
-import { AgentApiUnavailable, type AgentApiClient, type AgentStatus, type OwnerIntent } from './agent-api.js';
+import { isUnits } from './validate.js';
 import {
-  InvalidAction, parseAgentAction, runAgentAction, type ActionKind, type AgentAction, type AgentRunner,
-} from './agents.js';
+  AgentApiUnavailable, type AgentApiClient, type AgentGrant, type AgentStatus, type OwnerIntent,
+} from './agent-api.js';
+import { parseAgentAction, spendOf, type ActionKind, type AgentAction } from './agent-actions.js';
+import { dragonsPolicy, fitsOwnerFlow, grantsNoMore, type OwnerSigning } from './agent-policy.js';
+import { runAgentAction, type AgentRunner } from './agents.js';
 import { openGrant, sealNewGrant } from './agent-grants.js';
+import type { Owner } from './agent-paths.js';
 
 type Deployment = NonNullable<Config['deployment']>;
 type Queryable = Pick<pg.Pool, 'query'>;
-export interface Owner { account: string; publicKey: string }
-export interface OwnerSigning { walletContract: string; messageRecipient: string }
 export interface AgentAccounts {
   db: pg.Pool;
   deployment: Deployment;
-  api: Pick<AgentApiClient, 'generateIntent' | 'submitIntent' | 'status' | 'wallet'>;
+  api: Pick<AgentApiClient, 'generateIntent' | 'submitIntent' | 'status' | 'wallet' | 'frozen'>;
   runner: AgentRunner;
-  chain: { nearBalance(account: string): Promise<string> };
+  chain: { view: View; nearBalance(account: string): Promise<string> };
   grantKey: Buffer;
   signing: OwnerSigning;
+  checkKey: CheckAccessKey;
+  webOrigin: string;
 }
 
-const NEAR = 10n ** 24n;
-const WRAPPED_NEAR = 'nep141:wrap.near';
 const LIMITS = { openAgents: 3, agentsPerDay: 10, pendingGrantsPerDay: 5 };
 const GRANT = { label: 'Dragons Market', lifetimeMs: 90 * 24 * 3600 * 1000 };
 const AGENT_NAME = /^[\x21-\x7e](?:[\x20-\x7e]{0,62}[\x21-\x7e])?$/;
 const ACTION_KEY = /^[A-Za-z0-9_.:-]{8,100}$/;
 const GRANT_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
-const OWNER_KINDS: readonly ActionKind[] = ['stake', 'claim', 'withdraw', 'cash_out'];
-const WHILE_FROZEN = new Set<ActionKind>(['claim', 'withdraw', 'cash_out']);
-
-const nearDestination = (address: string) => ({ action: 'withdraw' as const, chain: 'near', address, memo: null });
-
-export function dragonsPolicy(d: Deployment, owner: string): Policy {
-  const rounds = d.contracts.rounds ? [d.contracts.rounds] : [];
-  const cashOut = agentCashOut(d);
-  return {
-    frozen: false, actions: ['withdraw'], confidential: false, owner_approval: false,
-    assets: [...new Set([d.collateralTokenId, WRAPPED_NEAR])],
-    limits: {
-      per_transaction: { [d.collateralTokenId]: cashOut.perTransaction, [WRAPPED_NEAR]: String(NEAR / 10n) },
-      daily: { [d.collateralTokenId]: cashOut.daily, [WRAPPED_NEAR]: String(NEAR / 2n) },
-    },
-    max_actions_per_hour: 60,
-    destinations: { mode: 'only', list: [owner, ...rounds].map(nearDestination) },
-    budget: { daily_usd: null, weekly_usd: null, monthly_usd: null }, timelock_ms: 0,
-    native: {
-      near: { sign_message: [], transfer: false, call: rounds },
-      evm: { sign_typed_data: [], sign_message: false, sign_transaction: false },
-      solana: { sign_message: false, sign_transaction: false },
-    },
-  };
-}
-
-function powers(policy: unknown) {
-  const set = (v: unknown) => (Array.isArray(v) ? v.map(canonical).sort() : v);
-  if (!object(policy) || !object(policy.destinations) || !object(policy.native) || !object(policy.native.near)) {
-    return null;
-  }
-  const { native: { near, evm, solana }, destinations } = policy;
-  return canonical({ frozen: policy.frozen, actions: set(policy.actions), confidential: policy.confidential,
-    owner_approval: policy.owner_approval, assets: set(policy.assets), limits: policy.limits,
-    max_actions_per_hour: policy.max_actions_per_hour, destinations: [destinations.mode, set(destinations.list)],
-    call: set(near.call), transfer: near.transfer, sign_message: set(near.sign_message), evm, solana });
-}
-export const grantsNoMore = (shown: unknown, asked: Policy) =>
-  powers(shown) !== null && powers(shown) === powers(asked);
-
-function delegateFits(payload: Record<string, unknown>, walletContract: string) {
-  const actions = Array.isArray(payload.actions) ? payload.actions : [];
-  const deposits = actions.map(a => (object(a) && a.type === 'FunctionCall' && object(a.params)
-    && typeof a.params.deposit === 'string' && /^\d{1,39}$/.test(a.params.deposit) ? BigInt(a.params.deposit) : null));
-  return payload.receiverId === walletContract && deposits.length > 0 && !deposits.includes(null)
-    && deposits.reduce<bigint>((sum, d) => sum + d!, 0n) <= NEAR;
-}
-
-const messageFits = (payload: Record<string, unknown>, recipient: string) => payload.recipient === recipient
-  && typeof payload.message === 'string' && typeof payload.nonce === 'string'
-  && /^[A-Za-z0-9+/]{43}=$/.test(payload.nonce);
-
-export function fitsOwnerFlow(signing: OwnerSigning, generated: OwnerIntent, type: IntentType, agentId?: string) {
-  const { standard, payload } = generated.intent;
-  return generated.type === type && (agentId === undefined || generated.agent_id === agentId)
-    && (standard === 'nep366' ? delegateFits(payload, signing.walletContract)
-      : standard === 'nep413' && messageFits(payload, signing.messageRecipient));
-}
 
 function refused(what: string): never {
   console.error(`Refused ${what} from the Agent API that Dragons Market did not ask for`);
@@ -116,19 +61,19 @@ const recordIntent = (q: Queryable, agentAccount: string, i: OwnerIntent, agentG
     VALUES($1,$2,$3,$4,$5,$6,$7)`,
   [i.correlation_id, agentAccount, i.type, agentGrant, JSON.stringify(i), i.status, i.expires_at]);
 
-const STILL_SIGNABLE = `EXISTS (SELECT 1 FROM agent_intents i
-  WHERE i.agent_account=a.id AND (i.expires_at>now() OR i.status<>'PENDING_SIGNATURE'))`;
+const MAY_STILL_LAND = `EXISTS (SELECT 1 FROM agent_intents i
+  WHERE i.agent_account=a.id AND (i.expires_at>now()-interval '10 minutes' OR i.status<>'PENDING_SIGNATURE'))`;
 
 const abandonStale = (q: Queryable, d: Deployment, owner: Owner) =>
   q.query(`UPDATE agent_accounts a SET state='abandoned',updated_at=now()
     WHERE a.deployment_id=$1 AND a.owner_account_id=$2
     AND ((a.state='creating' AND a.created_at<now()-interval '5 minutes')
-      OR (a.state='pending' AND NOT ${STILL_SIGNABLE}))`, [d.id, owner.account]);
+      OR (a.state='pending' AND NOT ${MAY_STILL_LAND}))`, [d.id, owner.account]);
 
 function reserveAgent(s: AgentAccounts, owner: Owner, name: string) {
   const id = randomUUID(), d = s.deployment;
   return transaction(s.db, async c => {
-    await c.query(`SELECT pg_advisory_xact_lock(${LOCK.agents},hashtext($1))`, [`agents:${d.id}:${owner.account}`]);
+    await agentLock(c, `agents:${d.id}:${owner.account}`);
     await abandonStale(c, d, owner);
     const { rows: [taken] } = await c.query(`SELECT count(*) FILTER (WHERE state<>'abandoned')::int AS open,
       count(*) FILTER (WHERE created_at>now()-interval '1 day')::int AS today
@@ -192,6 +137,15 @@ async function usableGrant(q: Queryable, key: Buffer, agent: Pick<AgentRow, 'id'
 export const authorizedUntil = (s: AgentAccounts, agent: Pick<AgentRow, 'id' | 'agent_id'>) =>
   usableGrant(s.db, s.grantKey, agent).then(grant => grant?.expiresAt ?? null);
 
+export function grantByCommitment(s: AgentAccounts, agentId: string, commitment: string): Promise<AgentGrant | null> {
+  return s.db.query(`SELECT g.sealed_token FROM agent_grants g JOIN agent_accounts a ON a.id=g.agent_account
+    WHERE a.agent_id=$1 AND a.deployment_id=$2 AND g.commitment=$3 AND g.state='live' AND g.expires_at>now()`,
+  [agentId, s.deployment.id, commitment]).then(({ rows: [row] }) => {
+    const token = row ? openGrant(s.grantKey, agentId, commitment, row.sealed_token) : null;
+    return token ? { agentId, token } : null;
+  });
+}
+
 function ownerRequest(s: AgentAccounts, owner: Owner, agent: AgentRow, request: GenerateIntentRequest,
   agentGrant: string | null) {
   return s.api.generateIntent(request, owner.account, `dm-${request.type}-${randomUUID()}`).then(async generated => {
@@ -206,7 +160,7 @@ export async function issueGrant(s: AgentAccounts, owner: Owner, agentId: string
   const { commitment, sealed } = sealNewGrant(s.grantKey, agentId);
   const id = randomUUID(), expiresAt = new Date(Date.now() + GRANT.lifetimeMs).toISOString();
   await transaction(s.db, async c => {
-    await c.query(`SELECT pg_advisory_xact_lock(${LOCK.agents},hashtext($1))`, [`grants:${agent.id}`]);
+    await agentLock(c, `grants:${agent.id}`);
     if (await usableGrant(c, s.grantKey, agent)) throw new ReadError(409, 'grant_already_live');
     const { rows: [pending] } = await c.query(`SELECT count(*)::int AS n FROM agent_grants
       WHERE agent_account=$1 AND state='pending' AND created_at>now()-interval '1 day'`, [agent.id]);
@@ -222,7 +176,7 @@ export async function issueGrant(s: AgentAccounts, owner: Owner, agentId: string
 export async function revokeGrants(s: AgentAccounts, owner: Owner, agentId: string) {
   const agent = await ownedAgent(s, owner, agentId);
   const live = await transaction(s.db, async c => {
-    await c.query(`SELECT pg_advisory_xact_lock(${LOCK.agents},hashtext($1))`, [`grants:${agent.id}`]);
+    await agentLock(c, `grants:${agent.id}`);
     await c.query(`UPDATE agent_grants SET state='revoked',sealed_token=NULL
       WHERE agent_account=$1 AND state<>'revoked'`, [agent.id]);
     await c.query(`UPDATE agent_access_tokens SET revoked_at=now()
@@ -242,78 +196,81 @@ export async function revokeGrants(s: AgentAccounts, owner: Owner, agentId: stri
   return { data };
 }
 
+const recordFrozen = (q: Queryable, agentAccount: string, frozen: boolean) =>
+  q.query('UPDATE agent_accounts SET frozen=$2,updated_at=now() WHERE id=$1', [agentAccount, frozen]);
+
 export async function freezeAgent(s: AgentAccounts, owner: Owner, agentId: string, frozen: boolean) {
   const agent = await activeAgent(s, owner, agentId);
-  if (agent.frozen === frozen) throw new ReadError(409, frozen ? 'agent_frozen' : 'agent_not_frozen');
+  const actual = await s.api.frozen(agentId);
+  if (actual !== agent.frozen) await recordFrozen(s.db, agent.id, actual);
+  if (actual === frozen) throw new ReadError(409, frozen ? 'agent_frozen' : 'agent_not_frozen');
   return ownerRequest(s, owner, agent, { type: frozen ? 'agent_freeze' : 'agent_unfreeze', agent_id: agentId }, null);
 }
 
 type OwnerIntentType = 'agent_create' | 'grant_issue' | 'grant_revoke' | 'agent_freeze' | 'agent_unfreeze';
-interface IntentRow {
+export interface IntentRow {
   correlation_id: string; agent_account: string; agent_id: string; type: OwnerIntentType;
   agent_grant: string | null; commitment: string | null; intent: OwnerIntent; recorded: string;
 }
 
+const INTENT_ROW = `SELECT i.correlation_id,i.agent_account,a.agent_id,i.type,i.agent_grant,g.commitment,i.intent,
+  i.status AS recorded FROM agent_intents i JOIN agent_accounts a ON a.id=i.agent_account
+  LEFT JOIN agent_grants g ON g.id=i.agent_grant`;
+
 async function ownedIntent(s: AgentAccounts, owner: Owner, correlationId: string): Promise<IntentRow> {
-  const { rows } = await s.db.query(`SELECT i.correlation_id,i.agent_account,a.agent_id,i.type,i.agent_grant,
-    g.commitment,i.intent,i.status AS recorded FROM agent_intents i JOIN agent_accounts a ON a.id=i.agent_account
-    LEFT JOIN agent_grants g ON g.id=i.agent_grant
-    WHERE i.correlation_id=$1 AND a.owner_account_id=$2 AND a.deployment_id=$3`,
-  [correlationId, owner.account, s.deployment.id]);
+  const { rows } = await s.db.query(`${INTENT_ROW} WHERE i.correlation_id=$1 AND a.owner_account_id=$2
+    AND a.deployment_id=$3`, [correlationId, owner.account, s.deployment.id]);
   if (!rows[0]) throw new ReadError(404, 'intent_not_found');
   return rows[0];
 }
 
-type Change = [string, unknown[]] | null;
+const FAILED = new Set(['FAILED', 'REFUNDED']);
+const failGrant = (q: Queryable, row: IntentRow) =>
+  q.query("UPDATE agent_grants SET state='failed' WHERE id=$1 AND state='pending'", [row.agent_grant]);
 
-function grantLive(row: IntentRow, status: AgentStatus): Change {
+function grantLive(q: Queryable, row: IntentRow, status: AgentStatus) {
   const grant = object(status.details.grant) ? status.details.grant : null;
   const ours = grant && typeof grant.grant_id === 'string' && GRANT_ID.test(grant.grant_id)
     && grant.agent_id === row.agent_id && grant.revoked_at === null && object(grant.owner_message)
     && grant.owner_message.credential === row.commitment;
   if (ours) {
-    return ["UPDATE agent_grants SET state='live',api_grant_id=$2 WHERE id=$1 AND state='pending'",
-      [row.agent_grant, grant.grant_id]];
+    return q.query("UPDATE agent_grants SET state='live',api_grant_id=$2 WHERE id=$1 AND state='pending'",
+      [row.agent_grant, grant.grant_id]);
   }
   console.error('Refused a grant the Agent API reports that is not the one Dragons Market issued');
-  return ["UPDATE agent_grants SET state='failed' WHERE id=$1 AND state='pending'", [row.agent_grant]];
+  return failGrant(q, row);
 }
 
-async function consequence(s: AgentAccounts, row: IntentRow, status: AgentStatus): Promise<Change> {
-  const succeeded = status.status === 'SUCCESS', failed = status.status === 'FAILED' || status.status === 'REFUNDED';
-  const agentRow = (set: string) => [`UPDATE agent_accounts SET ${set},updated_at=now() WHERE id=$1`,
-    [row.agent_account]] as [string, unknown[]];
-  switch (row.type) {
-    case 'agent_create': {
-      if (failed) {
-        return ["UPDATE agent_accounts SET state='abandoned',updated_at=now() WHERE id=$1 AND state='pending'",
-          [row.agent_account]];
-      }
-      if (!succeeded) return null;
-      const near = (await s.api.wallet(row.agent_id)).near_account_id;
-      return [`UPDATE agent_accounts SET state='active',near_account_id=$2,updated_at=now()
-        WHERE id=$1 AND state='pending'`, [row.agent_account, near]];
+type Effect = (q: Queryable, row: IntentRow, status: AgentStatus, near: string | null) => Promise<unknown> | null;
+const EFFECTS: Record<OwnerIntentType, Effect> = {
+  agent_create(q, row, status, near) {
+    if (FAILED.has(status.status)) {
+      return q.query(`UPDATE agent_accounts SET state='abandoned',updated_at=now()
+        WHERE id=$1 AND state='pending'`, [row.agent_account]);
     }
-    case 'grant_issue':
-      if (failed) return ["UPDATE agent_grants SET state='failed' WHERE id=$1 AND state='pending'", [row.agent_grant]];
-      return succeeded ? grantLive(row, status) : null;
-    case 'agent_freeze':
-      if (failed) return agentRow('frozen=false');
-      return status.status === 'PENDING_SIGNATURE' ? null : agentRow('frozen=true');
-    case 'agent_unfreeze':
-      return succeeded ? agentRow('frozen=false') : null;
-    case 'grant_revoke':
-      return null;
-  }
-}
+    return near ? q.query(`UPDATE agent_accounts SET state='active',near_account_id=$2,updated_at=now()
+      WHERE id=$1 AND state='pending'`, [row.agent_account, near]) : null;
+  },
+  grant_issue(q, row, status) {
+    if (FAILED.has(status.status)) return failGrant(q, row);
+    return status.status === 'SUCCESS' ? grantLive(q, row, status) : null;
+  },
+  agent_freeze(q, row, status) {
+    if (FAILED.has(status.status)) return recordFrozen(q, row.agent_account, false);
+    return status.status === 'PENDING_SIGNATURE' ? null : recordFrozen(q, row.agent_account, true);
+  },
+  agent_unfreeze: (q, row, status) => (status.status === 'SUCCESS' ? recordFrozen(q, row.agent_account, false) : null),
+  grant_revoke: () => null,
+};
 
 async function applyIntentStatus(s: AgentAccounts, row: IntentRow, status: AgentStatus) {
   if (status.status !== row.recorded) {
-    const change = await consequence(s, row, status);
+    const created = row.type === 'agent_create' && status.status === 'SUCCESS';
+    const near = created ? (await s.api.wallet(row.agent_id)).near_account_id : null;
     await transaction(s.db, async c => {
       await c.query('UPDATE agent_intents SET status=$2,updated_at=now() WHERE correlation_id=$1',
         [row.correlation_id, status.status]);
-      if (change) await c.query(...change);
+      await EFFECTS[row.type](c, row, status, near);
     });
   }
   return { correlation_id: row.correlation_id, type: row.type, agent_id: row.agent_id, status: status.status,
@@ -324,25 +281,40 @@ const expected = (row: IntentRow) => ({ type: row.type, agentId: row.agent_id })
 
 export async function submitOwnerIntent(s: AgentAccounts, owner: Owner, correlationId: string, signed: unknown) {
   const row = await ownedIntent(s, owner, correlationId);
-  if (!object(signed) || signed.standard !== row.intent.intent.standard) {
+  const { standard, payload } = row.intent.intent;
+  if (!object(signed) || signed.standard !== standard || !object(signed.payload)
+    || canonical(signed.payload) !== canonical(payload)) {
     throw new ReadError(400, 'invalid_signed_data');
   }
   return applyIntentStatus(s, row, await s.api.submitIntent(row.intent, signed));
 }
 
+export const followOwnerIntent = (s: AgentAccounts, row: IntentRow) =>
+  s.api.status(row.correlation_id, 0, expected(row)).then(status => applyIntentStatus(s, row, status));
+
 export async function ownerIntentStatus(s: AgentAccounts, owner: Owner, correlationId: string) {
-  const row = await ownedIntent(s, owner, correlationId);
-  return applyIntentStatus(s, row, await s.api.status(row.correlation_id, 0, expected(row)));
+  return followOwnerIntent(s, await ownedIntent(s, owner, correlationId));
+}
+
+export async function strandedIntents(s: AgentAccounts): Promise<IntentRow[]> {
+  const { rows: due } = await s.db.query(`UPDATE agent_intents SET followed_at=now() WHERE correlation_id IN (
+    SELECT i.correlation_id FROM agent_intents i JOIN agent_accounts a ON a.id=i.agent_account
+    WHERE a.deployment_id=$1 AND i.status NOT IN ('SUCCESS','FAILED','REFUNDED')
+    AND (i.status<>'PENDING_SIGNATURE' OR i.expires_at>now()-interval '10 minutes')
+    AND i.created_at>now()-interval '7 days' AND (i.followed_at IS NULL OR i.followed_at<now()-interval '1 minute')
+    ORDER BY i.followed_at NULLS FIRST LIMIT 50 FOR UPDATE OF i SKIP LOCKED) RETURNING correlation_id`,
+  [s.deployment.id]);
+  const ids = due.map(row => row.correlation_id as string);
+  return ids.length ? (await s.db.query(`${INTENT_ROW} WHERE i.correlation_id=ANY($1)`, [ids])).rows : [];
 }
 
 export async function listAgents(s: AgentAccounts, owner: Owner) {
   const { rows } = await s.db.query(`SELECT a.id,a.agent_id,a.name,a.state,a.frozen,a.near_account_id,a.created_at,
     COALESCE((SELECT jsonb_agg(jsonb_build_object('status',i.status,'generated',i.intent) ORDER BY i.created_at)
       FROM agent_intents i WHERE i.agent_account=a.id AND i.status NOT IN ('SUCCESS','FAILED','REFUNDED')
-      AND NOT (i.status='PENDING_SIGNATURE' AND i.expires_at<=now())
-      AND i.created_at>now()-interval '1 day'),'[]'::jsonb) AS open_intents
+      AND NOT (i.status='PENDING_SIGNATURE' AND i.expires_at<=now())),'[]'::jsonb) AS open_intents
     FROM agent_accounts a WHERE a.deployment_id=$1 AND a.owner_account_id=$2
-    AND (a.state='active' OR (a.state='pending' AND ${STILL_SIGNABLE}))
+    AND (a.state='active' OR (a.state='pending' AND ${MAY_STILL_LAND}))
     ORDER BY a.created_at DESC LIMIT 10`, [s.deployment.id, owner.account]);
   const data = await Promise.all(rows.map(async ({ id, ...agent }) => {
     const until = agent.state === 'active' ? await authorizedUntil(s, { id, agent_id: agent.agent_id }) : null;
@@ -351,23 +323,61 @@ export async function listAgents(s: AgentAccounts, owner: Owner) {
   return { data };
 }
 
-export interface OwnedRequest {
-  key: unknown; action: unknown; via?: string; admit?: (action: AgentAction) => Promise<void>;
+export const parseOwnedAction = (body: unknown, owner: string, kinds?: readonly ActionKind[]) =>
+  parseAgentAction(object(body) ? { ...body, recipient: owner } : body, kinds);
+
+export interface SpendLimits { via: string; one: bigint; daily: bigint }
+export interface OwnedRun { key: unknown; action: AgentAction; limits: SpendLimits }
+
+export const sessionLimits = (s: Pick<AgentAccounts, 'deployment'>, owner: OwnerAccount): SpendLimits => {
+  const { perTransaction, daily } = agentSpend(s.deployment);
+  return { via: `web:${owner.account}`, one: BigInt(perTransaction), daily: BigInt(daily) };
+};
+
+const WIDEST_SLIPPAGE_BPS = 1000n;
+const BPS = 10000n;
+const quoted = (value: unknown) => {
+  if (!isUnits(value)) throw new Error('invalid_quote');
+  return BigInt(value);
+};
+
+function priced(s: AgentAccounts, a: AgentAction) {
+  const { rounds, market } = s.deployment.contracts;
+  if (a.kind === 'stake' && rounds) {
+    return { least: a.minShares, quote: s.chain.view(rounds, 'quote_stake',
+      { series_id: a.series, round: a.round, side: a.side, amount: a.amount }).then(quoted) };
+  }
+  if (a.kind === 'buy' && market) {
+    return { least: a.minShares, quote: s.chain.view(market, 'quote_buy',
+      { market_id: a.market, side: a.side, amount: a.amount }).then(q => quoted(object(q) ? q.shares_out : null)) };
+  }
+  if (a.kind === 'sell' && market) {
+    return { least: a.minCollateral, quote: s.chain.view(market, 'quote_sell',
+      { market_id: a.market, side: a.side, shares: a.shares })
+      .then(q => (object(q) ? quoted(q.collateral_out) - quoted(q.fee) : quoted(null))) };
+  }
+  return null;
 }
 
-export async function runOwnedAction(s: AgentAccounts, owner: OwnerAccount, agentId: string, request: OwnedRequest) {
-  const { key, via, admit } = request;
+async function fenceAction(s: AgentAccounts, action: AgentAction) {
+  const trade = priced(s, action);
+  if (trade && BigInt(trade.least) * BPS < (await trade.quote) * (BPS - WIDEST_SLIPPAGE_BPS)) {
+    throw new ReadError(409, 'slippage_too_wide');
+  }
+}
+
+export async function runOwnedAction(s: AgentAccounts, owner: OwnerAccount, agentId: string, run: OwnedRun) {
+  const { key, action, limits } = run;
   if (typeof key !== 'string' || !ACTION_KEY.test(key)) throw new ReadError(400, 'invalid_key');
-  const body = request.action;
-  const action = parseAgentAction(object(body) ? { ...body, recipient: owner.account } : body, OWNER_KINDS);
-  if ('contract' in action && action.contract !== 'rounds') throw new InvalidAction('invalid_contract');
+  const spend = spendOf(action);
+  if (spend > limits.one) throw new ReadError(409, 'spend_over_limit');
   const agent = await activeAgent(s, owner, agentId);
+  if (agent.frozen) throw new ReadError(409, 'wallet_frozen');
   const grant = await usableGrant(s.db, s.grantKey, agent);
   if (!grant) throw new ReadError(409, 'grant_required');
-  await admit?.(action);
-  const holdNew = agent.frozen && !WHILE_FROZEN.has(action.kind);
-  return runAgentAction(s.runner, { agentId, token: grant.token },
-    { agent: agent.near_account_id, key, action, holdNew, ...(via ? { via } : {}) });
+  return runAgentAction(s.runner, { agentId, token: grant.token }, { agent: agent.near_account_id, key, action,
+    via: limits.via, fence: () => fenceAction(s, action),
+    ...(spend > 0n ? { cap: { via: limits.via, limit: limits.daily, amount: spend } } : {}) });
 }
 
 export async function agentOperations(s: AgentAccounts, owner: OwnerAccount, agentId: string) {
@@ -377,4 +387,40 @@ export async function agentOperations(s: AgentAccounts, owner: OwnerAccount, age
     updated_at FROM user_operations WHERE deployment_id=$1 AND account_id=$2 ORDER BY updated_at DESC LIMIT 50`,
   [s.deployment.id, agent.near_account_id]);
   return { data: rows };
+}
+
+const UNCLAIMED = `SELECT (s.request->'action'->>'series')::int AS series, s.request->'action'->>'round' AS round
+  FROM user_operations s WHERE s.deployment_id=$1 AND s.account_id=$2 AND s.state='confirmed'
+  AND s.request->'action'->>'kind'='stake' AND NOT EXISTS (SELECT 1 FROM user_operations c
+    WHERE c.deployment_id=s.deployment_id AND c.account_id=s.account_id AND c.state='confirmed'
+    AND c.request->'action'->>'kind'='claim' AND c.request->'action'->>'series'=s.request->'action'->>'series'
+    AND c.request->'action'->>'round'=s.request->'action'->>'round')
+  GROUP BY 1,2 ORDER BY max(s.updated_at) DESC LIMIT 40`;
+
+export async function claimableStakes(s: AgentAccounts, account: string) {
+  const rounds = s.deployment.contracts.rounds;
+  if (!rounds) return { data: [] };
+  const { rows } = await s.db.query(UNCLAIMED, [s.deployment.id, account]);
+  const found = await Promise.all(rows.map(async ({ series, round }: { series: number; round: string }) => {
+    const where = { series_id: series, round };
+    const [stake, outcome] = await Promise.all([s.chain.view(rounds, 'get_stake', { ...where, account_id: account }),
+      s.chain.view(rounds, 'round_outcome', where)]);
+    return object(stake) && outcome ? { series, round, side: stake.side, amount: stake.amount, outcome } : null;
+  }));
+  return { data: found.filter(stake => stake !== null) };
+}
+
+export async function agentClaimable(s: AgentAccounts, owner: OwnerAccount, agentId: string) {
+  const { near_account_id: account } = await ownedAgent(s, owner, agentId);
+  return account ? claimableStakes(s, account) : { data: [] };
+}
+
+const POSITION_PAGE = '100';
+
+export async function marketPositions(s: AgentAccounts, account: string) {
+  const market = s.deployment.contracts.market;
+  if (!market) return { data: [] };
+  const held = await s.chain.view(market, 'get_positions', { account_id: account, limit: POSITION_PAGE });
+  if (!Array.isArray(held)) throw new Error('invalid_positions');
+  return { data: held };
 }

@@ -1,30 +1,20 @@
 import { ReadError } from './read-api.js';
 import { AgentApiError, AgentApiUnavailable, refusalCode } from './agent-api.js';
-import { InvalidAction } from './agents.js';
+import { InvalidAction } from './agent-actions.js';
+import { OperationRefused } from './operations.js';
 import {
-  agentOperations, createAgent, freezeAgent, issueGrant, listAgents, ownerIntentStatus, revokeGrants, runOwnedAction,
-  submitOwnerIntent, type AgentAccounts, type Owner,
+  agentClaimable, agentOperations, createAgent, freezeAgent, issueGrant, listAgents, ownerIntentStatus,
+  parseOwnedAction, revokeGrants, runOwnedAction, sessionLimits, submitOwnerIntent, type AgentAccounts,
 } from './agent-accounts.js';
 import {
-  accessFor, accessOperations, accessQuote, accessRounds, accessSession, accessSummary, createAccessToken,
-  listAccessTokens, revokeAccessToken, runAccessAction, type Access,
+  accessClaimable, accessFor, accessMarkets, accessOperations, accessPositions, accessQuote, accessQuoteBuy,
+  accessQuoteSell, accessRounds, accessSession, accessSummary, listAccessTokens, requestAccess, revokeAccessToken,
+  runAccessAction, signAccess, type Access,
 } from './agent-access.js';
+import { accessPath, agentPath, intentPath, tokenPath, type AgentRoutes, type Body, type Owner } from './agent-paths.js';
 
-type Body = () => Promise<Record<string, unknown>>;
-export interface AgentRoutes {
-  owner(method: string, path: string, owner: Owner, body: Body): Promise<unknown>;
-  access(method: string, path: string, authorization: string | undefined, body: Body): Promise<unknown>;
-}
 type OwnerHandler = (s: AgentAccounts, owner: Owner, ids: string[], body: Body) => Promise<unknown>;
 type AccessHandler = (s: AgentAccounts, access: Access, body: Body) => Promise<unknown>;
-
-const agentPath = /^\/v1\/agents\/([0-9a-f]{64})\/(grant|actions|operations|freeze|unfreeze|revoke|access)$/;
-const tokenPath = /^\/v1\/agents\/([0-9a-f]{64})\/access\/([0-9a-f-]{36})\/revoke$/;
-const intentPath = /^\/v1\/agent-intents\/(intent_[A-Za-z0-9_-]{1,128})(\/status)?$/;
-const accessPath = /^\/v1\/agent-access\/(session|agent|rounds|quote|actions|operations)$/;
-export const isAgentRoute = (p: string) =>
-  p === '/v1/agents' || agentPath.test(p) || tokenPath.test(p) || intentPath.test(p);
-export const isAgentAccessRoute = (p: string) => accessPath.test(p);
 
 function unsettled(error: unknown): never {
   if (error instanceof AgentApiError) {
@@ -41,11 +31,14 @@ const ownerHandlers: Record<string, OwnerHandler> = {
   'POST revoke': (s, owner, [id = '']) => revokeGrants(s, owner, id),
   'POST freeze': (s, owner, [id = '']) => freezeAgent(s, owner, id, true),
   'POST unfreeze': (s, owner, [id = '']) => freezeAgent(s, owner, id, false),
-  'POST actions': (s, owner, [id = ''], body) =>
-    body().then(b => runOwnedAction(s, owner, id, { key: b.key, action: b.action })).catch(unsettled),
+  'POST actions': (s, owner, [id = ''], body) => body().then(b => runOwnedAction(s, owner, id,
+    { key: b.key, action: parseOwnedAction(b.action, owner.account), limits: sessionLimits(s, owner) }))
+    .catch(unsettled),
   'GET operations': (s, owner, [id = '']) => agentOperations(s, owner, id),
+  'GET claimable': (s, owner, [id = '']) => agentClaimable(s, owner, id),
   'GET access': (s, owner, [id = '']) => listAccessTokens(s, owner, id),
-  'POST access': (s, owner, [id = ''], body) => body().then(b => createAccessToken(s, owner, id, b)),
+  'POST access': (s, owner, [id = ''], body) => body().then(b => requestAccess(s, owner, id, b)),
+  'POST access-sign': (s, owner, [id = '', token = ''], body) => body().then(b => signAccess(s, owner, id, token, b)),
   'POST access-revoke': (s, owner, [id = '', token = '']) => revokeAccessToken(s, owner, id, token),
   'POST intent': (s, owner, [id = ''], body) => body().then(b => submitOwnerIntent(s, owner, id, b.signed_data)),
   'POST status': (s, owner, [id = '']) => ownerIntentStatus(s, owner, id),
@@ -56,14 +49,19 @@ const accessHandlers: Record<string, AccessHandler> = {
   'GET agent': (s, access) => accessSummary(s, access),
   'GET rounds': s => accessRounds(s),
   'POST quote': (s, _access, body) => body().then(b => accessQuote(s, b)),
+  'GET markets': s => accessMarkets(s),
+  'GET positions': (s, access) => accessPositions(s, access),
+  'POST quote-buy': (s, _access, body) => body().then(b => accessQuoteBuy(s, b)),
+  'POST quote-sell': (s, _access, body) => body().then(b => accessQuoteSell(s, b)),
   'POST actions': (s, access, body) => body().then(b => runAccessAction(s, access, b)).catch(unsettled),
   'GET operations': (s, access) => accessOperations(s, access),
+  'GET claimable': (s, access) => accessClaimable(s, access),
 };
 
 function ownerTarget(path: string): [string, string[]] | null {
   if (path === '/v1/agents') return ['agents', []];
   const token = tokenPath.exec(path);
-  if (token) return ['access-revoke', [token[1]!, token[2]!]];
+  if (token) return [`access-${token[3]!}`, [token[1]!, token[2]!]];
   const agent = agentPath.exec(path);
   if (agent) return [agent[2]!, [agent[1]!]];
   const intent = intentPath.exec(path);
@@ -72,11 +70,8 @@ function ownerTarget(path: string): [string, string[]] | null {
 
 export function refusal(error: unknown): never {
   if (error instanceof InvalidAction) throw new ReadError(400, error.message);
-  if (error instanceof Error && error.message === 'operation_idempotency_conflict') {
-    throw new ReadError(409, error.message);
-  }
-  if (error instanceof Error && error.message === 'operation_state_conflict') {
-    throw new ReadError(409, 'operation_in_progress');
+  if (error instanceof OperationRefused) {
+    throw new ReadError(409, error.message === 'operation_state_conflict' ? 'operation_in_progress' : error.message);
   }
   if (error instanceof AgentApiUnavailable) throw new ReadError(502, 'agent_api_unavailable');
   if (!(error instanceof AgentApiError)) throw error;

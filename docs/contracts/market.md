@@ -416,6 +416,7 @@ Then:
 | `msg`                              | Who                | What it does |
 | ---------------------------------- | ------------------ | ------------ |
 | `deposit`                          | Registered account | Credits the amount to the sender's balance once the verifier has it. Refused if paused or not registered. |
+| `deposit_for:<account>`            | Anyone             | Credits the balance of another registered account once the verifier has it, at least 0.1 of the collateral. This is how an owner funds an agent that must never hold the token. The deposit event names the sender as `from`, and a refusal before the forward still refunds the sender. |
 | `buy:<market>:<side>:<min shares>` | Registered account | Credits the amount once the verifier has it, then buys `side` with it as `buy` does from a balance. Refused if paused, not registered, the market is not open, the side is not `yes` or `no`, or the minimum is zero. A buy that fails after the credit, because the price moved or the market closed in between, leaves the money in the balance. |
 
 A message with more parts than its action takes is refused, as above. Any other message is

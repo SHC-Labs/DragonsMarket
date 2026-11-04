@@ -66,7 +66,7 @@ enum Key {
     Withdrawals,
     PendingByAccount,
     Prices,
-    Registrations,
+    StoragePayers,
 }
 
 #[near(serializers=[borsh, json])]
@@ -138,10 +138,13 @@ pub struct Withdrawal {
     at: U64,
 }
 
-#[near(serializers=[borsh])]
-enum Registration {
-    Sponsored { payer: AccountId },
-    Collateral,
+#[near(serializers=[json])]
+pub struct OpenRound {
+    series_id: u32,
+    asset: String,
+    round: U64,
+    opens_at: U64,
+    closes_at: U64,
 }
 
 #[near(serializers=[json])]
@@ -284,7 +287,7 @@ pub struct RoundsContract {
     pending_by_account: LookupMap<AccountId, u128>,
     // Where sweep_fees sends the fees. Unset until the owner names it.
     treasury: Option<AccountId>,
-    registrations: LookupMap<AccountId, Registration>,
+    storage_payers: LookupMap<AccountId, AccountId>,
 }
 
 #[near(serializers=[borsh])]
@@ -352,7 +355,7 @@ impl From<StateV2> for RoundsContract {
             pending_withdrawals_total: old.pending_withdrawals_total,
             pending_by_account: old.pending_by_account,
             treasury: old.treasury,
-            registrations: LookupMap::new(Key::Registrations),
+            storage_payers: LookupMap::new(Key::StoragePayers),
         }
     }
 }
@@ -422,7 +425,7 @@ impl From<StateV1> for RoundsContract {
             pending_withdrawals_total: old.pending_withdrawals_total,
             pending_by_account: old.pending_by_account,
             treasury: None,
-            registrations: LookupMap::new(Key::Registrations),
+            storage_payers: LookupMap::new(Key::StoragePayers),
         }
     }
 }
@@ -454,6 +457,18 @@ impl Series {
     fn close_of(&self, round: u64) -> u64 {
         self.start_of(round.saturating_add(1))
             .saturating_sub(self.close_before.0)
+    }
+
+    fn next_round(&self, now: u64) -> u64 {
+        if now < self.first_start.0 {
+            return 0;
+        }
+        let current = (now - self.first_start.0) / self.interval.0;
+        if now < self.close_of(current) {
+            current
+        } else {
+            current + 1
+        }
     }
 }
 
@@ -658,7 +673,7 @@ impl RoundsContract {
             pending_withdrawals_total: 0,
             pending_by_account: LookupMap::new(Key::PendingByAccount),
             treasury: None,
-            registrations: LookupMap::new(Key::Registrations),
+            storage_payers: LookupMap::new(Key::StoragePayers),
         }
     }
 
@@ -1144,17 +1159,41 @@ impl RoundsContract {
 
     // The round taking stakes now, or the next to open when none is.
     pub fn next_round(&self, series_id: u32) -> U64 {
-        let s = self.series_by_id(series_id);
+        U64(self.series_by_id(series_id).next_round(env::block_timestamp()))
+    }
+
+    // Each series' round taking stakes now, or the next to open, with the moments it opens and closes.
+    pub fn open_rounds(&self, from_index: u32, limit: u32) -> Vec<OpenRound> {
         let now = env::block_timestamp();
-        if now < s.first_start.0 {
-            return U64(0);
+        (from_index..self.next_series_id.min(from_index.saturating_add(limit)))
+            .filter_map(|series_id| self.find_series(series_id).map(|s| (series_id, s)))
+            .map(|(series_id, s)| {
+                let round = s.next_round(now);
+                let (opens_at, closes_at) = (U64(s.start_of(round)), U64(s.close_of(round)));
+                OpenRound {
+                    series_id,
+                    asset: s.asset,
+                    round: U64(round),
+                    opens_at,
+                    closes_at,
+                }
+            })
+            .collect()
+    }
+
+    // The outcome a claim would settle now, or none while the round can still go either way.
+    pub fn round_outcome(&self, series_id: u32, round: U64) -> Option<Outcome> {
+        let r = self.find_round(series_id, round.0)?;
+        if r.outcome.is_some() {
+            return r.outcome;
         }
-        let current = (now - s.first_start.0) / s.interval.0;
-        U64(if now < s.close_of(current) {
-            current
-        } else {
-            current + 1
-        })
+        let series = self.find_series(series_id)?;
+        let now = env::block_timestamp();
+        if now < series.close_of(round.0) {
+            return None;
+        }
+        r.decide(&series, round.0, now, self.round_prices(series_id, round.0))
+            .map(|(outcome, _)| outcome)
     }
 
     pub fn get_round(&self, series_id: u32, round: U64) -> Option<Round> {
@@ -1240,6 +1279,13 @@ impl RoundsContract {
             .map(VersionedRound::into_current)
     }
 
+    fn round_prices(&self, series_id: u32, round: u64) -> (Option<U128>, Option<U128>) {
+        (
+            self.prices.get(&(series_id, round)).copied(),
+            self.prices.get(&(series_id, round.saturating_add(1))).copied(),
+        )
+    }
+
     fn store_round(&mut self, series_id: u32, round: u64, r: Round) {
         self.rounds.insert((series_id, round), r.into());
     }
@@ -1255,12 +1301,8 @@ impl RoundsContract {
         let series = self.series_by_id(series_id);
         let now = env::block_timestamp();
         require!(now >= series.close_of(round), "the round is still taking stakes");
-        let prices = (
-            self.prices.get(&(series_id, round)).copied(),
-            self.prices.get(&(series_id, round.saturating_add(1))).copied(),
-        );
         let (outcome, reason) = r
-            .decide(&series, round, now, prices)
+            .decide(&series, round, now, self.round_prices(series_id, round))
             .unwrap_or_else(|| env::panic_str("the round is waiting for its prices"));
         let fee = r.fee(outcome);
         r.left = U128(r.left.0 - fee);
@@ -1367,12 +1409,10 @@ impl RoundsContract {
         let fee = self.registration_fee;
         require!(amount >= fee, "send at least the registration fee");
         self.accounts.insert(who.clone(), 0);
-        self.registrations.insert(who.clone(), Registration::Collateral);
         if amount > fee {
             self.credit(who, amount - fee);
         }
         self.accounts.flush();
-        self.registrations.flush();
         self.balances.flush();
         self.assert_storage_reserve();
         self.fees += fee;
@@ -1464,18 +1504,16 @@ impl StorageManagement for RoundsContract {
     fn storage_deposit(&mut self, account_id: Option<AccountId>, registration_only: Option<bool>) -> StorageBalance {
         let _ = registration_only;
         require!(!self.paused, "paused");
-        let payer = env::predecessor_account_id();
-        let who = account_id.unwrap_or_else(|| payer.clone());
+        let caller = env::predecessor_account_id();
+        let who = account_id.unwrap_or_else(|| caller.clone());
+        let payer = if caller == self.verifier { who.clone() } else { caller };
         let paid = env::attached_deposit();
         let refund = if self.accounts.contains_key(&who) {
             paid
         } else {
             require!(paid >= STORAGE_DEPOSIT, "attach at least 0.05 NEAR");
             self.accounts.insert(who.clone(), 0);
-            if payer != who && payer != self.verifier {
-                self.registrations
-                    .insert(who.clone(), Registration::Sponsored { payer: payer.clone() });
-            }
+            self.storage_payers.insert(who.clone(), payer.clone());
             emit("registered", json!({ "account": who, "paid_by": payer }));
             paid.saturating_sub(STORAGE_DEPOSIT)
         };
@@ -1521,21 +1559,11 @@ impl StorageManagement for RoundsContract {
         );
         self.accounts.remove(&who);
         self.balances.remove(&who);
-        let deposit_to = match self.registrations.remove(&who) {
-            None => {
-                let _ = Promise::new(who.clone()).transfer(STORAGE_DEPOSIT.saturating_add(ONE_YOCTO));
-                Some(who.clone())
-            }
-            Some(Registration::Sponsored { payer }) => {
-                let _ = Promise::new(payer.clone()).transfer(STORAGE_DEPOSIT);
-                let _ = Promise::new(who.clone()).transfer(ONE_YOCTO);
-                Some(payer)
-            }
-            Some(Registration::Collateral) => {
-                let _ = Promise::new(who.clone()).transfer(ONE_YOCTO);
-                None
-            }
-        };
+        let deposit_to = self.storage_payers.remove(&who);
+        if let Some(payer) = &deposit_to {
+            let _ = Promise::new(payer.clone()).transfer(STORAGE_DEPOSIT);
+        }
+        let _ = Promise::new(who.clone()).transfer(ONE_YOCTO);
         emit("unregistered", json!({ "account": who, "deposit_to": deposit_to }));
         true
     }
@@ -1642,8 +1670,8 @@ mod tests {
     const END: u64 = START + INTERVAL;
     const CLOSE: u64 = END - CLOSE_BEFORE;
     const RECEIVED: u128 = 300 * USD;
-    const MEASURED_REGISTRATION_BYTES: u64 = 348;
-    const MEASURED_SPONSORED_BYTES: u64 = 416;
+    const MEASURED_REGISTRATION_BYTES: u64 = 238;
+    const MEASURED_SPONSORED_BYTES: u64 = 415;
     const MEASURED_STAKE_BYTES: u64 = 154;
     const MEASURED_ROUND_BYTES: u64 = 140;
     const MEASURED_PRICE_BYTES: u64 = 69;
@@ -2511,11 +2539,9 @@ mod tests {
         assert!(migrated.upgrade_proven && !migrated.upgrade_in_flight);
         act_paying("sponsor.near", FIFTY_MILLI, 5);
         migrated.storage_deposit(Some(acct("dan.near")), None);
-        assert!(
-            matches!(
-                migrated.registrations.get(&acct("dan.near")),
-                Some(Registration::Sponsored { .. })
-            ),
+        assert_eq!(
+            migrated.storage_payers.get(&acct("dan.near")),
+            Some(&acct("sponsor.near")),
             "the new map works after the move"
         );
     }
@@ -2911,11 +2937,10 @@ mod tests {
         let _ = c.on_auth(acct(USERS[2]), format!("withdraw:{all}"));
         act_as(CONTRACT, BETTING);
         c.on_withdraw(U64(1), Ok(()));
-        let with_yocto = FIFTY_MILLI.saturating_add(ONE_YOCTO);
         let leaving: [(&str, Vec<(&str, NearToken)>); 4] = [
-            ("dan.near", vec![("dan.near", with_yocto)]),
+            ("dan.near", vec![("dan.near", FIFTY_MILLI), ("dan.near", ONE_YOCTO)]),
             ("eve.near", vec![("sponsor.near", FIFTY_MILLI), ("eve.near", ONE_YOCTO)]),
-            ("fay.near", vec![("fay.near", with_yocto)]),
+            ("fay.near", vec![("fay.near", FIFTY_MILLI), ("fay.near", ONE_YOCTO)]),
             (USERS[2], vec![(USERS[2], ONE_YOCTO)]),
         ];
         for (who, paid_back) in leaving {
@@ -2926,6 +2951,81 @@ mod tests {
             assert!(!c.is_registered(acct(who)));
         }
         assert_eq!(c.fees, 3 * DEFAULT_REGISTRATION_FEE, "the registration fees stay");
+    }
+
+    #[test]
+    fn an_account_with_no_storage_payer_gets_back_only_its_yocto() {
+        let (mut c, _) = world();
+        act_as(USERS[0], BETTING);
+        let _ = c.withdraw(U128(balance(&c, USERS[0])));
+        act_as(CONTRACT, BETTING);
+        c.on_withdraw(U64(1), Ok(()));
+        act_as(USERS[0], BETTING);
+        assert!(
+            c.storage_unregister(None),
+            "it registered before any NEAR deposit was recorded"
+        );
+        assert_eq!(refunds(), vec![(USERS[0].to_string(), ONE_YOCTO)]);
+    }
+
+    #[test]
+    fn a_relayed_storage_deposit_refunds_the_account_it_was_for() {
+        let (mut c, _) = world();
+        act_paying(VERIFIER, NearToken::from_millinear(80), BETTING);
+        c.storage_deposit(Some(acct("dan.near")), None);
+        assert_eq!(refunds(), vec![("dan.near".to_string(), NearToken::from_millinear(30))]);
+        act_paying(VERIFIER, FIFTY_MILLI, BETTING);
+        c.storage_deposit(Some(acct("dan.near")), None);
+        assert_eq!(refunds(), vec![("dan.near".to_string(), FIFTY_MILLI)]);
+    }
+
+    #[test]
+    fn open_rounds_names_the_round_each_series_takes_stakes_for_and_when() {
+        let (c, _) = world();
+        act_as(USERS[0], BETTING);
+        let open = c.open_rounds(0, 12);
+        assert_eq!(open.len(), 1);
+        assert_eq!(
+            (
+                open[0].series_id,
+                open[0].round.0,
+                open[0].opens_at.0,
+                open[0].closes_at.0
+            ),
+            (0, 0, START, CLOSE)
+        );
+        act_as(USERS[0], CLOSE);
+        let next = &c.open_rounds(0, 12)[0];
+        assert_eq!(
+            (next.round.0, next.opens_at.0),
+            (1, END),
+            "after the close the next round is named"
+        );
+        assert!(c.open_rounds(1, 12).is_empty());
+        assert!(c.open_rounds(0, 0).is_empty());
+    }
+
+    #[test]
+    fn round_outcome_says_what_a_claim_would_settle_without_settling_it() {
+        let (mut c, _) = world();
+        stake(&mut c, BETTING, USERS[0], 0, "up", 10 * USD);
+        act_as(USERS[1], BETTING);
+        assert_eq!(c.round_outcome(0, U64(0)), None, "the round is still taking stakes");
+        assert_eq!(c.round_outcome(0, U64(5)), None, "nobody staked in that round");
+        act_as(USERS[1], CLOSE);
+        assert_eq!(
+            c.round_outcome(0, U64(0)),
+            Some(Outcome::Refund),
+            "a one-sided round refunds"
+        );
+        assert_eq!(c.find_round(0, 0).unwrap().outcome, None, "reading it settles nothing");
+        assert_eq!(claim(&mut c, CLOSE, USERS[0], 0), 10 * USD, "and a claim then pays");
+        act_as(USERS[1], CLOSE);
+        assert_eq!(
+            c.round_outcome(0, U64(0)),
+            Some(Outcome::Refund),
+            "a settled round keeps its outcome"
+        );
     }
 
     #[test]
@@ -2979,7 +3079,7 @@ mod tests {
         let before = env::storage_usage();
         c.storage_deposit(Some(acct(&"c".repeat(64))), None);
         c.accounts.flush();
-        c.registrations.flush();
+        c.storage_payers.flush();
         let mut in_near = env::storage_usage() - before;
         act_as(VERIFIER, BETTING);
         let before = env::storage_usage();

@@ -1,5 +1,4 @@
-import type pg from 'pg';
-import { readConfig, type Config } from './config.js';
+import { readConfig } from './config.js';
 import { createPool, verifyDatabase } from './database.js';
 import { createApp } from './app.js';
 import { createReadApi } from './read-api.js';
@@ -8,27 +7,7 @@ import { backendStatus } from './monitoring.js';
 import { createPrivateApi } from './private-api.js';
 import { accessKeyChecker } from './access-key.js';
 import { ingestionStatus } from './ingestion/store.js';
-import { ReadRpcClient } from './providers.js';
-import { AgentApiClient } from './agent-api.js';
-import { finalTransaction, finalView, nearBalance, type AgentRunner } from './agents.js';
-import { createAgentRoutes } from './agent-routes.js';
-import { operationStore } from './operations.js';
-
-function agentRoutes(pool: pg.Pool, config: Config) {
-  const { agentApi, agentAccounts, deployment } = config;
-  if (!agentApi || !agentAccounts || !deployment) return null;
-  const api = new AgentApiClient(agentApi);
-  const rpc = () => new ReadRpcClient(config.rpc.primaryUrl, config.rpc, config.rpc.primaryBearerToken);
-  const runner: AgentRunner = {
-    deployment, api, waitMs: 0,
-    view: (contract, method, args) => finalView(rpc())(contract, method, args),
-    transaction: (hash, sender) => finalTransaction(rpc(), hash, sender),
-    operations: operationStore(pool, deployment.id),
-  };
-  const chain = { nearBalance: (account: string) => nearBalance(rpc())(account) };
-  return createAgentRoutes({ db: pool, deployment, api, runner, chain, grantKey: agentAccounts.grantKey,
-    signing: { walletContract: agentAccounts.walletContract, messageRecipient: new URL(agentApi.url).hostname } });
-}
+import { agentGateway } from './agent-gateway.js';
 
 const READ_POOL_SIZE = 4;
 const STATUS_POOL_SIZE = 2;
@@ -42,6 +21,7 @@ try {
   // Public status routes also get their own, so a flood on them cannot take the connections login needs.
   const statusPool = createPool(config.databaseUrl, STATUS_POOL_SIZE);
   const evidence = createReadApi(readPool, config);
+  const checkKey = accessKeyChecker(config);
   const server = createApp(
     config,
     () => verifyDatabase(statusPool, config),
@@ -53,11 +33,11 @@ try {
     createPrivateApi(
       pool,
       config,
-      accessKeyChecker(config),
+      checkKey,
       process.env.POLICY_TERMS_HASH && process.env.POLICY_PRIVACY_HASH
         ? { terms: process.env.POLICY_TERMS_HASH, privacy: process.env.POLICY_PRIVACY_HASH }
         : null,
-      agentRoutes(pool, config),
+      config.agentWorker && agentGateway(config.agentWorker),
     ),
     async () => {
       await verifyDatabase(statusPool, config);

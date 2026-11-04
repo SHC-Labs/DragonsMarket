@@ -6,12 +6,11 @@ import {
   AgentApiClient, AgentApiError, AgentApiUnavailable, expectedOf, readAgentApiSettings, refusalCode,
   type AgentStatus, type Expected, type NativeCall, type Send,
 } from '../src/agent-api.js';
-import {
-  InvalidAction, finalTransaction, nearBalance, parseAgentAction, planAgentAction, runAgentAction, type AgentAction,
-  type AgentRunner, type ContractEvent, type FinalTransaction,
-} from '../src/agents.js';
+import { InvalidAction, parseAgentAction, planAgentAction, spendOf, type AgentAction } from '../src/agent-actions.js';
+import { finalTransaction, nearBalance, type ContractEvent, type FinalTransaction } from '../src/agent-chain.js';
+import { followOperation, runAgentAction, type AgentRunner } from '../src/agents.js';
+import { TransactionClaimed } from '../src/operations.js';
 import { RpcError } from '../src/providers.js';
-import { parseAction } from '../src/agent.js';
 
 const AGENT_ID = 'a'.repeat(64);
 const AGENT = 'b'.repeat(64);
@@ -21,14 +20,8 @@ const deployment = {
   id: 'agents', startBlock: '1', collateralTokenId: 'nep141:usdc.fixture.near', collateralDecimals: 6,
   contracts: { rounds: 'rounds.fixture.near', market: 'market.fixture.near', verifier: 'intents.fixture.near' },
 };
-const views = async (contract: string, method: string) => {
-  if (method === 'storage_balance_bounds') return { min: '1250000000000000000000', max: '1250000000000000000000' };
-  if (method === 'config') return { storage_deposit: '50000000000000000000000' };
-  if (method === 'storage_balance_of') return { total: '1', available: '0' };
-  throw new Error(`unexpected view ${contract}.${method}`);
-};
-const native = async (action: AgentAction) => {
-  const plan = await planAgentAction(deployment, AGENT, action, views);
+const native = (action: AgentAction) => {
+  const plan = planAgentAction(deployment, AGENT, action);
   assert.ok('native' in plan.send);
   return plan.send.native;
 };
@@ -36,55 +29,62 @@ const apiError = (status: number, code: string, retryable = false, layer: ApiErr
   new AgentApiError(status, { errors: [{ status: String(status), code, layer, title: code, meta: { retryable } }],
     meta: {} });
 
-test('each action is the one native call the contracts take from an agent account', async () => {
-  const stake = await native({ kind: 'stake', series: 0, round: '42', side: 'up', amount: '5000000', minShares: '0' });
+test('each action is the one call the rounds contract takes from an agent account', () => {
+  const stake = native({ kind: 'stake', series: 0, round: '42', side: 'up', amount: '5000000', minShares: '0' });
   assert.deepEqual(stake, { receiver_id: 'rounds.fixture.near', method_name: 'stake', gas: '50000000000000',
     deposit: '1', args: { series_id: 0, round: '42', side: 'up', amount: '5000000', min_shares: '0' } },
   'a stake is paid from the rounds balance, not sent by token');
-  assert.deepEqual(await native({ kind: 'deposit', amount: '5000000' }), { receiver_id: 'usdc.fixture.near',
-    method_name: 'ft_transfer_call', gas: '100000000000000', deposit: '1',
-    args: { receiver_id: 'rounds.fixture.near', amount: '5000000', msg: 'deposit' } });
-  const buy = await native({ kind: 'buy', market: '7', side: 'no', amount: '2000000', minShares: '1900000' });
-  assert.deepEqual(buy.args, { receiver_id: 'market.fixture.near', amount: '2000000', msg: 'buy:7:no:1900000' });
-  assert.deepEqual(await native({ kind: 'claim', series: 0, round: '42' }), { receiver_id: 'rounds.fixture.near',
+  assert.deepEqual(native({ kind: 'claim', series: 0, round: '42' }), { receiver_id: 'rounds.fixture.near',
     method_name: 'claim', args: { series_id: 0, round: '42', account_id: AGENT }, gas: '50000000000000',
     deposit: '0' });
-  assert.equal((await native({ kind: 'redeem', market: '7' })).deposit, '0', 'redeem takes no deposit');
-  const withdraw = await native({ kind: 'withdraw', contract: 'market', amount: '3000000' });
+  const withdraw = native({ kind: 'withdraw', venue: 'rounds', amount: '3000000' });
   assert.deepEqual([withdraw.receiver_id, withdraw.method_name, withdraw.deposit],
-    ['market.fixture.near', 'withdraw', '1']);
-  const register = await native({ kind: 'register', contract: 'rounds' });
-  assert.deepEqual([register.receiver_id, register.deposit], ['rounds.fixture.near', '50000000000000000000000']);
-  const token = await native({ kind: 'register_token' });
-  assert.deepEqual(token.args, { account_id: AGENT, registration_only: true });
-  assert.equal(token.deposit, '1250000000000000000000');
-  const fund = await planAgentAction(deployment, AGENT, { kind: 'fund', amount: '5000000' }, views);
-  assert.deepEqual(fund.send, { withdraw: { asset: 'nep141:usdc.fixture.near', amount: '5000000', chain: 'near',
-    recipient: AGENT } });
+    ['rounds.fixture.near', 'withdraw', '1']);
+  const leave = native({ kind: 'leave', venue: 'rounds' });
+  assert.deepEqual([leave.receiver_id, leave.method_name, leave.args, leave.deposit],
+    ['rounds.fixture.near', 'storage_unregister', {}, '1']);
+  const cashOut = planAgentAction(deployment, AGENT, { kind: 'cash_out', amount: '5000000', recipient: 'alice.near' });
+  assert.deepEqual(cashOut.send, { withdraw: { asset: 'nep141:usdc.fixture.near', amount: '5000000', chain: 'near',
+    recipient: 'alice.near' } });
 });
 
-test('a contract asking more than 0.1 NEAR to register is not paid', async () => {
-  const greedy = async () => ({ storage_deposit: '100000000000000000000001', min: '100000000000000000000001' });
-  for (const action of [{ kind: 'register', contract: 'rounds' }, { kind: 'register_token' }] as const) {
-    await assert.rejects(planAgentAction(deployment, AGENT, action, greedy),
-      (e: unknown) => e instanceof InvalidAction && /_too_high$/.test(e.message), action.kind);
-  }
-  const exact = async () => ({ storage_deposit: '100000000000000000000000' });
-  const plan = await planAgentAction(deployment, AGENT, { kind: 'register', contract: 'rounds' }, exact);
-  assert.ok('native' in plan.send && plan.send.native.deposit === '100000000000000000000000');
+test('each market action is the one call the market contract takes from a balance', () => {
+  const at = 'market.fixture.near', gas = '50000000000000';
+  assert.deepEqual(native({ kind: 'buy', market: '7', side: 'yes', amount: '2000000', minShares: '1900000' }),
+    { receiver_id: at, method_name: 'buy', gas, deposit: '1',
+      args: { market_id: '7', side: 'yes', amount: '2000000', min_shares: '1900000' } });
+  assert.deepEqual(native({ kind: 'sell', market: '7', side: 'no', shares: '500', minCollateral: '400' }),
+    { receiver_id: at, method_name: 'sell', gas, deposit: '1',
+      args: { market_id: '7', side: 'no', shares: '500', min_collateral: '400' } });
+  assert.deepEqual(native({ kind: 'redeem', market: '7' }),
+    { receiver_id: at, method_name: 'redeem', gas, deposit: '0', args: { market_id: '7' } });
+  assert.deepEqual(native({ kind: 'withdraw', venue: 'market', amount: '3' }),
+    { receiver_id: at, method_name: 'withdraw', gas, deposit: '1', args: { amount: '3' } });
+  assert.deepEqual(native({ kind: 'leave', venue: 'market' }),
+    { receiver_id: at, method_name: 'storage_unregister', gas, deposit: '1', args: {} });
+  assert.deepEqual([spendOf({ kind: 'buy', market: '7', side: 'yes', amount: '2', minShares: '1' }),
+    spendOf({ kind: 'sell', market: '7', side: 'yes', shares: '9', minCollateral: '1' }),
+    spendOf({ kind: 'withdraw', venue: 'market', amount: '9' })], [2n, 0n, 0n],
+  'only money going into a position is spending');
 });
 
-test('one parser lets through only well-formed actions of an allowed kind, with only the fields they use', async () => {
+test('one parser lets through only well-formed actions of an allowed kind, with only the fields they use', () => {
   const stake = { kind: 'stake', series: 0, round: '1', side: 'up', amount: '1', minShares: '0' };
+  const buy = { kind: 'buy', market: '7', side: 'yes', amount: '1', minShares: '1' };
+  const sell = { kind: 'sell', market: '7', side: 'yes', shares: '1', minCollateral: '1' };
   const refused: [unknown, string][] = [
     [{ ...stake, side: 'sideways' }, 'invalid_side'], [{ ...stake, series: -1 }, 'invalid_series'],
     [{ ...stake, series: '0' }, 'invalid_series'], [{ ...stake, series: 2 ** 32 }, 'invalid_series'],
     [{ ...stake, round: '01' }, 'invalid_round'], [{ ...stake, round: '18446744073709551616' }, 'invalid_round'],
     [{ ...stake, amount: '0' }, 'invalid_amount'], [{ ...stake, amount: String(2n ** 128n) }, 'invalid_amount'],
-    [{ kind: 'deposit', amount: '-5' }, 'invalid_amount'],
-    [{ kind: 'buy', market: '1', side: 'yes', amount: '1', minShares: '0' }, 'invalid_min_shares'],
-    [{ kind: 'withdraw', contract: 'rounds', amount: '1:2' }, 'invalid_amount'],
-    [{ kind: 'register', contract: 'verifier' }, 'invalid_contract'],
+    [{ ...stake, minShares: '-1' }, 'invalid_min_shares'], [{ kind: 'deposit', amount: '5' }, 'invalid_action'],
+    [{ kind: 'withdraw', venue: 'rounds', amount: '1:2' }, 'invalid_amount'],
+    [{ kind: 'withdraw', amount: '1' }, 'invalid_venue'], [{ kind: 'leave', venue: 'verifier' }, 'invalid_venue'],
+    [{ ...buy, market: '07' }, 'invalid_market'], [{ ...buy, market: 7 }, 'invalid_market'],
+    [{ ...buy, side: 'up' }, 'invalid_side'], [{ ...buy, minShares: '0' }, 'invalid_min_shares'],
+    [{ ...sell, side: 'down' }, 'invalid_side'], [{ ...sell, shares: '0' }, 'invalid_shares'],
+    [{ ...sell, minCollateral: '0' }, 'invalid_min_collateral'],
+    [{ kind: 'redeem', market: '-1' }, 'invalid_market'],
     [{ kind: 'cash_out', amount: '1', recipient: 'Not An Account' }, 'invalid_recipient'],
     [{ kind: '__proto__' }, 'invalid_action'], [{ kind: 'constructor' }, 'invalid_action'], [null, 'invalid_action'],
     [[stake], 'invalid_action'], [stake.kind, 'invalid_action'],
@@ -94,9 +94,12 @@ test('one parser lets through only well-formed actions of an allowed kind, with 
       JSON.stringify(input));
   }
   assert.deepEqual(parseAgentAction({ ...stake, note: 'dropped', recipient: 'mallory.near' }), stake);
-  assert.throws(() => parseAgentAction({ kind: 'fund', amount: '1' }, ['stake']), /invalid_action/);
-  const noMarket = { ...deployment, contracts: { rounds: 'rounds.fixture.near', verifier: 'intents.fixture.near' } };
-  await assert.rejects(planAgentAction(noMarket, AGENT, { kind: 'redeem', market: '1' }, views),
+  assert.deepEqual(parseAgentAction({ ...buy, note: 'dropped' }), buy);
+  assert.throws(() => parseAgentAction({ kind: 'leave', venue: 'rounds' }, ['stake']), /invalid_action/);
+  const noVenues = { ...deployment, contracts: { verifier: 'intents.fixture.near' } };
+  assert.throws(() => planAgentAction(noVenues, AGENT, { kind: 'leave', venue: 'rounds' }),
+    (e: unknown) => e instanceof InvalidAction && e.message === 'rounds_not_configured');
+  assert.throws(() => planAgentAction(noVenues, AGENT, { kind: 'redeem', market: '7' }),
     (e: unknown) => e instanceof InvalidAction && e.message === 'market_not_configured');
 });
 
@@ -176,6 +179,25 @@ test('a status is the one asked about, and a long poll waits at most 25 seconds'
   assert.equal(seen.length, 2);
 });
 
+test('a status read can ask the API to look again, and frozen is read from the policy in force', async () => {
+  const seen: Seen = [];
+  const policy = (value: unknown) => ({ status: 200, body: { wallet_id: 'w', revision: 1, status: 'APPLIED',
+    policy: value } });
+  const api = new AgentApiClient(settings, transport([
+    { status: 200, body: answered('SUCCESS', { tx_hash: 'tx1' }) },
+    policy({ frozen: true }), policy({ frozen: false }), policy(null), policy({ frozen: 'yes' }),
+  ], seen));
+  await api.status('op_1', 0, expectedOf({ native: CLAIM }, AGENT_ID, AGENT), true);
+  assert.equal(new URL(seen[0]!.url).searchParams.get('refresh'), 'true');
+  assert.equal(await api.frozen(AGENT_ID), true);
+  assert.equal(seen[1]!.url, `https://agents.example.com/v1/agents/${AGENT_ID}/policy`);
+  assert.equal(await api.frozen(AGENT_ID), false);
+  for (const why of ['no policy', 'a flag that is not a boolean']) {
+    await assert.rejects(api.frozen(AGENT_ID), AgentApiUnavailable, why);
+  }
+  await assert.rejects(api.frozen('A'.repeat(64)), /invalid_agent_id/);
+});
+
 test('owner intents go out with the partner key alone and must be for this owner and agent', async () => {
   const seen: Seen = [];
   const generated = { correlation_id: 'intent_1', type: 'grant_issue', agent_id: AGENT_ID,
@@ -253,23 +275,24 @@ interface Fake {
   order: string[];
   requests: unknown[];
   released: string[];
+  refreshes: (boolean | undefined)[];
 }
 interface FakeOptions {
   replies: AgentStatus[];
   events?: ContractEvent[];
   tx?: Partial<FinalTransaction>;
-  existing?: { state: string; evidence: unknown };
+  existing?: { state: string; sent?: boolean; correlation?: string };
   sendError?: unknown;
   held?: boolean;
   claimed?: boolean;
 }
 function fake(opts: FakeOptions): Fake {
   const sent: Fake['sent'] = [], transitions: string[] = [], order: string[] = [], requests: unknown[] = [];
-  const released: string[] = [], replies = [...opts.replies];
+  const released: string[] = [], refreshes: Fake['refreshes'] = [], replies = [...opts.replies];
   let state = opts.existing?.state ?? 'prepared';
   const reply = () => { const r = replies.shift(); assert.ok(r, 'an unexpected status read'); return r; };
   const runner: AgentRunner = {
-    deployment, view: views, waitMs: 0,
+    deployment, waitMs: 0,
     api: {
       forGrant: g => {
         assert.deepEqual(g, grant);
@@ -280,7 +303,10 @@ function fake(opts: FakeOptions): Fake {
           return reply();
         } };
       },
-      status: async () => reply(),
+      status: async (_id, _wait, _expected, refresh) => {
+        refreshes.push(refresh);
+        return reply();
+      },
     },
     transaction: async () => {
       order.push('final transaction');
@@ -290,30 +316,32 @@ function fake(opts: FakeOptions): Fake {
         ...opts.tx };
     },
     operations: {
+      seen: async () => opts.existing !== undefined,
       prepare: async (_agent, _kind, _key, request) => {
         requests.push(request);
         return { id: '00000000-0000-4000-8000-000000000001', state: 'prepared', evidence: null };
       },
-      lease: async (_id, agent) => {
+      lease: async ({ agent }) => {
         assert.equal(agent, AGENT);
-        return opts.held ? null : { token: 'lease-1', state, evidence: opts.existing?.evidence ?? null };
+        return opts.held ? null : { token: 'lease-1', state, evidence: null, sent: opts.existing?.sent ?? false,
+          correlation: opts.existing?.correlation ?? null };
       },
-      release: async (_id, _agent, token) => { released.push(token); },
-      sent: async (_id, agent) => {
+      release: async (_op, token) => { released.push(token); },
+      sent: async ({ agent }) => {
         assert.equal(agent, AGENT);
         assert.equal(state, 'prepared');
         order.push('marked sent');
       },
-      transition: async (_id, agent, from, to, hash) => {
+      transition: async ({ agent }, from, to, { txHash }) => {
         assert.equal(agent, AGENT);
         assert.equal(from, state, `a transition from ${from} while the operation is ${state}`);
-        if (opts.claimed && hash !== null) throw new Error('transaction_already_claimed');
+        if (opts.claimed && txHash !== null) throw new TransactionClaimed();
         transitions.push(`${from}>${to}`);
         state = to;
       },
     },
   };
-  return { runner, sent, transitions, order, requests, released };
+  return { runner, sent, transitions, order, requests, released, refreshes };
 }
 const status = (s: Status, details: Record<string, unknown> = {}): AgentStatus =>
   ({ correlation_id: 'op_1', type: 'native', status: s, failure_code: null, details });
@@ -322,12 +350,10 @@ const STAKE_CALL: NativeCall = { receiver_id: 'rounds.fixture.near', method_name
   deposit: '1', args: { series_id: 0, round: '42', side: 'up', amount: '5000000', min_shares: '0' } };
 const staked: ContractEvent = { executor: 'rounds.fixture.near', standard: 'rounds', event: 'staked',
   data: { series_id: 0, round: '42', account: AGENT, side: 'up', amount: '5000000' } };
-const run = (f: Fake, action: AgentAction = STAKE, holdNew = false) =>
-  runAgentAction(f.runner, grant, { agent: AGENT, key: 'stake-1', action, holdNew });
+const run = (f: Fake, action: AgentAction = STAKE) => runAgentAction(f.runner, grant, { agent: AGENT, key: 'stake-1', action });
 const settledWith = (events: ContractEvent[], last = status('SUCCESS', { tx_hash: 'tx1' })) =>
   fake({ replies: [status('PROCESSING'), last], events });
-const resend = (sendError: unknown) =>
-  fake({ replies: [], sendError, existing: { state: 'prepared', evidence: { sent: true } } });
+const resend = (sendError: unknown) => fake({ replies: [], sendError, existing: { state: 'prepared', sent: true } });
 
 test('a stake is sent once under the operation key and done only when the round logged it for the agent', async () => {
   const f = settledWith([staked]);
@@ -349,14 +375,16 @@ test('a run waits while another holds the operation, and acts on the state it re
   await assert.rejects(run(busy), /operation_state_conflict/);
   assert.deepEqual([busy.sent, busy.transitions], [[], []]);
   const moved = fake({ replies: [status('SUCCESS', { tx_hash: 'tx1' })], events: [staked],
-    existing: { state: 'submitted', evidence: { correlation_id: 'op_1' } } });
+    existing: { state: 'submitted', correlation: 'op_1' } });
   assert.equal((await run(moved)).state, 'confirmed');
   assert.deepEqual(moved.sent, [], 'a send another run already made is only polled');
 });
 
 test('only a refusal documented as sending nothing fails an operation before it is sent', async () => {
   for (const code of ['policy_destination_denied', 'spend_budget_exceeded', 'insufficient_balance', 'wallet_busy',
-    'provider_refused', 'policy_transaction_limit_exceeded']) {
+    'provider_refused', 'policy_transaction_limit_exceeded', 'wallet_frozen', 'policy_not_ready',
+    'authorization_stale', 'provider_policy_mismatch', 'custody_native_balance_required', 'agent_grant_required',
+    'native_method_denied', 'invalid_request']) {
     const f = fake({ replies: [], sendError: apiError(403, code) });
     const result = await run(f);
     assert.deepEqual([result.state, f.transitions], ['failed', ['prepared>failed']], code);
@@ -364,7 +392,7 @@ test('only a refusal documented as sending nothing fails an operation before it 
   }
   for (const [error, why] of [[apiError(403, 'grant_revoked', false, 'grant'), 'a grant refusal'],
     [apiError(409, 'idempotency_conflict', false, 'request'), 'an earlier send under the key'],
-    [apiError(400, 'invalid_request', false, 'request'), 'a validation refusal'],
+    [apiError(409, 'operation_not_recoverable', false, 'request'), 'a refusal the API does not say sent nothing'],
     [apiError(403, 'policy_destination_denied', false, 'policy'), 'a documented code on a resend']] as const) {
     const f = why.includes('resend') ? resend(error) : fake({ replies: [], sendError: error });
     assert.equal((await run(f)).state, 'reconcile', why);
@@ -384,18 +412,21 @@ test('an outage, a timeout or a refusal the same key can outlast leaves the oper
 
 test('a resend goes under the same key and grant, and its success is followed to the end', async () => {
   const f = fake({ replies: [status('PROCESSING'), status('SUCCESS', { tx_hash: 'tx1' })], events: [staked],
-    existing: { state: 'prepared', evidence: { sent: true } } });
+    existing: { state: 'prepared', sent: true } });
   assert.equal((await run(f)).state, 'confirmed');
   assert.deepEqual([f.order[0], f.sent.map(s => s.key)], ['send', ['dm-00000000-0000-4000-8000-000000000001']]);
 });
 
-test('a frozen agent fails a stake not yet sent, and still follows one already sent', async () => {
-  const fresh = fake({ replies: [] });
-  const held = await run(fresh, STAKE, true);
-  assert.deepEqual([held.state, held.evidence, fresh.sent], ['failed', { reason: 'agent_frozen' }, []]);
-  const inFlight = fake({ replies: [status('PROCESSING'), status('SUCCESS', { tx_hash: 'tx1' })], events: [staked],
-    existing: { state: 'prepared', evidence: { sent: true } } });
-  assert.equal((await run(inFlight, STAKE, true)).state, 'confirmed');
+test('the API alone judges a frozen agent: every action is refused and nothing is left in doubt', async () => {
+  for (const action of [STAKE, { kind: 'claim', series: 0, round: '42' }, { kind: 'withdraw', venue: 'rounds', amount: '1' },
+    { kind: 'buy', market: '7', side: 'yes', amount: '1', minShares: '1' },
+    { kind: 'cash_out', amount: '1', recipient: 'alice.near' }] as const) {
+    const held = await run(fake({ replies: [], sendError: apiError(409, 'wallet_frozen', false, 'request') }), action);
+    assert.deepEqual([held.state, held.evidence], ['failed', { reason: 'refused_before_sending', code: 'wallet_frozen' }],
+      action.kind);
+  }
+  const f = resend(apiError(409, 'wallet_frozen', false, 'request'));
+  assert.equal((await run(f)).state, 'reconcile', 'a resend refused says nothing about the send before it');
 });
 
 test('a FAILED or REFUNDED status alone never fails an operation', async () => {
@@ -419,15 +450,64 @@ test('a FAILED or REFUNDED status alone never fails an operation', async () => {
 });
 
 test('a withdrawal whose callback has not come is still owed, not failed', async () => {
-  const out = { kind: 'withdraw', contract: 'rounds', amount: '3000000' } as const;
-  const logged = (event: string): ContractEvent => ({ executor: 'rounds.fixture.near', standard: 'rounds', event,
-    data: { account: AGENT, amount: '3000000', id: '7' } });
-  const cases: [ContractEvent[], string][] = [[[logged('withdraw')], 'reconcile'],
-    [[logged('withdraw'), logged('withdraw_failed')], 'failed'],
-    [[logged('withdraw'), logged('withdraw_confirmed')], 'confirmed']];
-  for (const [events, state] of cases) {
-    assert.equal((await run(settledWith(events), out)).state, state, events.map(e => e.event).join());
+  for (const [venue, executor] of [['rounds', 'rounds.fixture.near'], ['market', 'market.fixture.near']] as const) {
+    const out = { kind: 'withdraw', venue, amount: '3000000' } as const;
+    const logged = (event: string): ContractEvent => ({ executor, standard: venue, event,
+      data: { account: AGENT, amount: '3000000', id: '7' } });
+    const cases: [ContractEvent[], string][] = [[[logged('withdraw')], 'reconcile'],
+      [[logged('withdraw'), logged('withdraw_failed')], 'failed'],
+      [[logged('withdraw'), logged('withdraw_confirmed')], 'confirmed']];
+    for (const [events, state] of cases) {
+      assert.equal((await run(settledWith(events), out)).state, state, venue + events.map(e => e.event).join());
+    }
   }
+});
+
+const BUY = { kind: 'buy', market: '7', side: 'yes', amount: '2000000', minShares: '1900000' } as const;
+const bought: ContractEvent = { executor: 'market.fixture.near', standard: 'market', event: 'buy',
+  data: { market_id: '7', account: AGENT, side: 'yes', shares: '2000000', collateral: '2000000', fee: '40000' } };
+
+test('a trade is proven only by its own market, side and size, logged by the market', async () => {
+  assert.equal((await run(settledWith([bought]), BUY)).state, 'confirmed');
+  const wrong: [Partial<ContractEvent>, string][] = [
+    [{ data: { ...bought.data, market_id: '8' } }, 'another market'],
+    [{ data: { ...bought.data, side: 'no' } }, 'the other side'],
+    [{ data: { ...bought.data, collateral: '1999999' } }, 'another size'],
+    [{ data: { ...bought.data, account: 'other.near' } }, 'someone else'],
+    [{ executor: 'rounds.fixture.near' }, 'another contract logging it'],
+    [{ standard: 'rounds' }, 'another standard'],
+    [{ event: 'sell' }, 'another event'],
+  ];
+  for (const [change, what] of wrong) {
+    assert.equal((await run(settledWith([{ ...bought, ...change }]), BUY)).state, 'failed', what);
+  }
+  const sell = { kind: 'sell', market: '7', side: 'yes', shares: '500', minCollateral: '400' } as const;
+  const sold: ContractEvent = { ...bought, event: 'sell', data: { market_id: '7', account: AGENT, side: 'yes',
+    shares: '500', collateral: '420', fee: '8' } };
+  assert.equal((await run(settledWith([sold]), sell)).state, 'confirmed');
+  assert.equal((await run(settledWith([{ ...sold, data: { ...sold.data, shares: '499' } }]), sell)).state, 'failed');
+  const redeem = { kind: 'redeem', market: '7' } as const;
+  const paid: ContractEvent = { ...bought, event: 'redeemed', data: { market_id: '7', account: AGENT, amount: '9' } };
+  assert.equal((await run(settledWith([paid]), redeem)).state, 'confirmed');
+  assert.equal((await run(settledWith([]), redeem)).state, 'failed', 'a redeem that paid nothing out');
+});
+
+test('the fence runs before anything is prepared, and never between a retry and its own send', async () => {
+  const fenced = async (f: Fake) => {
+    let asked = 0;
+    await runAgentAction(f.runner, grant, { agent: AGENT, key: 'stake-1', action: STAKE, fence: async () => {
+      asked++;
+      throw new Error('slippage_too_wide');
+    } }).catch(() => {});
+    return asked;
+  };
+  const fresh = fake({ replies: [] });
+  assert.equal(await fenced(fresh), 1);
+  assert.deepEqual([fresh.requests.length, fresh.sent.length], [0, 0], 'a fenced action leaves nothing to follow');
+  const retry = fake({ replies: [status('PROCESSING'), status('SUCCESS', { tx_hash: 'tx1' })], events: [staked],
+    existing: { state: 'prepared', sent: true } });
+  assert.equal(await fenced(retry), 0, 'a key already on record may have been sent, so the price cannot refuse it');
+  assert.equal(retry.sent.length, 1);
 });
 
 test('a stake the round did not take fails with what the contract logged, though the API reports success', async () => {
@@ -445,37 +525,87 @@ test('a stake is proven only by its own round, series, side and amount', async (
   }
 });
 
-test('a deposit is proven by the round crediting the agent, and only by that', async () => {
-  const deposit = { kind: 'deposit', amount: '5000000' } as const;
-  const credited: ContractEvent = { executor: 'rounds.fixture.near', standard: 'rounds', event: 'deposit',
-    data: { account: AGENT, amount: '5000000' } };
-  assert.equal((await run(settledWith([credited]), deposit)).state, 'confirmed');
-  const elsewhere = { ...credited, executor: 'market.fixture.near' };
-  assert.equal((await run(settledWith([elsewhere]), deposit)).state, 'failed');
-  const out = { kind: 'withdraw', contract: 'rounds', amount: '5000000' } as const;
-  assert.equal((await run(settledWith([credited]), out)).state, 'failed', 'a deposit is not the withdrawal');
+test('leaving is proven by the round closing the agent\'s account, and only by that', async () => {
+  const leave = { kind: 'leave', venue: 'rounds' } as const;
+  const closed: ContractEvent = { executor: 'rounds.fixture.near', standard: 'rounds', event: 'unregistered',
+    data: { account: AGENT, deposit_to: 'alice.near' } };
+  assert.equal((await run(settledWith([closed]), leave)).state, 'confirmed');
+  const elsewhere = { ...closed, executor: 'market.fixture.near' };
+  assert.equal((await run(settledWith([elsewhere]), leave)).state, 'failed');
+  assert.equal((await run(settledWith([]), leave)).state, 'failed', 'a call that closed nothing');
+  const noHash = settledWith([closed], status('SUCCESS'));
+  assert.equal((await run(noHash, leave)).state, 'reconcile');
 });
 
 test('a rerun after a crash polls the submitted operation and never sends it again', async () => {
   const f = fake({ replies: [status('SUCCESS', { tx_hash: 'tx1' })], events: [staked],
-    existing: { state: 'submitted', evidence: { correlation_id: 'op_1' } } });
+    existing: { state: 'submitted', correlation: 'op_1' } });
   assert.equal((await run(f)).state, 'confirmed');
   assert.deepEqual(f.sent, []);
   assert.deepEqual(f.transitions, ['submitted>confirmed']);
-  const still = fake({ replies: [status('PROCESSING')],
-    existing: { state: 'unknown', evidence: { correlation_id: 'op_1' } } });
+  const still = fake({ replies: [status('PROCESSING')], existing: { state: 'unknown', correlation: 'op_1' } });
   assert.equal((await run(still)).state, 'unknown');
   assert.deepEqual(still.transitions, [], 'an unknown operation stays unknown until it settles');
 });
 
-test('registering is read on chain only once its transaction is final', async () => {
-  const register = { kind: 'register', contract: 'rounds' } as const;
-  const f = settledWith([]);
-  assert.equal((await run(f, register)).state, 'confirmed');
-  assert.equal((f.sent[0]!.send as { native: NativeCall }).native.method_name, 'storage_deposit');
-  assert.deepEqual(f.order.slice(-1), ['final transaction']);
-  const noHash = settledWith([], status('SUCCESS'));
-  assert.equal((await run(noHash, register)).state, 'reconcile');
+const COMMITMENT = createHash('sha256').update(grant.token).digest('hex');
+const stranded = (action: AgentAction = STAKE) => ({ id: 'op-1', agent: AGENT,
+  request: { agent_id: AGENT_ID, grant: COMMITMENT, action } });
+const noGrant = async () => null;
+
+test('the sweep finishes an operation nobody is waiting on, with no grant and no second send', async () => {
+  const f = fake({ replies: [status('SUCCESS', { tx_hash: 'tx1' })], events: [staked],
+    existing: { state: 'unknown', correlation: 'op_1' } });
+  await followOperation(f.runner, stranded(), noGrant);
+  assert.deepEqual([f.transitions, f.sent, f.released], [['unknown>confirmed'], [], ['lease-1']]);
+  const unsettled = fake({ replies: [status('PROCESSING')], existing: { state: 'submitted', correlation: 'op_1' } });
+  await followOperation(unsettled.runner, stranded(), noGrant);
+  assert.deepEqual(unsettled.transitions, ['submitted>unknown']);
+  const busy = fake({ replies: [], held: true, existing: { state: 'unknown', correlation: 'op_1' } });
+  await followOperation(busy.runner, stranded(), noGrant);
+  assert.deepEqual(busy.transitions, [], 'a caller that holds the operation is left to finish it');
+});
+
+test('the sweep asks again about an operation stopped for a check, and clears it only on proof', async () => {
+  const proven = fake({ replies: [status('SUCCESS', { tx_hash: 'tx1' })], events: [staked],
+    existing: { state: 'reconcile', correlation: 'op_1' } });
+  await followOperation(proven.runner, stranded(), noGrant);
+  assert.deepEqual([proven.transitions, proven.refreshes], [['reconcile>confirmed'], [true]]);
+  const review = fake({ replies: [status('NEEDS_REVIEW')], existing: { state: 'reconcile', correlation: 'op_1' } });
+  await followOperation(review.runner, stranded(), noGrant);
+  assert.deepEqual(review.transitions, [], 'still under review, it stays stopped');
+  const blind = fake({ replies: [], existing: { state: 'reconcile' } });
+  await followOperation(blind.runner, stranded(), noGrant);
+  assert.deepEqual(blind.transitions, [], 'with nothing to ask about, it waits for the owner');
+});
+
+test('the sweep fails what never left, resends what may have, and stops when the grant is gone', async () => {
+  const never = fake({ replies: [] });
+  await followOperation(never.runner, stranded(), noGrant);
+  assert.deepEqual([never.transitions, never.sent], [['prepared>failed'], []]);
+  const asked: string[] = [];
+  const found = async (agentId: string, commitment: string) => {
+    asked.push(`${agentId}:${commitment}`);
+    return grant;
+  };
+  const again = fake({ replies: [status('PROCESSING'), status('SUCCESS', { tx_hash: 'tx1' })], events: [staked],
+    existing: { state: 'prepared', sent: true } });
+  await followOperation(again.runner, stranded(), found);
+  assert.deepEqual(asked, [`${AGENT_ID}:${COMMITMENT}`], 'only the grant it was sent under may send it again');
+  assert.equal(again.sent[0]!.key, 'dm-op-1');
+  assert.deepEqual(again.transitions, ['prepared>submitted', 'submitted>confirmed']);
+  const gone = fake({ replies: [], existing: { state: 'prepared', sent: true } });
+  await followOperation(gone.runner, stranded(), noGrant);
+  assert.deepEqual([gone.transitions, gone.sent], [['prepared>reconcile'], []]);
+});
+
+test('the sweep does not touch an operation whose recorded request it cannot read', async () => {
+  const f = fake({ replies: [], existing: { state: 'unknown', correlation: 'op_1' } });
+  for (const request of [null, { grant: COMMITMENT, action: STAKE }, { agent_id: AGENT_ID, grant: COMMITMENT },
+    { agent_id: AGENT_ID, grant: COMMITMENT, action: { kind: 'fund' } }]) {
+    await assert.rejects(followOperation(f.runner, { id: 'op-1', agent: AGENT, request }, noGrant));
+  }
+  assert.deepEqual(f.transitions, []);
 });
 
 test('a final transaction is its signer, receiver and calls, with events only from receipts that succeeded',
@@ -549,16 +679,4 @@ test('an account the chain has not seen holds no NEAR, and any other answer is a
   for (const amount of [undefined, '-1', '1.5', 7]) {
     await assert.rejects(nearBalance(rpc(() => ({ amount })))(AGENT), /invalid_account_view/, String(amount));
   }
-});
-
-test('the command line names one action and the key that resumes it', () => {
-  assert.deepEqual(parseAction(['stake', '--key', 'stake-1', '--series', '0', '--round', '42', '--side', 'up',
-    '--amount', '5000000', '--min-shares', '0']), { key: 'stake-1', action: STAKE });
-  assert.deepEqual(parseAction(['deposit', '--key', 'in-1', '--amount', '9']),
-    { key: 'in-1', action: { kind: 'deposit', amount: '9' } });
-  assert.deepEqual(parseAction(['withdraw', 'rounds', '--key', 'out-1', '--amount', '9']),
-    { key: 'out-1', action: { kind: 'withdraw', contract: 'rounds', amount: '9' } });
-  assert.throws(() => parseAction(['stake', '--series', '0']), /--key is required/);
-  assert.throws(() => parseAction(['register', 'oracle', '--key', 'k']), /npm run agent/);
-  assert.throws(() => parseAction(['sweep', '--key', 'k']), /npm run agent/);
 });

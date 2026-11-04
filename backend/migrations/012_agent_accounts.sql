@@ -24,9 +24,16 @@ CREATE TABLE agent_intents (
  agent_grant uuid REFERENCES agent_grants(id),
  intent jsonb NOT NULL, status text NOT NULL, expires_at timestamptz NOT NULL,
  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+ followed_at timestamptz,
  CHECK((type IN ('grant_issue','grant_revoke'))=(agent_grant IS NOT NULL))
 );
 CREATE INDEX agent_intents_agent ON agent_intents(agent_account,created_at);
-ALTER TABLE user_operations ADD COLUMN lease_token uuid, ADD COLUMN leased_until timestamptz;
+ALTER TABLE user_operations ADD COLUMN lease_token uuid, ADD COLUMN leased_until timestamptz,
+ ADD COLUMN sent_at timestamptz, ADD COLUMN correlation_id text, ADD COLUMN followed_at timestamptz,
+ ADD COLUMN created_at timestamptz NOT NULL DEFAULT now();
 CREATE UNIQUE INDEX user_operations_transaction ON user_operations(deployment_id,transaction_hash)
  WHERE transaction_hash IS NOT NULL;
+CREATE INDEX user_operations_via ON user_operations(deployment_id,(request->>'via'),created_at)
+ WHERE request ? 'via';
+CREATE INDEX user_operations_unsettled ON user_operations(deployment_id,followed_at)
+ WHERE state IN ('prepared','submitted','unknown','reconcile');

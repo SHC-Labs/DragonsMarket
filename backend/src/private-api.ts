@@ -5,7 +5,7 @@ import { challenge, isUuid, login, revokeAllSessions, session, tokenHash, type C
 import { isAccount as account } from './validate.js';
 import { ReadError } from './read-api.js';
 import { LOCK } from './locks.js';
-import { isAgentAccessRoute, isAgentRoute, type AgentRoutes } from './agent-routes.js';
+import { isAgentAccessRoute, isAgentRoute, type AgentRoutes } from './agent-paths.js';
 export const isPrivateRoute = (p: string) =>
   p.startsWith('/v1/auth/') || p === '/v1/watchlist' || p === '/v1/policies/acknowledge' || /^\/v1\/operations\/[^/]+$/.test(p) ||
   isAgentRoute(p) || isAgentAccessRoute(p);

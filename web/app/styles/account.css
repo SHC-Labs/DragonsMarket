@@ -68,11 +68,11 @@
 .agent-name { margin: 0; font-family: var(--font-display-stack); font-size: var(--fs-xl); font-weight: 600; letter-spacing: -0.025em; }
 .agent-account { display: flex; flex-wrap: wrap; gap: var(--s-2); margin: 0; font-size: var(--fs-sm); }
 .agent-step { display: grid; justify-items: start; gap: var(--s-3); width: 100%; }
-.agent-summary { margin: 0; padding: var(--s-4); border-left: 2px solid var(--brand); border-radius: var(--r-xs); background: var(--raised); line-height: 1.5; }
+.agent-summary { margin: 0; padding: var(--s-4); border-left: 2px solid var(--brand); border-radius: var(--r-xs); background: var(--raised); line-height: 1.5; white-space: pre-line; }
 .agent-label { font-size: var(--fs-sm); color: var(--text-muted); }
 .agent-step .field { width: min(100%, 24rem); }
 .agent-desk { display: grid; gap: var(--s-4); }
-.agent-balances { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-3); margin: 0; }
+.agent-balances { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--s-3); margin: 0; }
 .agent-balances > div { padding: var(--s-4); border-radius: var(--r-md); background: var(--raised); }
 .agent-balances dt { font-size: var(--fs-xs); color: var(--text-muted); }
 .agent-balances dd { margin: var(--s-1) 0 0; font-size: var(--fs-lg); font-weight: 500; }
@@ -81,7 +81,8 @@
 .agent-panel-title { margin: 0; font-size: var(--fs-md); font-weight: 500; }
 .agent-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); }
 .agent-amount { width: 9rem; }
-.agent-select { min-height: var(--control-md); padding: 0 var(--s-4); border: 1px solid var(--border-input); border-radius: var(--r-sm); background: var(--bg); color: var(--text); }
+.agent-select { max-width: 100%; min-height: var(--control-md); padding: 0 var(--s-4); border: 1px solid var(--border-input); border-radius: var(--r-sm); background: var(--bg); color: var(--text); }
+.agent-position { display: grid; gap: var(--s-2); font-size: var(--fs-sm); }
 .agent-history { display: grid; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
 .agent-history > li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); font-size: var(--fs-sm); }
 .agent-connect { display: grid; gap: var(--s-2); margin: 0; }

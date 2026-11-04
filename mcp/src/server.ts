@@ -9,20 +9,28 @@ import {
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { Backend, BackendRefusal } from './backend.js';
 import { readMcpConfig, type McpConfig } from './config.js';
+import { TokenBudget } from './token-budget.js';
 import { buildServer } from './tools.js';
 
 const TOKEN = /^dmk_[A-Za-z0-9_-]{43}$/;
 const MAX_BODY = 64 * 1024;
 
-export function createMcpApp(config: McpConfig, backend: Backend, skill: string) {
+export function createMcpApp(config: McpConfig, backend: Backend, skill: string, budget = new TokenBudget()) {
   const verifier = {
     verifyAccessToken: (token: string) => {
       if (!TOKEN.test(token)) {
         return Promise.reject(new OAuthError(OAuthErrorCode.InvalidToken, 'Not a Dragons Market access token'));
       }
-      return backend.session(token).then(session => ({ token, clientId: session.agentId, scopes: [],
-        expiresAt: session.expiresAt, extra: { decimals: session.decimals } }), (error: unknown) => {
+      if (!budget.allows(token)) {
+        return Promise.reject(new OAuthError(OAuthErrorCode.TemporarilyUnavailable, 'Too many new tokens, try again soon'));
+      }
+      return backend.session(token).then(session => {
+        budget.accepted(token);
+        return { token, clientId: session.agentId, scopes: [], expiresAt: session.expiresAt,
+          extra: { decimals: session.decimals } };
+      }, (error: unknown) => {
         if (error instanceof BackendRefusal && error.status === 401) {
+          budget.refused(token);
           throw new OAuthError(OAuthErrorCode.InvalidToken, 'The access token is not live');
         }
         throw error;

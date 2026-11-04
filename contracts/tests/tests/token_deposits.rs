@@ -126,6 +126,55 @@ async fn a_token_holder_registers_in_near_deposits_trades_and_exits() -> anyhow:
 }
 
 #[tokio::test]
+async fn an_owner_funds_an_agent_that_never_holds_the_token_and_it_trades() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let id = new_market(&w, 600).await?;
+    register_on_token(&w, w.market.id()).await?;
+    let (owner, agent) = (&w.dave, &w.alice);
+    owner
+        .call(w.market.id(), "storage_deposit")
+        .args_json(json!({ "account_id": agent.id() }))
+        .deposit(NearToken::from_millinear(50))
+        .transact()
+        .await?
+        .into_result()?;
+    let tokens = ft_balance(&w, agent.id()).await;
+    let before = credited(&w.market, agent.id()).await;
+    let gift = format!("deposit_for:{}", agent.id());
+    let r = send(&w, owner, w.market.id(), 15 * USD, &gift, SEND_TGAS).await?;
+    assert_clean(&w, "deposit for the agent", &r);
+    let from = format!("\"from\":\"{}\"", owner.id());
+    assert!(
+        r.logs()
+            .iter()
+            .any(|l| l.contains("\"event\":\"deposit\"") && l.contains(&from)),
+        "the deposit names who paid: {:?}",
+        r.logs()
+    );
+    assert_eq!(credited(&w.market, agent.id()).await, before + 15 * USD);
+    assert_eq!(credited(&w.market, owner.id()).await, 0);
+    assert_eq!(
+        ft_balance(&w, agent.id()).await,
+        tokens,
+        "no token ever reaches the agent"
+    );
+    assert_reconciled(&w).await;
+
+    agent
+        .call(w.market.id(), "buy")
+        .args_json(
+            json!({ "market_id": id.to_string(), "side": "yes", "amount": (5 * USD).to_string(), "min_shares": "1" }),
+        )
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+    assert_eq!(credited(&w.market, agent.id()).await, before + 10 * USD);
+    assert_reconciled(&w).await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_refused_transfer_comes_back_whole_and_moves_nothing() -> anyhow::Result<()> {
     let w = setup().await?;
     register_on_token(&w, w.market.id()).await?;
