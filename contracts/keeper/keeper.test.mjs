@@ -7,8 +7,8 @@ import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import {
-  accessKeyReport, advanceCursor, councilFloor, daoReport, describeOutcome, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options, wiringProblems, driftProblems, bondRatioWarning,
-  quarterEnd, quarterOf, readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, tokenProblems, verifierProblems,
+  accessKeyReport, advanceCursor, councilFloor, daoReport, drawableHolders, dueActions, formatNear, isOpen, juryProblems, marginReport, nearToYocto, options, wiringProblems, driftProblems, economicsProblems, basisPoints, milliseconds, bondRatioWarning,
+  readCursor, readKeyFile, reconcile, reconciliation, refuseKeyFlags, resolveKeys, secondJurySize, storageMargin, tokenProblems, verifierProblems,
   writeCursor, refuseRetiredController, releaseReport, validateActionKeys,
 } from "./keeper.mjs";
 import { b58encode } from "./chain.mjs";
@@ -162,7 +162,7 @@ test("the Council's figure is a floor: holding more is normal and holding less i
 test("the Council's floor is what it took in less what it paid and less the claims on their way", () => {
   const totals = (total_received, total_paid, pending_claims) => ({ total_received, total_paid, pending_claims });
   assert.equal(councilFloor(totals("1600000", "0", "0")), 1600000n);
-  assert.equal(councilFloor(totals("1600000", "871005", "0")), 728995n);
+  assert.equal(councilFloor(totals("1600000", "871005", "0")), 728995n, "accrued balances and live earnings are inside the floor");
   assert.equal(councilFloor(totals("1600000", "871005", "444970")), 284025n, "a claim in flight has already left the verifier");
   assert.equal(councilFloor(totals("0", "0", "0")), 0n);
   assert.equal(councilFloor(totals("340282366920938463463374607431768211455", "1", "0")), 340282366920938463463374607431768211454n);
@@ -372,50 +372,25 @@ const ns = (iso) => BigInt(Date.parse(iso)) * 1_000_000n;
 const DAY = 86_400n * 10n ** 9n;
 const HOUR = 3_600n * 10n ** 9n;
 const MINUTE = 60n * 10n ** 9n;
-const Q4_2026 = 2026 * 4 + 3;
 const idle = { ...base, now: 0n, cases: { 0: null }, markets: [] };
-const council = (extra = {}) => ({ lastTick: ns("2026-11-01T00:00:00Z"), nextToFinalize: Q4_2026, closeGraceNs: 7n * DAY, ...extra });
+const council = (extra = {}) => ({ lastDay: ns("2026-11-01T00:00:00Z") / DAY, ...extra });
 const withCouncil = (now, extra) => ({ ...idle, now: ns(now), council: council(extra) });
 const councilCalls = (s) => dueActions(s).filter((a) => a.contract === "council").map((a) => a.method);
 
-test("quarters are numbered year * 4 + quarter and end where the next one starts", () => {
-  assert.equal(quarterOf(ns("2026-12-31T23:59:59Z")), Q4_2026);
-  assert.equal(quarterOf(ns("2027-01-01T00:00:00Z")), Q4_2026 + 1);
-  assert.equal(quarterEnd(Q4_2026), ns("2027-01-01T00:00:00Z"));
-  assert.equal(quarterEnd(Q4_2026 + 1), ns("2027-04-01T00:00:00Z"));
-});
-
-test("advance_quarters is sent once the quarter of now is not the quarter of the last tick, and not before", () => {
-  assert.deepEqual(councilCalls(withCouncil("2026-12-31T23:59:59Z")), []);
-  assert.deepEqual(councilCalls(withCouncil("2027-01-01T00:00:00Z")), ["advance_quarters"]);
-  const [advance] = dueActions(withCouncil("2027-01-01T00:00:00Z"));
+test("advance_days is sent once the UTC day of now is past the council's last_day, and not before", () => {
+  assert.deepEqual(councilCalls(withCouncil("2026-11-01T23:59:59Z")), []);
+  assert.deepEqual(councilCalls(withCouncil("2026-11-02T00:00:00Z")), ["advance_days"]);
+  const [advance] = dueActions(withCouncil("2026-11-02T00:00:00Z"));
   assert.deepEqual([advance.contract, advance.args, advance.gas], ["council", {}, 50n * 10n ** 12n]);
 });
 
-test("finalize_quarter is sent for the next quarter only after its end plus the grace, and only that quarter", () => {
-  const end = quarterEnd(Q4_2026);
-  const caught = { lastTick: end };
-  assert.deepEqual(councilCalls({ ...withCouncil("2027-01-01T00:00:00Z", caught), now: end + 7n * DAY - 1n }), []);
-  const only = dueActions({ ...withCouncil("2027-01-01T00:00:00Z", caught), now: end + 7n * DAY });
-  const finalize = only.find((a) => a.method === "finalize_quarter");
-  assert.deepEqual([finalize.contract, finalize.args, finalize.gas], ["council", { quarter: Q4_2026 }, 50n * 10n ** 12n]);
-  const behind = dueActions({ ...withCouncil("2027-01-01T00:00:00Z", { lastTick: end - DAY }), now: end + 7n * DAY });
-  assert.deepEqual(behind.map((a) => a.method), ["advance_quarters", "finalize_quarter"], "the ledger moves first");
-  const later = dueActions({ ...withCouncil("2027-05-01T00:00:00Z", { nextToFinalize: Q4_2026 + 1, lastTick: quarterEnd(Q4_2026 + 1) }) });
-  assert.deepEqual(later.map((a) => a.args.quarter), [Q4_2026 + 1], "in order: the next one, not the newest");
+test("advance_days is sent while the cursor is many days behind, and not when it is ahead of the clock", () => {
+  assert.deepEqual(councilCalls(withCouncil("2027-03-01T00:00:00Z")), ["advance_days"]);
+  assert.deepEqual(councilCalls(withCouncil("2026-11-01T00:00:00Z", { lastDay: ns("2026-11-03T00:00:00Z") / DAY })), []);
 });
 
-test("finalize_quarter waits while one advance cannot bring the ledger up to the quarter's end", () => {
-  const stale = council({ lastTick: ns("2024-02-01T00:00:00Z") });
-  assert.deepEqual(councilCalls({ ...idle, now: ns("2027-03-01T00:00:00Z"), council: stale }), ["advance_quarters"]);
-  assert.deepEqual(councilCalls({ ...idle, now: ns("2027-03-01T00:00:00Z"), council: council({ lastTick: ns("2025-04-01T00:00:00Z") }) }), ["advance_quarters", "finalize_quarter"]);
-});
-
-test("a finalize refused for an open jury is reported as waiting, any other failure is shown as it is", () => {
-  const finalize = { method: "finalize_quarter" };
-  assert.match(describeOutcome(finalize, 'FAILED {"ActionError":"Smart contract panicked: a jury drawn in this quarter is still open"}'), /^waiting/);
-  assert.equal(describeOutcome(finalize, "FAILED other"), "FAILED other");
-  assert.equal(describeOutcome({ method: "sweep_fees" }, "ok"), "ok");
+test("a snapshot without a council sends no council call", () => {
+  assert.deepEqual(councilCalls({ ...idle, now: ns("2027-03-01T00:00:00Z") }), []);
 });
 
 const sweepAt = (id, at, status) => ({ id: String(id), at: String(at), council: { status }, treasury: { status: "settled" } });
@@ -595,4 +570,28 @@ test("the bond ratio warning names a ceiling that is far above the bond and stay
   assert.equal(bondRatioWarning({ max_market_locked: "500000000" }, { bond: "5000000" }), null);
   assert.match(bondRatioWarning({ max_market_locked: "100000000000" }, { bond: "5000000" }), /is 20000 times the oracle bond 5000000/);
   assert.equal(bondRatioWarning({ max_market_locked: "100000000000" }, { bond: "0" }), null);
+});
+
+test("a fee rate, ceiling or revenue share that moved is reported, and only the values given are compared", () => {
+  const market = { fee_rate_bps: 200, max_fee_rate_bps: 200, revenue_share_bps: 2500 };
+  assert.deepEqual(economicsProblems(market, { feeRateBps: 200, maxFeeRateBps: 200, revenueShareBps: 2500 }), []);
+  assert.deepEqual(economicsProblems(market, {}), []);
+  assert.deepEqual(economicsProblems({ ...market, fee_rate_bps: 100 }, { feeRateBps: 200 }), ["the market's fee rate in basis points is 100, expected 200"]);
+  assert.deepEqual(economicsProblems({ ...market, max_fee_rate_bps: 500, revenue_share_bps: 5000 }, { feeRateBps: 200, maxFeeRateBps: 200, revenueShareBps: 2500 }), [
+    "the market's fee rate ceiling in basis points is 500, expected 200",
+    "the market's revenue share in basis points is 5000, expected 2500",
+  ]);
+  assert.deepEqual(economicsProblems({}, { feeRateBps: 200 }), ["the market's fee rate in basis points is unset, expected 200"]);
+});
+
+test("basis-point options are whole numbers or absent", () => {
+  assert.equal(basisPoints({}, "expect-fee-rate-bps"), undefined);
+  assert.equal(basisPoints({ "expect-fee-rate-bps": "200" }, "expect-fee-rate-bps"), 200);
+  assert.equal(basisPoints({ "expect-fee-rate-bps": "0" }, "expect-fee-rate-bps"), 0);
+  for (const bad of ["2.5", "-1", "abc", "", "1e3"]) assert.throws(() => basisPoints({ "expect-fee-rate-bps": bad }, "expect-fee-rate-bps"), /whole number of basis points/);
+});
+
+test("the pace option is a whole number of milliseconds", () => {
+  assert.equal(milliseconds({ "rpc-pace-ms": "600" }, "rpc-pace-ms"), 600);
+  for (const bad of ["", "-5", "1.5", "fast"]) assert.throws(() => milliseconds({ "rpc-pace-ms": bad }, "rpc-pace-ms"), /whole number of milliseconds/);
 });

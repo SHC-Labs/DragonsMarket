@@ -9,7 +9,7 @@ import { signedFunctionCall, readKeyFile } from "./keeper.mjs";
 const METHODS = {
   market: new Set(["buy", "sell", "redeem", "withdraw", "sweep_fees", "settle_leg"]),
   oracle: new Set(["commit_vote", "reveal_vote", "finalize", "resolve_draw", "retry_apply", "retry_unlock", "resolve_by_deadline"]),
-  council: new Set(["advance_quarters", "finalize_quarter"]),
+  council: new Set(["advance_days"]),
   verifier: new Set(["mt_transfer_call"]),
 };
 const dec = /^(0|[1-9][0-9]*)$/;

@@ -23,7 +23,7 @@ if [ -n "${reproducible:-}" ]; then
   hashes=target/near/HASHES.txt
   mkdir -p target/near
   : >"$hashes"
-  for c in council market oracle; do
+  for c in council market oracle rounds; do
     (cd "$c" && cargo near build reproducible-wasm)
     crate=${c//-/_}
     (cd "target/near/$crate" && sha256sum "$crate.wasm") >>"$hashes"
@@ -35,6 +35,9 @@ fi
 log=$(mktemp)
 for c in mock-ft mock-nft mock-mt-receiver council market oracle rounds; do
   if (cd "$c" && cargo near build non-reproducible-wasm >"$log" 2>&1); then
+    crate=${c//-/_}
+    # A build that produces the same bytes may leave the file alone. The tests compare its time with the source, so mark it built now.
+    touch "target/near/$crate/$crate.wasm"
     echo "built $c"
   else
     cat "$log"

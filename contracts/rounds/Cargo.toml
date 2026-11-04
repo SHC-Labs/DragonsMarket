@@ -3,7 +3,7 @@ name = "rounds"
 version = "0.1.0"
 edition = "2021"
 publish = false
-repository = "https://github.com/SHC-Labs/Dragons-Market"
+repository = "https://github.com/SHC-Labs/DragonsMarket"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

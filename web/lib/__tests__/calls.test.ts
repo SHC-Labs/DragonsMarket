@@ -18,7 +18,7 @@ import {
   buyCall, buyFromBalanceCall, challengeCall, commitVoteCall, commitmentFor, depositCall, finalizeCall, newSalt, proposeCall, retryApplyCall,
   redeemCall, resolveDrawCall, revealVoteCall, sellCall, storageDepositCall, withdrawCall,
 } from "../market";
-import { claimQuarterCall, requestUnstakeCall, stakeCall, unstakeCall } from "../council";
+import { claimCall, requestUnstakeCall, stakeCall, unstakeCall } from "../council";
 
 const VERIFIER_FIELDS = { receiverId: "intents.near", methodName: "mt_transfer_call", deposit: "1", gas: "100000000000000" };
 
@@ -99,11 +99,12 @@ describe("council calls", () => {
     });
   });
   it("requests, unstakes and claims", () => {
-    expect(requestUnstakeCall("42")).toMatchObject({ receiverId: "council.near", methodName: "request_unstake", deposit: "0" });
+    expect(requestUnstakeCall("42")).toMatchObject({ receiverId: "council.near", methodName: "request_unstake", deposit: "0", args: { token_id: "42", accepts_cut: true } });
     expect(unstakeCall("42")).toMatchObject({ methodName: "unstake", deposit: "1" });
-    expect(claimQuarterCall(8108, "42")).toMatchObject({
-      methodName: "claim_quarter", deposit: "1", args: { quarter: 8108, token_id: "42" },
+    expect(claimCall(["42", "43"])).toMatchObject({
+      receiverId: "council.near", methodName: "claim", deposit: "1", args: { token_ids: ["42", "43"] },
     });
+    expect(claimCall([])).toMatchObject({ methodName: "claim", args: { token_ids: [] } });
   });
 });
 

@@ -353,9 +353,9 @@ fn the_oracle_never_names_holder_revenue() {
 }
 
 // Reward money leaves the Council by one path. Its only verifier call is the payout of a claim, so a holder cannot be paid
-// through a second route, and an unstake, a forfeit or a finalization moves no money.
+// through a second route, and an unstake, a forfeit or a quarter close moves no money.
 #[test]
-fn the_council_pays_reward_money_only_in_a_quarter_claim() {
+fn the_council_pays_reward_money_only_in_a_claim() {
     let sources = sources_of("council");
     let code: String = sources.iter().map(|(_, code)| code.as_str()).collect();
     assert_eq!(
@@ -365,14 +365,22 @@ fn the_council_pays_reward_money_only_in_a_quarter_claim() {
     );
     assert_eq!(code.matches("self.pay(").count(), 1, "and one caller of it");
     let claim = code
-        .split("pub fn claim_quarter(")
+        .split("pub fn claim(")
         .nth(1)
-        .expect("the Council has claim_quarter")
+        .expect("the Council has claim")
         .split("pub fn on_claim_paid(")
         .next()
         .unwrap();
-    assert!(claim.contains("self.pay("), "the payout is made from claim_quarter");
-    for removed in ["pub fn claim(", "pending_reward", "acc_per_seat", "Stream"] {
+    assert!(claim.contains("self.pay("), "the payout is made from claim");
+    for removed in [
+        "pub fn claim_quarter(",
+        "pub fn finalize_quarter(",
+        "pub fn advance_quarters(",
+        "pub fn book_seat_time(",
+        "pending_reward",
+        "acc_per_seat",
+        "Stream",
+    ] {
         assert!(!code.contains(removed), "the Council code still has {removed}");
     }
 }

@@ -2,54 +2,41 @@ import { config } from "./config";
 import { view } from "./rpc";
 import { GAS, type FunctionCall } from "./market";
 
-export type QuarterState = "open" | "closing" | "final";
-export type EntitlementStatus = "accruing" | "closing" | "claimable" | "pending" | "paid";
-
 export interface Stake {
   owner: string;
   staked_at: string;
   unlock_requested_at: string | null;
   serving: string | null;
-  booked_to: string;
+  // The UTC day this seat starts earning, as a day number since 1970-01-01. Only a council that pays by arrival reports it.
+  earn_from_day?: string;
 }
 
-export interface QuarterView {
+export type SeatState = "waiting" | "earning" | "leaving" | "serving";
+
+export interface SeatEarnings {
+  owner: string;
+  state: SeatState;
+  earning_from: string;
+  // What a claim pays for this seat now: its earnings up to the last finished quarter.
+  earned_closed: string;
+  // Earned in the quarter still running. A claim cannot reach it until the quarter ends, and leaving first cuts it by half.
+  earned_in_progress: string;
+}
+
+export interface QuarterInfo {
   quarter: number;
-  label: string;
   starts_at: string;
   ends_at: string;
-  claimable_from: string;
-  state: QuarterState;
-  revenue_in: string;
-  carry_in: string;
-  pool: string;
-  seat_ns: string;
-  forfeit_ns: string;
-  paid: string;
-  pending: string;
-  rolled_to: number | null;
-}
-
-export interface EntitlementView {
-  quarter: number;
-  token_id: string;
-  owner: string;
-  weight_ns: string;
-  amount: string;
-  // True until the quarter is final: later revenue and seat time still move the amount.
-  estimated: boolean;
-  status: EntitlementStatus;
-  requested_at: string | null;
-  paid_at: string | null;
+  last_closed_quarter: number;
 }
 
 export interface RewardTotals {
   total_received: string;
   total_paid: string;
   pending_claims: string;
-  open_pool: string;
-  final_unclaimed: string;
-  rolled: string;
+  carry: string;
+  cut_pool: string;
+  accrued_total: string;
 }
 
 export interface CouncilConfig {
@@ -60,8 +47,9 @@ export interface CouncilConfig {
   cooldown_ns: string;
   max_seats_per_account: number;
   allowlist_enabled: boolean;
-  close_grace_ns: string;
   reconcile_wait_ns: string;
+  last_day?: string;
+  active_seats?: number;
 }
 
 const council = () => config.councilId;
@@ -72,15 +60,24 @@ export const isSeat = (account: string) => view<boolean>(council(), "is_seat", {
 export const isAllowed = (tokenId: string) => view<boolean>(council(), "is_allowed", { token_id: tokenId });
 export const seatsOf = (account: string) => view<string[]>(council(), "seats_of", { account_id: account });
 export const stakeOf = (tokenId: string) => view<Stake | null>(council(), "stake_of", { token_id: tokenId });
-export const currentQuarter = () => view<QuarterView>(council(), "current_quarter");
-export const getQuarter = (quarter: number) => view<QuarterView | null>(council(), "get_quarter", { quarter });
-export const listQuarters = (from: number, limit: number) =>
-  view<QuarterView[]>(council(), "list_quarters", { from_quarter: from, limit });
-export const getEntitlement = (quarter: number, tokenId: string, account: string) =>
-  view<EntitlementView | null>(council(), "get_entitlement", { quarter, token_id: tokenId, account_id: account });
-export const entitlementsOf = (account: string, fromQuarter: number, limit: number) =>
-  view<EntitlementView[]>(council(), "entitlements_of", { account_id: account, from_quarter: fromQuarter, limit });
 export const rewardTotals = () => view<RewardTotals>(council(), "reward_totals");
+// What one seat has earned and when it starts. Only a council that pays by arrival has this view.
+export const seatEarnings = (tokenId: string) => view<SeatEarnings | null>(council(), "seat_earnings", { token_id: tokenId });
+// Revenue a holder can claim now, from quarters that have ended. Claims never expire.
+export const claimableOf = (account: string) => view<string>(council(), "claimable_of", { account_id: account });
+// What a holder has earned in the running quarter, claimable once it ends.
+export const inProgressOf = (account: string) => view<string>(council(), "in_progress_of", { account_id: account });
+export const quarterInfo = () => view<QuarterInfo>(council(), "quarter_info");
+
+export interface OwnedToken {
+  token_id: string;
+  owner_id: string;
+}
+
+// NEP-181 enumeration. A collection without it answers with an error, which callers treat as "cannot list".
+export const nftTokensFor = (account: string) =>
+  view<OwnedToken[]>(config.nftId, "nft_tokens_for_owner", { account_id: account, from_index: "0", limit: 50 });
+export const nftToken = (tokenId: string) => view<OwnedToken | null>(config.nftId, "nft_token", { token_id: tokenId });
 
 // Stakes a seat by sending the NFT to the Council. Check isAllowed first; the Council refuses tokens off its allowlist.
 export const stakeCall = (tokenId: string): FunctionCall => ({
@@ -91,10 +88,12 @@ export const stakeCall = (tokenId: string): FunctionCall => ({
   deposit: "1",
 });
 
+// Leaving before the quarter ends cuts half of that quarter's earnings. The contract refuses the call without accepts_cut, so
+// only send this after the holder has read the warning.
 export const requestUnstakeCall = (tokenId: string): FunctionCall => ({
   receiverId: council(),
   methodName: "request_unstake",
-  args: { token_id: tokenId },
+  args: { token_id: tokenId, accepts_cut: true },
   gas: "30000000000000",
   deposit: "0",
 });
@@ -107,11 +106,12 @@ export const unstakeCall = (tokenId: string): FunctionCall => ({
   deposit: "1",
 });
 
-// A quarter pays each seat once. The call is refused until the quarter is final.
-export const claimQuarterCall = (quarter: number, tokenId: string): FunctionCall => ({
+// Pays everything the caller's seats have earned in one transfer, up to ten seats a call. Pass no tokens to collect what an
+// account already settled from seats that have left.
+export const claimCall = (tokenIds: string[]): FunctionCall => ({
   receiverId: council(),
-  methodName: "claim_quarter",
-  args: { quarter, token_id: tokenId },
+  methodName: "claim",
+  args: { token_ids: tokenIds },
   gas: GAS,
   deposit: "1",
 });

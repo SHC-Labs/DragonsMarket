@@ -44,6 +44,20 @@ export function formatDateTime(ns: string | bigint): string {
   });
 }
 
+// A moment the contracts fix in UTC, such as the end of a quarter: "01 Jan 2027, 00:00 UTC", the same in every time zone.
+export function formatDateTimeUtc(ns: string | bigint): string {
+  const text = new Date(nsToMs(ns)).toLocaleString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "UTC",
+  });
+  return `${text} UTC`;
+}
+
 // "2h 14m left", "40s left", or "ended". Updates once a minute above an hour, per the design notes.
 export function timeLeft(ns: string | bigint, nowMs: number): string {
   const secs = Math.floor((nsToMs(ns) - nowMs) / 1000);

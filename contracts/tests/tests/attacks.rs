@@ -29,7 +29,7 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
     let market_args = json!({ "title": "t", "rule_text": "r", "resolution_source": "s", "void_policy": "v", "category": "a", "subcategory": "b",
         "close_at": "1", "resolve_by": "2" });
     let stake =
-        json!({ "owner": me, "staked_at": "0", "unlock_requested_at": null, "serving": null, "booked_to": "0" });
+        json!({ "owner": me, "staked_at": "0", "unlock_requested_at": null, "serving": null, "earn_from_day": "0" });
 
     let cases: Vec<(&Contractish, &str, serde_json::Value, &str)> = vec![
         (
@@ -274,8 +274,14 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
         ),
         (
             &Contractish::Council,
-            "set_close_grace_ns",
-            json!({ "close_grace_ns": "86400000000000" }),
+            "set_reconcile_wait_ns",
+            json!({ "reconcile_wait_ns": "600000000000" }),
+            "owner only",
+        ),
+        (
+            &Contractish::Council,
+            "reconcile_claim",
+            json!({ "id": "0", "paid": true }),
             "owner only",
         ),
         (
@@ -302,12 +308,7 @@ async fn every_restricted_method_refuses_a_stranger() -> anyhow::Result<()> {
             json!({ "token_id": "x", "stake": stake }),
             "private",
         ),
-        (
-            &Contractish::Council,
-            "on_claim_paid",
-            json!({ "quarter": 1, "token_id": "x", "owner": me, "requested_at": "1" }),
-            "private",
-        ),
+        (&Contractish::Council, "on_claim_paid", json!({ "id": "1" }), "private"),
     ];
     for (contract, method, args, why) in cases {
         let to = match contract {
@@ -396,11 +397,7 @@ async fn value_moving_methods_need_exactly_one_yocto() -> anyhow::Result<()> {
             "reveal_vote",
             json!({ "market": w.market.id(), "market_id": "0", "outcome": "yes", "salt": "s", "reason": "r" }),
         ),
-        (
-            w.council.id(),
-            "claim_quarter",
-            json!({ "quarter": 0, "token_id": "x" }),
-        ),
+        (w.council.id(), "claim", json!({ "token_ids": [] })),
         (w.council.id(), "unstake", json!({ "token_id": "x" })),
     ] {
         let r = none(to, method, args).await?;
@@ -751,16 +748,17 @@ async fn two_sweeps_in_flight_pay_the_fees_out_once() -> anyhow::Result<()> {
 #[tokio::test]
 async fn two_claims_and_two_unstakes_in_flight_pay_a_seat_once() -> anyhow::Result<()> {
     let w = setup().await?;
+    back_date(&w, 1).await?;
     mint(&w, w.owner.id(), 10_000 * USD).await?;
     send_revenue(&w, 10_000 * USD).await?;
+    end_quarters(&w, 1).await?;
+    advance_days(&w).await?;
     let seat = &w.jurors[0];
-    let quarter = age_current_quarter(&w).await?;
-    finalize_quarter(&w, quarter).await?;
-    let owed = u(&entitlement(&w, quarter, seat.id().as_str(), seat.id()).await["amount"]);
-    assert!(owed > 0);
+    let owed = claimable_of(&w, seat.id()).await;
+    assert_eq!(owed, 2_000 * USD);
     let claim = || {
-        seat.call(w.council.id(), "claim_quarter")
-            .args_json(json!({ "quarter": quarter, "token_id": seat.id().as_str() }))
+        seat.call(w.council.id(), "claim")
+            .args_json(json!({ "token_ids": [seat.id().as_str()] }))
             .deposit(NearToken::from_yoctonear(1))
             .gas(GAS)
     };
@@ -1390,12 +1388,12 @@ async fn at_the_deadline_an_unfinalized_proposal_is_applied_and_not_voided_over(
     Ok(())
 }
 
-// A seat that stakes a block before a large arrival used to take its share of everything gathered so far. A seat now earns
-// for the time it was staked inside the quarter, so five seats staked just before 10,000 USD arrives have earned less than
-// the five that were there all along, though they hold half the seats.
+// A seat that stakes a block before a large arrival earns nothing from it: a seat starts at the next UTC midnight, so five
+// seats staked just before 10,000 USD arrives get none of it, and the five that were there all along share all of it.
 #[tokio::test]
-async fn staking_one_block_before_a_sweep_earns_only_the_time_staked() -> anyhow::Result<()> {
+async fn staking_one_block_before_a_sweep_earns_nothing_from_it() -> anyhow::Result<()> {
     let w = setup().await?;
+    back_date(&w, 1).await?;
     mint(&w, w.owner.id(), 10_000 * USD).await?;
     skip_secs(&w.worker, 30).await;
     let sniper = w.worker.dev_create_account().await?;
@@ -1406,24 +1404,25 @@ async fn staking_one_block_before_a_sweep_earns_only_the_time_staked() -> anyhow
     }
     send_revenue(&w, 10_000 * USD).await?;
     skip_secs(&w.worker, 5).await;
-    let quarter = age_current_quarter(&w).await?;
-    finalize_quarter(&w, quarter).await?;
+    end_quarters(&w, 1).await?;
+    advance_days(&w).await?;
 
-    let mut sniped = 0;
-    for t in &tokens {
-        sniped += u(&entitlement(&w, quarter, t, sniper.id()).await["amount"]);
-    }
+    let sniped = claimable_of(&w, sniper.id()).await + in_progress_of(&w, sniper.id()).await;
+    assert_eq!(
+        sniped, 0,
+        "five seats staked a moment before the arrival earned nothing from it"
+    );
+    refused(
+        claim(&w, &sniper, &tokens.iter().map(String::as_str).collect::<Vec<_>>()).await,
+        "nothing to claim",
+    );
     let mut honest = 0;
     for j in &w.jurors {
-        honest += u(&entitlement(&w, quarter, j.id().as_str(), j.id()).await["amount"]);
+        honest += claimable_of(&w, j.id()).await;
     }
     assert!(
-        sniped > 0 && sniped < honest / 2,
-        "five seats staked a moment before the arrival earned {sniped} against {honest} for the five that were there"
-    );
-    assert!(
-        sniped + honest <= 10_000 * USD && 10_000 * USD - (sniped + honest) < 10,
-        "the shares and the dust are the whole pool"
+        honest <= 10_000 * USD && 10_000 * USD - honest < 10,
+        "the five that were there all along have the whole sweep and the dust is the rest"
     );
     Ok(())
 }

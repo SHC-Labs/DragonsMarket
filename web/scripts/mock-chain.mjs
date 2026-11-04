@@ -7,6 +7,7 @@ import { existsSync, writeFileSync } from "node:fs";
 
 const PORT = Number(process.env.MOCK_CHAIN_PORT ?? 3030);
 const MARKET = "market.test.near", ORACLE = "oracle.test.near", TOKEN = "ft.test.near", VERIFIER = "intents.test.near";
+const COUNCIL = "council.test.near", NFT = "nft.test.near";
 const SEC = 1_000_000_000n, DAY = 86_400n * SEC, USD = 1_000_000n;
 const now = () => BigInt(Date.now()) * 1_000_000n;
 const started = now();
@@ -109,6 +110,13 @@ const positionsOf = (account) => (account === ALICE ? Object.keys(holdings).map(
   const m = markets[id], [yes, no] = holdings[id];
   return { market_id: String(id), yes: String(yes), no: String(no), status: m.status, outcome: m.outcome, redeemable: String(redeemable(m, [yes, no])) };
 });
+// The seats the mock account holds: one staked, one leaving, one that has finished its cooldown, one on a jury.
+const SEATS = {
+  7: { owner: ALICE, staked_at: String(started - 12n * DAY), unlock_requested_at: null, serving: null, earn_from_day: String(started / DAY) },
+  8: { owner: ALICE, staked_at: String(started - 20n * DAY), unlock_requested_at: String(started + 30n * SEC), serving: null, earn_from_day: String(started / DAY) },
+  9: { owner: ALICE, staked_at: String(started - 30n * DAY), unlock_requested_at: String(started - 2n * DAY), serving: null, earn_from_day: String(started / DAY) },
+  10: { owner: ALICE, staked_at: String(started - 40n * DAY), unlock_requested_at: null, serving: "3", earn_from_day: String(started / DAY) },
+};
 const BALANCE = { [ALICE]: 126_400_000n };
 const lockedTotal = markets.reduce((sum, m) => sum + BigInt(m.locked), 0n);
 const FEES = 3_250_000n, REVENUE_DUE = 1_000_000n, TREASURY_DUE = 1_000_000n;
@@ -188,6 +196,30 @@ const views = {
       apply_buffer_ns: String(600n * SEC), juror_share_bps: 5000, no_decision_share_bps: 5000, max_publishers: 10, reconcile_wait_ns: String(DAY),
     }),
     claimable_of: () => "0",
+  },
+  [COUNCIL]: {
+    config: () => ({
+      verifier: VERIFIER, collateral_token_id: "nep141:ft.test.near", markets: [MARKET], nft_contract: NFT,
+      cooldown_ns: String(60n * SEC), max_seats_per_account: 5, allowlist_enabled: true,
+      reconcile_wait_ns: String(3600n * SEC), last_day: String(started / DAY), active_seats: 28,
+    }),
+    seat_count: () => 31,
+    seats_of: ({ account_id }) => (account_id === ALICE ? Object.keys(SEATS) : []),
+    stake_of: ({ token_id }) => SEATS[token_id] ?? null,
+    is_allowed: ({ token_id }) => Number(token_id) < 30,
+    claimable_of: ({ account_id }) => (account_id === ALICE ? "4250000" : "0"),
+    in_progress_of: ({ account_id }) => (account_id === ALICE ? "1800000" : "0"),
+    quarter_info: () => ({ quarter: 8107, starts_at: "1790812800000000000", ends_at: "1798761600000000000", last_closed_quarter: 8106 }),
+    seat_earnings: ({ token_id }) => {
+      const s = SEATS[token_id];
+      if (!s) return null;
+      const state = s.serving !== null ? "serving" : s.unlock_requested_at !== null ? "leaving" : "earning";
+      return { owner: s.owner, state, earning_from: String(BigInt(s.earn_from_day) * DAY), earned_closed: state === "earning" ? "1250000" : "0", earned_in_progress: state === "earning" ? "600000" : "0" };
+    },
+  },
+  [NFT]: {
+    nft_tokens_for_owner: ({ account_id }) => (account_id === ALICE ? ["21", "22", "35"].map((token_id) => ({ token_id, owner_id: ALICE })) : []),
+    nft_token: ({ token_id }) => (["21", "22", "35"].includes(token_id) ? { token_id, owner_id: ALICE } : null),
   },
   [VERIFIER]: { mt_balance_of: ({ account_id }) => (account_id === ALICE ? String(2_874_250_000n) : "0") },
 };

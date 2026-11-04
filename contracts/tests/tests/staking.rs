@@ -436,17 +436,9 @@ async fn a_failed_return_transfer_restores_the_stake() -> anyhow::Result<()> {
     };
     w.nft.as_account().deploy(&wasm("mock_ft")?).await?.into_result()?;
     assert_eq!(event_names(&unstake(&w, j, tok(j)).await?), vec!["unstake_failed"]);
-    // The seat is back as it was, except that it counts again from the moment it came back.
-    let after = stake_of(&w, tok(j)).await;
-    let counted = |stake: &serde_json::Value| stake["booked_to"].as_str().unwrap().parse::<u64>().unwrap();
-    assert!(
-        counted(&after) > counted(&before),
-        "the time the seat was out is not counted"
-    );
-    let (mut after_rest, mut before_rest) = (after.clone(), before.clone());
-    after_rest["booked_to"] = serde_json::Value::Null;
-    before_rest["booked_to"] = serde_json::Value::Null;
-    assert_eq!(after_rest, before_rest);
+    // The seat is back as it was, still leaving: it keeps its request, so it does not earn again.
+    assert_eq!(stake_of(&w, tok(j)).await, before);
+    assert_eq!(seat_earnings(&w, tok(j)).await["state"], "leaving");
     assert!(is_seat(&w, j.id()).await);
     assert_eq!(w.council.view("seat_count").await?.json::<u32>()?, 5);
 

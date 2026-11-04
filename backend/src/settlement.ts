@@ -25,7 +25,7 @@ const PAIRS = [
     standards: ['council'],
     request: ['claim_requested'],
     terminal: ['claim_paid', 'claim_failed', 'claim_reconciled'],
-    key: ['quarter', 'token_id', 'owner', 'requested_at'],
+    key: ['id'],
   },
 ] as const;
 
@@ -46,7 +46,7 @@ export function settlementOf(standard: string, event: string): Settlement | null
 
 /**
  * Requests with no later terminal event for the same key, up to the snapshot height. Oldest first. With `account`, only those
- * of that account (the payload's `account`, or `owner` for a Council claim), so a person's own items are not crowded out.
+ * of that account (the payload's `account`), so a person's own items are not crowded out.
  */
 export async function pendingSettlements(
   client: Pick<pg.PoolClient, 'query'>,
@@ -61,7 +61,7 @@ export async function pendingSettlements(
     const sameKey = pair.key.map(field => `t.payload->>'${field}' IS NOT DISTINCT FROM r.payload->>'${field}'`).join(' AND ');
     return `(SELECT r.block_height, r.receipt_id, r.log_index, r.data_index, r.receiver_id, r.event, r.payload, '${pair.kind}' AS kind
       FROM raw_events r WHERE r.deployment_id = $1 AND r.standard = ANY($${base + 3}) AND r.event = ANY($${base + 4}) AND r.block_height <= $2
-      AND ($${accountParam}::text IS NULL OR r.payload->>'account' = $${accountParam} OR r.payload->>'owner' = $${accountParam})
+      AND ($${accountParam}::text IS NULL OR r.payload->>'account' = $${accountParam})
       AND NOT EXISTS (SELECT 1 FROM raw_events t WHERE t.deployment_id = r.deployment_id AND t.receiver_id = r.receiver_id AND t.standard = r.standard
         AND t.event = ANY($${base + 5}) AND t.block_height >= r.block_height AND t.block_height <= $2 AND ${sameKey}))`;
   });

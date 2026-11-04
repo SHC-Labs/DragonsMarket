@@ -3,14 +3,19 @@
 // which the case ends with no decision: drawing a jury, finalizing, writing a final answer to the market, releasing a
 // jury's seats, and answering a market nobody answered once its resolve_by has passed. Every one of those calls is open
 // to anyone, so this script watches the chain and sends each one when it is due. It also sweeps the market's fees to the
-// Council and the treasury once enough have built up. It also moves the Council's seat-time ledger forward, finalizes its
-// quarters in order once their grace period has passed, and settles a fee leg whose result the market lost.
+// Council and the treasury once enough have built up. It also moves the Council's start-day cursor forward, so seats whose
+// first earning day has come share the revenue that arrives, and settles a fee leg whose result the market lost.
 //
 //   node keeper.mjs run   --rpc URL --market ID --oracle ID --council ID --account ID [--dry-run]
 //                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH] [--council-key-file PATH]
 //                         --state-file PATH [--events-file PATH] [--workers 2] [--job-batch 50] [--min-sweep UNITS]
 //   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID --rounds ID [--treasury ID] [--min-margin NEAR] [--release FILE|-]
 //                         [--expect-sealed] [--watch-dao] [--runway-config PATH] [--operator ID] [--collection-code-hash HASH]
+//                         [--expect-fee-rate-bps N] [--expect-max-fee-rate-bps N] [--expect-revenue-share-bps N]
+//
+// --rpc takes one endpoint or several separated by commas. A call that an endpoint refuses (HTTP 429 or 5xx, a timeout) is retried
+// on the next one. --rpc-pace-ms N (or KEEPER_RPC_PACE_MS) spaces every call at least N milliseconds apart, so free public
+// endpoints are not hit in bursts; 600 is a good start.
 //
 // `run` needs an account with a little NEAR for gas. The calls it makes move no money of the keeper's own, and none
 // of them attach a deposit, so a function call access key is enough. `check` reads only. It reports whether the
@@ -20,7 +25,8 @@
 // them pay by their own calls, has locked them or has paused transfers; how many NEAR access keys each has (--expect-sealed
 // makes any key a problem, for use after seal); and how much NEAR each contract account has left after paying for the
 // storage it uses. --watch-dao lists the open proposals of the --treasury DAO that name these contracts and flags any that is
-// not on the treasury helper's allow-list. It never votes. `check` exits 1 if anything is wrong.
+// not on the treasury helper's allow-list. It never votes. The three --expect-*-bps options compare the market's fee rate, its fee
+// rate ceiling and its revenue share with what the DAO announced, so a change of any of them shows up as a problem on the next run. `check` exits 1 if anything is wrong.
 //
 // The secret key is never taken from the command line, where it would sit in the process list and shell history.
 // Give it as the environment variable KEEPER_KEY, or as --key-file naming a file that only its owner can read
@@ -39,7 +45,7 @@
 //     --receiver-account-id MARKET.near --method-names 'sweep_fees,settle_leg' \
 //     autogenerate-new-keypair print-to-terminal network-config mainnet sign-with-keychain send
 //   near account add-key KEEPER.near grant-function-call-access --allowance '0.5 NEAR' \
-//     --receiver-account-id COUNCIL.near --method-names 'advance_quarters,finalize_quarter' \
+//     --receiver-account-id COUNCIL.near --method-names 'advance_days' \
 //     autogenerate-new-keypair print-to-terminal network-config mainnet sign-with-keychain send
 //
 // Legacy cursor helpers below are kept for inspecting old state files. Runtime uses the due-queue.
@@ -50,7 +56,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
-import { b58decode, b58encode, rpc, view, viewer } from "./chain.mjs";
+import { b58decode, b58encode, rpc, setRpcPace, view, viewer } from "./chain.mjs";
 import { compareCodeHashes, describeRelease, liveCodeHashes, parseReleaseHashes, upgradeProposalProblems } from "./release-check.mjs";
 import { reviewKind, storageRunway } from "./treasury.mjs";
 import { readQueue, writeQueue, withQueueLock, touch, finish, retry, selectJobs, bounded, serializeByKey, ingestFile } from "./due-queue.mjs";
@@ -72,15 +78,12 @@ const DEFAULT_MIN_SWEEP = 10_000_000n;
 // sweep_fees refuses less than 87 TGas.
 const SWEEP_GAS_TGAS = 100;
 const NS_PER_MINUTE = 60n * 10n ** 9n;
+const NS_PER_DAY = 86_400n * 10n ** 9n;
 // settle_leg needs 30 TGas; the measured cost is 6 in all.
 const SETTLE_GAS_TGAS = 50;
 
-// One book write and no transfer: 2 TGas in all, measured, with 30 attached. advance_quarters writes up to eight books.
-const FINALIZE_GAS_TGAS = 50;
+// advance_days writes one map entry and one event per start day it walks, at most 100 days (MAX_DAY_STEPS in the council).
 const ADVANCE_GAS_TGAS = 50;
-// The most quarters one advance_quarters call moves across (MAX_QUARTER_STEPS in the council).
-const MAX_QUARTER_STEPS = 8;
-const JURY_OPEN_REFUSAL = "a jury drawn in this quarter is still open";
 const CONTRACTS = ["market", "oracle", "council"];
 // `check` also covers the rounds contract: it holds stakes and fees in the verifier like the others, but the keeper never calls it.
 const CHECKED = [...CONTRACTS, "rounds"];
@@ -98,21 +101,8 @@ const BRIEF_MAX = 200;
 
 // ---- what is due -------------------------------------------------------------------------------------------------
 
-// The council's quarter id for a time in ns: year * 4 + (quarter - 1), UTC. A time on a boundary belongs to the quarter that
-// starts there.
-export function quarterOf(ns) {
-  const d = new Date(Number(ns / 1_000_000n));
-  return d.getUTCFullYear() * 4 + Math.floor(d.getUTCMonth() / 3);
-}
-
-// Where the quarter ends, exclusive, in ns.
-export function quarterEnd(quarter) {
-  const next = quarter + 1;
-  return BigInt(Date.UTC(Math.floor(next / 4), (next % 4) * 3, 1)) * 1_000_000n;
-}
-
 // snapshot: { market (the market account the oracle calls name), now, height, markets: [{ id, outcome, resolve_by }], cases: { [id]: case | null }, locked: { [id]: bool },
-// feesDue, minSweep, council: { lastTick, nextToFinalize, closeGraceNs }, sweeps: [{ id, at, council: { status } }] oldest
+// feesDue, minSweep, council: { lastDay }, sweeps: [{ id, at, council: { status } }] oldest
 // first, lastSweepAt, sweepIntervalNs, settleWaitNs }. feesDue is what a sweep would send now, in token units. lastSweepAt
 // is null before the first sweep.
 // A disputed case that has no jury yet can be drawn until draw_by and is over after it. One that has a jury is over once
@@ -153,26 +143,16 @@ export function dueActions(snapshot) {
   return actions;
 }
 
-// The views do not say how many ticks are owed, so advance_quarters is sent once a run when the quarter of now differs from
-// the quarter of last_tick. Within one quarter there is nothing a stake, an unstake or a finalize would have to catch up on.
-// finalize_quarter is sent for next_to_finalize only, once its end plus the grace has passed, and only when one advance
-// (eight quarters) can bring last_tick up to that end, because finalizing refuses until the ledger has reached it. The
-// contract still refuses while a jury drawn inside that quarter is open and no view shows one, so that refusal is read when
-// the call is sent (see JURY_OPEN_REFUSAL).
+// Revenue is split among the seats earning when it arrives, and a seat counts as earning once advance_days has folded in its
+// start day. config.last_day is the last UTC day folded in (days since the epoch). The views do not show how many starts are
+// queued, so advance_days is sent once a run whenever last_day is behind the UTC day of now. With nothing queued the call
+// only moves the cursor to today, and after that the council is caught up for the rest of the day. A call walks at most 100
+// days, so a council further behind is sent the call again on the next run.
 function councilActions(snapshot) {
   const c = snapshot.council;
   if (!c) return [];
-  const actions = [];
-  const lastTick = BigInt(c.lastTick);
-  const behind = quarterOf(snapshot.now) !== quarterOf(lastTick);
-  if (behind) actions.push({ contract: "council", method: "advance_quarters", args: {}, gas: BigInt(ADVANCE_GAS_TGAS) * TGAS });
-  const quarter = Number(c.nextToFinalize);
-  const end = quarterEnd(quarter);
-  const reachable = lastTick >= end || quarter - quarterOf(lastTick) + 1 <= MAX_QUARTER_STEPS;
-  if (snapshot.now >= end + BigInt(c.closeGraceNs) && reachable) {
-    actions.push({ contract: "council", method: "finalize_quarter", args: { quarter }, gas: BigInt(FINALIZE_GAS_TGAS) * TGAS });
-  }
-  return actions;
+  const behind = BigInt(c.lastDay) < snapshot.now / NS_PER_DAY;
+  return behind ? [{ contract: "council", method: "advance_days", args: {}, gas: BigInt(ADVANCE_GAS_TGAS) * TGAS }] : [];
 }
 
 // A market is finished when nothing more can be asked of the keeper for it: it has an answer, and its case, if it has
@@ -296,7 +276,7 @@ async function queuedRun(opts, keys) {
     lastSweepAt:marketConfig.last_sweep_at??null,
     sweepIntervalNs:BigInt(marketConfig.min_sweep_interval_minutes)*NS_PER_MINUTE,
     settleWaitNs:BigInt(marketConfig.settle_wait_minutes)*NS_PER_MINUTE,
-    council:{lastTick:BigInt(council.last_tick),nextToFinalize:council.next_to_finalize,closeGraceNs:BigInt(council.close_grace_ns)}
+    council:{lastDay:BigInt(council.last_day)}
   };
   state.globalRetry ??= {};
   const jobKey=a=>a.args.market_id!==undefined?"market:"+a.args.market_id:a.args.sweep_id!==undefined?"sweep:"+a.args.sweep_id:null;
@@ -327,7 +307,7 @@ async function queuedRun(opts, keys) {
       // One nonce stream per actual key, even when several receivers share the default key.
       const identity=crypto.createHash("sha256").update(keyFor(keys,action.contract)).digest("hex");
       const outcome=await serial(identity,()=>send(opts,keys,action));
-      console.log(label(action)+": "+describeOutcome(action,outcome));
+      console.log(label(action)+": "+outcome);
       if(outcome.startsWith("FAILED") && !outcome.includes(JURY_OPEN_REFUSAL))throw new Error(outcome);
       if(j){j.failures=0;delete j.error;j.attempting=false;}
       if(key)acted.add(key);
@@ -661,6 +641,20 @@ export function driftProblems(configs, { dao, operator }) {
   return problems;
 }
 
+// The fee settings the DAO announced. The owner key can change the fee rate inside the ceiling, so a rate or a revenue share that
+// moved without a DAO decision is a control change. Pinning the ceiling to the intended rate makes the owner raise the ceiling
+// in a separate step first, which this check also catches. Each value is compared only when it is given.
+export function economicsProblems(market, { feeRateBps, maxFeeRateBps, revenueShareBps }) {
+  const problems = [];
+  const expect = (label, actual, wanted) => {
+    if (wanted !== undefined && actual !== wanted) problems.push(`${label} is ${actual ?? "unset"}, expected ${wanted}`);
+  };
+  expect("the market's fee rate in basis points", market.fee_rate_bps, feeRateBps);
+  expect("the market's fee rate ceiling in basis points", market.max_fee_rate_bps, maxFeeRateBps);
+  expect("the market's revenue share in basis points", market.revenue_share_bps, revenueShareBps);
+  return problems;
+}
+
 async function finalHeight(url) {
   return (await rpc(url, "block", { finality: "final" })).header.height;
 }
@@ -674,8 +668,8 @@ async function waitForBlocks(url, count) {
 }
 
 // What the Council must hold at least: everything it took in as revenue, less what it paid out, less the claims in flight
-// (their transfers move the money before the Council books them as paid). Rounding left in finalized quarters and a plain
-// deposit make it hold more, so the figure is a floor and the Council is allowed to hold more. A Council holding less has lost
+// (their transfers move the money before the Council books them as paid). Accrued balances and the live seats' earnings are
+// inside it. Rounding left by the splits and a plain deposit make it hold more, so the figure is a floor and the Council is allowed to hold more. A Council holding less has lost
 // money.
 export function councilFloor(totals) {
   return BigInt(totals.total_received) - BigInt(totals.total_paid) - BigInt(totals.pending_claims);
@@ -762,6 +756,11 @@ const listed = (names) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} 
 async function check(opts) {
   const minMargin = nearToYocto(opts["min-margin"] ?? DEFAULT_MIN_MARGIN_NEAR);
   if (opts["watch-dao"] && !opts.treasury) throw new Error("--watch-dao needs --treasury, the DAO whose proposals to list");
+  const economics = {
+    feeRateBps: basisPoints(opts, "expect-fee-rate-bps"),
+    maxFeeRateBps: basisPoints(opts, "expect-max-fee-rate-bps"),
+    revenueShareBps: basisPoints(opts, "expect-revenue-share-bps"),
+  };
   const expectedRelease = opts.release === undefined ? null : parseReleaseHashes(readReleaseList(opts.release));
   const block = await rpc(opts.rpc, "block", { finality: "final" });
   const at = block.header.height;
@@ -873,6 +872,7 @@ async function check(opts) {
   const ratio = bondRatioWarning(configs.market, configs.oracle);
   if (ratio) console.log(`WARNING: ${ratio}`);
   if (opts.treasury) problems.push(...driftProblems(configs, { dao: opts.treasury, operator: opts.operator }));
+  problems.push(...economicsProblems(configs.market, economics));
   if (expectedRelease && !opts.treasury) console.log("release: upgrade proposals not checked, pass --treasury to compare them with the release list");
   if (opts["watch-dao"] || (expectedRelease && opts.treasury)) {
     const read = viewer(opts.rpc, at);
@@ -902,6 +902,14 @@ async function check(opts) {
 
 // ---- command line ------------------------------------------------------------------------------------------------
 
+// A basis-point option as a whole number, or undefined when it was not given.
+export function basisPoints(opts, name) {
+  if (opts[name] === undefined) return undefined;
+  const value = Number(opts[name]);
+  if (!/^\d+$/.test(String(opts[name])) || !Number.isSafeInteger(value)) throw new Error(`--${name} must be a whole number of basis points`);
+  return value;
+}
+
 const BOOLEAN_FLAGS = new Set(["dry-run", "expect-sealed", "watch-dao"]);
 
 export function options(argv) {
@@ -914,6 +922,12 @@ export function options(argv) {
   return opts;
 }
 
+// A millisecond option as a whole number.
+export function milliseconds(opts, name) {
+  if (!/^\d+$/.test(String(opts[name]))) throw new Error(`--${name} must be a whole number of milliseconds`);
+  return Number(opts[name]);
+}
+
 export function refuseRetiredController(opts) {
   if (Object.hasOwn(opts, "governance")) {
     throw new Error("--governance is retired; use --treasury with the verified Trezu/Sputnik account ID");
@@ -921,18 +935,14 @@ export function refuseRetiredController(opts) {
 }
 
 function label(action) {
-  return `${action.contract}.${action.method}(${action.args.market_id ?? action.args.quarter ?? action.args.sweep_id ?? ""})`;
-}
-
-// A finalize the contract refused only because a jury drawn in the quarter is still open is not a fault: the next run asks again.
-export function describeOutcome(action, outcome) {
-  return action.method === "finalize_quarter" && outcome.includes(JURY_OPEN_REFUSAL) ? "waiting, a jury drawn in this quarter is still open" : outcome;
+  return `${action.contract}.${action.method}(${action.args.market_id ?? action.args.sweep_id ?? ""})`;
 }
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const opts = options(rest);
   refuseRetiredController(opts);
+  if (opts["rpc-pace-ms"] !== undefined) setRpcPace(milliseconds(opts, "rpc-pace-ms"));
   if (command === "check") process.exit(await check(opts));
   if (command !== "run") {
     console.error("usage: keeper.mjs run|check --rpc URL --market ID --oracle ID --council ID [--account ID] [--dry-run] (see the top of the file)");
