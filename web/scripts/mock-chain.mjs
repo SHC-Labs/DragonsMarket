@@ -459,7 +459,7 @@ function runAgentAction(agentId, { action }) {
 // What the MCP server reads with an agent's access token (backend/src/agent-access.ts). The demo token belongs to Atlas.
 const MCP_TOKEN = `dmk_${"dragonsmarketshowreelaccesstokenatlas".padEnd(43, "0")}`;
 const accessAgent = (req) => (req.headers.authorization === `Bearer ${MCP_TOKEN}` ? AGENTS[0] : null);
-const spentToday = () => [...operations.get(ATLAS)].filter((o) => o.action?.kind === "buy" && Date.now() - Date.parse(o.updated_at) < DAY_MS)
+const spentToday = () => [...operations.get(ATLAS)].filter((o) => o.via === "mcp" && o.state !== "failed" && o.action?.kind === "buy" && Date.now() - Date.parse(o.updated_at) < DAY_MS)
   .reduce((sum, o) => sum + BigInt(o.action.amount), 0n);
 const accessRoutes = [
   ["GET", "session", (a) => ({ agent_id: a.agent_id, label: "Claude Desktop", expires_at: iso(60), collateral: { token_id: "nep141:ft.test.near", decimals: 6 } })],
@@ -484,7 +484,10 @@ const accessRoutes = [
   }],
   ["POST", "actions", (a, b) => {
     if (b.action?.kind === "buy" && BigInt(b.action.amount) > 25_000_000n) return { error: { code: "spend_over_limit" }, status: 409 };
-    return runAgentAction(a.agent_id, { action: b.action });
+    if (b.action?.kind === "buy" && spentToday() + BigInt(b.action.amount) > 100_000_000n) return { error: { code: "daily_limit_reached" }, status: 409 };
+    const done = runAgentAction(a.agent_id, { action: b.action });
+    operations.get(a.agent_id).find((o) => o.id === done.operation).via = "mcp";
+    return done;
   }],
 ];
 
