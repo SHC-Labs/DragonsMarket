@@ -116,14 +116,16 @@ Object.assign(markets[5], { status: "resolved", outcome: "yes" });
 
 // Accounts. alice is the demo owner; her two agents trade on their own.
 const ALICE = "alice.test.near";
+// Agent ids are 64 hex characters, as the backend issues them.
+const ATLAS = "a71a5".padEnd(64, "0"), EMBER = "e3be4".padEnd(64, "0");
 const AGENTS = [
-  { agent_id: "agt_atlas", name: "Atlas", near_account_id: "atlas.agents.test.near" },
-  { agent_id: "agt_ember", name: "Ember", near_account_id: "ember.agents.test.near" },
+  { agent_id: ATLAS, name: "Atlas", near_account_id: "atlas.agents.test.near" },
+  { agent_id: EMBER, name: "Ember", near_account_id: "ember.agents.test.near" },
 ];
 const holdings = new Map(); // account -> Map(market id -> [yes, no])
 const hold = (account) => holdings.get(account) ?? holdings.set(account, new Map()).get(account);
 for (const [id, yes, no] of [[0, 142_500_000n, 0n], [3, 0n, 48_000_000n], [5, 85_000_000n, 0n], [6, 64_000_000n, 0n], [7, 0n, 30_000_000n], [14, 38_750_000n, 0n], [18, 52_000_000n, 0n]]) hold(ALICE).set(id, [yes, no]);
-for (const [id, yes, no] of [[0, 61_000_000n, 0n], [8, 0n, 40_000_000n], [15, 27_500_000n, 0n]]) hold(AGENTS[0].near_account_id).set(id, [yes, no]);
+for (const [id, yes, no] of [[0, 61_000_000n, 0n], [8, 40_000_000n, 0n], [15, 0n, 27_500_000n]]) hold(AGENTS[0].near_account_id).set(id, [yes, no]);
 for (const [id, yes, no] of [[21, 33_000_000n, 0n], [20, 18_000_000n, 0n]]) hold(AGENTS[1].near_account_id).set(id, [yes, no]);
 const marketBalance = new Map([[ALICE, 126_400_000n], [AGENTS[0].near_account_id, 212_750_000n], [AGENTS[1].near_account_id, 88_300_000n]]);
 const intentsBalance = new Map([[ALICE, 2_874_250_000n], [AGENTS[0].near_account_id, 40_000_000n], [AGENTS[1].near_account_id, 12_500_000n]]);
@@ -199,11 +201,11 @@ const pushOp = (agentId, action, state = "confirmed", minutesAgo = 0) => {
   operations.get(agentId).length = Math.min(operations.get(agentId).length, 12);
   return op;
 };
-pushOp("agt_atlas", { kind: "buy", market: "15", side: "yes", amount: "10000000", minShares: "0" }, "confirmed", 96);
-pushOp("agt_atlas", { kind: "buy", market: "8", side: "no", amount: "15000000", minShares: "0" }, "confirmed", 41);
-pushOp("agt_atlas", { kind: "buy", market: "0", side: "yes", amount: "25000000", minShares: "0" }, "confirmed", 12);
-pushOp("agt_ember", { kind: "stake", series: 0, round: "0", side: "up", amount: "5000000", minShares: "0" }, "confirmed", 30);
-pushOp("agt_ember", { kind: "buy", market: "21", side: "yes", amount: "12000000", minShares: "0" }, "confirmed", 8);
+pushOp(ATLAS, { kind: "buy", market: "15", side: "no", amount: "10000000", minShares: "0" }, "confirmed", 96);
+pushOp(ATLAS, { kind: "buy", market: "8", side: "yes", amount: "15000000", minShares: "0" }, "confirmed", 41);
+pushOp(ATLAS, { kind: "buy", market: "0", side: "yes", amount: "25000000", minShares: "0" }, "confirmed", 12);
+pushOp(EMBER, { kind: "stake", series: 0, round: "0", side: "up", amount: "5000000", minShares: "0" }, "confirmed", 30);
+pushOp(EMBER, { kind: "buy", market: "21", side: "yes", amount: "12000000", minShares: "0" }, "confirmed", 8);
 
 // Price rounds: five-minute Up or Down rounds on three assets.
 const ROUND_NS = 300n * SEC;
@@ -227,9 +229,9 @@ function simulate(r) {
 }
 function agentTurn(r) {
   const agent = AGENTS[Math.floor(r() * AGENTS.length)], account = agent.near_account_id;
-  const pool = agent.agent_id === "agt_atlas" ? [0, 7, 8, 9, 14, 15, 16] : [18, 19, 20, 21, 22];
+  const pool = agent.agent_id === ATLAS ? [0, 7, 8, 9, 14, 15, 16] : [18, 19, 20, 21, 22];
   const id = pool[Math.floor(r() * pool.length)], target = SPECS[id][6];
-  const side = target >= Number(markets[id].price_yes) / 1e6 ? "yes" : "no";
+  const side = target >= 0.5 ? "yes" : "no"; // an agent holds one view per market
   const amount = BigInt(Math.round((4 + r() * 16) * 1e6));
   if (get(marketBalance, account) < amount) marketBalance.set(account, get(marketBalance, account) + 100_000_000n);
   const op = pushOp(agent.agent_id, { kind: "buy", market: String(id), side, amount: String(amount), minShares: "0" }, "submitted");
@@ -438,9 +440,9 @@ http.createServer(async (req, res) => {
 const iso = (days) => new Date(Date.now() + days * DAY_MS).toISOString();
 const DAY_MS = 86_400_000;
 const watchlist = new Set(["0", "6", "7", "14", "18"].map((id) => `${MARKET}/${id}`));
-const access = new Map([["agt_atlas", [{ id: "tok_1", label: "Claude Desktop", max_spend: "25000000", daily_limit: "100000000", expires_at: iso(60), last_used_at: new Date(Date.now() - 4 * 60_000).toISOString() }]], ["agt_ember", []]]);
+const access = new Map([[ATLAS, [{ id: "tok_1", label: "Claude Desktop", max_spend: "25000000", daily_limit: "100000000", expires_at: iso(60), last_used_at: new Date(Date.now() - 4 * 60_000).toISOString() }]], [EMBER, []]]);
 const agentView = (a) => ({ ...a, state: "active", frozen: false, authorized_until: iso(84), open_intents: [] });
-const roundsClaimable = { agt_ember: [{ series: 0, round: String(roundNow() - 3n), side: "up", amount: "5000000", outcome: "up" }], agt_atlas: [] };
+const roundsClaimable = { [EMBER]: [{ series: 0, round: String(roundNow() - 3n), side: "up", amount: "5000000", outcome: "up" }], [ATLAS]: [] };
 
 function runAgentAction(agentId, { action }) {
   const agent = AGENTS.find((a) => a.agent_id === agentId);
@@ -453,6 +455,38 @@ function runAgentAction(agentId, { action }) {
   } catch { op.state = "failed"; }
   return { operation: op.id, state: op.state, evidence: null };
 }
+
+// What the MCP server reads with an agent's access token (backend/src/agent-access.ts). The demo token belongs to Atlas.
+const MCP_TOKEN = `dmk_${"dragonsmarketshowreelaccesstokenatlas".padEnd(43, "0")}`;
+const accessAgent = (req) => (req.headers.authorization === `Bearer ${MCP_TOKEN}` ? AGENTS[0] : null);
+const spentToday = () => [...operations.get(ATLAS)].filter((o) => o.action?.kind === "buy" && Date.now() - Date.parse(o.updated_at) < DAY_MS)
+  .reduce((sum, o) => sum + BigInt(o.action.amount), 0n);
+const accessRoutes = [
+  ["GET", "session", (a) => ({ agent_id: a.agent_id, label: "Claude Desktop", expires_at: iso(60), collateral: { token_id: "nep141:ft.test.near", decimals: 6 } })],
+  ["GET", "agent", (a) => {
+    const where = a.near_account_id;
+    return { agent_id: a.agent_id, near_account_id: where, frozen: false, authorized_until: iso(84),
+      collateral: { token_id: "nep141:ft.test.near", decimals: 6 },
+      balances: { near_for_gas: "1840000000000000000000000", intents: String(get(intentsBalance, where)), rounds_available: "0", rounds_pending_withdrawals: "0",
+        registered_with_rounds: true, open_stakes: 0, market_available: String(get(marketBalance, where)), market_pending_withdrawals: "0",
+        registered_with_market: true, positions: positionsOf(where).length },
+      limits: { max_spend: "25000000", daily_limit: "100000000", spent_today: String(spentToday()), expires_at: iso(60) } };
+  }],
+  ["GET", "markets", () => ({ rules: { fee_rate_bps: 200, paused: false, sells_paused: false, max_positions: 20 },
+    markets: markets.filter((m) => m.status === "open").map((m) => ({ market: m.id, title: m.title, rule: m.rule_text, resolution_source: m.resolution_source,
+      category: m.category, closes_at: new Date(Number(BigInt(m.close_at) / 1_000_000n)).toISOString(), price_yes: m.price_yes, price_no: m.price_no, locked: m.locked })) })],
+  ["GET", "positions", (a) => ({ data: positionsOf(a.near_account_id) })],
+  ["GET", "operations", (a) => ({ data: operations.get(a.agent_id) ?? [] })],
+  ["GET", "claimable", (a) => ({ data: roundsClaimable[a.agent_id] ?? [] })],
+  ["POST", "quote-buy", (_, b) => {
+    const q = views[MARKET].quote_buy({ market_id: b.market, side: b.side, amount: b.amount });
+    return { market: b.market, side: b.side, amount: b.amount, shares: q.shares_out, fee: q.fee };
+  }],
+  ["POST", "actions", (a, b) => {
+    if (b.action?.kind === "buy" && BigInt(b.action.amount) > 25_000_000n) return { error: { code: "spend_over_limit" }, status: 409 };
+    return runAgentAction(a.agent_id, { action: b.action });
+  }],
+];
 
 const routes = [
   ["GET", /^\/v1\/config$/, () => ({ capabilities: { agents: true }, deployment: { collateralTokenId: "nep141:ft.test.near", contracts: { rounds: ROUNDS, market: MARKET } },
@@ -492,6 +526,14 @@ http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") return res.end();
   res.setHeader("content-type", "application/json");
   const [path, search = ""] = req.url.split("?");
+  if (path.startsWith("/v1/agent-access/")) {
+    const agent = accessAgent(req), route = accessRoutes.find(([m, name]) => m === req.method && path === `/v1/agent-access/${name}`);
+    let body = {};
+    try { body = raw ? JSON.parse(raw) : {}; } catch { /* no body */ }
+    const answer = !agent ? { error: { code: "access_token_invalid" }, status: 401 } : route ? route[2](agent, body) : { error: { code: "not_found" }, status: 404 };
+    if (answer.status) res.statusCode = answer.status;
+    return res.end(JSON.stringify(answer.status ? { error: answer.error } : answer));
+  }
   for (const [method, pattern, fn] of routes) {
     const hit = req.method === method && path.match(pattern);
     if (!hit) continue;
