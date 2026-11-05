@@ -258,6 +258,9 @@ const SEATS = {
   9: { owner: ALICE, staked_at: String(started - 30n * DAY), unlock_requested_at: String(started - 2n * DAY), serving: null, earn_from_day: String(started / DAY) },
   10: { owner: ALICE, staked_at: String(started - 40n * DAY), unlock_requested_at: null, serving: "3", earn_from_day: String(started / DAY) },
 };
+// Council state the stake page changes: alice's unstaked Dragons and her claimable revenue.
+const aliceNfts = new Set(["21", "22", "35"]);
+let councilClaimable = 4_250_000n;
 const account = (id, registered) => ({ registered, available: String(get(marketBalance, id)), pending_withdrawals: "0", positions: positionsOf(id).length });
 
 const views = {
@@ -337,10 +340,10 @@ const views = {
       reconcile_wait_ns: String(3600n * SEC), last_day: String(started / DAY), active_seats: 28,
     }),
     seat_count: () => 31,
-    seats_of: ({ account_id }) => (account_id === ALICE ? Object.keys(SEATS) : []),
+    seats_of: ({ account_id }) => Object.keys(SEATS).filter((id) => SEATS[id].owner === account_id),
     stake_of: ({ token_id }) => SEATS[token_id] ?? null,
     is_allowed: ({ token_id }) => Number(token_id) < 30,
-    claimable_of: ({ account_id }) => (account_id === ALICE ? "4250000" : "0"),
+    claimable_of: ({ account_id }) => (account_id === ALICE ? String(councilClaimable) : "0"),
     in_progress_of: ({ account_id }) => (account_id === ALICE ? "1800000" : "0"),
     quarter_info: () => ({ quarter: 8107, starts_at: "1790812800000000000", ends_at: "1798761600000000000", last_closed_quarter: 8106 }),
     seat_earnings: ({ token_id }) => {
@@ -351,8 +354,8 @@ const views = {
     },
   },
   [NFT]: {
-    nft_tokens_for_owner: ({ account_id }) => (account_id === ALICE ? ["21", "22", "35"].map((token_id) => ({ token_id, owner_id: ALICE })) : []),
-    nft_token: ({ token_id }) => (["21", "22", "35"].includes(token_id) ? { token_id, owner_id: ALICE } : null),
+    nft_tokens_for_owner: ({ account_id }) => (account_id === ALICE ? [...aliceNfts].map((token_id) => ({ token_id, owner_id: ALICE })) : []),
+    nft_token: ({ token_id }) => (aliceNfts.has(token_id) ? { token_id, owner_id: ALICE } : SEATS[token_id] ? { token_id, owner_id: COUNCIL } : null),
   },
   [VERIFIER]: { mt_balance_of: ({ account_id }) => String(get(intentsBalance, account_id)) },
   [TOKEN]: { ft_balance_of: ({ account_id }) => String(get(walletBalance, account_id)) },
@@ -388,6 +391,17 @@ function applySend({ signer_id: signer, receiver_id: receiver, actions = [] }) {
       if (get(marketBalance, signer) < amount) throw new Error("Smart contract panicked: not enough balance");
       marketBalance.set(signer, get(marketBalance, signer) - amount);
       intentsBalance.set(signer, get(intentsBalance, signer) + amount);
+    } else if (receiver === NFT && method === "nft_transfer_call" && args.receiver_id === COUNCIL) {
+      if (!aliceNfts.delete(String(args.token_id))) throw new Error("Smart contract panicked: not the owner");
+      SEATS[args.token_id] = { owner: signer, staked_at: String(now()), unlock_requested_at: null, serving: null, earn_from_day: String(now() / DAY + 1n) };
+    } else if (receiver === COUNCIL && method === "request_unstake") {
+      SEATS[args.token_id].unlock_requested_at = String(now() - 120n * SEC);
+    } else if (receiver === COUNCIL && method === "unstake") {
+      delete SEATS[args.token_id];
+      aliceNfts.add(String(args.token_id));
+    } else if (receiver === COUNCIL && method === "claim") {
+      walletBalance.set(signer, get(walletBalance, signer) + councilClaimable);
+      councilClaimable = 0n;
     } else throw new Error(`mock chain does not simulate ${receiver}.${method}`);
   }
   return { transaction: { hash: `mock${Date.now().toString(36)}` }, status: { SuccessValue: "" } };
@@ -452,6 +466,13 @@ function runAgentAction(agentId, { action }) {
     if (action.kind === "buy") { trade(who, Number(action.market), action.side, BigInt(action.amount)); record(who, action.market, action.side, BigInt(action.amount)); }
     else if (action.kind === "sell") sell(who, Number(action.market), action.side, BigInt(action.shares));
     else if (action.kind === "claim") roundsClaimable[agentId] = roundsClaimable[agentId].filter((s) => s.round !== action.round);
+    else if (action.kind === "withdraw" && action.venue === "market") {
+      marketBalance.set(who, get(marketBalance, who) - BigInt(action.amount));
+      intentsBalance.set(who, get(intentsBalance, who) + BigInt(action.amount));
+    } else if (action.kind === "cash_out") {
+      intentsBalance.set(who, get(intentsBalance, who) - BigInt(action.amount));
+      walletBalance.set(ALICE, get(walletBalance, ALICE) + BigInt(action.amount));
+    }
   } catch { op.state = "failed"; }
   return { operation: op.id, state: op.state, evidence: null };
 }
