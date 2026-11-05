@@ -219,6 +219,24 @@
 .recent-move[data-dir="down"] .recent-arrow { color: var(--danger); }
 .recent-prices time { grid-column: 1 / -1; font-size: var(--fs-2xs); color: var(--text-muted); }
 .recent-empty { color: var(--text-muted); }
+/* Latest trades: who, which side, how much, when. The side word always carries the colour. */
+.trade-feed { margin-top: var(--section-space); padding-top: var(--s-8); border-top: 1px solid var(--line); }
+.trade-feed .section-title { margin-bottom: var(--s-4); }
+.trade-feed ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-2) var(--s-3); list-style: none; margin: 0; padding: 0; }
+.trade-row > a, .trade-row > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "who time" "what amount" "title title"; align-items: baseline; gap: var(--s-1) var(--s-4); padding: var(--s-3) var(--s-4); border: 1px solid var(--line); border-left: 2px solid var(--trade-ink); border-radius: var(--r-md); text-decoration: none; transition: background var(--dur-2), border-color var(--dur-2); }
+.trade-row { --trade-ink: var(--yes); }
+.trade-row[data-side="no"] { --trade-ink: var(--no); }
+.trade-row > a:hover { background: var(--surface-hover); border-color: var(--line-strong); border-left-color: var(--trade-ink); }
+.trade-who { grid-area: who; font-size: var(--fs-xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trade-time { grid-area: time; font-size: var(--fs-2xs); color: var(--text-muted); text-align: right; }
+.trade-what { grid-area: what; font-size: var(--fs-sm); }
+.trade-side { font-weight: 600; color: var(--trade-ink); }
+.trade-amount { grid-area: amount; font-size: var(--fs-sm); font-weight: 600; text-align: right; }
+.trade-title { grid-area: title; font-size: var(--fs-xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trade-skeleton { height: 3.5rem; border-radius: var(--r-md); }
+.trade-feed[data-scope="market"] { margin-top: 0; padding-top: 0; border-top: 0; }
+.trade-feed[data-scope="market"] ul { grid-template-columns: 1fr; }
+
 
 /* ---------- Responsive ---------- */
 @media (max-width: 1199px) {
@@ -251,7 +269,7 @@
   .market-sort { width: 100%; }
   .market-sort select { width: 100%; }
   .market-list-head { margin-top: var(--s-6); }
-  .recent-prices, .recent-prices ul { grid-template-columns: 1fr; gap: var(--s-4); }
+  .recent-prices, .recent-prices ul, .trade-feed ul { grid-template-columns: 1fr; gap: var(--s-4); }
   .recent-prices a { grid-template-columns: 1fr; }
   .empty-results { padding: var(--s-9) var(--s-5); }
 }
