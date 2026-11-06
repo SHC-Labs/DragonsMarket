@@ -25,8 +25,9 @@ interface EventRow {
 }
 
 // The backend indexes every contract event and lists them oldest first, so the feed reads a recent window of blocks
-// (about fifteen minutes) and keeps the newest rows of it.
+// (about fifteen minutes) to its end and keeps the newest rows of it.
 const WINDOW_BLOCKS = 900n;
+const MAX_PAGES = 10;
 const UNITS = /^\d{1,39}$/;
 
 function parse(row: EventRow): Trade | null {
@@ -47,9 +48,20 @@ export async function recentTrades(limit = 8, marketId?: string): Promise<Trade[
   if (!backendEnabled()) return null;
   const head = await chainHeight();
   const from = head > WINDOW_BLOCKS ? head - WINDOW_BLOCKS : 0n;
-  const read = (event: string) => call<{ data: EventRow[] }>(`/v1/events?${new URLSearchParams({
-    standard: "market", event, receiver: config.marketId, fromBlock: from.toString(), limit: "100",
-  })}`).then((reply) => reply.body.data);
+  // Rows come oldest first, so walk the cursor to the end of the window; a busy window would otherwise lose its newest trades.
+  const read = async (event: string) => {
+    const rows: EventRow[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const query = new URLSearchParams({ standard: "market", event, receiver: config.marketId, fromBlock: from.toString(), limit: "100" });
+      if (cursor) query.set("cursor", cursor);
+      const reply = await call<{ data: EventRow[]; nextCursor?: string | null }>(`/v1/events?${query}`);
+      rows.push(...reply.body.data);
+      cursor = reply.body.nextCursor ?? null;
+      if (!cursor) break;
+    }
+    return rows;
+  };
   const rows = (await Promise.all([read("buy"), read("sell")])).flat();
   return rows.map(parse).filter((t): t is Trade => t !== null && (!marketId || t.marketId === marketId))
     .sort((a, b) => b.at - a.at).slice(0, limit);
