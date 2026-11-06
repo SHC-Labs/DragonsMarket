@@ -54,16 +54,19 @@ export async function challenge(pool: pg.Pool, config: Config, accountId: string
   return { browser, request: { id, accountId, message, nonce, recipient: config.webOrigin, callbackUrl: config.webOrigin, expiresAt: expires.toISOString() } };
 }
 export type CheckAccessKey = (accountId: string, publicKey: string) => Promise<boolean>;
+// NEP-413 lets the payload carry a callback URL or not, and some wallet connectors cannot add one. Both forms bind the same
+// message, so a signature over either one proves the same thing.
+export function signedBy(publicKey: string, signature: string, proof: { message: string; nonce: string; recipient: string }) {
+  const key = createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), decodeKey(publicKey)]), format: 'der', type: 'spki' });
+  const { message, nonce, recipient } = proof, bytes = Buffer.from(signature, 'base64');
+  return [recipient, undefined].some(callbackUrl => verify(null, messageHash(message, nonce, recipient, callbackUrl), key, bytes));
+}
 export async function login(pool: pg.Pool, config: Config, id: string, publicKey: string, signature: string, browser: string, checkKey: CheckAccessKey) {
   if (!UUID.test(id) || !browser || !/^([A-Za-z0-9+/]{86}==)$/.test(signature)) throw new Error('invalid_login');
   const row = (await pool.query('SELECT * FROM wallet_challenges WHERE id=$1 AND consumed_at IS NULL AND expires_at>now()', [id])).rows[0];
   if (!row || row.origin !== config.webOrigin || row.network !== config.network || row.browser_hash !== tokenHash(browser)) throw new Error('invalid_login');
-  const key = createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), decodeKey(publicKey)]), format: 'der', type: 'spki' });
   // A definitive rejection spends the challenge, so one challenge cannot be replayed against the RPC. A failing RPC is not a rejection and leaves it usable.
-  // NEP-413 lets the payload carry a callback URL or not, and some wallet connectors cannot add one. Both forms bind the same
-  // message (account, origin, challenge id, expiry), so a signature over either one proves the same thing.
-  const bytes = Buffer.from(signature, 'base64');
-  const signed = [row.origin, undefined].some(callbackUrl => verify(null, messageHash(row.message, row.nonce, row.origin, callbackUrl), key, bytes));
+  const signed = signedBy(publicKey, signature, { message: row.message, nonce: row.nonce, recipient: row.origin });
   if (!signed || !(await checkKey(row.account_id, publicKey))) {
     await pool.query('UPDATE wallet_challenges SET consumed_at=now() WHERE id=$1 AND consumed_at IS NULL', [id]);
     throw new Error('invalid_login');
@@ -94,7 +97,7 @@ export async function session(pool: pg.Pool, config: Config, token: string) {
   if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
   const found = (
     await pool.query(
-      `SELECT account_id,network,expires_at,last_seen_at<now()-make_interval(secs=>$4) AS stale FROM wallet_sessions
+      `SELECT account_id,network,public_key,expires_at,last_seen_at<now()-make_interval(secs=>$4) AS stale FROM wallet_sessions
        WHERE token_hash=$1 AND network=$2 AND expires_at>now() AND last_seen_at>now()-make_interval(secs=>$3)`,
       [tokenHash(token), config.network, config.sessionIdleSeconds, IDLE_TOUCH_SECONDS],
     )

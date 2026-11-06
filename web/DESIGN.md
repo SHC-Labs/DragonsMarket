@@ -309,6 +309,7 @@ Reuse before building. Import from these files and extend them rather than copyi
 | `MarketSeal`, `Sigil` | `components/` | The ceremonial seal struck from a rule hash | General decoration |
 | `MarketIcon`, `CategoryEmblem` | `components/` | A market's category glyph in its category colours | Generic icons |
 | `Brand` | `components/Brand.tsx` | The crest and wordmark lockup | Rebuilding the logo |
+| `TradeFeed` | `components/TradeFeed.tsx` | The latest buys and sells from the backend's event index, all markets or one; hidden without a backend | Price history: use the chart or `RecentPrices` |
 | `CountUp` | `components/CountUp.tsx` | Numbers that change while the user watches | Static numbers |
 | Icons | `components/icons.tsx` | Every icon. Phosphor; `Linear` by default, `Bulk` or `TwoTone` decorative, `Bold` selected; 16, 20 or 24px | Importing `@phosphor-icons/react` directly |
 | Dialogs | `HowItWorksDialog.tsx`, `TermsAcceptanceDialog.tsx` | Native `<dialog>` with `--elev-3` | Custom overlay divs |

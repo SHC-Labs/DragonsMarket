@@ -3,6 +3,7 @@ import { readRpcSettings, type RpcSettings } from './providers.js';
 
 export type Network = 'sandbox' | 'testnet' | 'mainnet';
 export type ContractRole = 'market' | 'rounds' | 'oracle' | 'council' | 'verifier';
+export interface AgentWorkerLink { url: string; token: string }
 export interface Config {
   databaseUrl: string;
   host: string;
@@ -15,6 +16,7 @@ export interface Config {
   sessionIdleSeconds: number;
   network: Network;
   rpc: RpcSettings;
+  agentWorker: AgentWorkerLink | null;
   deployment: null | {
     id: string;
     startBlock: string;
@@ -29,6 +31,7 @@ const DEFAULT_SESSION_IDLE_SECONDS = 12 * 3600;
 const MIN_SESSION_SECONDS = 300;
 const MAX_SESSION_SECONDS = 30 * 24 * 3600;
 const MIN_OPERATOR_TOKEN_LENGTH = 32;
+const PRIVATE_HOST = /^(127\.0\.0\.1|[a-z0-9-]+|[a-z0-9.-]+\.internal)$/;
 
 function integer(value: string, name: string, min: number, max: number): number {
   if (!/^\d+$/.test(value) || Number(value) < min || Number(value) > max) throw new Error(`Invalid ${name}`);
@@ -39,6 +42,24 @@ function url(value: string, name: string, protocols: string[]): URL {
   try { result = new URL(value); } catch { throw new Error(`Invalid ${name}`); }
   if (!protocols.includes(result.protocol) || !result.hostname) throw new Error(`Invalid ${name}`);
   return result;
+}
+
+export function agentWorkerToken(value: string | undefined) {
+  if (!value || value.length < MIN_OPERATOR_TOKEN_LENGTH) throw new Error('AGENT_WORKER_TOKEN must be at least 32 characters');
+  return value;
+}
+
+function readAgentWorkerLink(env: NodeJS.ProcessEnv): AgentWorkerLink | null {
+  if (env.AGENT_API_KEY || env.AGENT_GRANT_KEY) {
+    throw new Error('AGENT_API_KEY and AGENT_GRANT_KEY belong to the agent worker, never to this process');
+  }
+  if (!env.AGENT_WORKER_URL && !env.AGENT_WORKER_TOKEN) return null;
+  const link = url(env.AGENT_WORKER_URL ?? '', 'AGENT_WORKER_URL', ['http:', 'https:']);
+  if (link.origin !== env.AGENT_WORKER_URL) throw new Error('AGENT_WORKER_URL must be an exact origin');
+  if (link.protocol === 'http:' && !PRIVATE_HOST.test(link.hostname)) {
+    throw new Error('AGENT_WORKER_URL must be https outside a private network');
+  }
+  return { url: link.origin, token: agentWorkerToken(env.AGENT_WORKER_TOKEN) };
 }
 
 export function readNetwork(env: NodeJS.ProcessEnv): Network {
@@ -94,13 +115,26 @@ export function readConfig(env: NodeJS.ProcessEnv): Config {
   const sessionAbsoluteSeconds = integer(env.SESSION_ABSOLUTE_SECONDS || String(DEFAULT_SESSION_ABSOLUTE_SECONDS), 'SESSION_ABSOLUTE_SECONDS', MIN_SESSION_SECONDS, MAX_SESSION_SECONDS);
   const sessionIdleSeconds = integer(env.SESSION_IDLE_SECONDS || String(DEFAULT_SESSION_IDLE_SECONDS), 'SESSION_IDLE_SECONDS', MIN_SESSION_SECONDS, MAX_SESSION_SECONDS);
   if (sessionIdleSeconds > sessionAbsoluteSeconds) throw new Error('SESSION_IDLE_SECONDS cannot exceed SESSION_ABSOLUTE_SECONDS');
-  return { databaseUrl, network, rpc, host, port, webOrigin, trustedProxyHops, trustedProxyAddresses, operatorToken, sessionAbsoluteSeconds, sessionIdleSeconds, deployment };
+  return {
+    databaseUrl, network, rpc, agentWorker: readAgentWorkerLink(env), host, port, webOrigin, trustedProxyHops,
+    trustedProxyAddresses, operatorToken, sessionAbsoluteSeconds, sessionIdleSeconds, deployment,
+  };
 }
+
+function wholeUnits(deployment: NonNullable<Config['deployment']>, one: bigint, daily: bigint) {
+  const unit = 10n ** BigInt(deployment.collateralDecimals);
+  return { perTransaction: String(one * unit), daily: String(daily * unit) };
+}
+export const agentCashOut = (deployment: NonNullable<Config['deployment']>) => wholeUnits(deployment, 100n, 500n);
+export const agentSpend = (deployment: NonNullable<Config['deployment']>) => wholeUnits(deployment, 100n, 1000n);
 
 // Deliberate allowlist: never spread process.env or expose database credentials.
 export function publicConfig(config: Config) {
   return {
     apiVersion: 'v1', network: config.network, deployment: config.deployment,
-    capabilities: { trading: false, funding: false, indexing: config.network === 'mainnet' && config.deployment !== null, walletSessions: true },
+    agentCashOut: config.deployment && agentCashOut(config.deployment),
+    agentSpend: config.deployment && agentSpend(config.deployment),
+    capabilities: { trading: false, funding: false, indexing: config.network === 'mainnet' && config.deployment !== null, walletSessions: true,
+      agents: config.agentWorker !== null && config.deployment !== null },
   };
 }

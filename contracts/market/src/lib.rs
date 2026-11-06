@@ -133,6 +133,7 @@ const DEFAULT_STORAGE_RESERVE: u128 = 1_000_000_000_000_000_000_000_000;
 const HARD_MIN_STORAGE_RESERVE: u128 = 100_000_000_000_000_000_000_000;
 const HARD_MAX_STORAGE_RESERVE: u128 = 100_000_000_000_000_000_000_000_000;
 const DEFAULT_REGISTRATION_FEE: u128 = 250_000;
+const MIN_DEPOSIT_FOR: u128 = 100_000;
 const HARD_MIN_REGISTRATION_FEE: u128 = 10_000;
 const HARD_MAX_REGISTRATION_FEE: u128 = 2_000_000;
 
@@ -487,6 +488,7 @@ pub trait Council {
 #[serde(rename_all = "lowercase")]
 pub enum Arrival {
     Deposit,
+    DepositFor(AccountId),
     Buy { market_id: U64, side: u8, min_shares: U128 },
 }
 
@@ -1020,6 +1022,13 @@ fn side_index(side: &str) -> u8 {
 fn parse_part<T: std::str::FromStr>(part: Option<&str>, what: &str) -> T {
     part.and_then(|s| s.parse().ok())
         .unwrap_or_else(|| env::panic_str(&format!("bad {what}")))
+}
+
+fn no_more<'a>(mut parts: impl Iterator<Item = &'a str>) {
+    require!(
+        parts.next().is_none(),
+        "the message has more parts than its action takes"
+    );
 }
 
 #[near]
@@ -1762,14 +1771,19 @@ impl MarketContract {
         let mut parts = msg.split(':');
         match parts.next() {
             Some("deposit") => {
+                no_more(parts);
                 self.assert_can_deposit(&sender_id);
-                self.credit_deposit(&sender_id, amount.0);
+                self.credit_deposit(&sender_id, amount.0, &sender_id);
             }
-            Some("register") => self.register_with_collateral(&sender_id, amount.0),
+            Some("register") => {
+                no_more(parts);
+                self.register_with_collateral(&sender_id, amount.0);
+            }
             Some("buy") => {
                 let id: u64 = parse_part(parts.next(), "market id");
                 let side = side_index(parts.next().unwrap_or(""));
                 let min_out: u128 = parse_part(parts.next(), "min shares");
+                no_more(parts);
                 self.buy_with(&sender_id, id, side, amount.0, min_out);
             }
             _ => env::panic_str("unknown action"),
@@ -1789,7 +1803,11 @@ impl MarketContract {
         if taken == 0 {
             return amount;
         }
-        self.credit_deposit(&sender_id, taken);
+        let credited = match &arrival {
+            Arrival::DepositFor(who) => who.clone(),
+            _ => sender_id.clone(),
+        };
+        self.credit_deposit(&credited, taken, &sender_id);
         if let Arrival::Buy {
             market_id,
             side,
@@ -1825,6 +1843,7 @@ impl MarketContract {
                 let side = side_index(parts.next().unwrap_or(""));
                 let amount: u128 = parse_part(parts.next(), "amount");
                 let min_out: u128 = parse_part(parts.next(), "min shares");
+                no_more(parts);
                 self.debit(&signer_id, amount);
                 self.buy_with(&signer_id, id, side, amount, min_out);
             }
@@ -1833,13 +1852,17 @@ impl MarketContract {
                 let side = parts.next().unwrap_or("");
                 let shares: u128 = parse_part(parts.next(), "shares");
                 let min_collateral: u128 = parse_part(parts.next(), "min collateral");
+                no_more(parts);
                 self.sell_for(&signer_id, id, side, shares, min_collateral);
             }
             Some("redeem") => {
-                let _ = self.redeem_for(&signer_id, parse_part(parts.next(), "market id"));
+                let id: u64 = parse_part(parts.next(), "market id");
+                no_more(parts);
+                let _ = self.redeem_for(&signer_id, id);
             }
             Some("withdraw") => {
                 let amount: u128 = parse_part(parts.next(), "amount");
+                no_more(parts);
                 return PromiseOrValue::Promise(self.withdraw_for(signer_id, amount));
             }
             _ => env::panic_str("unknown action"),
@@ -2627,13 +2650,25 @@ impl FungibleTokenReceiver for MarketContract {
         let mut parts = msg.split(':');
         let arrival = match parts.next() {
             Some("deposit") => {
+                no_more(parts);
                 self.assert_can_deposit(&sender_id);
                 Arrival::Deposit
+            }
+            Some("deposit_for") => {
+                let who: AccountId = parse_part(parts.next(), "account");
+                no_more(parts);
+                self.assert_can_deposit(&who);
+                require!(
+                    amount.0 >= MIN_DEPOSIT_FOR,
+                    "a deposit for an account must be at least the minimum"
+                );
+                Arrival::DepositFor(who)
             }
             Some("buy") => {
                 let id: u64 = parse_part(parts.next(), "market id");
                 let side = side_index(parts.next().unwrap_or(""));
                 let min_out: u128 = parse_part(parts.next(), "min shares");
+                no_more(parts);
                 self.market_to_buy(&sender_id, id, min_out);
                 Arrival::Buy {
                     market_id: U64(id),
@@ -2920,9 +2955,13 @@ impl MarketContract {
         require!(self.accounts.contains_key(who), "do the storage deposit first");
     }
 
-    fn credit_deposit(&mut self, who: &AccountId, amount: u128) {
+    fn credit_deposit(&mut self, who: &AccountId, amount: u128, from: &AccountId) {
         self.credit(who, amount);
-        emit("deposit", json!({ "account": who, "amount": amount.to_string() }));
+        let mut data = json!({ "account": who, "amount": amount.to_string() });
+        if from != who {
+            data["from"] = json!(from);
+        }
+        emit("deposit", data);
     }
 
     fn register_with_collateral(&mut self, who: &AccountId, amount: u128) {
@@ -8346,8 +8385,28 @@ mod tests {
         let (mut c, total_in) = world();
         let (paid, floor) = (5_000_000, GAS_FORWARD_FLOOR.as_tgas());
         let not_the_token = "only the collateral token can deliver money";
-        let cases: [(&str, &str, u128, &str, u64, &str); 13] = [
+        let for_ben = format!("deposit_for:{}", USERS[1]);
+        let cases: [(&str, &str, u128, &str, u64, &str); 18] = [
             ("evil.near", USERS[0], paid, "deposit", 100, not_the_token),
+            (
+                TOKEN,
+                USERS[0],
+                paid,
+                "deposit_for:zed.near",
+                100,
+                "storage deposit first",
+            ),
+            (
+                TOKEN,
+                USERS[0],
+                MIN_DEPOSIT_FOR - 1,
+                &for_ben,
+                100,
+                "at least the minimum",
+            ),
+            (TOKEN, USERS[0], paid, "deposit_for", 100, "bad account"),
+            (TOKEN, USERS[0], paid, "deposit_for:Not An Account", 100, "bad account"),
+            (TOKEN, USERS[0], paid, "deposit_for:ben.near:1", 100, "more parts"),
             (VERIFIER, USERS[0], paid, "deposit", 100, not_the_token),
             (TOKEN, VERIFIER, paid, "deposit", 100, "not out of the verifier"),
             (TOKEN, USERS[0], 0, "deposit", 100, "amount must be positive"),
@@ -8388,6 +8447,36 @@ mod tests {
     }
 
     #[test]
+    fn a_message_with_extra_parts_is_refused() {
+        let (mut c, total_in) = world();
+        let extra = "the message has more parts than its action takes";
+        for msg in ["deposit:1", "register:", "buy:0:yes:5000000:1"] {
+            act_as(VERIFIER, 3);
+            let reason = refusal(|| {
+                let _ = receive(&mut c, acct(USERS[0]), U128(5_000_000), msg.into());
+            });
+            assert!(reason.contains(extra), "{msg} by transfer: {reason}");
+        }
+        for msg in [
+            "buy:0:yes:1000000:1:9",
+            "sell:0:yes:1:0:9",
+            "redeem:0:9",
+            "withdraw:1:2",
+        ] {
+            act_as(VERIFIER, 3);
+            let reason = refusal(|| {
+                let _ = c.on_auth(acct(USERS[0]), msg.into());
+            });
+            assert!(reason.contains(extra), "{msg} signed: {reason}");
+        }
+        for msg in ["deposit:x", "buy:0:yes:1:9"] {
+            let reason = refusal(|| token_sends(&mut c, USERS[0], 5_000_000, msg, 100));
+            assert!(reason.contains(extra), "{msg} by token: {reason}");
+        }
+        assert_eq!(c.total_owed().0, total_in);
+    }
+
+    #[test]
     fn what_reached_intents_is_credited_and_nothing_goes_back() {
         let (mut c, total_in) = world();
         let before = c.get_balance(acct(USERS[0])).0;
@@ -8401,6 +8490,51 @@ mod tests {
             (e["event"].as_str(), &e["data"]["amount"]),
             (Some("deposit"), &json!("5000000"))
         );
+    }
+
+    #[test]
+    fn a_deposit_for_another_account_credits_that_account_and_names_who_paid() {
+        let (mut c, total_in) = world();
+        let before = (c.get_balance(acct(USERS[0])).0, c.get_balance(acct(USERS[1])).0);
+        token_sends(&mut c, USERS[0], 5_000_000, &format!("deposit_for:{}", USERS[1]), 100);
+        let (_, args, _, _) = call_of(&receipts()[1]);
+        assert_eq!(
+            (&args["sender_id"], &args["arrival"]),
+            (&json!(USERS[0]), &json!({ "depositfor": USERS[1] })),
+            "a refusal past this point still refunds the sender, who paid"
+        );
+        let arrival = near_sdk::serde_json::from_value(args["arrival"].clone()).unwrap();
+        act_as(SELF, 4);
+        let back = c.on_forwarded(acct(USERS[0]), U128(5_000_000), arrival, Ok(U128(5_000_000)));
+        assert_eq!(back.0, 0);
+        assert_eq!(
+            (c.get_balance(acct(USERS[0])).0, c.get_balance(acct(USERS[1])).0),
+            (before.0, before.1 + 5_000_000)
+        );
+        assert_eq!(
+            last_event()["data"],
+            json!({ "account": USERS[1], "amount": "5000000", "from": USERS[0] })
+        );
+        assert_eq!(c.total_owed().0, total_in + 5_000_000);
+    }
+
+    #[test]
+    fn a_deposit_for_an_account_that_left_in_flight_stays_its_money() {
+        let (mut c, total_in) = world();
+        act_paying("dan.near", NearToken::from_millinear(50));
+        c.storage_deposit(None, None);
+        token_sends(&mut c, USERS[0], 5_000_000, "deposit_for:dan.near", 100);
+        act_paying("dan.near", NearToken::from_yoctonear(1));
+        assert!(c.storage_unregister(None));
+        act_as(SELF, 4);
+        let gift = Arrival::DepositFor(acct("dan.near"));
+        let _ = c.on_forwarded(acct(USERS[0]), U128(5_000_000), gift, Ok(U128(5_000_000)));
+        assert_eq!(
+            c.get_balance(acct("dan.near")).0,
+            5_000_000,
+            "registering again finds it"
+        );
+        assert_eq!(c.total_owed().0, total_in + 5_000_000);
     }
 
     #[test]

@@ -6,6 +6,8 @@ export interface RpcSettings {
   primaryUrl: string;
   archivalUrl: string | null;
   primaryBearerToken: string | null;
+  secondUrl: string | null;
+  secondBearerToken: string | null;
   timeoutMs: number;
   intervalMs: number;
 }
@@ -37,8 +39,12 @@ export function readRpcSettings(env: NodeJS.ProcessEnv, network: Network): RpcSe
   const archivalUrl = archive ? endpoint(archive, 'RPC_ARCHIVAL_URL') : null;
   const primaryBearerToken = env.RPC_PRIMARY_BEARER_TOKEN || null;
   if (primaryBearerToken && (/[\r\n]/.test(primaryBearerToken) || !primaryUrl.startsWith('https://'))) throw new Error('RPC bearer token requires HTTPS and must not contain newlines');
+  const secondUrl = env.RPC_SECOND_URL ? endpoint(env.RPC_SECOND_URL, 'RPC_SECOND_URL') : null;
+  const secondBearerToken = env.RPC_SECOND_BEARER_TOKEN || null;
+  if (secondUrl && new URL(secondUrl).hostname === new URL(primaryUrl).hostname) throw new Error('RPC_SECOND_URL must be a different provider from RPC_URL');
+  if (secondBearerToken && (/[\r\n]/.test(secondBearerToken) || !secondUrl?.startsWith('https://'))) throw new Error('RPC bearer token requires HTTPS and must not contain newlines');
   return {
-    primaryUrl, archivalUrl, primaryBearerToken,
+    primaryUrl, archivalUrl, primaryBearerToken, secondUrl, secondBearerToken,
     timeoutMs: bounded(env.RPC_TIMEOUT_MS || '10000', 'RPC_TIMEOUT_MS', 100, 60000),
     intervalMs: bounded(env.RPC_INTERVAL_MS || '1000', 'RPC_INTERVAL_MS', 1000, 60000),
   };
@@ -57,11 +63,13 @@ async function readCapped(response: Response, max: number): Promise<string> {
 }
 
 export class RpcError extends Error {
-  constructor(public readonly code: string | number) { super(`RPC request failed (${code})`); }
+  constructor(public readonly code: string | number, public readonly causeName: string | null = null) {
+    super(`RPC request failed (${code})`);
+  }
 }
 
 // Only read operations are allowed in this provider diagnostic. No wallet or signing keys.
-type ReadMethod = 'status' | 'block' | 'EXPERIMENTAL_indexer_block' | 'query';
+type ReadMethod = 'status' | 'block' | 'EXPERIMENTAL_indexer_block' | 'query' | 'EXPERIMENTAL_tx_status';
 export class ReadRpcClient {
   private tail: Promise<unknown> = Promise.resolve();
   private nextAt = 0;
@@ -89,7 +97,10 @@ export class ReadRpcClient {
       let body: unknown;
       try { body = JSON.parse(await readCapped(response, MAX_RPC_RESPONSE_BYTES)); } catch { throw new RpcError(`http_${response.status}_invalid_json`); }
       if (!isObject(body) || body.id !== id || body.jsonrpc !== '2.0') throw new RpcError('invalid_envelope');
-      if (isObject(body.error) && typeof body.error.code === 'number') throw new RpcError(body.error.code);
+      if (isObject(body.error) && typeof body.error.code === 'number') {
+        const cause = isObject(body.error.cause) && typeof body.error.cause.name === 'string' ? body.error.cause.name : null;
+        throw new RpcError(body.error.code, cause);
+      }
       if (!response.ok) throw new RpcError(`http_${response.status}`);
       if (!Object.hasOwn(body, 'result')) throw new RpcError('missing_result');
       return body.result;

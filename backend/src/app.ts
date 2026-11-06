@@ -1,4 +1,5 @@
 import { isPrivateRoute, type PrivateHandler } from './private-api.js';
+import { isAgentAccessRoute } from './agent-paths.js';
 import { createServer, type IncomingMessage } from 'node:http';
 import { BlockList, isIP } from 'node:net';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -8,6 +9,8 @@ import { isReadRoute, ReadError, type ReadHandler } from './read-api.js';
 
 const WINDOW_MS = 60000;
 const REQUESTS_PER_WINDOW = 120;
+const ACCESS_REQUESTS_PER_WINDOW = 6000;
+const REQUESTS_PER_ACCESS_TOKEN = 120;
 const CHALLENGES_PER_WINDOW = 5;
 const MAX_TRACKED_CLIENTS = 10000;
 
@@ -34,6 +37,15 @@ function withinLimit(counters: Counters, client: string, max: number, now: numbe
     return true;
   }
   return ++entry.count <= max;
+}
+
+function pathOf(url: string | undefined) {
+  if ((url?.length ?? 0) > 8192) return null;
+  try {
+    return new URL(url ?? '/', 'http://localhost').pathname;
+  } catch {
+    return null;
+  }
 }
 
 // An IPv6 client usually holds a whole /64, so each address in it would otherwise get a fresh budget.
@@ -99,7 +111,8 @@ export function createApp(
   serviceStatus?: ServiceStatusReader,
 ) {
   const limits: Counters = new Map(),
-    challengeLimits: Counters = new Map();
+    challengeLimits: Counters = new Map(),
+    tokenLimits: Counters = new Map();
   const proxies = trustedProxyList(config.trustedProxyAddresses);
   const server = createServer(async (req, res) => {
     const requestId = randomUUID();
@@ -118,19 +131,18 @@ export function createApp(
     };
     const client = clientAddress(req, config.trustedProxyHops, proxies);
     const now = Date.now();
-    if (!withinLimit(limits, client, REQUESTS_PER_WINDOW, now)) {
+    const privatePath = pathOf(req.url);
+    const access = privatePath !== null && isAgentAccessRoute(privatePath);
+    const token = access ? createHash('sha256').update(String(req.headers.authorization)).digest('hex') : '';
+    if (
+      !withinLimit(limits, client, access ? ACCESS_REQUESTS_PER_WINDOW : REQUESTS_PER_WINDOW, now) ||
+      (access && !withinLimit(tokenLimits, token, REQUESTS_PER_ACCESS_TOKEN, now))
+    ) {
       res.setHeader('Retry-After', '60');
       reply(429, { error: { code: 'rate_limited', requestId } });
       return;
     }
-    if ((req.url?.length ?? 0) > 8192) {
-      reply(400, { error: { code: 'invalid_url', requestId } });
-      return;
-    }
-    let privatePath: string;
-    try {
-      privatePath = new URL(req.url ?? '/', 'http://localhost').pathname;
-    } catch {
+    if (privatePath === null) {
       reply(400, { error: { code: 'invalid_url', requestId } });
       return;
     }

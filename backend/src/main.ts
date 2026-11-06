@@ -7,6 +7,7 @@ import { backendStatus } from './monitoring.js';
 import { createPrivateApi } from './private-api.js';
 import { accessKeyChecker } from './access-key.js';
 import { ingestionStatus } from './ingestion/store.js';
+import { agentGateway } from './agent-gateway.js';
 
 const READ_POOL_SIZE = 4;
 const STATUS_POOL_SIZE = 2;
@@ -20,6 +21,7 @@ try {
   // Public status routes also get their own, so a flood on them cannot take the connections login needs.
   const statusPool = createPool(config.databaseUrl, STATUS_POOL_SIZE);
   const evidence = createReadApi(readPool, config);
+  const checkKey = accessKeyChecker(config);
   const server = createApp(
     config,
     () => verifyDatabase(statusPool, config),
@@ -31,10 +33,11 @@ try {
     createPrivateApi(
       pool,
       config,
-      accessKeyChecker(config),
+      checkKey,
       process.env.POLICY_TERMS_HASH && process.env.POLICY_PRIVACY_HASH
         ? { terms: process.env.POLICY_TERMS_HASH, privacy: process.env.POLICY_PRIVACY_HASH }
         : null,
+      config.agentWorker && agentGateway(config.agentWorker),
     ),
     async () => {
       await verifyDatabase(statusPool, config);

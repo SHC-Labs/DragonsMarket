@@ -154,7 +154,7 @@ The test verifies receipt IDs, event payloads and final contract settings agains
 
 `LocalSandboxReader` and `captureLocalTransactions` live in `src/ingestion/local-source.ts`. The source is labelled `local_capture`, not `fixture` or `live`. The third migration adds that status label. Migration 004 indexes receipt outcomes and backfills committed journals. Migrations 005 and 006 add source heads, transaction provenance, jobs, operations, price/signing evidence, reconciliation reports and wallet sessions. Migration 007 enforces append-only deployment identities so service users do not need deployment-update privileges. It captures only the known calls controlled by this isolated harness. It cannot discover arbitrary users' transactions and must never be presented as complete network ingestion.
 
-Prerequisites are the repository Rust toolchain, WebAssembly target, `cargo-near`, Node 22.23.4+ in the 22.x line and local PostgreSQL. The official `near-sandbox` and `near-api-js` packages are test-only dependencies. The first sandbox run downloads its pinned binary. Build output, binary cache and sandbox temporary files stay under ignored `backend/.local/`; that folder is excluded from Docker builds. The test prints the WASM SHA-256 and receipt/event counts for its actual run.
+Prerequisites are the repository Rust toolchain, WebAssembly target, `cargo-near`, Node 24.21.0+ in the 24.x line and local PostgreSQL. The official `near-sandbox` and `near-api-js` packages are test-only dependencies. The first sandbox run downloads its pinned binary. Build output, binary cache and sandbox temporary files stay under ignored `backend/.local/`; that folder is excluded from Docker builds. The test prints the WASM SHA-256 and receipt/event counts for its actual run.
 
 A mutation check also confirmed that incorrectly marking rejected receipts as successful makes this integration fail. The correct adapter was restored afterward. The separate public-RPC capability checks still do not establish a complete live receipt stream.
 
@@ -302,7 +302,9 @@ Reconciliation subtracts what a contract has already sent out but not yet booked
 
 `npm run verify:chain` (a `verify-chain` Compose service, every 6 hours) checks the stored history against itself: each block names the previous stored block as its parent, the checkpoint is the last block, and the events kept equal the events the blocks declare. Results go to `chain_integrity_reports`; `/v1/operator/services` raises `chain_integrity_failed` or `chain_integrity_stale`. Entity-level gap repair waits for the financial read model.
 
-Compose gives each service its own database login (`dm_api_login`, `dm_indexer_login`, `dm_worker_login`) with only the rights in `ops/roles.sql`. A `roles` service applies the file after migrations and sets the passwords from `API_DB_PASSWORD`, `INDEXER_DB_PASSWORD` and `WORKER_DB_PASSWORD`; running it again rotates them. Migrations and deployment registration still use the database owner.
+Compose gives each service its own database login (`dm_api_login`, `dm_indexer_login`, `dm_worker_login`, `dm_agent_login`) with only the rights in `ops/roles.sql`. A `roles` service applies the file after migrations and sets the passwords from `API_DB_PASSWORD`, `INDEXER_DB_PASSWORD`, `WORKER_DB_PASSWORD` and `AGENT_DB_PASSWORD`; running it again rotates them. Migrations and deployment registration still use the database owner.
+
+Agent accounts run in their own process, `agent-worker` (`docker compose --profile agents`, `npm run agent-worker`). It alone holds the Agent API partner key and the grant key, in `.env.agent-worker`, and only its login can read a sealed grant or write an operation; the API refuses to start if it sees either key. The API authenticates the session or `dmk_` token, applies the rate limits and forwards the request to the worker's private `POST /internal/agents` with `AGENT_WORKER_TOKEN`. Publish no port for the worker. The worker owns the sweep that follows stranded work, and it enforces the limits itself: at most 100 units for one stake or buy and 1,000 in 24 hours per owner from a website session, the owner-signed limits on a `dmk_` token, and no trade that accepts more than 10% worse than the on-chain quote. So a compromised API can ask for trades inside those limits but cannot read a key or a grant, and money still pays out only to the owner. With the worker down the agent routes answer 502 and the rest of the API keeps working.
 
 Behind a reverse proxy set `TRUSTED_PROXY_HOPS` to the number of proxies and `TRUSTED_PROXY_ADDRESSES` to the addresses (or CIDR ranges) they connect from. `X-Forwarded-For` is read only from those addresses, and only the entry the nearest proxy appended. Without both, every client is limited by its socket address, which behind a proxy means one shared limit. IPv6 clients are limited per /64.
 
@@ -312,7 +314,7 @@ The backup command writes a custom-format pg_dump archive with a SHA-256 file un
 
 ## Host development and checks
 
-Use Node 22.23.4 or a newer 22.x release and npm, matching the website runtime. Dependencies are locked in `package-lock.json`: TypeScript, the `pg` PostgreSQL driver, and type declarations. HTTP and tests use Node's standard library.
+Use Node 24.21.0 or a newer 24.x release and npm; the NEAR Intents Agent API SDK needs Node 24. Dependencies are locked in `package-lock.json`: TypeScript, the `pg` PostgreSQL driver, the official `@near-intents-agent-api/sdk`, and type declarations. HTTP and tests use Node's standard library.
 
 ```sh
 npm ci

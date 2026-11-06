@@ -35,6 +35,30 @@ export async function view<T>(contractId: string, method: string, args: Record<s
   return (text === "" ? null : JSON.parse(text)) as T;
 }
 
+export async function chainHeight(): Promise<bigint> {
+  const block = await rpc<{ header: { height: number } }>("block", { finality: "final" });
+  return BigInt(block.header.height);
+}
+
+// The mock chain (scripts/mock-chain.mjs) applies a dev account's transaction itself. A real sandbox has no such
+// method and refuses it, which reads the same as a wallet that did not send.
+export async function sandboxSend(signerId: string, receiverId: string, actions: unknown[]): Promise<string> {
+  const sent = await rpc<{ transaction: { hash: string } }>("sandbox_send",
+    { signer_id: signerId, receiver_id: receiverId, actions });
+  return sent.transaction.hash;
+}
+
+export async function nearBalance(accountId: string): Promise<bigint> {
+  try {
+    const params = { request_type: "view_account", finality: "final", account_id: accountId };
+    const account = await rpc<{ amount: string }>("query", params);
+    return BigInt(account.amount);
+  } catch (e) {
+    if (e instanceof RpcError && /does not exist|UNKNOWN_ACCOUNT/.test(e.message)) return 0n;
+    throw e;
+  }
+}
+
 // Contract panic messages from a finished transaction, so a failure can be explained in words.
 export async function txPanics(txHash: string, signerId: string): Promise<string[]> {
   const result = await rpc<unknown>("EXPERIMENTAL_tx_status", {
@@ -53,4 +77,30 @@ export async function txPanics(txHash: string, signerId: string): Promise<string
   };
   walk(result);
   return found;
+}
+
+export interface ChainEvent { executor: string; standard: unknown; event: unknown; data: Record<string, unknown> }
+interface ReceiptOutcome { outcome?: { executor_id?: string; logs?: string[]; status?: Record<string, unknown> } }
+
+function eventsOf({ outcome }: ReceiptOutcome): ChainEvent[] {
+  const status = outcome?.status ?? {};
+  if (!("SuccessValue" in status) && !("SuccessReceiptId" in status)) return [];
+  return (outcome?.logs ?? []).filter((log) => log.startsWith("EVENT_JSON:")).flatMap((log) => {
+    try {
+      const e = JSON.parse(log.slice("EVENT_JSON:".length));
+      const data = e?.data && typeof e.data === "object" && !Array.isArray(e.data) ? e.data : {};
+      return [{ executor: outcome?.executor_id ?? "", standard: e?.standard, event: e?.event, data }];
+    } catch {
+      return [];
+    }
+  });
+}
+
+export async function txEvents(txHash: string, signerId: string): Promise<ChainEvent[]> {
+  const result = await rpc<{ receipts_outcome?: ReceiptOutcome[] }>("EXPERIMENTAL_tx_status", {
+    tx_hash: txHash,
+    sender_account_id: signerId,
+    wait_until: "FINAL",
+  });
+  return (result.receipts_outcome ?? []).flatMap(eventsOf);
 }

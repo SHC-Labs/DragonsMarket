@@ -2,7 +2,7 @@
 
 import { useLayoutEffect, type RefObject } from "react";
 
-const ACTIVE = '[aria-pressed="true"], [aria-current="page"]';
+const ACTIVE = '[aria-pressed="true"], [aria-current="page"], [aria-selected="true"]';
 
 // Positions a container's sliding indicator under its active child by setting --seg-x and --seg-w.
 // The indicator only appears once measured (data-ready), so the first paint never shows it in the wrong place.

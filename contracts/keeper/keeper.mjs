@@ -532,9 +532,10 @@ export function verifierProblems({ name, id, keys, predecessorAuth, locked }) {
   return problems;
 }
 
-export function tokenProblems({ token, market, marketRegistered, verifier, verifierRegistered }) {
+export function tokenProblems({ token, market, marketRegistered, rounds, roundsRegistered, verifier, verifierRegistered }) {
   const problems = [];
   if (!marketRegistered) problems.push(`market ${market} is not registered with the token ${token}: the token refuses every deposit and buy by ft_transfer_call, so register it with storage_deposit on the token`);
+  if (rounds && !roundsRegistered) problems.push(`rounds ${rounds} is not registered with the token ${token}: the token refuses every deposit and stake by ft_transfer_call, so register it with storage_deposit on the token`);
   if (!verifierRegistered) problems.push(`the verifier ${verifier} is not registered with the token ${token}: the market cannot move a token deposit into Intents, so every one goes back to its sender`);
   return problems;
 }
@@ -818,9 +819,9 @@ async function check(opts) {
   const token = configs.market.collateral_token_id.slice(NEP141_PREFIX.length);
   const registered = async (id) => (await view(opts.rpc, token, "storage_balance_of", { account_id: id }, at)) !== null;
   const tokenTrouble = tokenProblems({
-    token, market: opts.market, marketRegistered: await registered(opts.market), verifier: configs.market.verifier, verifierRegistered: await registered(configs.market.verifier),
+    token, market: opts.market, marketRegistered: await registered(opts.market), rounds: opts.rounds, roundsRegistered: opts.rounds ? await registered(opts.rounds) : false, verifier: configs.market.verifier, verifierRegistered: await registered(configs.market.verifier),
   });
-  if (!tokenTrouble.length) console.log(`token ${token}: the market and the verifier are registered, so deposits and buys by ft_transfer_call can arrive`);
+  if (!tokenTrouble.length) console.log(`token ${token}: the ${opts.rounds ? "market, rounds and the verifier are" : "market and the verifier are"} registered, so deposits by ft_transfer_call can arrive`);
   problems.push(...tokenTrouble);
 
   const keyCounts = [];

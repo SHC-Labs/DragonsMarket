@@ -609,23 +609,14 @@ async fn malformed_messages_bounce_with_the_money_back() -> anyhow::Result<()> {
         "revenue".into(),
         "\u{0}\u{0}".into(),
         "buy::::".into(),
+        format!("buy:{id}:yes:1:and:more"),
+        "deposit:extra:parts".into(),
     ] {
         let before = holdings(&w, w.alice.id()).await;
         let _ = ft_call(&w, &w.alice, w.market.id(), USD, &msg).await;
         assert_eq!(holdings(&w, w.alice.id()).await, before, "{msg:?} was not bounced");
     }
     assert_eq!(u(&market_json(&w, id).await["locked"]), locked, "no market money moved");
-
-    // Extra text after a complete message is ignored, so "buy:0:yes:1:more" is a buy and "deposit:more" is a deposit. That is
-    // harmless: the sender only ever spends their own money and gets exactly what they asked for.
-    let shares_before = shares(&w, id, w.alice.id()).await.0;
-    ft_call(&w, &w.alice, w.market.id(), USD, &format!("buy:{id}:yes:1:and:more")).await?;
-    assert!(shares(&w, id, w.alice.id()).await.0 > shares_before);
-    // A deposit with extra text is credited to the sender, not lost, and she can take it out.
-    let (tokens, held) = (holdings(&w, w.alice.id()).await, market_balance(&w, w.alice.id()).await);
-    let _ = ft_call(&w, &w.alice, w.market.id(), USD, "deposit:extra:parts").await;
-    assert_eq!(holdings(&w, w.alice.id()).await + USD, tokens);
-    assert_eq!(market_balance(&w, w.alice.id()).await, held + USD);
 
     let mk = w.market.id();
     for msg in [

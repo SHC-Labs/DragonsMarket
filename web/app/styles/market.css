@@ -9,7 +9,7 @@
 /* Main column and a sticky ticket; on phones the ticket follows the price. */
 .market-detail-layout {
   display: grid; grid-template-columns: minmax(0, 1fr) var(--ticket-w); column-gap: clamp(2rem, 4vw, 4rem); row-gap: var(--s-7);
-  grid-template-areas: "head head" "price ticket" "body ticket";
+  grid-template-areas: "head head" "price ticket" "body ticket" "feed feed";
   align-items: start; margin-top: var(--s-5);
 }
 .market-detail-header { grid-area: head; display: flex; align-items: flex-start; gap: var(--s-5); min-width: 0; }
@@ -20,6 +20,7 @@
 .market-detail-meta svg { color: var(--text-muted); }
 .market-detail-result { color: var(--text); font-weight: 500; }
 .market-title { margin: var(--s-4) 0 0; font-size: clamp(1.75rem, 1.2rem + 1.8vw, 2.75rem); font-weight: 500; line-height: 1.12; letter-spacing: -0.03em; overflow-wrap: anywhere; }
+.market-feed-slot { grid-area: feed; min-width: 0; }
 .market-ticket-slot { grid-area: ticket; position: sticky; top: calc(var(--header-h) + var(--s-6)); min-width: 0; }
 .market-detail-body { grid-area: body; min-width: 0; display: grid; gap: var(--s-10); }
 
@@ -150,7 +151,7 @@
 .market-skeleton-ticket { height: 30rem; }
 
 @media (max-width: 1023px) {
-  .market-detail-layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "head" "price" "ticket" "body"; row-gap: var(--s-6); }
+  .market-detail-layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "head" "price" "ticket" "feed" "body"; row-gap: var(--s-6); }
   .market-ticket-slot { position: static; }
 }
 @media (max-width: 767px) {

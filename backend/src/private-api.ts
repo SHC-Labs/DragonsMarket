@@ -5,8 +5,10 @@ import { challenge, isUuid, login, revokeAllSessions, session, tokenHash, type C
 import { isAccount as account } from './validate.js';
 import { ReadError } from './read-api.js';
 import { LOCK } from './locks.js';
+import { isAgentAccessRoute, isAgentRoute, type AgentRoutes } from './agent-paths.js';
 export const isPrivateRoute = (p: string) =>
-  p.startsWith('/v1/auth/') || p === '/v1/watchlist' || p === '/v1/policies/acknowledge' || /^\/v1\/operations\/[^/]+$/.test(p);
+  p.startsWith('/v1/auth/') || p === '/v1/watchlist' || p === '/v1/policies/acknowledge' || /^\/v1\/operations\/[^/]+$/.test(p) ||
+  isAgentRoute(p) || isAgentAccessRoute(p);
 export type PrivateHandler = (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<unknown>;
 // A cookie name sent twice is ambiguous (a sibling subdomain can plant a second one), so it counts as absent.
 function cookie(req: IncomingMessage, name: string) {
@@ -18,13 +20,13 @@ function cookie(req: IncomingMessage, name: string) {
   return found.length === 1 ? found[0]!.slice(name.length + 1) : '';
 }
 const LOGIN_REJECTIONS = ['invalid_login', 'challenge_used_or_expired', 'invalid_public_key', 'invalid_nonce'];
-async function body(req: IncomingMessage) {
+async function body(req: IncomingMessage, limit = 16384) {
   if (!req.headers['content-type']?.startsWith('application/json')) throw new ReadError(415, 'json_required');
   let length = 0;
   const parts: Buffer[] = [];
   for await (const part of req) {
     length += part.length;
-    if (length > 16384) throw new ReadError(413, 'body_too_large');
+    if (length > limit) throw new ReadError(413, 'body_too_large');
     parts.push(part);
   }
   try {
@@ -40,6 +42,7 @@ export function createPrivateApi(
   config: Config,
   checkKey: CheckAccessKey,
   policies: { terms: string; privacy: string } | null = null,
+  agents: AgentRoutes | null = null,
 ): PrivateHandler {
   // Over https the __Host- prefix makes browsers refuse a cookie set by a sibling subdomain; it requires Secure and Path=/.
   const https = config.webOrigin.startsWith('https:');
@@ -50,6 +53,11 @@ export function createPrivateApi(
     const method = req.method ?? 'GET',
       path = url.pathname;
     if (url.search) throw new ReadError(400, 'invalid_query');
+    if (isAgentAccessRoute(path)) {
+      if (!agents || !config.deployment) throw new ReadError(503, 'agents_not_configured');
+      if (req.headers.origin !== undefined || req.headers.cookie !== undefined) throw new ReadError(403, 'server_to_server_only');
+      return agents.access(method, path, req.headers.authorization, () => body(req));
+    }
     if (!['GET', 'HEAD'].includes(method) && req.headers.origin !== config.webOrigin) throw new ReadError(403, 'origin_required');
     if (path === '/v1/auth/challenge' && method === 'POST') {
       const b = await body(req);
@@ -102,6 +110,10 @@ export function createPrivateApi(
     }
     const deployment = config.deployment?.id;
     if (!deployment) throw new ReadError(503, 'deployment_not_configured');
+    if (isAgentRoute(path)) {
+      if (!agents) throw new ReadError(503, 'agents_not_configured');
+      return agents.owner(method, path, { account: identity.account_id, publicKey: identity.public_key }, () => body(req, 65536));
+    }
     if (path === '/v1/watchlist') {
       if (['GET', 'HEAD'].includes(method))
         return {

@@ -272,9 +272,11 @@ async fn the_keeper_sweeps_fees_once_they_reach_the_minimum_with_keys_scoped_to_
     )
     .await?;
     let market_key = scoped_key(&w, w.market.id(), &["sweep_fees"]).await?;
-    let (oracle_file, market_file) = (dir.join("oracle"), dir.join("market"));
+    let council_key = scoped_key(&w, w.council.id(), &["advance_days"]).await?;
+    let (oracle_file, market_file, council_file) = (dir.join("oracle"), dir.join("market"), dir.join("council"));
     write_key_file(&oracle_file, &oracle_key, 0o600);
     write_key_file(&market_file, &market_key, 0o600);
+    write_key_file(&council_file, &council_key, 0o600);
     let (oracle_arg, market_arg) = (oracle_file.to_str().unwrap(), market_file.to_str().unwrap());
 
     // No key at all: nothing is sent.
@@ -318,6 +320,8 @@ async fn the_keeper_sweeps_fees_once_they_reach_the_minimum_with_keys_scoped_to_
             oracle_arg,
             "--market-key-file",
             market_arg,
+            "--council-key-file",
+            council_file.to_str().unwrap(),
         ],
         &[],
     )

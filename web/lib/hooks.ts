@@ -9,7 +9,7 @@ import type { FunctionCall } from "./market";
 // Results are tied to the dependency values, so changing them never shows the old answer.
 export function usePoll<T>(fn: () => Promise<T>, deps: unknown[], ms = 5000) {
   const key = JSON.stringify(deps);
-  const [state, setState] = useState<{ key: string; data: T | null; error: string | null }>({ key, data: null, error: null });
+  const [state, setState] = useState<{ key: string; data: T | null; error: string | null; answered: boolean }>({ key, data: null, error: null, answered: false });
   const fnRef = useRef(fn);
   const runRef = useRef<() => Promise<void>>(async () => {});
 
@@ -22,10 +22,10 @@ export function usePoll<T>(fn: () => Promise<T>, deps: unknown[], ms = 5000) {
     const run = async () => {
       try {
         const data = await fnRef.current();
-        if (live) setState({ key, data, error: null });
+        if (live) setState({ key, data, error: null, answered: true });
       } catch (e) {
         const error = e instanceof Error ? e.message : "Could not load.";
-        if (live) setState((s) => ({ key, data: s.key === key ? s.data : null, error }));
+        if (live) setState((s) => ({ key, data: s.key === key ? s.data : null, error, answered: true }));
       }
     };
     runRef.current = run;
@@ -37,9 +37,9 @@ export function usePoll<T>(fn: () => Promise<T>, deps: unknown[], ms = 5000) {
     };
   }, [key, ms]);
 
-  const current = state.key === key ? state : { data: null, error: null };
+  const current = state.key === key ? state : { data: null, error: null, answered: false };
   const reload = useCallback(() => runRef.current(), []);
-  return { data: current.data, error: current.error, loading: current.data === null && current.error === null, reload };
+  return { data: current.data, error: current.error, loading: !current.answered, reload };
 }
 
 export function useNow(ms = 1000) {

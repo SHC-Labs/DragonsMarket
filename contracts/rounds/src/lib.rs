@@ -4,6 +4,9 @@
 
 use std::cmp::Ordering;
 
+use near_contract_standards::fungible_token::core::ext_ft_core;
+use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
+use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds, StorageManagement};
 use near_sdk::json_types::{Base58CryptoHash, U128, U64};
 use near_sdk::serde_json::json;
 use near_sdk::store::LookupMap;
@@ -17,7 +20,7 @@ const GAS_REMOVE_VERIFIER_KEY: Gas = Gas::from_tgas(15);
 const NEP141_PREFIX: &str = "nep141:";
 // Two disjoint groups of publishers must never both reach the threshold, or two prices could win for one moment.
 const MAJORITY_NEEDED: &str = "the threshold must be more than half of the publishers";
-const STATE_VERSION: u16 = 2;
+const STATE_VERSION: u16 = 3;
 const BPS_DENOMINATOR: u128 = 10_000;
 // Taken from what the losing side paid, and capped so a winner never gets back less than the stake.
 const DEFAULT_FEE_BPS: u32 = 300;
@@ -44,6 +47,13 @@ const RECONCILE_WAIT_NS: u64 = 60 * NS_PER_MINUTE;
 const GAS_MT_TRANSFER: Gas = Gas::from_tgas(15);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
 const SWEEP_GAS: Gas = Gas::from_tgas(60);
+const STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(50);
+const GAS_FT_FORWARD: Gas = Gas::from_tgas(50);
+const GAS_STAKE: Gas = Gas::from_tgas(10);
+const GAS_ON_FORWARDED: Gas = Gas::from_gas(GAS_CALLBACK.as_gas() + GAS_STAKE.as_gas());
+const GAS_FORWARD_OVERHEAD: Gas = Gas::from_tgas(5);
+const GAS_FORWARD_FLOOR: Gas =
+    Gas::from_gas(GAS_FT_FORWARD.as_gas() + GAS_ON_FORWARDED.as_gas() + GAS_FORWARD_OVERHEAD.as_gas());
 
 #[near(serializers=[borsh])]
 #[derive(BorshStorageKey)]
@@ -56,6 +66,7 @@ enum Key {
     Withdrawals,
     PendingByAccount,
     Prices,
+    StoragePayers,
 }
 
 #[near(serializers=[borsh, json])]
@@ -125,6 +136,43 @@ pub struct Withdrawal {
     account: AccountId,
     amount: U128,
     at: U64,
+}
+
+#[near(serializers=[json])]
+pub struct OpenRound {
+    series_id: u32,
+    asset: String,
+    round: U64,
+    opens_at: U64,
+    closes_at: U64,
+}
+
+#[near(serializers=[json])]
+pub struct Order {
+    series_id: u32,
+    round: U64,
+    side: Side,
+    min_shares: U128,
+}
+
+impl Order {
+    fn bet(&self, amount: u128) -> Bet {
+        Bet {
+            series_id: self.series_id,
+            round: self.round.0,
+            side: self.side,
+            amount,
+            min_shares: self.min_shares.0,
+        }
+    }
+}
+
+#[near(serializers=[json])]
+#[serde(rename_all = "lowercase")]
+pub enum Arrival {
+    Deposit,
+    DepositFor(AccountId),
+    Stake(Order),
 }
 
 #[near(serializers=[borsh])]
@@ -197,7 +245,13 @@ pub trait Verifier {
     );
 }
 
-#[near(contract_state, contract_metadata(standard(standard = "nep297", version = "1.0.0")))]
+#[near(
+    contract_state,
+    contract_metadata(
+        standard(standard = "nep145", version = "1.0.0"),
+        standard(standard = "nep297", version = "1.0.0"),
+    )
+)]
 #[derive(PanicOnDefault)]
 pub struct RoundsContract {
     state_version: u16,
@@ -221,7 +275,7 @@ pub struct RoundsContract {
     // The price at the start of a round, which is also the end price of the round before. Recorded once.
     prices: LookupMap<(u32, u64), U128>,
     stakes: LookupMap<(u32, u64, AccountId), Stake>,
-    // account -> the stakes it has not claimed. Presence means it paid the registration fee.
+    // account -> the stakes it has not claimed. Presence means it registered, by the fee or by a storage deposit.
     accounts: LookupMap<AccountId, u32>,
     balances: LookupMap<AccountId, u128>,
     balances_total: u128,
@@ -233,6 +287,77 @@ pub struct RoundsContract {
     pending_by_account: LookupMap<AccountId, u128>,
     // Where sweep_fees sends the fees. Unset until the owner names it.
     treasury: Option<AccountId>,
+    storage_payers: LookupMap<AccountId, AccountId>,
+}
+
+#[near(serializers=[borsh])]
+struct StateV2 {
+    state_version: u16,
+    upgrade_proven: bool,
+    upgrade_in_flight: bool,
+    owner: AccountId,
+    pending_owner: Option<AccountId>,
+    operator: AccountId,
+    verifier: AccountId,
+    collateral_token_id: String,
+    network: String,
+    paused: bool,
+    fee_bps: u32,
+    registration_fee: u128,
+    publishers: Vec<PublicKey>,
+    price_threshold: u32,
+    next_series_id: u32,
+    series: LookupMap<u32, VersionedSeries>,
+    rounds: LookupMap<(u32, u64), VersionedRound>,
+    prices: LookupMap<(u32, u64), U128>,
+    stakes: LookupMap<(u32, u64, AccountId), Stake>,
+    accounts: LookupMap<AccountId, u32>,
+    balances: LookupMap<AccountId, u128>,
+    balances_total: u128,
+    locked_total: u128,
+    fees: u128,
+    next_withdrawal_id: u64,
+    withdrawals: LookupMap<u64, Withdrawal>,
+    pending_withdrawals_total: u128,
+    pending_by_account: LookupMap<AccountId, u128>,
+    treasury: Option<AccountId>,
+}
+
+impl From<StateV2> for RoundsContract {
+    fn from(old: StateV2) -> Self {
+        Self {
+            state_version: STATE_VERSION,
+            upgrade_proven: old.upgrade_proven,
+            upgrade_in_flight: old.upgrade_in_flight,
+            owner: old.owner,
+            pending_owner: old.pending_owner,
+            operator: old.operator,
+            verifier: old.verifier,
+            collateral_token_id: old.collateral_token_id,
+            network: old.network,
+            paused: old.paused,
+            fee_bps: old.fee_bps,
+            registration_fee: old.registration_fee,
+            publishers: old.publishers,
+            price_threshold: old.price_threshold,
+            next_series_id: old.next_series_id,
+            series: old.series,
+            rounds: old.rounds,
+            prices: old.prices,
+            stakes: old.stakes,
+            accounts: old.accounts,
+            balances: old.balances,
+            balances_total: old.balances_total,
+            locked_total: old.locked_total,
+            fees: old.fees,
+            next_withdrawal_id: old.next_withdrawal_id,
+            withdrawals: old.withdrawals,
+            pending_withdrawals_total: old.pending_withdrawals_total,
+            pending_by_account: old.pending_by_account,
+            treasury: old.treasury,
+            storage_payers: LookupMap::new(Key::StoragePayers),
+        }
+    }
 }
 
 // Exact layout of state version 1, which had no treasury.
@@ -300,6 +425,7 @@ impl From<StateV1> for RoundsContract {
             pending_withdrawals_total: old.pending_withdrawals_total,
             pending_by_account: old.pending_by_account,
             treasury: None,
+            storage_payers: LookupMap::new(Key::StoragePayers),
         }
     }
 }
@@ -331,6 +457,18 @@ impl Series {
     fn close_of(&self, round: u64) -> u64 {
         self.start_of(round.saturating_add(1))
             .saturating_sub(self.close_before.0)
+    }
+
+    fn next_round(&self, now: u64) -> u64 {
+        if now < self.first_start.0 {
+            return 0;
+        }
+        let current = (now - self.first_start.0) / self.interval.0;
+        if now < self.close_of(current) {
+            current
+        } else {
+            current + 1
+        }
     }
 }
 
@@ -469,13 +607,22 @@ fn parse_bet<'a>(mut parts: impl Iterator<Item = &'a str>, sent: Option<u128>) -
     let round = parse_part(parts.next(), "round");
     let side = parse_side(parts.next().unwrap_or(""));
     let amount = sent.unwrap_or_else(|| parse_part(parts.next(), "amount"));
+    let min_shares = parse_part(parts.next(), "minimum shares");
+    no_more(parts);
     Bet {
         series_id,
         round,
         side,
         amount,
-        min_shares: parse_part(parts.next(), "minimum shares"),
+        min_shares,
     }
+}
+
+fn no_more<'a>(mut parts: impl Iterator<Item = &'a str>) {
+    require!(
+        parts.next().is_none(),
+        "the message has more parts than its action takes"
+    );
 }
 
 #[near]
@@ -526,6 +673,7 @@ impl RoundsContract {
             pending_withdrawals_total: 0,
             pending_by_account: LookupMap::new(Key::PendingByAccount),
             treasury: None,
+            storage_payers: LookupMap::new(Key::StoragePayers),
         }
     }
 
@@ -569,6 +717,7 @@ impl RoundsContract {
         require!(bytes.len() >= 2, "invalid state");
         let mut state: Self = match u16::from_le_bytes([bytes[0], bytes[1]]) {
             STATE_VERSION => env::state_read().unwrap_or_else(|| env::panic_str("invalid current state")),
+            2 => Self::from(env::state_read::<StateV2>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
             1 => Self::from(env::state_read::<StateV1>().unwrap_or_else(|| env::panic_str("invalid previous state"))),
             _ => env::panic_str("unsupported state version"),
         };
@@ -864,17 +1013,50 @@ impl RoundsContract {
         require!(amount > 0, "amount must be positive");
         let mut parts = msg.split(':');
         match parts.next() {
-            Some("register") => self.register_with_collateral(&sender_id, amount),
+            Some("register") => {
+                no_more(parts);
+                self.register_with_collateral(&sender_id, amount);
+            }
             Some("deposit") => {
-                require!(!self.paused, "paused");
-                require!(self.accounts.contains_key(&sender_id), "register first");
-                self.credit(&sender_id, amount);
-                emit("deposit", json!({ "account": sender_id, "amount": amount.to_string() }));
+                no_more(parts);
+                self.assert_can_deposit(&sender_id);
+                self.credit_deposit(&sender_id, amount, &sender_id);
             }
             Some("stake") => self.stake_for(&sender_id, parse_bet(parts, Some(amount))),
             _ => env::panic_str("unknown action"),
         }
         vec![U128(0)]
+    }
+
+    #[private]
+    pub fn on_forwarded(
+        &mut self,
+        sender_id: AccountId,
+        amount: U128,
+        arrival: Arrival,
+        #[callback_result] used: Result<U128, PromiseError>,
+    ) -> U128 {
+        let taken = used.map_or(0, |used| used.0.min(amount.0));
+        if taken == 0 {
+            return amount;
+        }
+        let credited = match &arrival {
+            Arrival::DepositFor(who) => who.clone(),
+            _ => sender_id.clone(),
+        };
+        self.credit_deposit(&credited, taken, &sender_id);
+        if let Arrival::Stake(order) = arrival {
+            let _ = Self::ext(env::current_account_id())
+                .with_static_gas(GAS_STAKE)
+                .stake_credited(sender_id, order, U128(taken));
+        }
+        U128(amount.0 - taken)
+    }
+
+    #[private]
+    pub fn stake_credited(&mut self, who: AccountId, order: Order, amount: U128) {
+        self.debit(&who, amount.0);
+        self.stake_for(&who, order.bet(amount.0));
     }
 
     pub fn on_auth(&mut self, signer_id: AccountId, msg: String) -> PromiseOrValue<()> {
@@ -891,6 +1073,7 @@ impl RoundsContract {
             }
             Some("withdraw") => {
                 let amount: u128 = parse_part(parts.next(), "amount");
+                no_more(parts);
                 return PromiseOrValue::Promise(self.withdraw_for(signer_id, amount));
             }
             _ => env::panic_str("unknown action"),
@@ -963,7 +1146,8 @@ impl RoundsContract {
                 "upgrade_in_flight": self.upgrade_in_flight, "owner": self.owner, "pending_owner": self.pending_owner,
                 "operator": self.operator, "verifier": self.verifier, "collateral_token_id": self.collateral_token_id,
                 "network": self.network, "paused": self.paused, "fee_bps": self.fee_bps,
-                "registration_fee": self.registration_fee.to_string(), "min_stake": MIN_STAKE.to_string(),
+                "registration_fee": self.registration_fee.to_string(),
+                "storage_deposit": STORAGE_DEPOSIT.as_yoctonear().to_string(), "min_stake": MIN_STAKE.to_string(),
                 "max_open_stakes": MAX_OPEN_STAKES, "publishers": self.publishers, "price_threshold": self.price_threshold,
                 "treasury": self.treasury,
                 "series": self.next_series_id })
@@ -975,17 +1159,41 @@ impl RoundsContract {
 
     // The round taking stakes now, or the next to open when none is.
     pub fn next_round(&self, series_id: u32) -> U64 {
-        let s = self.series_by_id(series_id);
+        U64(self.series_by_id(series_id).next_round(env::block_timestamp()))
+    }
+
+    // Each series' round taking stakes now, or the next to open, with the moments it opens and closes.
+    pub fn open_rounds(&self, from_index: u32, limit: u32) -> Vec<OpenRound> {
         let now = env::block_timestamp();
-        if now < s.first_start.0 {
-            return U64(0);
+        (from_index..self.next_series_id.min(from_index.saturating_add(limit)))
+            .filter_map(|series_id| self.find_series(series_id).map(|s| (series_id, s)))
+            .map(|(series_id, s)| {
+                let round = s.next_round(now);
+                let (opens_at, closes_at) = (U64(s.start_of(round)), U64(s.close_of(round)));
+                OpenRound {
+                    series_id,
+                    asset: s.asset,
+                    round: U64(round),
+                    opens_at,
+                    closes_at,
+                }
+            })
+            .collect()
+    }
+
+    // The outcome a claim would settle now, or none while the round can still go either way.
+    pub fn round_outcome(&self, series_id: u32, round: U64) -> Option<Outcome> {
+        let r = self.find_round(series_id, round.0)?;
+        if r.outcome.is_some() {
+            return r.outcome;
         }
-        let current = (now - s.first_start.0) / s.interval.0;
-        U64(if now < s.close_of(current) {
-            current
-        } else {
-            current + 1
-        })
+        let series = self.find_series(series_id)?;
+        let now = env::block_timestamp();
+        if now < series.close_of(round.0) {
+            return None;
+        }
+        r.decide(&series, round.0, now, self.round_prices(series_id, round.0))
+            .map(|(outcome, _)| outcome)
     }
 
     pub fn get_round(&self, series_id: u32, round: U64) -> Option<Round> {
@@ -1071,6 +1279,13 @@ impl RoundsContract {
             .map(VersionedRound::into_current)
     }
 
+    fn round_prices(&self, series_id: u32, round: u64) -> (Option<U128>, Option<U128>) {
+        (
+            self.prices.get(&(series_id, round)).copied(),
+            self.prices.get(&(series_id, round.saturating_add(1))).copied(),
+        )
+    }
+
     fn store_round(&mut self, series_id: u32, round: u64, r: Round) {
         self.rounds.insert((series_id, round), r.into());
     }
@@ -1086,12 +1301,8 @@ impl RoundsContract {
         let series = self.series_by_id(series_id);
         let now = env::block_timestamp();
         require!(now >= series.close_of(round), "the round is still taking stakes");
-        let prices = (
-            self.prices.get(&(series_id, round)).copied(),
-            self.prices.get(&(series_id, round.saturating_add(1))).copied(),
-        );
         let (outcome, reason) = r
-            .decide(&series, round, now, prices)
+            .decide(&series, round, now, self.round_prices(series_id, round))
             .unwrap_or_else(|| env::panic_str("the round is waiting for its prices"));
         let fee = r.fee(outcome);
         r.left = U128(r.left.0 - fee);
@@ -1121,7 +1332,21 @@ impl RoundsContract {
         );
     }
 
-    fn stake_for(&mut self, who: &AccountId, bet: Bet) {
+    fn assert_can_deposit(&self, who: &AccountId) {
+        require!(!self.paused, "paused");
+        require!(self.accounts.contains_key(who), "register first");
+    }
+
+    fn credit_deposit(&mut self, who: &AccountId, amount: u128, from: &AccountId) {
+        self.credit(who, amount);
+        let mut data = json!({ "account": who, "amount": amount.to_string() });
+        if from != who {
+            data["from"] = json!(from);
+        }
+        emit("deposit", data);
+    }
+
+    fn check_stake(&self, who: &AccountId, bet: &Bet) -> (u32, Option<Stake>) {
         require!(!self.paused, "paused");
         let open = self
             .accounts
@@ -1130,8 +1355,7 @@ impl RoundsContract {
             .unwrap_or_else(|| env::panic_str("register first"));
         require!(bet.amount >= MIN_STAKE, "the stake is below the minimum");
         self.require_taking_stakes(bet.series_id, bet.round);
-        let key = (bet.series_id, bet.round, who.clone());
-        let held = self.stakes.get(&key).copied();
+        let held = self.stakes.get(&(bet.series_id, bet.round, who.clone())).copied();
         match held {
             Some(s) => require!(s.side == bet.side, "you staked the other side of this round"),
             None => require!(
@@ -1139,6 +1363,12 @@ impl RoundsContract {
                 "claim a settled round before staking in another"
             ),
         }
+        (open, held)
+    }
+
+    fn stake_for(&mut self, who: &AccountId, bet: Bet) {
+        let (open, held) = self.check_stake(who, &bet);
+        let key = (bet.series_id, bet.round, who.clone());
         let mut r = self
             .find_round(bet.series_id, bet.round)
             .unwrap_or_else(|| Round::new(self.fee_bps));
@@ -1259,6 +1489,160 @@ impl RoundsContract {
             "storage reserve reached; top up before adding records"
         );
     }
+
+    fn registered_balance() -> StorageBalance {
+        StorageBalance {
+            total: STORAGE_DEPOSIT,
+            available: NearToken::from_yoctonear(0),
+        }
+    }
+}
+
+#[near]
+impl StorageManagement for RoundsContract {
+    #[payable]
+    fn storage_deposit(&mut self, account_id: Option<AccountId>, registration_only: Option<bool>) -> StorageBalance {
+        let _ = registration_only;
+        require!(!self.paused, "paused");
+        let caller = env::predecessor_account_id();
+        let who = account_id.unwrap_or_else(|| caller.clone());
+        let payer = if caller == self.verifier { who.clone() } else { caller };
+        let paid = env::attached_deposit();
+        let refund = if self.accounts.contains_key(&who) {
+            paid
+        } else {
+            require!(paid >= STORAGE_DEPOSIT, "attach at least 0.05 NEAR");
+            self.accounts.insert(who.clone(), 0);
+            self.storage_payers.insert(who.clone(), payer.clone());
+            emit("registered", json!({ "account": who, "paid_by": payer }));
+            paid.saturating_sub(STORAGE_DEPOSIT)
+        };
+        if !refund.is_zero() {
+            let _ = Promise::new(payer).transfer(refund);
+        }
+        Self::registered_balance()
+    }
+
+    #[payable]
+    fn storage_withdraw(&mut self, amount: Option<NearToken>) -> StorageBalance {
+        assert_one_yocto();
+        require!(
+            self.accounts.contains_key(&env::predecessor_account_id()),
+            "the account is not registered"
+        );
+        require!(
+            amount.is_none_or(|a| a.is_zero()),
+            "nothing above the 0.05 NEAR deposit to withdraw"
+        );
+        Self::registered_balance()
+    }
+
+    #[payable]
+    fn storage_unregister(&mut self, force: Option<bool>) -> bool {
+        assert_one_yocto();
+        require!(
+            force != Some(true),
+            "force is not supported, claim your stakes and withdraw your balance first"
+        );
+        let who = env::predecessor_account_id();
+        let Some(open) = self.accounts.get(&who).copied() else {
+            return false;
+        };
+        require!(open == 0, "claim your stakes first");
+        require!(
+            self.balances.get(&who).copied().unwrap_or(0) == 0,
+            "withdraw your balance first"
+        );
+        require!(
+            self.pending_by_account.get(&who).copied().unwrap_or(0) == 0,
+            "a withdrawal is still pending"
+        );
+        self.accounts.remove(&who);
+        self.balances.remove(&who);
+        let deposit_to = self.storage_payers.remove(&who);
+        if let Some(payer) = &deposit_to {
+            let _ = Promise::new(payer.clone()).transfer(STORAGE_DEPOSIT);
+        }
+        let _ = Promise::new(who.clone()).transfer(ONE_YOCTO);
+        emit("unregistered", json!({ "account": who, "deposit_to": deposit_to }));
+        true
+    }
+
+    fn storage_balance_bounds(&self) -> StorageBalanceBounds {
+        StorageBalanceBounds {
+            min: STORAGE_DEPOSIT,
+            max: Some(STORAGE_DEPOSIT),
+        }
+    }
+
+    fn storage_balance_of(&self, account_id: AccountId) -> Option<StorageBalance> {
+        self.accounts.contains_key(&account_id).then(Self::registered_balance)
+    }
+}
+
+#[near]
+impl FungibleTokenReceiver for RoundsContract {
+    fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> PromiseOrValue<U128> {
+        let token = env::predecessor_account_id();
+        require!(
+            self.collateral_token_id.strip_prefix(NEP141_PREFIX) == Some(token.as_str()),
+            "only the collateral token can deliver money"
+        );
+        require!(
+            sender_id != self.verifier,
+            "send from your own account, not out of the verifier"
+        );
+        require!(amount.0 > 0, "amount must be positive");
+        upgrade::require_gas(
+            GAS_FORWARD_FLOOR,
+            "the rounds contract moves the money into its Intents account before crediting it",
+        );
+        let mut parts = msg.split(':');
+        let arrival = match parts.next() {
+            Some("deposit") => {
+                no_more(parts);
+                self.assert_can_deposit(&sender_id);
+                Arrival::Deposit
+            }
+            Some("deposit_for") => {
+                let who: AccountId = parse_part(parts.next(), "account");
+                no_more(parts);
+                self.assert_can_deposit(&who);
+                require!(
+                    amount.0 >= MIN_STAKE,
+                    "a deposit for an account must be at least the minimum stake"
+                );
+                Arrival::DepositFor(who)
+            }
+            Some("stake") => {
+                let bet = parse_bet(parts, Some(amount.0));
+                self.check_stake(&sender_id, &bet);
+                Arrival::Stake(Order {
+                    series_id: bet.series_id,
+                    round: U64(bet.round),
+                    side: bet.side,
+                    min_shares: U128(bet.min_shares),
+                })
+            }
+            _ => env::panic_str("unknown action"),
+        };
+        PromiseOrValue::Promise(
+            ext_ft_core::ext(token)
+                .with_attached_deposit(ONE_YOCTO)
+                .with_static_gas(GAS_FT_FORWARD)
+                .ft_transfer_call(
+                    self.verifier.clone(),
+                    amount,
+                    None,
+                    env::current_account_id().to_string(),
+                )
+                .then(
+                    Self::ext(env::current_account_id())
+                        .with_static_gas(GAS_ON_FORWARDED)
+                        .on_forwarded(sender_id, amount, arrival),
+                ),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1273,6 +1657,8 @@ mod tests {
     const OWNER: &str = "owner.near";
     const VERIFIER: &str = "intents.near";
     const COLLATERAL_ID: &str = "nep141:usdc.near";
+    const TOKEN: &str = "usdc.near";
+    const FIFTY_MILLI: NearToken = NearToken::from_millinear(50);
     const NETWORK: &str = "testnet";
     const USERS: [&str; 3] = ["ann.near", "ben.near", "cat.near"];
     const USD: u128 = 1_000_000;
@@ -1285,6 +1671,7 @@ mod tests {
     const CLOSE: u64 = END - CLOSE_BEFORE;
     const RECEIVED: u128 = 300 * USD;
     const MEASURED_REGISTRATION_BYTES: u64 = 238;
+    const MEASURED_SPONSORED_BYTES: u64 = 415;
     const MEASURED_STAKE_BYTES: u64 = 154;
     const MEASURED_ROUND_BYTES: u64 = 140;
     const MEASURED_PRICE_BYTES: u64 = 69;
@@ -1304,6 +1691,67 @@ mod tests {
 
     fn refused<T>(f: impl FnOnce() -> T) -> bool {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err()
+    }
+
+    fn refusal(f: impl FnOnce()) -> String {
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err("expected a refusal");
+        err.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
+    fn act_paying(who: &str, deposit: NearToken, now: u64) {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(acct(CONTRACT))
+            .predecessor_account_id(acct(who))
+            .block_timestamp(now)
+            .attached_deposit(deposit)
+            .build());
+    }
+
+    fn token_sends(c: &mut RoundsContract, at: u64, from: &str, amount: u128, msg: &str, tgas: u64) {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(acct(CONTRACT))
+            .predecessor_account_id(acct(TOKEN))
+            .block_timestamp(at)
+            .prepaid_gas(Gas::from_tgas(tgas))
+            .build());
+        let _ = c.ft_on_transfer(acct(from), U128(amount), msg.into());
+    }
+
+    fn receipts() -> Vec<near_sdk::mock::Receipt> {
+        near_sdk::test_utils::get_created_receipts()
+    }
+
+    fn call_of(r: &near_sdk::mock::Receipt) -> (String, near_sdk::serde_json::Value, u128, u64) {
+        match &r.actions[0] {
+            near_sdk::mock::MockAction::FunctionCallWeight {
+                method_name,
+                args,
+                attached_deposit,
+                prepaid_gas,
+                ..
+            } => (
+                String::from_utf8(method_name.clone()).unwrap(),
+                near_sdk::serde_json::from_slice(args).unwrap(),
+                attached_deposit.as_yoctonear(),
+                prepaid_gas.as_gas(),
+            ),
+            other => panic!("not a function call: {other:?}"),
+        }
+    }
+
+    fn refunds() -> Vec<(String, NearToken)> {
+        receipts()
+            .iter()
+            .flat_map(|r| {
+                r.actions.iter().filter_map(|a| match a {
+                    near_sdk::mock::MockAction::Transfer { deposit, .. } => Some((r.receiver_id.to_string(), *deposit)),
+                    _ => None,
+                })
+            })
+            .collect()
     }
 
     // What the verifier calls after a transfer with a message. The caller must already be acting as the verifier.
@@ -1995,7 +2443,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_moves_version_one_state_to_two_with_no_treasury() {
+    fn migrate_moves_version_one_state_to_three_with_no_treasury() {
         let (c, _) = world();
         let old = StateV1 {
             state_version: 1,
@@ -2042,6 +2490,60 @@ mod tests {
         );
         assert!(migrated.treasury.is_none());
         assert!(migrated.upgrade_proven && !migrated.upgrade_in_flight);
+    }
+
+    #[test]
+    fn migrate_moves_version_two_state_to_three_and_keeps_the_treasury() {
+        let (c, _) = world();
+        let old = StateV2 {
+            state_version: 2,
+            upgrade_proven: true,
+            upgrade_in_flight: true,
+            owner: acct(OWNER),
+            pending_owner: None,
+            operator: acct(OWNER),
+            verifier: acct(VERIFIER),
+            collateral_token_id: COLLATERAL_ID.to_string(),
+            network: NETWORK.to_string(),
+            paused: false,
+            fee_bps: DEFAULT_FEE_BPS,
+            registration_fee: DEFAULT_REGISTRATION_FEE,
+            publishers: c.publishers.clone(),
+            price_threshold: 2,
+            next_series_id: 1,
+            series: LookupMap::new(Key::Series),
+            rounds: LookupMap::new(Key::Rounds),
+            prices: LookupMap::new(Key::Prices),
+            stakes: LookupMap::new(Key::Stakes),
+            accounts: LookupMap::new(Key::Accounts),
+            balances: LookupMap::new(Key::Balances),
+            balances_total: 7,
+            locked_total: 8,
+            fees: 9,
+            next_withdrawal_id: 4,
+            withdrawals: LookupMap::new(Key::Withdrawals),
+            pending_withdrawals_total: 5,
+            pending_by_account: LookupMap::new(Key::PendingByAccount),
+            treasury: Some(acct("treasury.near")),
+        };
+        env::state_write(&old);
+        drop(c);
+        act_as(CONTRACT, 5);
+        let mut migrated = RoundsContract::migrate();
+        assert_eq!(migrated.state_version, STATE_VERSION);
+        assert_eq!(
+            (migrated.balances_total, migrated.locked_total, migrated.fees),
+            (7, 8, 9)
+        );
+        assert_eq!(migrated.treasury, Some(acct("treasury.near")));
+        assert!(migrated.upgrade_proven && !migrated.upgrade_in_flight);
+        act_paying("sponsor.near", FIFTY_MILLI, 5);
+        migrated.storage_deposit(Some(acct("dan.near")), None);
+        assert_eq!(
+            migrated.storage_payers.get(&acct("dan.near")),
+            Some(&acct("sponsor.near")),
+            "the new map works after the move"
+        );
     }
 
     #[test]
@@ -2133,6 +2635,418 @@ mod tests {
     }
 
     #[test]
+    fn a_deposit_for_an_account_that_left_in_flight_stays_its_money() {
+        let (mut c, _) = world();
+        act_paying("dan.near", FIFTY_MILLI, BETTING);
+        c.storage_deposit(None, None);
+        token_sends(&mut c, BETTING, USERS[0], 5 * USD, "deposit_for:dan.near", 100);
+        act_as("dan.near", BETTING);
+        assert!(c.storage_unregister(None));
+        act_as(CONTRACT, BETTING);
+        let gift = Arrival::DepositFor(acct("dan.near"));
+        let _ = c.on_forwarded(acct(USERS[0]), U128(5 * USD), gift, Ok(U128(5 * USD)));
+        assert_eq!(balance(&c, "dan.near"), 5 * USD, "registering again finds it");
+        assert_eq!(c.total_owed().0, RECEIVED + 5 * USD);
+    }
+
+    #[test]
+    fn a_deposit_for_another_account_credits_that_account_and_names_who_paid() {
+        let (mut c, _) = world();
+        let before = (balance(&c, USERS[0]), balance(&c, USERS[1]));
+        token_sends(&mut c, BETTING, USERS[0], 5 * USD, "deposit_for:ben.near", 100);
+        let (_, args, _, _) = call_of(&receipts()[1]);
+        assert_eq!(
+            (&args["sender_id"], &args["arrival"]),
+            (&json!(USERS[0]), &json!({ "depositfor": USERS[1] })),
+            "a refusal past this point still refunds the sender, who paid"
+        );
+        let arrival = near_sdk::serde_json::from_value(args["arrival"].clone()).unwrap();
+        act_as(CONTRACT, BETTING);
+        let back = c.on_forwarded(acct(USERS[0]), U128(5 * USD), arrival, Ok(U128(5 * USD)));
+        assert_eq!(back.0, 0);
+        assert_eq!(
+            (balance(&c, USERS[0]), balance(&c, USERS[1])),
+            (before.0, before.1 + 5 * USD)
+        );
+        assert_eq!(
+            last_event()["data"],
+            json!({ "account": USERS[1], "amount": "5000000", "from": USERS[0] })
+        );
+        assert_conserved(&c, RECEIVED + 5 * USD, 0..0);
+    }
+
+    #[test]
+    fn a_forward_the_verifier_did_not_take_credits_nothing() {
+        let (mut c, _) = world();
+        for result in [Err(PromiseError::Failed), Ok(U128(0))] {
+            act_as(CONTRACT, BETTING);
+            let back = c.on_forwarded(acct("dan.near"), U128(5 * USD), Arrival::Deposit, result);
+            assert_eq!(back.0, 5 * USD);
+        }
+        assert_eq!(balance(&c, "dan.near"), 0);
+        assert_conserved(&c, RECEIVED, 0..0);
+    }
+
+    #[test]
+    fn a_message_with_extra_parts_is_refused() {
+        let (mut c, _) = world();
+        let extra = "the message has more parts than its action takes";
+        for msg in ["register:1", "deposit:", "stake:0:0:up:5000000:1"] {
+            act_as(VERIFIER, BETTING);
+            let reason = refusal(|| receive(&mut c, USERS[0], USD, msg));
+            assert!(reason.contains(extra), "{msg} by transfer: {reason}");
+        }
+        for msg in ["withdraw:1:2", "stake:0:0:up:1000000:0:9"] {
+            act_as(VERIFIER, BETTING);
+            let reason = refusal(|| {
+                let _ = c.on_auth(acct(USERS[0]), msg.to_string());
+            });
+            assert!(reason.contains(extra), "{msg} signed: {reason}");
+        }
+        for msg in ["deposit:x", "stake:0:0:up:0:1"] {
+            let reason = refusal(|| token_sends(&mut c, BETTING, USERS[0], USD, msg, 100));
+            assert!(reason.contains(extra), "{msg} by token: {reason}");
+        }
+    }
+
+    #[test]
+    fn an_account_leaves_only_once_it_holds_nothing() {
+        let (mut c, _) = world();
+        stake(&mut c, BETTING, USERS[0], 0, "up", 10 * USD);
+        act_as(USERS[0], BETTING);
+        let reason = refusal(|| {
+            c.storage_unregister(None);
+        });
+        assert!(reason.contains("claim your stakes first"), "{reason}");
+        let reason = refusal(|| {
+            c.storage_unregister(Some(true));
+        });
+        assert!(reason.contains("force is not supported"), "{reason}");
+        assert_eq!(claim(&mut c, CLOSE, USERS[0], 0), 10 * USD, "a one-sided round refunds");
+        act_as(USERS[0], CLOSE);
+        let reason = refusal(|| {
+            c.storage_unregister(None);
+        });
+        assert!(reason.contains("withdraw your balance first"), "{reason}");
+        let _ = c.withdraw(U128(balance(&c, USERS[0])));
+        let reason = refusal(|| {
+            c.storage_unregister(None);
+        });
+        assert!(reason.contains("a withdrawal is still pending"), "{reason}");
+        act_as(CONTRACT, CLOSE);
+        c.on_withdraw(U64(1), Ok(()));
+        act_as(USERS[0], CLOSE);
+        assert!(c.storage_unregister(None));
+        assert!(!c.storage_unregister(None), "a second call finds nothing to close");
+    }
+
+    #[test]
+    fn an_account_that_leaves_in_flight_keeps_its_money() {
+        let (mut c, _) = world();
+        act_paying("dan.near", FIFTY_MILLI, BETTING);
+        c.storage_deposit(None, None);
+        token_sends(&mut c, BETTING, "dan.near", 5 * USD, "deposit", 100);
+        act_as("dan.near", BETTING);
+        assert!(c.storage_unregister(None));
+        act_as(CONTRACT, BETTING);
+        let _ = c.on_forwarded(acct("dan.near"), U128(5 * USD), Arrival::Deposit, Ok(U128(5 * USD)));
+        assert!(!c.is_registered(acct("dan.near")));
+        assert_eq!(balance(&c, "dan.near"), 5 * USD);
+        assert_eq!(c.total_owed().0, RECEIVED + 5 * USD);
+        act_as("dan.near", BETTING);
+        let _ = c.withdraw(U128(5 * USD));
+        assert_eq!(balance(&c, "dan.near"), 0);
+        act_as("dan.near", BETTING);
+        assert!(!c.storage_unregister(None), "the deposit went back once already");
+        assert!(refunds().is_empty());
+    }
+
+    #[test]
+    fn a_sponsor_can_register_another_account_once() {
+        let (mut c, _) = world();
+        act_paying("sponsor.near", FIFTY_MILLI, BETTING);
+        c.storage_deposit(Some(acct("dan.near")), None);
+        assert!(c.is_registered(acct("dan.near")));
+        assert!(!c.is_registered(acct("sponsor.near")), "the payer is not registered");
+        assert!(refunds().is_empty());
+        for who in ["dan.near", USERS[0]] {
+            act_paying("sponsor.near", FIFTY_MILLI, BETTING);
+            c.storage_deposit(Some(acct(who)), None);
+            assert_eq!(
+                refunds(),
+                vec![("sponsor.near".to_string(), FIFTY_MILLI)],
+                "{who} was already registered"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "attach at least 0.05 NEAR")]
+    fn a_storage_deposit_one_yocto_short_registers_nobody() {
+        let (mut c, _) = world();
+        act_paying(
+            "dan.near",
+            NearToken::from_yoctonear(FIFTY_MILLI.as_yoctonear() - 1),
+            BETTING,
+        );
+        c.storage_deposit(None, None);
+    }
+
+    #[test]
+    fn a_storage_deposit_registers_without_the_fee() {
+        let (mut c, _) = world();
+        act_paying("dan.near", NearToken::from_millinear(80), BETTING);
+        let held = c.storage_deposit(None, Some(true));
+        assert_eq!(
+            (held.total, held.available),
+            (FIFTY_MILLI, NearToken::from_yoctonear(0))
+        );
+        assert_eq!(refunds(), vec![("dan.near".to_string(), NearToken::from_millinear(30))]);
+        assert!(c.is_registered(acct("dan.near")));
+        assert_eq!(c.fees, 3 * DEFAULT_REGISTRATION_FEE, "no fee is taken in collateral");
+        token_sends(&mut c, BETTING, "dan.near", 5 * USD, "stake:0:0:up:0", 100);
+        assert_eq!(receipts().len(), 2, "the account can stake by token at once");
+    }
+
+    #[test]
+    fn a_token_deposit_moves_on_to_intents_before_it_is_credited() {
+        let (mut c, _) = world();
+        token_sends(&mut c, BETTING, USERS[0], 5 * USD, "deposit", 100);
+        let sent = receipts();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].receiver_id, acct(TOKEN));
+        let (method, args, deposit, gas) = call_of(&sent[0]);
+        assert_eq!(
+            (method.as_str(), deposit, gas),
+            ("ft_transfer_call", 1, GAS_FT_FORWARD.as_gas())
+        );
+        assert_eq!(
+            (&args["receiver_id"], &args["amount"], &args["msg"]),
+            (&json!(VERIFIER), &json!("5000000"), &json!(CONTRACT)),
+            "the verifier credits this contract's own account"
+        );
+        assert_eq!(sent[1].receiver_id, acct(CONTRACT));
+        let (method, args, _, gas) = call_of(&sent[1]);
+        assert_eq!((method.as_str(), gas), ("on_forwarded", GAS_ON_FORWARDED.as_gas()));
+        assert_eq!(
+            (&args["sender_id"], &args["amount"], &args["arrival"]),
+            (&json!(USERS[0]), &json!("5000000"), &json!("deposit"))
+        );
+        assert_eq!(balance(&c, USERS[0]), 100 * USD - DEFAULT_REGISTRATION_FEE);
+        assert_eq!(c.total_owed().0, RECEIVED, "nothing is owed for money still on its way");
+    }
+
+    #[test]
+    fn a_token_stake_is_credited_first_and_staked_in_its_own_receipt() {
+        let (mut c, _) = world();
+        token_sends(&mut c, BETTING, USERS[0], 5 * USD, "stake:0:0:down:7", 100);
+        let (_, args, _, _) = call_of(&receipts()[1]);
+        assert_eq!(
+            args["arrival"],
+            json!({ "stake": { "series_id": 0, "round": "0", "side": "down", "min_shares": "7" } })
+        );
+        let order = near_sdk::serde_json::from_value(args["arrival"]["stake"].clone()).unwrap();
+        let before = balance(&c, USERS[0]);
+        act_as(CONTRACT, BETTING);
+        let back = c.on_forwarded(acct(USERS[0]), U128(5 * USD), Arrival::Stake(order), Ok(U128(4 * USD)));
+        assert_eq!(back.0, USD);
+        assert_eq!(balance(&c, USERS[0]), before + 4 * USD);
+        let sent = receipts();
+        assert_eq!((sent.len(), &sent[0].receiver_id), (1, &acct(CONTRACT)));
+        let (method, args, _, gas) = call_of(&sent[0]);
+        assert_eq!((method.as_str(), gas), ("stake_credited", GAS_STAKE.as_gas()));
+        assert_eq!(args["amount"], "4000000", "only what reached Intents is staked");
+        act_as(CONTRACT, BETTING);
+        let order = near_sdk::serde_json::from_value(args["order"].clone()).unwrap();
+        c.stake_credited(acct(USERS[0]), order, U128(4 * USD));
+        assert_eq!(balance(&c, USERS[0]), before);
+        let s = c.get_stake(0, U64(0), acct(USERS[0])).unwrap();
+        assert_eq!((s.side, s.amount.0), (Side::Down, 4 * USD));
+        assert_conserved(&c, RECEIVED + 4 * USD, 0..1);
+    }
+
+    #[test]
+    fn every_token_refusal_comes_before_the_forward() {
+        let (mut c, _) = world();
+        stake(&mut c, BETTING, USERS[0], 0, "up", MIN_STAKE);
+        let floor = GAS_FORWARD_FLOOR.as_tgas();
+        let not_the_token = "only the collateral token can deliver money";
+        let cases: [(&str, &str, u128, &str, u64, &str); 18] = [
+            ("evil.near", USERS[1], USD, "deposit", 100, not_the_token),
+            (TOKEN, USERS[1], USD, "deposit_for:dan.near", 100, "register first"),
+            (
+                TOKEN,
+                USERS[1],
+                MIN_STAKE - 1,
+                "deposit_for:ann.near",
+                100,
+                "at least the minimum stake",
+            ),
+            (TOKEN, USERS[1], USD, "deposit_for", 100, "bad account"),
+            (TOKEN, USERS[1], USD, "deposit_for:Not An Account", 100, "bad account"),
+            (TOKEN, USERS[1], USD, "deposit_for:ann.near:1", 100, "more parts"),
+            (VERIFIER, USERS[1], USD, "deposit", 100, not_the_token),
+            (TOKEN, VERIFIER, USD, "deposit", 100, "not out of the verifier"),
+            (TOKEN, USERS[1], 0, "deposit", 100, "amount must be positive"),
+            (TOKEN, USERS[1], USD, "deposit", floor - 1, "attach at least"),
+            (TOKEN, USERS[1], USD, "register", 100, "unknown action"),
+            (TOKEN, USERS[1], USD, "", 100, "unknown action"),
+            (TOKEN, "dan.near", USD, "deposit", 100, "register first"),
+            (TOKEN, "dan.near", USD, "stake:0:0:up:0", 100, "register first"),
+            (TOKEN, USERS[1], USD, "stake:0:1:up:0", 100, "the round has not started"),
+            (
+                TOKEN,
+                USERS[1],
+                MIN_STAKE - 1,
+                "stake:0:0:up:0",
+                100,
+                "below the minimum",
+            ),
+            (TOKEN, USERS[0], USD, "stake:0:0:down:0", 100, "the other side"),
+            (TOKEN, USERS[1], USD, "stake:0:0:up", 100, "bad minimum shares"),
+        ];
+        for (caller, from, amount, msg, tgas, expected) in cases {
+            testing_env!(VMContextBuilder::new()
+                .current_account_id(acct(CONTRACT))
+                .predecessor_account_id(acct(caller))
+                .block_timestamp(BETTING)
+                .prepaid_gas(Gas::from_tgas(tgas))
+                .build());
+            let reason = refusal(|| {
+                let _ = c.ft_on_transfer(acct(from), U128(amount), msg.into());
+            });
+            assert!(reason.contains(expected), "{caller} {from} {msg}: {reason}");
+            assert!(receipts().is_empty(), "{msg}: nothing was sent");
+        }
+        assert_conserved(&c, RECEIVED, 0..1);
+    }
+
+    #[test]
+    fn leaving_returns_the_deposit_to_whoever_paid_it() {
+        let (mut c, _) = world();
+        for (payer, who) in [
+            ("dan.near", "dan.near"),
+            ("sponsor.near", "eve.near"),
+            (VERIFIER, "fay.near"),
+        ] {
+            act_paying(payer, FIFTY_MILLI, BETTING);
+            c.storage_deposit(Some(acct(who)), None);
+        }
+        let all = balance(&c, USERS[2]);
+        act_as(VERIFIER, BETTING);
+        let _ = c.on_auth(acct(USERS[2]), format!("withdraw:{all}"));
+        act_as(CONTRACT, BETTING);
+        c.on_withdraw(U64(1), Ok(()));
+        let leaving: [(&str, Vec<(&str, NearToken)>); 4] = [
+            ("dan.near", vec![("dan.near", FIFTY_MILLI), ("dan.near", ONE_YOCTO)]),
+            ("eve.near", vec![("sponsor.near", FIFTY_MILLI), ("eve.near", ONE_YOCTO)]),
+            ("fay.near", vec![("fay.near", FIFTY_MILLI), ("fay.near", ONE_YOCTO)]),
+            (USERS[2], vec![(USERS[2], ONE_YOCTO)]),
+        ];
+        for (who, paid_back) in leaving {
+            act_as(who, BETTING);
+            assert!(c.storage_unregister(None), "{who}");
+            let expected: Vec<(String, NearToken)> = paid_back.into_iter().map(|(to, a)| (to.to_string(), a)).collect();
+            assert_eq!(refunds(), expected, "{who}");
+            assert!(!c.is_registered(acct(who)));
+        }
+        assert_eq!(c.fees, 3 * DEFAULT_REGISTRATION_FEE, "the registration fees stay");
+    }
+
+    #[test]
+    fn an_account_with_no_storage_payer_gets_back_only_its_yocto() {
+        let (mut c, _) = world();
+        act_as(USERS[0], BETTING);
+        let _ = c.withdraw(U128(balance(&c, USERS[0])));
+        act_as(CONTRACT, BETTING);
+        c.on_withdraw(U64(1), Ok(()));
+        act_as(USERS[0], BETTING);
+        assert!(
+            c.storage_unregister(None),
+            "it registered before any NEAR deposit was recorded"
+        );
+        assert_eq!(refunds(), vec![(USERS[0].to_string(), ONE_YOCTO)]);
+    }
+
+    #[test]
+    fn a_relayed_storage_deposit_refunds_the_account_it_was_for() {
+        let (mut c, _) = world();
+        act_paying(VERIFIER, NearToken::from_millinear(80), BETTING);
+        c.storage_deposit(Some(acct("dan.near")), None);
+        assert_eq!(refunds(), vec![("dan.near".to_string(), NearToken::from_millinear(30))]);
+        act_paying(VERIFIER, FIFTY_MILLI, BETTING);
+        c.storage_deposit(Some(acct("dan.near")), None);
+        assert_eq!(refunds(), vec![("dan.near".to_string(), FIFTY_MILLI)]);
+    }
+
+    #[test]
+    fn open_rounds_names_the_round_each_series_takes_stakes_for_and_when() {
+        let (c, _) = world();
+        act_as(USERS[0], BETTING);
+        let open = c.open_rounds(0, 12);
+        assert_eq!(open.len(), 1);
+        assert_eq!(
+            (
+                open[0].series_id,
+                open[0].round.0,
+                open[0].opens_at.0,
+                open[0].closes_at.0
+            ),
+            (0, 0, START, CLOSE)
+        );
+        act_as(USERS[0], CLOSE);
+        let next = &c.open_rounds(0, 12)[0];
+        assert_eq!(
+            (next.round.0, next.opens_at.0),
+            (1, END),
+            "after the close the next round is named"
+        );
+        assert!(c.open_rounds(1, 12).is_empty());
+        assert!(c.open_rounds(0, 0).is_empty());
+    }
+
+    #[test]
+    fn round_outcome_says_what_a_claim_would_settle_without_settling_it() {
+        let (mut c, _) = world();
+        stake(&mut c, BETTING, USERS[0], 0, "up", 10 * USD);
+        act_as(USERS[1], BETTING);
+        assert_eq!(c.round_outcome(0, U64(0)), None, "the round is still taking stakes");
+        assert_eq!(c.round_outcome(0, U64(5)), None, "nobody staked in that round");
+        act_as(USERS[1], CLOSE);
+        assert_eq!(
+            c.round_outcome(0, U64(0)),
+            Some(Outcome::Refund),
+            "a one-sided round refunds"
+        );
+        assert_eq!(c.find_round(0, 0).unwrap().outcome, None, "reading it settles nothing");
+        assert_eq!(claim(&mut c, CLOSE, USERS[0], 0), 10 * USD, "and a claim then pays");
+        act_as(USERS[1], CLOSE);
+        assert_eq!(
+            c.round_outcome(0, U64(0)),
+            Some(Outcome::Refund),
+            "a settled round keeps its outcome"
+        );
+    }
+
+    #[test]
+    fn the_storage_bounds_are_the_flat_deposit() {
+        let (mut c, _) = world();
+        let bounds = c.storage_balance_bounds();
+        assert_eq!((bounds.min, bounds.max), (FIFTY_MILLI, Some(FIFTY_MILLI)));
+        let held = c.storage_balance_of(acct(USERS[0])).unwrap();
+        assert_eq!(
+            (held.total, held.available),
+            (FIFTY_MILLI, NearToken::from_yoctonear(0))
+        );
+        assert!(c.storage_balance_of(acct("dan.near")).is_none());
+        act_as(USERS[0], BETTING);
+        assert_eq!(c.storage_withdraw(None).total, FIFTY_MILLI);
+        assert!(refused(|| c.storage_withdraw(Some(NearToken::from_yoctonear(1)))));
+        act_as("dan.near", BETTING);
+        assert!(refused(|| c.storage_withdraw(None)), "dan is not registered");
+    }
+
+    #[test]
     fn measure_an_account_at_its_open_stake_limit() {
         let (mut c, _) = world();
         let longest = "a".repeat(64);
@@ -2161,15 +3075,32 @@ mod tests {
         c.prices.insert((u32::MAX, u64::MAX), U128(u128::MAX));
         c.prices.flush();
         let per_price = env::storage_usage() - before;
+        act_paying(&"b".repeat(64), FIFTY_MILLI, BETTING);
+        let before = env::storage_usage();
+        c.storage_deposit(Some(acct(&"c".repeat(64))), None);
+        c.accounts.flush();
+        c.storage_payers.flush();
+        let mut in_near = env::storage_usage() - before;
+        act_as(VERIFIER, BETTING);
+        let before = env::storage_usage();
+        receive(&mut c, &"c".repeat(64), USD, "deposit");
+        c.balances.flush();
+        in_near += env::storage_usage() - before;
         assert_eq!(
-            (registered, per_stake, per_round, per_price),
+            (registered, in_near, per_stake, per_round, per_price),
             (
                 MEASURED_REGISTRATION_BYTES,
+                MEASURED_SPONSORED_BYTES,
                 MEASURED_STAKE_BYTES,
                 MEASURED_ROUND_BYTES,
                 MEASURED_PRICE_BYTES
             ),
             "update the storage figures in docs/contracts/rounds.md"
+        );
+        let at_the_limit = in_near + u64::from(MAX_OPEN_STAKES) * per_stake;
+        assert!(
+            u128::from(at_the_limit) * env::storage_byte_cost().as_yoctonear() <= STORAGE_DEPOSIT.as_yoctonear(),
+            "the storage deposit covers an account at its open stake limit"
         );
     }
 
@@ -2213,6 +3144,26 @@ mod tests {
             prop_assert!(r.left.0 < 3, "rounding leaves less than one unit a winner");
             prop_assert_eq!(USERS.iter().map(|u| balance(&c, u)).sum::<u128>(), before + paid);
             assert_conserved(&c, RECEIVED, 0..1);
+        }
+
+        #[test]
+        fn the_contract_owes_exactly_what_reached_intents(
+            amount in 1u128..1_000_000_000_000,
+            report in proptest::option::of(0u128..2_000_000_000_000),
+            staking in any::<bool>(),
+        ) {
+            let (mut c, _) = world();
+            let arrival = if staking {
+                Arrival::Stake(Order { series_id: 0, round: U64(0), side: Side::Up, min_shares: U128(0) })
+            } else {
+                Arrival::Deposit
+            };
+            let result = report.map(U128).ok_or(PromiseError::Failed);
+            let taken = report.map_or(0, |used| used.min(amount));
+            act_as(CONTRACT, BETTING);
+            let back = c.on_forwarded(acct(USERS[0]), U128(amount), arrival, result).0;
+            prop_assert_eq!(back, amount - taken);
+            prop_assert_eq!(c.total_owed().0, RECEIVED + taken);
         }
     }
 }

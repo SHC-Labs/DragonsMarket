@@ -3118,6 +3118,7 @@ version = "0.1.0"
 dependencies = [
  "dpm",
  "ed25519-dalek",
+ "near-contract-standards",
  "near-sdk",
  "price-signatures",
  "proptest",

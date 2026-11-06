@@ -1,12 +1,14 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { NearConnector } from "@hot-labs/near-connect";
+import type { ConnectorAction, NearConnector } from "@hot-labs/near-connect";
 import { usePathname } from "next/navigation";
 import { config } from "@/lib/config";
 import { backendEnabled, currentSession, signIn, signOut, signOutEverywhere } from "@/lib/backend";
+import type { OwnerSigner } from "@/lib/agents";
 import type { FunctionCall } from "@/lib/market";
 import { createLegalAcceptance, legalAcceptanceKey, parseLegalAcceptance, readLegalAcceptance, saveLegalAcceptance } from "@/lib/legal";
+import { sandboxSend } from "@/lib/rpc";
 import { TermsAcceptanceDialog } from "./TermsAcceptanceDialog";
 
 // NEAR Connect, the connector NEAR's docs recommend. Keys stay in the user's wallet; this app only asks it to sign.
@@ -21,6 +23,8 @@ interface WalletState {
   signInToBackend: () => Promise<void>;
   signOutOnAllDevices: () => Promise<void>;
   send: (call: FunctionCall) => Promise<string>;
+  sendTransaction: (receiverId: string, actions: ConnectorAction[]) => Promise<string>;
+  signer: () => Promise<OwnerSigner>;
 }
 
 const Ctx = createContext<WalletState>({
@@ -32,6 +36,8 @@ const Ctx = createContext<WalletState>({
   signInToBackend: () => Promise.reject(new Error("wallet not ready")),
   signOutOnAllDevices: () => Promise.reject(new Error("wallet not ready")),
   send: () => Promise.reject(new Error("wallet not ready")),
+  sendTransaction: () => Promise.reject(new Error("wallet not ready")),
+  signer: () => Promise.reject(new Error("wallet not ready")),
 });
 
 export const useWallet = () => useContext(Ctx);
@@ -48,7 +54,8 @@ const subscribeToLegalAcceptance = (notify: () => void) => {
 };
 
 // The local test chain has no wallet. To look at account views, the page can pretend to be an account:
-// open any page with ?as=<account id> once and it is remembered. Reads only; sending is refused.
+// open any page with ?as=<account id> once and it is remembered. Sends go to the mock chain, which applies them;
+// a real sandbox refuses them.
 function readDevAccount(): string | null {
   try {
     const asked = new URLSearchParams(window.location.search).get("as");
@@ -153,29 +160,44 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setSessionFor(account);
   }, [account]);
 
-  const send = useCallback(async (call: FunctionCall) => {
+  const connectedWallet = useCallback(async () => {
     const c = connector.current;
     if (!c) throw new Error("wallet not ready");
     if (!walletAccount || !readLegalAcceptance(window.localStorage, walletAccount, config.network)) throw new Error("Review and accept the current policies before continuing.");
     const wallet = await c.wallet();
     const connected = await wallet.getAccounts();
     if (connected[0]?.accountId !== walletAccount) throw new Error("Your wallet account changed. Connect again before continuing.");
-    const result = await wallet.signAndSendTransaction({
-      signerId: walletAccount,
-      receiverId: call.receiverId,
-      actions: [
-        {
-          type: "FunctionCall",
-          params: { methodName: call.methodName, args: call.args, gas: call.gas, deposit: call.deposit },
-        },
-      ],
-    });
-    return result.transaction.hash;
+    return { wallet, signerId: walletAccount };
   }, [walletAccount]);
 
+  const sendTransaction = useCallback(async (receiverId: string, actions: ConnectorAction[]) => {
+    if (!walletAvailable) {
+      if (!devAccount) throw new Error("wallet not ready");
+      return sandboxSend(devAccount, receiverId, actions);
+    }
+    const { wallet, signerId } = await connectedWallet();
+    const result = await wallet.signAndSendTransaction({ signerId, receiverId, actions });
+    return result.transaction.hash;
+  }, [connectedWallet, walletAvailable, devAccount]);
+
+  const send = useCallback((call: FunctionCall) => {
+    const { methodName, args, gas, deposit } = call;
+    return sendTransaction(call.receiverId, [{ type: "FunctionCall", params: { methodName, args, gas, deposit } }]);
+  }, [sendTransaction]);
+
+  const signer = useCallback(() => connectedWallet().then(({ wallet, signerId }): OwnerSigner => {
+    const network = config.network === "mainnet" ? "mainnet" : "testnet";
+    return {
+      signMessage: (params) => wallet.signMessage({ ...params, signerId, network }),
+      signDelegateActions: (params) => (wallet.manifest.features?.signDelegateActions
+        ? wallet.signDelegateActions({ ...params, signerId, network })
+        : Promise.reject(new Error(`${wallet.manifest.name} cannot sign this: it does not sign NEAR delegate actions. Connect a wallet that does.`))),
+    };
+  }), [connectedWallet]);
+
   const value = useMemo(
-    () => ({ account, walletAvailable, openConnect, disconnect, backendAccount, signInToBackend, signOutOnAllDevices, send }),
-    [account, walletAvailable, openConnect, disconnect, backendAccount, signInToBackend, signOutOnAllDevices, send],
+    () => ({ account, walletAvailable, openConnect, disconnect, backendAccount, signInToBackend, signOutOnAllDevices, send, sendTransaction, signer }),
+    [account, walletAvailable, openConnect, disconnect, backendAccount, signInToBackend, signOutOnAllDevices, send, sendTransaction, signer],
   );
   return <Ctx.Provider value={value}>{children}{!readingPolicy && walletAvailable && walletAccount && !accepted && <TermsAcceptanceDialog key={walletAccount} account={walletAccount} onAccept={acceptPolicies} onDismiss={disconnect} />}</Ctx.Provider>;
 }

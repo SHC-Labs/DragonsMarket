@@ -7,6 +7,7 @@ import { useWallet } from "@/components/WalletProvider";
 import { useWatchlist } from "@/lib/watchlist";
 import { RecentPrices } from "@/components/RecentPrices";
 import { Ticker } from "@/components/Ticker";
+import { TradeFeed } from "@/components/TradeFeed";
 import { CouncilCall } from "@/components/CouncilCall";
 import { AccountEmptyState, PageLandmark } from "@/components/PageHeader";
 import { Controls } from "@/components/Controls";
@@ -179,6 +180,7 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
         )}
       </section>
 
+      {!watching && <TradeFeed markets={markets} />}
       {!watching && <RecentPrices markets={markets} histories={data.histories} />}
       {!watching && <CouncilCall />}
     </div>

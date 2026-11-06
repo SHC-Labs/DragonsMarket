@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const reply = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
+const APP = "https://app.example";
+const SIGN_IN = "Sign in to Dragons Market\nAccount: alice.near\nNetwork: testnet";
 
 async function load(url = "https://api.example") {
   vi.resetModules();
@@ -25,12 +27,12 @@ describe("backend client", () => {
     const backend = await load();
     const nonce = Buffer.alloc(32, 7).toString("base64");
     vi.mocked(fetch)
-      .mockResolvedValueOnce(reply(200, { id: "c1", accountId: "alice.near", message: "Sign in", nonce, recipient: "https://app.example", callbackUrl: "https://app.example", expiresAt: "x" }))
+      .mockResolvedValueOnce(reply(200, { id: "c1", accountId: "alice.near", message: SIGN_IN, nonce, recipient: APP, callbackUrl: APP, expiresAt: "x" }))
       .mockResolvedValueOnce(reply(200, { authenticated: true }))
       .mockResolvedValueOnce(reply(200, { session: { account_id: "alice.near" } }));
     const sign = vi.fn(async () => ({ accountId: "alice.near", publicKey: "ed25519:abc", signature: "sig" }));
-    await backend.signIn("alice.near", sign);
-    expect(sign).toHaveBeenCalledWith({ message: "Sign in", recipient: "https://app.example", callbackUrl: "https://app.example", nonce: new Uint8Array(32).fill(7) });
+    await backend.signIn("alice.near", sign, APP);
+    expect(sign).toHaveBeenCalledWith({ message: SIGN_IN, recipient: APP, callbackUrl: APP, nonce: new Uint8Array(32).fill(7) });
     const [path, init] = vi.mocked(fetch).mock.calls[1]!;
     expect(path).toBe("https://api.example/v1/auth/verify");
     expect(init).toMatchObject({ method: "POST", credentials: "include" });
@@ -40,19 +42,34 @@ describe("backend client", () => {
   it("says so when the browser did not keep the sign-in cookie", async () => {
     const backend = await load();
     vi.mocked(fetch)
-      .mockResolvedValueOnce(reply(200, { id: "c1", accountId: "alice.near", message: "m", nonce: "AA==", recipient: "r", callbackUrl: "r", expiresAt: "x" }))
+      .mockResolvedValueOnce(reply(200, { id: "c1", accountId: "alice.near", message: SIGN_IN, nonce: "AA==", recipient: APP, callbackUrl: APP, expiresAt: "x" }))
       .mockResolvedValueOnce(reply(200, { authenticated: true }))
       .mockResolvedValueOnce(reply(200, { session: null }));
-    await expect(backend.signIn("alice.near", async () => ({ accountId: "alice.near", publicKey: "k", signature: "s" }))).rejects.toMatchObject({ code: "session_not_kept" });
+    await expect(backend.signIn("alice.near", async () => ({ accountId: "alice.near", publicKey: "k", signature: "s" }), APP)).rejects.toMatchObject({ code: "session_not_kept" });
   });
 
   it("refuses a challenge or a signature for a different account", async () => {
     const backend = await load();
-    vi.mocked(fetch).mockResolvedValueOnce(reply(200, { id: "c1", accountId: "mallory.near", message: "m", nonce: "AA==", recipient: "r", callbackUrl: "r", expiresAt: "x" }));
-    await expect(backend.signIn("alice.near", vi.fn())).rejects.toMatchObject({ code: "account_mismatch" });
-    vi.mocked(fetch).mockResolvedValueOnce(reply(200, { id: "c2", accountId: "alice.near", message: "m", nonce: "AA==", recipient: "r", callbackUrl: "r", expiresAt: "x" }));
-    await expect(backend.signIn("alice.near", async () => ({ accountId: "bob.near", publicKey: "k", signature: "s" }))).rejects.toMatchObject({ code: "account_mismatch" });
+    vi.mocked(fetch).mockResolvedValueOnce(reply(200, { id: "c1", accountId: "mallory.near", message: SIGN_IN, nonce: "AA==", recipient: APP, callbackUrl: APP, expiresAt: "x" }));
+    await expect(backend.signIn("alice.near", vi.fn(), APP)).rejects.toMatchObject({ code: "account_mismatch" });
+    vi.mocked(fetch).mockResolvedValueOnce(reply(200, { id: "c2", accountId: "alice.near", message: SIGN_IN, nonce: "AA==", recipient: APP, callbackUrl: APP, expiresAt: "x" }));
+    await expect(backend.signIn("alice.near", async () => ({ accountId: "bob.near", publicKey: "k", signature: "s" }), APP)).rejects.toMatchObject({ code: "account_mismatch" });
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("signs nothing unless the challenge is this site's sign-in for this account", async () => {
+    const backend = await load();
+    for (const forged of [
+      { recipient: "intents.near" },
+      { callbackUrl: "https://evil.example" },
+      { message: "Sign in to Dragons Market\nAccount: mallory.near\n" },
+      { message: '{"signer_id":"alice.near","intents":[{"intent":"transfer"}]}' },
+    ]) {
+      vi.mocked(fetch).mockResolvedValueOnce(reply(200, { id: "c1", accountId: "alice.near", message: SIGN_IN, nonce: "AA==", recipient: APP, callbackUrl: APP, expiresAt: "x", ...forged }));
+      const sign = vi.fn();
+      await expect(backend.signIn("alice.near", sign, APP)).rejects.toMatchObject({ code: "challenge_mismatch" });
+      expect(sign).not.toHaveBeenCalled();
+    }
   });
 
   it("asks the service to end every session and reports a failure", async () => {
