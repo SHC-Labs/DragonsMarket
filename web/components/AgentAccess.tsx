@@ -7,6 +7,7 @@ import { StepNotice, useStep } from "./AgentStep";
 import { config } from "@/lib/config";
 import { formatMoney, toMicro } from "@/lib/format";
 import { usePoll } from "@/lib/hooks";
+import { Bot } from "./icons";
 import {
   accessTokens, requestAccess, revokeAccess, signAccess, type AccessRequest, type IssuedAccess,
 } from "@/lib/agents";
@@ -53,6 +54,16 @@ function SignRequest({ agentId, asked, onIssued }: SignProps) {
   </div>;
 }
 
+const when = (iso: string) => new Date(iso).toLocaleString("en-GB",
+  { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+
+function Endpoints() {
+  return <dl className="agent-connect">
+    <div><dt>MCP server</dt><dd className="mono">{endpoint("/mcp")}</dd></div>
+    <div><dt>Skill</dt><dd className="mono">{endpoint("/skill.md")}</dd></div>
+  </dl>;
+}
+
 export function AgentAccess({ agentId }: { agentId: string }) {
   const { data: tokens, reload } = usePoll(() => accessTokens(agentId), [agentId], 30000);
   const [label, setLabel] = useState("My AI agent");
@@ -79,33 +90,65 @@ export function AgentAccess({ agentId }: { agentId: string }) {
   if (!config.mcpUrl) return null;
   if (issued) return <Issued issued={issued} onDone={() => setIssued(null)} />;
   if (asked) return <SignRequest agentId={agentId} asked={asked} onIssued={signed} />;
-  return <div className="agent-panel">
-    <h4 className="agent-panel-title">Connect an AI agent</h4>
-    <p className="text-muted">
-      Give an AI agent this account through the Dragons Market MCP server. It trades only from the balances you fund
-      and pays out only to you. Your limits cover buys and stakes, and it can sell what the agent holds at any time.
-    </p>
-    <div className="agent-row">
-      <div className="field agent-amount">
-        <input aria-label="Name for this connection" value={label} maxLength={64} autoComplete="off"
-          onChange={(e) => setLabel(e.target.value)} />
-      </div>
-      <div className="field agent-amount">
-        <input aria-label={`Most ${config.tokenSymbol} for one stake or buy`} inputMode="decimal" placeholder="Per trade"
-          value={perTrade} onChange={(e) => setPerTrade(e.target.value)} className="num" />
-      </div>
-      <div className="field agent-amount">
-        <input aria-label={`Most ${config.tokenSymbol} in 24 hours`} inputMode="decimal" placeholder="Per 24 hours"
-          value={perDay} onChange={(e) => setPerDay(e.target.value)} className="num" />
-      </div>
-      <Button variant="secondary" onClick={give} disabled={!valid || step.busy}>Give access</Button>
+  const symbol = config.tokenSymbol;
+  return <div className="agent-access">
+    <div className="agent-access-intro">
+      <h4 className="agent-panel-title">Connect an AI agent</h4>
+      <p className="text-muted">
+        Give an AI agent this account through the Dragons Market MCP server. It trades only from the balances you fund
+        and pays out only to you. Your limits cover buys and stakes, and it can sell what the agent holds at any time.
+      </p>
+      <Endpoints />
     </div>
-    <StepNotice step={step} />
-    {tokens && tokens.length > 0 && <ul className="agent-history">
-      {tokens.map((t) => <li key={t.id}>
-        <span>{t.label}: {money(t.max_spend)} a trade, {money(t.daily_limit)} in 24 hours</span>
-        <Button variant="secondary" size="sm" onClick={() => revoke(t.id)} disabled={step.busy}>Revoke</Button>
-      </li>)}
-    </ul>}
+    <div className="agent-access-main">
+      <div role="group" aria-labelledby={`give-${agentId}`} className="agent-form">
+        <h5 id={`give-${agentId}`} className="agent-form-title">New connection</h5>
+        <div className="agent-access-fields">
+          <label className="agent-field">
+            <span className="agent-label">Name</span>
+            <span className="field">
+              <input aria-label="Name for this connection" value={label} maxLength={64} autoComplete="off"
+                onChange={(e) => setLabel(e.target.value)} />
+            </span>
+          </label>
+          <label className="agent-field">
+            <span className="agent-label">Per trade</span>
+            <span className="field">
+              <input aria-label={`Most ${symbol} for one stake or buy`} inputMode="decimal" placeholder="0.00"
+                value={perTrade} onChange={(e) => setPerTrade(e.target.value)} className="num" />
+              <span className="agent-unit" aria-hidden="true">{symbol}</span>
+            </span>
+          </label>
+          <label className="agent-field">
+            <span className="agent-label">Per 24 hours</span>
+            <span className="field">
+              <input aria-label={`Most ${symbol} in 24 hours`} inputMode="decimal" placeholder="0.00"
+                value={perDay} onChange={(e) => setPerDay(e.target.value)} className="num" />
+              <span className="agent-unit" aria-hidden="true">{symbol}</span>
+            </span>
+          </label>
+          <Button variant="secondary" onClick={give} disabled={!valid || step.busy}>Give access</Button>
+        </div>
+        <StepNotice step={step} />
+      </div>
+      <div className="agent-form">
+        <h5 className="agent-form-title">Connections</h5>
+        {tokens && tokens.length > 0 ? <ul className="agent-tokens">
+          {tokens.map((t) => <li key={t.id}>
+            <span className="agent-token-mark" aria-hidden="true"><Bot size={20} variant="Bulk" /></span>
+            <div className="agent-token-main">
+              <p className="agent-token-label">{t.label}</p>
+              <p className="agent-token-limits">
+                <span className="num">{money(t.max_spend)}</span> a trade, <span className="num">
+                  {money(t.daily_limit)}</span> in 24 hours
+                {t.last_used_at && <>. Last used {when(t.last_used_at)}</>}
+              </p>
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => revoke(t.id)} disabled={step.busy}
+              aria-label={`Revoke ${t.label}`}>Revoke</Button>
+          </li>)}
+        </ul> : <p className="text-muted">{tokens ? "No AI agent is connected yet." : "Reading connections"}</p>}
+      </div>
+    </div>
   </div>;
 }

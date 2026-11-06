@@ -330,7 +330,7 @@
 }
 /* Market page: the ticket fills the chart panel's height, action pinned to its foot. */
 @media (min-width: 1024px) {
-  .market-detail-layout { grid-template-areas: "head head" "price ticket" "body ."; }
+  .market-detail-layout { grid-template-areas: "head head" "price ticket" "body feed"; }
   .market-ticket-slot { position: static; align-self: stretch; display: flex; }
   .market-ticket-slot > .ticket { flex: 1; display: flex; flex-direction: column; }
   .market-ticket-slot > .ticket > .btn-lg { margin-top: auto; }

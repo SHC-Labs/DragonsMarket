@@ -14,6 +14,7 @@ import { MarketSeal } from "@/components/MarketSeal";
 import { CategoryEmblem, trackPanel } from "@/components/CategoryEmblem";
 import { CategoryGlyph, categoryColours } from "@/components/MarketIcon";
 import { Embers } from "@/components/Embers";
+import { TradeFeed } from "@/components/TradeFeed";
 import { TradeTicket } from "@/components/TradeTicket";
 import { Clock, Coin } from "@/components/icons";
 import { config } from "@/lib/config";
@@ -90,6 +91,8 @@ export function MarketPageView() {
         <div className="market-ticket-slot">
           <TradeTicket market={m} initialSide={initialSide} />
         </div>
+
+        {m.status === "open" && <div className="market-feed-slot"><TradeFeed marketId={m.id} limit={6} /></div>}
 
         <div className="market-detail-body">
           <RulesBlock market={m} />

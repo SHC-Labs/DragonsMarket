@@ -8,6 +8,7 @@ import { backendEnabled, currentSession, signIn, signOut, signOutEverywhere } fr
 import type { OwnerSigner } from "@/lib/agents";
 import type { FunctionCall } from "@/lib/market";
 import { createLegalAcceptance, legalAcceptanceKey, parseLegalAcceptance, readLegalAcceptance, saveLegalAcceptance } from "@/lib/legal";
+import { sandboxSend } from "@/lib/rpc";
 import { TermsAcceptanceDialog } from "./TermsAcceptanceDialog";
 
 // NEAR Connect, the connector NEAR's docs recommend. Keys stay in the user's wallet; this app only asks it to sign.
@@ -53,7 +54,8 @@ const subscribeToLegalAcceptance = (notify: () => void) => {
 };
 
 // The local test chain has no wallet. To look at account views, the page can pretend to be an account:
-// open any page with ?as=<account id> once and it is remembered. Reads only; sending is refused.
+// open any page with ?as=<account id> once and it is remembered. Sends go to the mock chain, which applies them;
+// a real sandbox refuses them.
 function readDevAccount(): string | null {
   try {
     const asked = new URLSearchParams(window.location.search).get("as");
@@ -169,10 +171,14 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, [walletAccount]);
 
   const sendTransaction = useCallback(async (receiverId: string, actions: ConnectorAction[]) => {
+    if (!walletAvailable) {
+      if (!devAccount) throw new Error("wallet not ready");
+      return sandboxSend(devAccount, receiverId, actions);
+    }
     const { wallet, signerId } = await connectedWallet();
     const result = await wallet.signAndSendTransaction({ signerId, receiverId, actions });
     return result.transaction.hash;
-  }, [connectedWallet]);
+  }, [connectedWallet, walletAvailable, devAccount]);
 
   const send = useCallback((call: FunctionCall) => {
     const { methodName, args, gas, deposit } = call;

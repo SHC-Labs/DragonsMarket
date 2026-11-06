@@ -35,6 +35,19 @@ export async function view<T>(contractId: string, method: string, args: Record<s
   return (text === "" ? null : JSON.parse(text)) as T;
 }
 
+export async function chainHeight(): Promise<bigint> {
+  const block = await rpc<{ header: { height: number } }>("block", { finality: "final" });
+  return BigInt(block.header.height);
+}
+
+// The mock chain (scripts/mock-chain.mjs) applies a dev account's transaction itself. A real sandbox has no such
+// method and refuses it, which reads the same as a wallet that did not send.
+export async function sandboxSend(signerId: string, receiverId: string, actions: unknown[]): Promise<string> {
+  const sent = await rpc<{ transaction: { hash: string } }>("sandbox_send",
+    { signer_id: signerId, receiver_id: receiverId, actions });
+  return sent.transaction.hash;
+}
+
 export async function nearBalance(accountId: string): Promise<bigint> {
   try {
     const params = { request_type: "view_account", finality: "final", account_id: accountId };

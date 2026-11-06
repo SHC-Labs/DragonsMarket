@@ -14,6 +14,8 @@ const env = {
   NEXT_PUBLIC_VERIFIER_ID: "intents.test.near",
   NEXT_PUBLIC_COLLATERAL_TOKEN_ID: "nep141:ft.test.near",
   NEXT_PUBLIC_TOKEN_ID: "ft.test.near",
+  NEXT_PUBLIC_BACKEND_URL: `http://127.0.0.1:${process.env.MOCK_BACKEND_PORT ?? 3031}`,
+  NEXT_PUBLIC_MCP_URL: "http://127.0.0.1:3700",
 };
 
 const children = [

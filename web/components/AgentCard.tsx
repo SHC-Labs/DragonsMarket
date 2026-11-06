@@ -3,8 +3,8 @@
 import { useState } from "react";
 import { Button, Notice } from "./ui";
 import { useWallet } from "./WalletProvider";
-import { AgentAccess } from "./AgentAccess";
 import { AgentDesk } from "./AgentDesk";
+import { Embers } from "./Embers";
 import { StepNotice, useStep } from "./AgentStep";
 import { config } from "@/lib/config";
 import { useNow } from "@/lib/hooks";
@@ -131,9 +131,9 @@ function Controls({ agent, reload }: { agent: AgentView; reload: () => void }) {
     reload();
     return "Sign below to apply it.";
   });
-  return <div className="agent-step">
+  return <div className="agent-controls">
     <div className="agent-row">
-      {agent.authorized_until && <Button variant="secondary" onClick={revoke} disabled={step.busy}>
+      {agent.authorized_until && <Button variant="ghost" onClick={revoke} disabled={step.busy}>
         Stop Dragons Market
       </Button>}
       <Button variant="secondary" onClick={freeze} disabled={step.busy}>
@@ -153,25 +153,32 @@ function NextStep({ agent, owner, setup, reload }: CardProps) {
   if (open) return waiting("Signed. Waiting for the agent service to apply it.");
   if (agent.state === "pending") return waiting("Waiting for the agent account to open.");
   if (!agent.authorized_until) return <Authorize agentId={agent.agent_id} onDone={reload} />;
-  return <>
-    <AgentDesk agentId={agent.agent_id} account={agent.near_account_id!} owner={owner} setup={setup}
-      frozen={agent.frozen} />
-    <AgentAccess agentId={agent.agent_id} />
-  </>;
+  return <AgentDesk agentId={agent.agent_id} account={agent.near_account_id!} owner={owner} setup={setup}
+    frozen={agent.frozen} />;
 }
 
 export function AgentCard(props: CardProps) {
   const { agent, reload } = props;
   const [label, tone] = stage(agent);
-  return <article className="agent-card">
-    <header className="agent-card-head">
-      <h3 className="agent-name">{agent.name}</h3>
-      <span className="status-pill" data-tone={tone}>{label}</span>
+  const live = agent.state === "active" && !agent.frozen && Boolean(agent.authorized_until);
+  return <article className="agent-card" data-live={live || undefined} aria-labelledby={`agent-${agent.agent_id}`}>
+    <header className="agent-band">
+      {live && <Embers height={0.7} intensity={1.1} speed={0.4} spark="--council" smoke="--council" />}
+      <span className="agent-crest" aria-hidden="true"><span className="brand-mark" /></span>
+      <div className="agent-ident">
+        <div className="agent-ident-top">
+          <h3 id={`agent-${agent.agent_id}`} className="agent-name">{agent.name}</h3>
+          <span className="status-pill" data-tone={tone}>{label}</span>
+        </div>
+        {agent.near_account_id && <p className="agent-account">
+          <span><span className="text-muted">Agent account</span> <span className="mono">{agent.near_account_id}</span></span>
+          {" "}<span><span className="text-muted">pays out only to</span> <span className="mono">{props.owner}</span></span>
+        </p>}
+      </div>
+      {agent.state === "active" && <Controls agent={agent} reload={reload} />}
     </header>
-    {agent.near_account_id && <p className="agent-account">
-      <span className="text-muted">Agent account</span> <span className="mono">{agent.near_account_id}</span>
-    </p>}
-    <NextStep {...props} />
-    {agent.state === "active" && <Controls agent={agent} reload={reload} />}
+    <div className="agent-body">
+      <NextStep {...props} />
+    </div>
   </article>;
 }
