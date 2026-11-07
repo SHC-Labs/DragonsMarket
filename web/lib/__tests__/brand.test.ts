@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { checkRepo, checkSource } from "../../scripts/check-brand.mjs";
 
@@ -27,14 +28,13 @@ describe("brand check", () => {
   });
 
   it("would have caught the partner colours that lived in showreel.css before the tokens", () => {
-    const before = execFileSync("git", ["show", "4004acd:web/app/styles/showreel.css"], { encoding: "utf8" });
+    const before = readFileSync(new URL("./fixtures/showreel-partner-colours.css", import.meta.url), "utf8");
     expect(rules("app/styles/showreel.css", before).filter(r => r === "raw-colour").length).toBeGreaterThan(5);
   });
 });
 
 describe("generated design files", () => {
-  it("match design/tokens.json, with one DESIGN.md front matter", async () => {
-    const { readFileSync } = await import("node:fs");
+  it("match design/tokens.json, with one DESIGN.md front matter", () => {
     const read = () => [readFileSync("app/tokens.generated.css", "utf8"), readFileSync("DESIGN.md", "utf8").replace(/\r\n/g, "\n")];
     const before = read();
     execFileSync(process.execPath, ["scripts/generate-tokens.mjs"]);

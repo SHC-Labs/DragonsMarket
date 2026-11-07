@@ -1,0 +1,33 @@
+name: Production smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    if: >-
+      github.repository == 'SHC-Labs/DragonsMarket' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' || vars.PRODUCTION_MONITOR_ENABLED == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version-file: .node-version
+      - name: Check HTTPS, database, browser origin and MCP connection
+        # No package install, build, production secret or wallet operation.
+        run: >-
+          node deploy/railway/smoke.mjs
+          https://dragons.market https://api.dragons.market https://mcp.dragons.market

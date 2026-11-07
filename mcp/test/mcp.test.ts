@@ -151,8 +151,53 @@ test('the MCP server takes only https origins and keeps the backend on a private
   }
 });
 
+test('MCP readiness verifies backend schema, uses no credentials, and rejects bad answers', async () => {
+  const healthy = { status: 'ready', checks: { database: 'ok', schema: 'current' }, deploymentConfigured: false };
+  await new Backend('https://api.example.com', async (url, init) => {
+    assert.equal(url, 'https://api.example.com/health/ready');
+    assert.equal(init?.headers, undefined);
+    assert.equal(init?.redirect, 'error');
+    return Response.json(healthy);
+  }).ready();
+  for (const response of [Response.json(healthy, { status: 503 }), Response.json({ ok: true }),
+    Response.json({ ...healthy, checks: { database: 'ok', schema: 'outdated' } }),
+    new Response('not json'), new Response('x'.repeat((1 << 20) + 1))]) {
+    await assert.rejects(new Backend('https://api.example.com', async () => response).ready(), /backend_unavailable/);
+  }
+  await assert.rejects(new Backend('https://api.example.com', async () => { throw new Error('private details'); }).ready(),
+    error => error instanceof Error && error.message === 'backend_unavailable');
+});
+
+test('MCP readiness coalesces probes, caches failures, recovers, and keeps liveness independent', async () => {
+  let probes = 0, available = false;
+  const backend = new Backend('https://api.example.com', async () => {
+    probes++;
+    if (!available) throw new Error('database credentials must never appear in health output');
+    return Response.json({ status: 'ready', checks: { database: 'ok', schema: 'current' } });
+  });
+  const app = createMcpApp(readMcpConfig({ DRAGONS_API_URL: 'https://api.example.com', MCP_PUBLIC_URL: 'https://mcp.example.com' }), backend, 'skill');
+  const probe = () => app.fetch(new Request('https://healthcheck.railway.app/health/ready'));
+  const responses = await Promise.all(Array.from({ length: 20 }, probe));
+  assert.equal(probes, 1);
+  for (const response of responses) {
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('strict-transport-security'), 'max-age=31536000');
+    assert.deepEqual(await response.json(), { status: 'not_ready', scope: 'foundation', checks: { backend: 'unavailable' } });
+  }
+  assert.equal((await app.fetch(new Request('https://healthcheck.railway.app/health'))).status, 200);
+  available = true;
+  assert.equal((await probe()).status, 503, 'failure is cached briefly to protect the API');
+  assert.equal(probes, 1);
+  await new Promise(resolve => setTimeout(resolve, 2100));
+  assert.equal((await probe()).status, 200);
+  assert.equal(probes, 2);
+});
+
 test('the skill is served openly, and /mcp needs a live Dragons Market token on this host only', () =>
   withMcp(async ({ base, fake }) => {
+    assert.equal((await raw(base, '/health', { Host: 'healthcheck.railway.app' })).status, 200);
+    assert.equal((await raw(base, '/mcp', { Host: 'healthcheck.railway.app' })).status, 403);
     const skill = await raw(base, '/skill.md', {});
     assert.equal(skill.status, 200);
     assert.match(String(skill.headers['content-type']), /text\/markdown/);

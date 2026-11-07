@@ -81,18 +81,22 @@ export function trustedProxyList(entries: string[]): BlockList {
   return list;
 }
 
-// X-Forwarded-For is read only when the connection comes from a configured proxy, and then only the entry that proxy appended.
-// Entries to its left are client-controlled. Anyone else connecting directly is limited by the socket address.
-function clientAddress(req: IncomingMessage, hops: number, proxies: BlockList): string {
+// Forwarded identity is accepted only from an allowlisted peer. X-Real-IP requires
+// a proxy that overwrites it; X-Forwarded-For selects only the configured right-hand hop.
+function clientAddress(req: IncomingMessage, config: Config, proxies: BlockList): string {
   const peer = req.socket.remoteAddress ?? 'unknown';
   const bare = peer.replace(/^::ffff:/i, '');
   const family = isIP(bare) === 6 ? 'ipv6' : 'ipv4';
-  if (hops > 0 && isIP(bare) && proxies.check(bare, family)) {
+  if (config.trustedProxyHops > 0 && isIP(bare) && proxies.check(bare, family)) {
+    if (config.trustedProxyHeader === 'x-real-ip') {
+      const value = req.headers['x-real-ip'];
+      return typeof value === 'string' && isIP(value) ? limitKey(value) : limitKey(peer);
+    }
     const forwarded = String(req.headers['x-forwarded-for'] ?? '')
       .split(',')
       .map(part => part.trim())
       .filter(Boolean);
-    const candidate = forwarded[forwarded.length - hops];
+    const candidate = forwarded[forwarded.length - config.trustedProxyHops];
     if (candidate && isIP(candidate)) return limitKey(candidate);
   }
   return limitKey(peer);
@@ -114,11 +118,16 @@ export function createApp(
     challengeLimits: Counters = new Map(),
     tokenLimits: Counters = new Map();
   const proxies = trustedProxyList(config.trustedProxyAddresses);
+  let readiness: { expires: number; result: Promise<boolean> } | undefined;
   const server = createServer(async (req, res) => {
     const requestId = randomUUID();
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    if (config.webOrigin.startsWith('https:')) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     res.setHeader('X-Request-Id', requestId);
     res.setHeader('Vary', 'Origin');
     if (req.headers.origin === config.webOrigin) {
@@ -129,9 +138,33 @@ export function createApp(
       res.writeHead(status);
       res.end(JSON.stringify(body));
     };
-    const client = clientAddress(req, config.trustedProxyHops, proxies);
+    const client = clientAddress(req, config, proxies);
     const now = Date.now();
     const privatePath = pathOf(req.url);
+    if (['GET', 'HEAD'].includes(req.method ?? '') && privatePath === '/health/live') {
+      reply(200, { status: 'ok' });
+      return;
+    }
+    if (['GET', 'HEAD'].includes(req.method ?? '') && privatePath === '/health/ready') {
+      if (!readiness || readiness.expires <= now) {
+        const check = { expires: Infinity, result: Promise.resolve(true) };
+        check.result = Promise.resolve().then(ready).then(() => true, error => {
+          logFailure(requestId, 'ready', error);
+          return false;
+        }).finally(() => { check.expires = Date.now() + 2000; });
+        readiness = check;
+      }
+      if (await readiness.result) {
+        reply(200, {
+          status: 'ready', checks: { database: 'ok', schema: 'current' },
+          deploymentConfigured: config.deployment !== null, scope: 'foundation',
+          indexing: config.deployment ? 'see_indexer_status' : 'deployment_not_configured',
+        });
+      } else {
+        reply(503, { status: 'not_ready', error: { code: 'database_or_configuration_unavailable', requestId } });
+      }
+      return;
+    }
     const access = privatePath !== null && isAgentAccessRoute(privatePath);
     const token = access ? createHash('sha256').update(String(req.headers.authorization)).digest('hex') : '';
     if (
@@ -146,7 +179,9 @@ export function createApp(
       reply(400, { error: { code: 'invalid_url', requestId } });
       return;
     }
-    if (privatePath === '/v1/auth/challenge' && !withinLimit(challengeLimits, challengeKey(client), CHALLENGES_PER_WINDOW, now)) {
+    if (privatePath === '/v1/auth/challenge' && req.method === 'POST' && req.headers.origin === config.webOrigin &&
+        !withinLimit(challengeLimits, challengeKey(client), CHALLENGES_PER_WINDOW, now)) {
+      res.setHeader('Retry-After', '60');
       reply(429, { error: { code: 'challenge_rate_limited', requestId } });
       return;
     }
@@ -185,10 +220,6 @@ export function createApp(
       reply(400, { error: { code: 'invalid_url', requestId } });
       return;
     }
-    if (path === '/health/live') {
-      reply(200, { status: 'ok' });
-      return;
-    }
     if (path === '/v1/config') {
       reply(200, publicConfig(config));
       return;
@@ -202,20 +233,18 @@ export function createApp(
       }
       return;
     }
-    if (path === '/health/ready') {
-      try {
-        await ready();
-        reply(200, {
-          status: 'ready',
-          checks: { database: 'ok', schema: 'current' },
-          deploymentConfigured: config.deployment !== null,
-          scope: 'foundation',
-          indexing: config.deployment ? 'see_indexer_status' : 'deployment_not_configured',
-        });
-      } catch (error) {
-        logFailure(requestId, 'ready', error);
-        reply(503, { status: 'not_ready', error: { code: 'database_or_configuration_unavailable', requestId } });
+    if (path === '/v1/operator/ingress') {
+      if (!operatorAuthorized(config.operatorToken, req.headers.authorization)) {
+        reply(404, { error: { code: 'not_found', requestId } });
+        return;
       }
+      const realIp = req.headers['x-real-ip'];
+      reply(200, {
+        peer: req.socket.remoteAddress, client,
+        realIp: typeof realIp === 'string' && isIP(realIp) ? realIp : null,
+        forwardedFor: String(req.headers['x-forwarded-for'] ?? '').split(',').map(value => value.trim()).filter(value => isIP(value)),
+        trustedProxyHeader: config.trustedProxyHeader,
+      });
       return;
     }
     if (path === '/v1/health/services' || path === '/v1/operator/services') {

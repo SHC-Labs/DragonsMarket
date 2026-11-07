@@ -104,7 +104,7 @@ The engine accepts normalized blocks through a replaceable `BlockSource` interfa
 
 A block supplies `network`, `finalized: true`, a header with decimal-string height/nanosecond timestamp plus hash/predecessor, and receipt IDs, receiver IDs, execution statuses and original logs. See `test/fixtures/blocks.jsonl`. Future live connectors must establish finality, complete receipt coverage and history access before producing this format. The `finalized` flag itself is an assertion, not a cryptographic proof.
 
-For a local replay, use an explicit sandbox deployment. These are fixture names, not deployed contracts. Run from `backend/` after `npm ci`, `npm run build`, starting local PostgreSQL and applying `npm run migrate` with the same database URL:
+For a local replay, use an explicit sandbox deployment. These are fixture names, not deployed contracts. Run from `backend/` after `pnpm install --frozen-lockfile`, `npm run build`, starting local PostgreSQL and applying `npm run migrate` with the same database URL:
 
 ```sh
 export DATABASE_URL=postgresql://dragons:dragons_local_only@127.0.0.1:55432/dragons_market
@@ -314,10 +314,10 @@ The backup command writes a custom-format pg_dump archive with a SHA-256 file un
 
 ## Host development and checks
 
-Use Node 24.21.0 or a newer 24.x release and npm; the NEAR Intents Agent API SDK needs Node 24. Dependencies are locked in `package-lock.json`: TypeScript, the `pg` PostgreSQL driver, the official `@near-intents-agent-api/sdk`, and type declarations. HTTP and tests use Node's standard library.
+Use Node 24.21.0 or a newer 24.x release and pnpm 10.33.0; the NEAR Intents Agent API SDK needs Node 24. Dependencies are locked in the root `pnpm-lock.yaml`: TypeScript, the `pg` PostgreSQL driver, the official `@near-intents-agent-api/sdk`, and type declarations. HTTP and tests use Node's standard library. Install from the workspace root or this directory. Existing `npm run` commands still invoke the package scripts, but dependency installation uses pnpm.
 
 ```sh
-npm ci
+pnpm install --frozen-lockfile
 npm run check
 npm test
 ```

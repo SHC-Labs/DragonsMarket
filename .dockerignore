@@ -1,0 +1,15 @@
+.git
+.railway
+**/node_modules
+**/dist
+**/target
+**/.env
+**/.env.*
+**/.local
+**/*.log
+**/*.key
+**/*.pem
+web/.next
+web/out
+web/test-results
+contracts/dev-chain.json

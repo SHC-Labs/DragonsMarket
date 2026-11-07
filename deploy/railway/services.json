@@ -1,0 +1,200 @@
+{
+  "web": {
+    "source.rootDirectory": "/",
+    "build.builder": "DOCKERFILE",
+    "build.buildCommand": "",
+    "build.watchPatterns": [
+      "web/**",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      ".node-version",
+      "deploy/railway/**",
+      "Caddyfile",
+      ".dockerignore"
+    ],
+    "deploy.startCommand": "caddy run --config /etc/caddy/Caddyfile --adapter caddyfile",
+    "deploy.healthcheckPath": "/health/live",
+    "deploy.healthcheckTimeout": 120,
+    "deploy.preDeployCommand": [],
+    "deploy.restartPolicyType": "ON_FAILURE",
+    "deploy.restartPolicyMaxRetries": 3,
+    "deploy.sleepApplication": false,
+    "build.dockerfilePath": "web/Dockerfile"
+  },
+  "server": {
+    "source.rootDirectory": "/",
+    "build.builder": "DOCKERFILE",
+    "build.buildCommand": "",
+    "build.watchPatterns": [
+      "backend/**",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      ".node-version",
+      "deploy/railway/**",
+      ".dockerignore"
+    ],
+    "deploy.startCommand": "node dist/src/main.js",
+    "deploy.healthcheckPath": "/health/ready",
+    "deploy.healthcheckTimeout": 120,
+    "deploy.preDeployCommand": [
+      "node dist/src/check-database.js"
+    ],
+    "deploy.restartPolicyType": "ON_FAILURE",
+    "deploy.restartPolicyMaxRetries": 3,
+    "deploy.sleepApplication": false,
+    "build.dockerfilePath": "backend/Dockerfile"
+  },
+  "mcp": {
+    "source.rootDirectory": "/",
+    "build.builder": "DOCKERFILE",
+    "build.buildCommand": "",
+    "build.watchPatterns": [
+      "mcp/**",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      ".node-version",
+      "deploy/railway/**",
+      ".dockerignore"
+    ],
+    "deploy.startCommand": "node dist/src/server.js",
+    "deploy.healthcheckPath": "/health",
+    "deploy.healthcheckTimeout": 120,
+    "deploy.preDeployCommand": [],
+    "deploy.restartPolicyType": "ON_FAILURE",
+    "deploy.restartPolicyMaxRetries": 3,
+    "deploy.sleepApplication": false,
+    "build.dockerfilePath": "mcp/Dockerfile"
+  },
+  "database-release": {
+    "source.rootDirectory": "/",
+    "build.builder": "DOCKERFILE",
+    "build.buildCommand": "",
+    "build.watchPatterns": [
+      "backend/**",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      ".node-version",
+      "deploy/railway/**",
+      ".dockerignore"
+    ],
+    "deploy.startCommand": "node dist/src/release.js",
+    "deploy.preDeployCommand": [],
+    "deploy.restartPolicyType": "NEVER",
+    "deploy.sleepApplication": false,
+    "build.dockerfilePath": "backend/Dockerfile"
+  },
+  "agent-worker": {
+    "source.rootDirectory": "/",
+    "build.builder": "DOCKERFILE",
+    "build.buildCommand": "",
+    "build.watchPatterns": [
+      "backend/**",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      ".node-version",
+      "deploy/railway/**",
+      ".dockerignore"
+    ],
+    "deploy.startCommand": "node dist/src/agent-worker.js",
+    "deploy.healthcheckPath": "/health",
+    "deploy.healthcheckTimeout": 120,
+    "deploy.preDeployCommand": [],
+    "deploy.restartPolicyType": "ON_FAILURE",
+    "deploy.restartPolicyMaxRetries": 3,
+    "deploy.sleepApplication": false,
+    "build.dockerfilePath": "backend/Dockerfile"
+  },
+  "indexer": {
+    "source.rootDirectory": "/",
+    "build.builder": "DOCKERFILE",
+    "build.buildCommand": "",
+    "build.watchPatterns": [
+      "backend/**",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      ".node-version",
+      "deploy/railway/**",
+      ".dockerignore"
+    ],
+    "deploy.startCommand": "node dist/src/ingestion/follow.js",
+    "deploy.preDeployCommand": [
+      "node dist/src/preflight.js"
+    ],
+    "deploy.restartPolicyType": "ON_FAILURE",
+    "deploy.restartPolicyMaxRetries": 3,
+    "deploy.sleepApplication": false,
+    "build.dockerfilePath": "backend/Dockerfile"
+  },
+  "reconcile": {
+    "source.rootDirectory": "/",
+    "build.builder": "DOCKERFILE",
+    "build.buildCommand": "",
+    "build.watchPatterns": [
+      "backend/**",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      ".node-version",
+      "deploy/railway/**",
+      ".dockerignore"
+    ],
+    "deploy.startCommand": "node dist/src/reconcile.js --follow",
+    "deploy.preDeployCommand": [
+      "node dist/src/preflight.js"
+    ],
+    "deploy.restartPolicyType": "ON_FAILURE",
+    "deploy.restartPolicyMaxRetries": 3,
+    "deploy.sleepApplication": false,
+    "build.dockerfilePath": "backend/Dockerfile"
+  },
+  "verify-chain": {
+    "source.rootDirectory": "/",
+    "build.builder": "DOCKERFILE",
+    "build.buildCommand": "",
+    "build.watchPatterns": [
+      "backend/**",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      ".node-version",
+      "deploy/railway/**",
+      ".dockerignore"
+    ],
+    "deploy.startCommand": "node dist/src/verify-chain.js",
+    "deploy.preDeployCommand": [
+      "node dist/src/preflight.js"
+    ],
+    "deploy.restartPolicyType": "NEVER",
+    "deploy.sleepApplication": false,
+    "build.dockerfilePath": "backend/Dockerfile",
+    "deploy.cronSchedule": "0 */6 * * *"
+  },
+  "prices": {
+    "source.rootDirectory": "/",
+    "build.builder": "DOCKERFILE",
+    "build.buildCommand": "",
+    "build.watchPatterns": [
+      "backend/**",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      ".node-version",
+      "deploy/railway/**",
+      ".dockerignore"
+    ],
+    "deploy.startCommand": "node dist/src/prices.js --follow",
+    "deploy.preDeployCommand": [
+      "node dist/src/preflight.js"
+    ],
+    "deploy.restartPolicyType": "ON_FAILURE",
+    "deploy.restartPolicyMaxRetries": 3,
+    "deploy.sleepApplication": false,
+    "build.dockerfilePath": "backend/Dockerfile"
+  }
+}

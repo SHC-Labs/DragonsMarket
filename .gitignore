@@ -6,6 +6,9 @@ contracts/**/target/
 contracts/dev-chain.json
 
 # Node / Next.js
+node_modules/
+backend/dist/
+mcp/dist/
 web/node_modules/
 web/.next/
 web/out/
@@ -25,3 +28,7 @@ web/site-tour*.mp4
 
 # Signed prices the keeper publisher keeps between restarts
 publisher-prices.json
+
+.env
+.env.*
+.railway/

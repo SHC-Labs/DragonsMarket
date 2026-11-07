@@ -1,0 +1,69 @@
+name: Deploy Railway
+run-name: Railway ${{ inputs.action }} from ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Check configuration or deploy the checked commit
+        type: choice
+        default: check
+        options: [check, deploy]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-production
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    if: github.repository == 'SHC-Labs/DragonsMarket' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/agents.yml
+
+  deploy:
+    needs: checks
+    if: github.repository == 'SHC-Labs/DragonsMarket' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    environment:
+      name: production
+      url: https://railway.com/project/489b02ad-fd74-4413-ab91-835da8b86542
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version-file: .node-version
+      - name: Install pinned Railway CLI
+        if: inputs.action == 'deploy'
+        run: |
+          npm install --prefix "$RUNNER_TEMP/railway-cli" @railway/cli@4.36.1
+          echo "$RUNNER_TEMP/railway-cli/node_modules/.bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/railway-cli/node_modules/.bin/railway" --version
+      - name: Verify Railway credential and configuration
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: node deploy/railway/release.mjs --check
+      - name: Release database, API, MCP and web
+        if: inputs.action == 'deploy'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: node deploy/railway/release.mjs
+      - name: Verify deployed foundation
+        if: inputs.action == 'deploy'
+        run: >-
+          node deploy/railway/smoke.mjs
+          https://web-production-0ecbb.up.railway.app
+          https://server-production-d0bfb.up.railway.app
+          https://mcp-production-b3a8.up.railway.app
+      - name: Verify custom domains
+        if: inputs.action == 'deploy' && vars.CUSTOM_DOMAINS_READY == 'true'
+        run: >-
+          node deploy/railway/smoke.mjs
+          https://dragons.market
+          https://api.dragons.market
+          https://mcp.dragons.market
