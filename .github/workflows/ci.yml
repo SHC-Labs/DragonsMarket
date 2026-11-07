@@ -83,7 +83,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             contracts/target
-          key: sandbox-nodebug-${{ runner.os }}-${{ hashFiles('contracts/Cargo.lock', 'contracts/rust-toolchain.toml') }}
+          key: >-
+            sandbox-nodebug-${{ runner.os }}-${{ hashFiles('contracts/Cargo.lock',
+            'contracts/rust-toolchain.toml', 'contracts/tests/fixtures/council-v5-source.tar.gz') }}
           restore-keys: sandbox-nodebug-${{ runner.os }}-
       - uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
@@ -95,6 +97,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libudev-dev
       - name: Install cargo-near
         run: cargo near --version 2>/dev/null | grep -q 0.22.0 || cargo install cargo-near --version 0.22.0 --locked
+      - name: Build the version 5 Council migration fixture
+        run: bash build-council-v5.sh
       - name: Build the wasm the sandbox tests load
         run: ./build.sh
       - name: Build the NEAR Intents verifier the sandbox tests load
