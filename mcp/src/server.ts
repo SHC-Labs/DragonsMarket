@@ -40,20 +40,45 @@ export function createMcpApp(config: McpConfig, backend: Backend, skill: string,
   const gate = requireBearerAuth({ verifier });
   const handler = createMcpHandler(() => buildServer(backend, skill), { maxRequestBodySize: MAX_BODY });
   const hosts = [config.publicUrl.hostname];
+  let readiness: { expires: number; result: Promise<boolean> } | undefined;
+  const fetchRequest = async (request: Request) => {
+    if (new URL(request.url).pathname === '/health/ready' && ['GET', 'HEAD'].includes(request.method)) {
+      if (!readiness || readiness.expires <= Date.now()) {
+        const check = { expires: Infinity, result: Promise.resolve(false) };
+        check.result = Promise.resolve().then(() => backend.ready()).then(() => true, () => false)
+          .finally(() => { check.expires = Date.now() + 2000; });
+        readiness = check;
+      }
+      const ready = await readiness.result;
+      return Response.json({ status: ready ? 'ready' : 'not_ready', scope: 'foundation',
+        checks: { backend: ready ? 'ok' : 'unavailable' } }, { status: ready ? 200 : 503 });
+    }
+    return appRequest(request);
+  };
+  const appRequest = async (request: Request): Promise<Response> => {
+    const { pathname } = new URL(request.url);
+    // Railway probes use their own Host header. These routes expose health only;
+    // MCP and skill requests retain the public-host and origin checks below.
+    if (pathname === '/health' && ['GET', 'HEAD'].includes(request.method)) return Response.json({ ok: true });
+    const rejected = hostHeaderValidationResponse(request, hosts) ?? originValidationResponse(request, []);
+    if (rejected) return rejected;
+    if (pathname === '/skill.md' && request.method === 'GET') {
+      return new Response(skill, { headers: { 'content-type': 'text/markdown; charset=utf-8' } });
+    }
+    if (pathname !== '/mcp') return new Response('Not found', { status: 404 });
+    const auth = await gate(request);
+    return auth instanceof Response ? auth : handler.fetch(request, { authInfo: auth });
+  };
   return {
     fetch: async (request: Request) => {
-      const { pathname } = new URL(request.url);
-      // Railway probes use their own Host header. This route exposes liveness only;
-      // MCP and skill requests retain the public-host and origin checks below.
-      if (pathname === '/health' && request.method === 'GET') return Response.json({ ok: true });
-      const rejected = hostHeaderValidationResponse(request, hosts) ?? originValidationResponse(request, []);
-      if (rejected) return rejected;
-      if (pathname === '/skill.md' && request.method === 'GET') {
-        return new Response(skill, { headers: { 'content-type': 'text/markdown; charset=utf-8' } });
-      }
-      if (pathname !== '/mcp') return new Response('Not found', { status: 404 });
-      const auth = await gate(request);
-      return auth instanceof Response ? auth : handler.fetch(request, { authInfo: auth });
+      const response = await fetchRequest(request);
+      response.headers.set('Cache-Control', 'no-store');
+      response.headers.set('X-Content-Type-Options', 'nosniff');
+      response.headers.set('X-Frame-Options', 'DENY');
+      response.headers.set('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+      response.headers.set('Referrer-Policy', 'no-referrer');
+      if (config.publicUrl.protocol === 'https:') response.headers.set('Strict-Transport-Security', 'max-age=31536000');
+      return response;
     },
   };
 }

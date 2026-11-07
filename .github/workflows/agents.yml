@@ -4,7 +4,7 @@ on:
   workflow_call:
   workflow_dispatch:
   push:
-    branches: [main, agent-accounts, deploy/railway]
+    branches: [main]
     paths:
       - backend/**
       - mcp/**
@@ -19,18 +19,7 @@ on:
       - .github/workflows/**
   pull_request:
     branches: [main]
-    paths:
-      - backend/**
-      - mcp/**
-      - web/**
-      - package.json
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - Caddyfile
-      - .node-version
-      - .dockerignore
-      - deploy/railway/**
-      - .github/workflows/**
+    # A required check must report even for documentation-only PRs.
 
 permissions:
   contents: read

@@ -107,16 +107,16 @@ test('failed, removed, unknown and mismatched deployments fail closed', async ()
 
 test('release order is serial and excludes Postgres and all inactive workers', async () => {
   const events = [];
-  await release({ query: async () => target(),
+  await release({ query: async () => target(), backups: async () => { events.push('backup-check'); },
     upload: service => { events.push(`upload:${service.name}`); return { deploymentId: id }; },
     wait: async (_query, service) => { events.push(`ready:${service.name}`); }, report() {} });
-  assert.deepEqual(events, ['upload:database-release', 'ready:database-release', 'upload:server', 'ready:server',
+  assert.deepEqual(events, ['backup-check', 'upload:database-release', 'ready:database-release', 'upload:server', 'ready:server',
     'upload:mcp', 'ready:mcp', 'upload:web', 'ready:web']);
 });
 
 test('a failed database release prevents every application upload', async () => {
   const uploaded = [];
-  await assert.rejects(release({ query: async () => target(),
+  await assert.rejects(release({ query: async () => target(), backups: async () => {},
     upload: service => { uploaded.push(service.name); return { deploymentId: id }; },
     wait: async () => { throw new Error('Migration failed'); }, report() {} }), /Migration failed/);
   assert.deepEqual(uploaded, ['database-release']);
@@ -126,5 +126,12 @@ test('invalid target or upload result cannot be mistaken for a successful releas
   let uploads = 0;
   await assert.rejects(release({ query: async () => ({ ...target(), projectToken: null }), upload() { uploads++; } }), /project token/);
   assert.equal(uploads, 0);
-  await assert.rejects(release({ query: async () => target(), upload: () => ({ deploymentId: 'not-an-id' }) }), /deployment ID/);
+  await assert.rejects(release({ query: async () => target(), backups: async () => {}, upload: () => ({ deploymentId: 'not-an-id' }) }), /deployment ID/);
+});
+
+test('a missing or stale backup prevents uploads and migrations', async () => {
+  let uploads = 0;
+  await assert.rejects(release({ query: async () => target(), backups: async () => { throw new Error('No recent backup'); },
+    upload() { uploads++; } }), /No recent backup/);
+  assert.equal(uploads, 0);
 });

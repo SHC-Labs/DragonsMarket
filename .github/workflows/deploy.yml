@@ -54,13 +54,14 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: node deploy/railway/release.mjs
       - name: Verify deployed foundation
+        if: inputs.action == 'deploy'
         run: >-
           node deploy/railway/smoke.mjs
           https://web-production-0ecbb.up.railway.app
           https://server-production-d0bfb.up.railway.app
           https://mcp-production-b3a8.up.railway.app
       - name: Verify custom domains
-        if: vars.CUSTOM_DOMAINS_READY == 'true'
+        if: inputs.action == 'deploy' && vars.CUSTOM_DOMAINS_READY == 'true'
         run: >-
           node deploy/railway/smoke.mjs
           https://dragons.market

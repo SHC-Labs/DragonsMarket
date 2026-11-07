@@ -124,6 +124,10 @@ export function createApp(
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    if (config.webOrigin.startsWith('https:')) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     res.setHeader('X-Request-Id', requestId);
     res.setHeader('Vary', 'Origin');
     if (req.headers.origin === config.webOrigin) {

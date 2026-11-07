@@ -3,6 +3,7 @@ import { appendFileSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { checkBackups } from './backups.mjs';
 
 export const projectId = '489b02ad-fd74-4413-ab91-835da8b86542';
 export const environmentId = 'dfda2a3a-a864-4e86-ab25-2299069f7729';
@@ -100,8 +101,9 @@ export async function waitForDeployment(query, service, id, { sleep = delay, now
   throw new Error(`Timed out waiting for ${service.name}; inspect ${id} before retrying`);
 }
 
-export async function release({ query, upload, wait = waitForDeployment, report = console.log }) {
+export async function release({ query, upload, wait = waitForDeployment, report = console.log, backups = checkBackups }) {
   await checkTarget(query);
+  await backups(query, projectId, environmentId);
   for (const service of services) {
     const { deploymentId } = await upload(service);
     if (!uuid.test(deploymentId ?? '')) throw new Error(`Railway did not return a deployment ID for ${service.name}`);
@@ -115,7 +117,8 @@ async function main() {
   const query = railwayQuery(process.env.RAILWAY_TOKEN);
   if (process.argv[2] === '--check') {
     await checkTarget(query);
-    console.log('Railway project token and release service settings verified; no deployments started');
+    await checkBackups(query, projectId, environmentId);
+    console.log('Railway project token, release service settings and recent backups verified; no deployments started');
     return;
   }
   verifySource(process.env, execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }),

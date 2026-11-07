@@ -40,6 +40,22 @@ async function bounded(response: Response): Promise<unknown> {
 export class Backend {
   constructor(private readonly origin: string, private readonly fetcher: typeof fetch = fetch) {}
 
+  /** Readiness checks the private API and its database, without any agent credential. */
+  async ready(): Promise<void> {
+    try {
+      const response = await this.fetcher(`${this.origin}/health/ready`, {
+        redirect: 'error', signal: AbortSignal.timeout(5000),
+      });
+      const answer = record(await bounded(response));
+      const checks = record(answer.checks);
+      if (!response.ok || answer.status !== 'ready' || checks.database !== 'ok' || checks.schema !== 'current') {
+        throw new Error('not_ready');
+      }
+    } catch {
+      throw new BackendRefusal(503, 'backend_unavailable');
+    }
+  }
+
   async call(token: string, method: 'GET' | 'POST', path: string, body?: unknown): Promise<Json> {
     const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
