@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "files": ["dist/src", "skill"],
   "engines": {
     "node": ">=24.21.0 <25"
   },
@@ -21,8 +22,5 @@
     "@modelcontextprotocol/client": "2.3.1",
     "@types/node": "24.19.2",
     "typescript": "5.9.3"
-  },
-  "overrides": {
-    "@hono/node-server": "2.1.5"
   }
 }

@@ -42,13 +42,15 @@ export function createMcpApp(config: McpConfig, backend: Backend, skill: string,
   const hosts = [config.publicUrl.hostname];
   return {
     fetch: async (request: Request) => {
+      const { pathname } = new URL(request.url);
+      // Railway probes use their own Host header. This route exposes liveness only;
+      // MCP and skill requests retain the public-host and origin checks below.
+      if (pathname === '/health' && request.method === 'GET') return Response.json({ ok: true });
       const rejected = hostHeaderValidationResponse(request, hosts) ?? originValidationResponse(request, []);
       if (rejected) return rejected;
-      const { pathname } = new URL(request.url);
       if (pathname === '/skill.md' && request.method === 'GET') {
         return new Response(skill, { headers: { 'content-type': 'text/markdown; charset=utf-8' } });
       }
-      if (pathname === '/health' && request.method === 'GET') return Response.json({ ok: true });
       if (pathname !== '/mcp') return new Response('Not found', { status: 404 });
       const auth = await gate(request);
       return auth instanceof Response ? auth : handler.fetch(request, { authInfo: auth });
@@ -65,7 +67,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const node = toNodeHandler(app, { maxRequestBodySize: MAX_BODY });
     const server = createServer((req, res) => void node(req as Parameters<typeof node>[0], res));
     server.requestTimeout = 120000;
-    server.listen(config.port, config.host, () => console.log(`Dragons Market MCP listening on port ${config.port}`));
+    server.listen(config.port, config.host, () => console.log(JSON.stringify({ service: 'mcp', port: config.port, node: process.version, uid: process.getuid?.() })));
     const stop = () => server.close(() => process.exit(0));
     process.on('SIGTERM', stop);
     process.on('SIGINT', stop);

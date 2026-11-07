@@ -51,7 +51,7 @@ try {
     void statusPool.end();
     process.exitCode = 1;
   });
-  server.listen(config.port, config.host, () => console.log(`Dragons Market backend listening on port ${config.port}`));
+  server.listen(config.port, config.host, () => console.log(JSON.stringify({ service: 'api', port: config.port, node: process.version, uid: process.getuid?.() })));
   const housekeeping = setInterval(() => {
     void cleanupExpiredAuth(pool).catch(() => console.error('Expired credential cleanup unavailable'));
   }, HOUSEKEEPING_INTERVAL_MS);

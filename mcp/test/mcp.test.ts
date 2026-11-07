@@ -153,6 +153,8 @@ test('the MCP server takes only https origins and keeps the backend on a private
 
 test('the skill is served openly, and /mcp needs a live Dragons Market token on this host only', () =>
   withMcp(async ({ base, fake }) => {
+    assert.equal((await raw(base, '/health', { Host: 'healthcheck.railway.app' })).status, 200);
+    assert.equal((await raw(base, '/mcp', { Host: 'healthcheck.railway.app' })).status, 403);
     const skill = await raw(base, '/skill.md', {});
     assert.equal(skill.status, 200);
     assert.match(String(skill.headers['content-type']), /text\/markdown/);

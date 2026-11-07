@@ -11,6 +11,7 @@ export interface Config {
   webOrigin: string;
   trustedProxyHops: number;
   trustedProxyAddresses: string[];
+  trustedProxyHeader: 'x-forwarded-for' | 'x-real-ip';
   operatorToken: string | null;
   sessionAbsoluteSeconds: number;
   sessionIdleSeconds: number;
@@ -110,6 +111,9 @@ export function readConfig(env: NodeJS.ProcessEnv): Config {
     if (!version || (prefix !== undefined && (!/^\d+$/.test(prefix) || Number(prefix) > (version === 6 ? 128 : 32)))) throw new Error('Invalid TRUSTED_PROXY_ADDRESSES');
   }
   if (trustedProxyHops > 0 && !trustedProxyAddresses.length) throw new Error('TRUSTED_PROXY_HOPS needs TRUSTED_PROXY_ADDRESSES: the addresses the proxy connects from');
+  const trustedProxyHeader = env.TRUSTED_PROXY_HEADER || 'x-forwarded-for';
+  if (trustedProxyHeader !== 'x-forwarded-for' && trustedProxyHeader !== 'x-real-ip') throw new Error('Invalid TRUSTED_PROXY_HEADER');
+  if (trustedProxyHeader === 'x-real-ip' && trustedProxyHops !== 1) throw new Error('X-Real-IP requires exactly one trusted proxy hop');
   const operatorToken = env.OPERATOR_TOKEN || null;
   if (operatorToken !== null && operatorToken.length < MIN_OPERATOR_TOKEN_LENGTH) throw new Error('OPERATOR_TOKEN must be at least 32 characters');
   const sessionAbsoluteSeconds = integer(env.SESSION_ABSOLUTE_SECONDS || String(DEFAULT_SESSION_ABSOLUTE_SECONDS), 'SESSION_ABSOLUTE_SECONDS', MIN_SESSION_SECONDS, MAX_SESSION_SECONDS);
@@ -117,7 +121,7 @@ export function readConfig(env: NodeJS.ProcessEnv): Config {
   if (sessionIdleSeconds > sessionAbsoluteSeconds) throw new Error('SESSION_IDLE_SECONDS cannot exceed SESSION_ABSOLUTE_SECONDS');
   return {
     databaseUrl, network, rpc, agentWorker: readAgentWorkerLink(env), host, port, webOrigin, trustedProxyHops,
-    trustedProxyAddresses, operatorToken, sessionAbsoluteSeconds, sessionIdleSeconds, deployment,
+    trustedProxyAddresses, trustedProxyHeader, operatorToken, sessionAbsoluteSeconds, sessionIdleSeconds, deployment,
   };
 }
 

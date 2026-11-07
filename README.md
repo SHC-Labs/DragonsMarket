@@ -19,7 +19,7 @@
   <img src="https://img.shields.io/badge/chain-NEAR-23734d.svg" alt="Chain: NEAR">&nbsp;&nbsp;&nbsp;
   <img src="https://img.shields.io/badge/collateral-USDC%20via%20NEAR%20Intents-2775ca.svg" alt="Collateral: USDC via NEAR Intents"> <br>
   <img src="https://img.shields.io/badge/contracts-Rust-orange.svg" alt="Contracts: Rust">&nbsp;&nbsp;&nbsp;
-  <img src="https://img.shields.io/badge/status-not%20deployed-lightgrey.svg" alt="Status: not deployed">
+  <img src="https://img.shields.io/badge/status-integration%20pending-lightgrey.svg" alt="Status: integration pending">
 </p>
 
 &nbsp;
@@ -76,7 +76,7 @@ Each contract has a manual with its methods, events, limits and failure modes.
 
 ## Run it locally
 
-You need the Rust toolchain pinned in `contracts/rust-toolchain.toml`, `cargo-near`, Node.js 22 and npm.
+You need the Rust toolchain pinned in `contracts/rust-toolchain.toml`, `cargo-near`, Node.js 24.22.2 and pnpm 10.33.0. The website, backend and MCP server share the root pnpm workspace and lockfile.
 
 Build the contracts and start a local chain:
 
@@ -91,7 +91,7 @@ Wait for `DEV_CHAIN_READY`. In a second terminal, start the website against that
 ```bash
 cd web
 source scripts/use-node.sh
-npm ci
+pnpm install --frozen-lockfile
 DEV_SERVER_SECS=0 PORT=3400 bash scripts/dev-local.sh
 ```
 
@@ -112,6 +112,10 @@ The sandbox suite runs every contract in a local NEAR chain with the real Intent
 hour, because the dispute tests move chain time forward by hours. Website checks run from `web/` with `npm test`;
 backend setup is in [backend/README.md](backend/README.md).
 
+From the repository root, `pnpm typecheck`, `pnpm lint`, `pnpm test` and `pnpm build` check the application workspace. Database tests additionally require `TEST_DATABASE_URL`; `pnpm test:release` requires a disposable PostgreSQL cluster because it provisions cluster-level service roles.
+
+Railway service layout, release order and runtime variables are documented in [docs/RAILWAY.md](docs/RAILWAY.md). The domain handoff is in [docs/CLOUDFLARE.md](docs/CLOUDFLARE.md).
+
 Security reviews of the contracts are kept as regression tests: each finding has a failing test first, then the fix.
 They live in `contracts/tests/tests/review_*.rs`.
 
@@ -119,9 +123,11 @@ They live in `contracts/tests/tests/review_*.rs`.
 
 ## Status
 
-The contracts are not deployed. The sandbox runs the real Intents verifier with test collateral, and nothing here
-has been run on mainnet. Still open: the real treasury and DAO handover, a run against real USDC, and the live
-funding and withdrawal flow. The remaining limits and decisions are in the contract manuals.
+The team reports deployed contracts; their authoritative account, network and ownership manifest is pending for
+the Railway integration. The deployed web, API and database provide the application foundation, with chain
+workers disabled until that manifest and the integration checks are complete. This deployment does not yet
+establish live funding, trading or withdrawals. Treasury/DAO handover and real collateral flows also need
+verification against the supplied deployment. See [docs/RAILWAY.md](docs/RAILWAY.md) for the activation gates.
 
 &nbsp;
 

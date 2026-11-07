@@ -1,0 +1,32 @@
+{
+  "name": "dragons-market",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=24.21.0 <25"
+  },
+  "scripts": {
+    "dev:web": "pnpm --filter web dev",
+    "dev:server": "pnpm --filter dragons-market-backend dev",
+    "build": "pnpm build:server && pnpm build:mcp && pnpm build:web",
+    "build:web": "pnpm --filter web build",
+    "build:server": "pnpm --filter dragons-market-backend build",
+    "build:mcp": "pnpm --filter dragons-market-mcp build",
+    "start:server": "pnpm --filter dragons-market-backend start",
+    "start:mcp": "pnpm --filter dragons-market-mcp start",
+    "start:agent-worker": "pnpm --filter dragons-market-backend agent-worker",
+    "start:indexer": "pnpm --filter dragons-market-backend exec node dist/src/ingestion/follow.js",
+    "start:reconcile": "pnpm --filter dragons-market-backend exec node dist/src/reconcile.js --follow",
+    "start:verify-chain": "pnpm --filter dragons-market-backend exec node dist/src/verify-chain.js --follow",
+    "start:prices": "pnpm --filter dragons-market-backend exec node dist/src/prices.js --follow",
+    "db:deploy": "pnpm --filter dragons-market-backend exec node dist/src/release.js",
+    "db:check": "pnpm --filter dragons-market-backend exec node dist/src/check-database.js",
+    "chain:register": "pnpm --filter dragons-market-backend exec node dist/src/ingestion/cli.js register",
+    "chain:preflight": "pnpm --filter dragons-market-backend exec node dist/src/preflight.js",
+    "typecheck": "pnpm --filter dragons-market-backend check && pnpm --filter dragons-market-mcp check && pnpm --filter web check",
+    "lint": "pnpm --filter web lint && pnpm --filter web check:brand",
+    "test": "pnpm --filter dragons-market-backend test && pnpm --filter dragons-market-mcp test && pnpm --filter web test",
+    "test:database": "pnpm --filter dragons-market-backend test:database",
+    "test:release": "pnpm --filter dragons-market-backend test:release"
+  }
+}

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "files": ["dist/src", "migrations", "ops"],
   "engines": {
     "node": ">=24.21.0 <25"
   },
@@ -20,6 +21,7 @@
     "logs": "docker compose logs -f api",
     "rpc:check": "npm run build && node --env-file-if-exists=.env dist/src/check-rpc.js",
     "test:backup": "npm run build && node --env-file-if-exists=.env --test dist/test/backup-restore.test.js",
+    "test:release": "pnpm build && node --test dist/test/release.test.js",
     "backup": "bash scripts/backup.sh",
     "verify:chain": "npm run build && node --env-file-if-exists=.env dist/src/verify-chain.js",
     "preflight": "npm run build && node --env-file-if-exists=.env dist/src/preflight.js",
@@ -43,8 +45,5 @@
     "near-api-js": "7.4.0",
     "near-sandbox": "0.3.4",
     "typescript": "5.9.3"
-  },
-  "overrides": {
-    "tar": "7.5.22"
   }
 }
