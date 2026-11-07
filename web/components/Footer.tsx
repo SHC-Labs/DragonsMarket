@@ -1,9 +1,9 @@
 import { Brand } from "./Brand";
 import Link from "next/link";
 
-// TODO before launch: replace these mock destinations with the official X profile, Docs and API URLs.
+// Docs and API destinations are not configured yet.
 const footerLinks: { label: string; href: string; icon?: "x" }[] = [
-  { label: "X (Twitter)", href: "#x", icon: "x" },
+  { label: "X (Twitter)", href: "https://x.com/DragonsOnNear", icon: "x" },
   { label: "Docs", href: "#docs" },
   { label: "API", href: "#api" },
 ];
@@ -24,7 +24,7 @@ export function Footer() {
           <nav aria-label="Community and resources">
             <h2 className="eyebrow">Community</h2>
             {footerLinks.map(({ label, href, icon }) => (
-              <a key={label} href={href} title="Placeholder link">{icon === "x" && <XMark />}{label}</a>
+              <a key={label} href={href} title={href.startsWith("#") ? "Placeholder link" : undefined}>{icon === "x" && <XMark />}{label}</a>
             ))}
           </nav>
           <nav aria-label="Legal">
