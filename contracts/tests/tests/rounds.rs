@@ -151,28 +151,36 @@ async fn a_first_jury_that_does_not_decide_is_followed_by_one_larger_disjoint_ju
     Ok(())
 }
 
-// The jury is drawn at the very end of the draw window and still has all of its own time to commit and to reveal.
+// Exact draw_by boundaries are covered by oracle unit tests. Sandbox block skipping and receipts also advance time.
 #[tokio::test]
-async fn a_jury_drawn_at_the_last_allowed_moment_still_gets_the_full_commit_period() -> anyhow::Result<()> {
+async fn a_jury_drawn_late_gets_the_full_commit_and_reveal_period() -> anyhow::Result<()> {
     let w = setup().await?;
     let id = proposed(&w).await?;
     challenge(&w, &w.dave, id).await?;
     let draw_by = case_time(&w, id, "draw_by").await;
-    skip_until(&w, draw_by - 15 * 1_000_000_000).await;
+    let late = draw_by - 300 * 1_000_000_000;
+    skip_until(&w, late).await;
+    let before_draw = now(&w.worker).await;
+    assert!(
+        before_draw >= late && before_draw < draw_by,
+        "draw must start in the last five minutes: now={before_draw}, draw_by={draw_by}"
+    );
     let jury = draw_jury(&w, id).await?;
-    let seated = now(&w.worker).await;
-    assert!(seated <= draw_by, "the draw landed inside the window");
+    let after_draw = now(&w.worker).await;
     let (commit_ends, deadline) = (
         case_time(&w, id, "commit_ends_at").await,
         case_time(&w, id, "panel_deadline").await,
     );
     let half = PANEL_MS * 1_000_000 / 2;
     assert!(
-        commit_ends >= seated + half - 5_000_000_000,
-        "{} ns of commit period left",
-        commit_ends - seated
+        commit_ends >= before_draw + half && commit_ends <= after_draw + half,
+        "commit clock must start during the draw: before={before_draw}, after={after_draw}, commit_ends={commit_ends}"
     );
-    assert!(deadline >= seated + 2 * half - 5_000_000_000);
+    assert_eq!(
+        deadline,
+        commit_ends + half,
+        "the reveal period follows the full commit period"
+    );
 
     // The three who vote do so, and the two who never committed are the only ones at fault. Nobody is marked delinquent
     // for time they never had.
