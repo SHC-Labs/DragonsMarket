@@ -7,8 +7,8 @@ if [ -x "$dragons_node_bin/node" ]; then
 fi
 node -e '
   const [major, minor, patch] = process.versions.node.split(".").map(Number);
-  if (major !== 22 || minor < 23 || (minor === 23 && patch < 4)) {
-    console.error("Dragons Market requires Node.js 22.23.4 or a newer 22.x release. Select the version in web/.node-version with your Node version manager.");
+  if (major !== 24 || minor < 21) {
+    console.error("Dragons Market requires Node.js 24.21.0 or a newer 24.x release. Select the version in .node-version with your Node version manager.");
     process.exit(1);
   }
 ' || return 1

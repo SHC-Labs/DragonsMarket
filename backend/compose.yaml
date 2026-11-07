@@ -1,4 +1,7 @@
 name: dragons-market-backend
+x-backend-build: &backend_build
+  context: ..
+  dockerfile: backend/Dockerfile
 x-backend-environment: &backend_environment
   DATABASE_URL: postgresql://dm_api_login:${API_DB_PASSWORD:-dragons_api_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
   HOST: 0.0.0.0
@@ -46,7 +49,7 @@ services:
       retries: 20
     restart: unless-stopped
   migrate:
-    build: .
+    build: *backend_build
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-dragons}:${POSTGRES_PASSWORD:-dragons_local_only}@postgres:5432/${POSTGRES_DB:-dragons_market}
     command: ["node", "dist/src/migrate.js"]
@@ -73,7 +76,7 @@ services:
       migrate:
         condition: service_completed_successfully
   api:
-    build: .
+    build: *backend_build
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
     environment:
@@ -92,7 +95,7 @@ services:
       retries: 12
     restart: unless-stopped
   agent-worker:
-    build: .
+    build: *backend_build
     profiles: [agents]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
@@ -115,7 +118,7 @@ services:
       retries: 12
     restart: unless-stopped
   indexer:
-    build: .
+    build: *backend_build
     profiles: [indexing]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
@@ -128,7 +131,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
   feed:
-    build: .
+    build: *backend_build
     profiles: [indexing]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
@@ -143,7 +146,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
   reconcile:
-    build: .
+    build: *backend_build
     profiles: [indexing]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
@@ -156,7 +159,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
   verify-chain:
-    build: .
+    build: *backend_build
     profiles: [indexing]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
@@ -169,7 +172,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
   publisher:
-    build: .
+    build: *backend_build
     profiles: [publishing]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
@@ -187,7 +190,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
   prices:
-    build: .
+    build: *backend_build
     profiles: [prices]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]

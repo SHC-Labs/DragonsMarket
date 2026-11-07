@@ -79,6 +79,20 @@ test('the operator token compare accepts only the exact token', () => {
   assert.ok(!operatorAuthorized(null, `Bearer ${TOKEN}`));
 });
 
+test('HTTPS API responses have a non-executable document policy and do not permit framing', async () => {
+  const { root, close } = await serve({ WEB_ORIGIN: 'https://dragons.market' }, async () => DETAIL);
+  try {
+    for (const path of ['/health/ready', '/v1/nope']) {
+      const response = await fetch(`${root}${path}`);
+      assert.equal(response.headers.get('strict-transport-security'), 'max-age=31536000');
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(response.headers.get('x-frame-options'), 'DENY');
+      assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+    }
+  } finally { await close(); }
+});
+
 test('configuration refuses a short operator token and inconsistent session limits', () => {
   assert.equal(readConfig(base).operatorToken, null);
   assert.equal(readConfig({ ...base, OPERATOR_TOKEN: TOKEN }).operatorToken, TOKEN);

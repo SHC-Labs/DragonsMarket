@@ -3,11 +3,13 @@ name: contracts
 on:
   push:
     branches: [main]
+    paths: [contracts/**, .github/workflows/ci.yml]
   pull_request:
     branches: [main]
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: contracts-${{ github.ref }}
@@ -21,7 +23,35 @@ defaults:
     working-directory: contracts
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: .
+    outputs:
+      contracts: ${{ steps.paths.outputs.contracts }}
+    steps:
+      - name: Detect contract changes without running pull request code
+        id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo 'contracts=true' >> "$GITHUB_OUTPUT"
+          else
+            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed-files"
+            if [ "$(wc -l < "$RUNNER_TEMP/changed-files")" -ge 3000 ] || grep -E '^(contracts/|\.github/workflows/ci\.yml$)' "$RUNNER_TEMP/changed-files" > /dev/null; then
+              echo 'contracts=true' >> "$GITHUB_OUTPUT"
+            else
+              echo 'contracts=false' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
   fmt:
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -31,6 +61,8 @@ jobs:
       - run: cargo fmt --all --check
 
   clippy:
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -53,6 +85,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   unit:
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -70,8 +104,15 @@ jobs:
       - run: cargo test -p market -p oracle -p council -p rounds -p dpm -p price-signatures -p upgrade
 
   sandbox:
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
@@ -83,7 +124,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             contracts/target
-          key: sandbox-nodebug-${{ runner.os }}-${{ hashFiles('contracts/Cargo.lock', 'contracts/rust-toolchain.toml') }}
+          key: >-
+            sandbox-nodebug-${{ runner.os }}-${{ hashFiles('contracts/Cargo.lock',
+            'contracts/rust-toolchain.toml', 'contracts/tests/fixtures/council-v5-source.tar.gz') }}
           restore-keys: sandbox-nodebug-${{ runner.os }}-
       - uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
@@ -95,11 +138,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libudev-dev
       - name: Install cargo-near
         run: cargo near --version 2>/dev/null | grep -q 0.22.0 || cargo install cargo-near --version 0.22.0 --locked
+      - name: Build the version 5 Council migration fixture
+        run: bash build-council-v5.sh
       - name: Build the wasm the sandbox tests load
         run: ./build.sh
       - name: Build the NEAR Intents verifier the sandbox tests load
         # The tests fail with this recipe when the file is missing (docs/contracts/INTENTS-PROOF.md). Needs docker.
         run: |
+          if echo "a1afab98916d9f213746544dcf8e4e6bdb22c0be6bc5dfbd8ea8814c9922b547  target/intents/defuse.wasm" | sha256sum --check --status; then
+            echo 'Using the checksum-verified cached NEAR Intents fixture'
+            exit 0
+          fi
           git clone https://github.com/near/intents "$RUNNER_TEMP/intents-src"
           git -C "$RUNNER_TEMP/intents-src" checkout 16d04f6ec4401263f8914638710260da50bb46b0
           (cd "$RUNNER_TEMP/intents-src/contracts/defuse" && cargo near build reproducible-wasm --out-dir "$RUNNER_TEMP/intents-repro")
@@ -114,15 +163,19 @@ jobs:
         env:
           CARGO_INCREMENTAL: "0"
           CARGO_PROFILE_DEV_DEBUG: "0"
-        run: cargo test -p tests -- --test-threads=2
+        # Partition every Cargo integration target, including newly added ones. Keep
+        # two sandbox processes per runner; increasing threads breaks timed disputes.
+        run: node run-sandbox-shard.mjs ${{ matrix.shard }} 8
       - name: Record the sha256 of each wasm
         run: sha256sum target/near/*/*.wasm | tee wasm-sha256.txt
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
-          name: wasm-sha256-sandbox-build
+          name: wasm-sha256-sandbox-build-${{ matrix.shard }}
           path: contracts/wasm-sha256.txt
 
   keeper:
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -130,4 +183,27 @@ jobs:
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
         with:
           node-version-file: web/.node-version
-      - run: node --test verify-build.test.mjs keeper/*.test.mjs
+      - run: node --test verify-build.test.mjs run-sandbox-shard.test.mjs keeper/*.test.mjs
+
+  contract-checks:
+    if: always()
+    needs: [changes, fmt, clippy, unit, sandbox, keeper]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Require every applicable contract check
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node -e '
+            const jobs = JSON.parse(process.env.RESULTS);
+            if (jobs.changes.result !== "success") process.exit(1);
+            if (jobs.changes.outputs.contracts === "false") process.exit(0);
+            if (jobs.changes.outputs.contracts !== "true") process.exit(1);
+            for (const [name, job] of Object.entries(jobs)) {
+              if (job.result !== "success") { console.error(`${name}: ${job.result}`); process.exit(1); }
+            }
+          '

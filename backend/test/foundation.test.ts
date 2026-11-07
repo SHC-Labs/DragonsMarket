@@ -27,7 +27,8 @@ test('deployment validates identity and preserves u64 values without rounding', 
   assert.throws(() => readConfig({ DATABASE_URL: 'secret-not-a-url' }), /Invalid DATABASE_URL/);
 });
 
-test('API separates liveness from readiness, restricts origin/methods and sanitizes errors', async () => {
+test('API separates liveness from readiness, restricts origin/methods and sanitizes errors', async t => {
+  t.mock.timers.enable({ apis: ['Date'] });
   let available = true;
   const app = createApp(readConfig(base), async () => { if (!available) throw new Error('password=secret'); }, async () => {
     if (!available) throw new Error('password=secret');
@@ -49,6 +50,7 @@ test('API separates liveness from readiness, restricts origin/methods and saniti
     response = await fetch(`${root}/v1/indexer/status`);
     assert.equal(response.status, 503);
     assert.ok(!(await response.text()).includes('secret'));
+    t.mock.timers.tick(2001);
     response = await fetch(`${root}/health/ready`);
     assert.equal(response.status, 503);
     assert.ok(!(await response.text()).includes('secret'));

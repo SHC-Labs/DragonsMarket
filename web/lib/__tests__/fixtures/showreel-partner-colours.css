@@ -1,0 +1,13 @@
+.partner-game-art::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, transparent 35%, rgb(8 4 14 / 0.72)); opacity: 0; transition: opacity var(--dur-4) var(--ease-out); }
+.game-hint { position: absolute; z-index: 1; left: 50%; bottom: 10%; width: 46%; transform: translate(-50%, 12px); opacity: 0; transition: opacity var(--dur-4) var(--ease-out), transform var(--dur-4) var(--ease-out); pointer-events: none; overflow: visible; }
+.partner-game:is(:hover, :focus-visible) .partner-game-art::after { opacity: 1; }
+.partner-game:is(:hover, :focus-visible) .game-hint { opacity: 1; transform: translate(-50%, 0); }
+.hint-climb { fill: none; stroke: #ffd166; stroke-width: 4; stroke-linecap: round; stroke-dasharray: 1; stroke-dashoffset: 1; filter: drop-shadow(0 0 6px #ff8a3d); }
+.hint-rocket { fill: #fff; opacity: 0; }
+.hint-crash { stroke: #ff3d6e; stroke-width: 3; stroke-linecap: round; opacity: 0; }
+.hint-blackjack { display: flex; justify-content: center; width: 46%; bottom: 8%; }
+.hint-card { width: 44%; height: auto; margin: 0 -6%; filter: drop-shadow(0 10px 18px rgb(0 0 0 / 0.5)); transform-origin: 50% 100%; overflow: visible; }
+.card-rank { font: 700 9px Georgia, "Times New Roman", serif; }
+.card-court { font: 700 20px Georgia, "Times New Roman", serif; }
+.hint-peg { fill: rgb(255 255 255 / 0.85); }
+.hint-ball { fill: #ff3d6e; filter: drop-shadow(0 0 6px #ff3d6e); }
