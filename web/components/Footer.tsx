@@ -1,11 +1,10 @@
 import { Brand } from "./Brand";
 import Link from "next/link";
 
-// Docs and API destinations are not configured yet.
 const footerLinks: { label: string; href: string; icon?: "x" }[] = [
   { label: "X (Twitter)", href: "https://x.com/DragonsOnNear", icon: "x" },
-  { label: "Docs", href: "#docs" },
-  { label: "API", href: "#api" },
+  { label: "Docs", href: "/docs" },
+  { label: "API", href: "/api" },
 ];
 
 function XMark() {
@@ -23,9 +22,9 @@ export function Footer() {
         <div className="site-footer-links">
           <nav aria-label="Community and resources">
             <h2 className="eyebrow">Community</h2>
-            {footerLinks.map(({ label, href, icon }) => (
-              <a key={label} href={href} title={href.startsWith("#") ? "Placeholder link" : undefined}>{icon === "x" && <XMark />}{label}</a>
-            ))}
+            {footerLinks.map(({ label, href, icon }) => href.startsWith("/")
+              ? <Link key={label} href={href}>{label}</Link>
+              : <a key={label} href={href} title={href.startsWith("#") ? "Placeholder link" : undefined}>{icon === "x" && <XMark />}{label}</a>)}
           </nav>
           <nav aria-label="Legal">
             <h2 className="eyebrow">Legal</h2>
