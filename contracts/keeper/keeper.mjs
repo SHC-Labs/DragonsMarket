@@ -9,6 +9,7 @@
 //   node keeper.mjs run   --rpc URL --market ID --oracle ID --council ID --account ID [--dry-run]
 //                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH] [--council-key-file PATH]
 //                         --state-file PATH [--events-file PATH] [--workers 2] [--job-batch 50] [--min-sweep UNITS]
+//                         [--prepare-feed] [--require-live-feed] [--require-scoped-keys]
 //   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID --rounds ID [--treasury ID] [--min-margin NEAR] [--release FILE|-]
 //                         [--expect-sealed] [--watch-dao] [--runway-config PATH] [--operator ID] [--collection-code-hash HASH]
 //                         [--expect-fee-rate-bps N] [--expect-max-fee-rate-bps N] [--expect-revenue-share-bps N]
@@ -59,7 +60,7 @@ import { pathToFileURL } from "node:url";
 import { b58decode, b58encode, rpc, setRpcPace, view, viewer } from "./chain.mjs";
 import { compareCodeHashes, describeRelease, liveCodeHashes, parseReleaseHashes, upgradeProposalProblems } from "./release-check.mjs";
 import { reviewKind, storageRunway } from "./treasury.mjs";
-import { readQueue, writeQueue, withQueueLock, touch, finish, retry, selectJobs, bounded, serializeByKey, ingestFile } from "./due-queue.mjs";
+import { readQueue, writeQueue, withQueueLock, touch, finish, retry, selectJobs, bounded, serializeByKey, ingestFile, feedIsCurrent } from "./due-queue.mjs";
 
 const TGAS = 10n ** 12n;
 const PAGE = 50;
@@ -205,8 +206,10 @@ export function nextMarketAt(market, c, locked, now, height) {
   return now;
 }
 
-async function queuedRun(opts, keys) {
+export async function queuedRun(opts, keys) {
   if (!opts["state-file"] && !opts["dry-run"]) throw new Error("run needs --state-file for its durable due-queue");
+  if ((opts["prepare-feed"] || opts["require-live-feed"]) && !opts["events-file"])
+    throw new Error("A current event feed is required");
   const scope = { rpc:opts.rpc, market:opts.market, oracle:opts.oracle, council:opts.council };
   const state = readQueue(opts["state-file"],scope);
   const workers = Number(opts.workers ?? 2);
@@ -214,11 +217,18 @@ async function queuedRun(opts, keys) {
   if (!Number.isInteger(batch)||batch<1||batch>500) throw new Error("Job batch must be 1 to 500");
   const block = await rpc(opts.rpc,"block",{finality:"final"});
   const at = block.header.height, now = BigInt(block.header.timestamp_nanosec), height = BigInt(at);
+  const guardedFeed = opts["prepare-feed"] || opts["require-live-feed"];
+  ingestFile(state,opts["events-file"],at,8_388_608,guardedFeed ? 5000 : 32);
+  if (opts["prepare-feed"] || (opts["require-live-feed"] && !feedIsCurrent(state,block.header))) {
+    if (!opts["dry-run"]) writeQueue(opts["state-file"],state);
+    const current = feedIsCurrent(state,block.header);
+    console.log(JSON.stringify({service:"keeper",mode:"prepare-feed",current,height:state.cursor?.height??null}));
+    return {actions:[],state,current};
+  }
   const read = (account,method,args={})=>view(opts.rpc,account,method,args,at);
   const [marketConfig,council,fees] = await Promise.all([
     read(opts.market,"config"), read(opts.council,"config"), read(opts.market,"get_fees")
   ]);
-  ingestFile(state,opts["events-file"],at);
   if (!opts["events-file"]) console.log("no event feed: using bounded bootstrap and rotating reconciliation; live deadlines need --events-file");
   // One page of markets and sweeps per run. Neither recovery cursor can be pinned by an open market.
   const marketFrom = BigInt(state.marketCursor);
@@ -349,6 +359,11 @@ const KEY_SOURCES = {
   market: { file: "market-key-file", env: "KEEPER_MARKET_KEY" },
   council: { file: "council-key-file", env: "KEEPER_COUNCIL_KEY" },
 };
+const KEEPER_METHODS = {
+  oracle: ["finalize", "resolve_draw", "retry_apply", "retry_unlock", "resolve_by_deadline"],
+  market: ["sweep_fees", "settle_leg"],
+  council: ["advance_days"],
+};
 
 export function refuseKeyFlags(opts) {
   for (const flag of ["key", "oracle-key", "market-key", "council-key"]) {
@@ -411,9 +426,16 @@ export async function validateActionKeys(opts, keys, actions) {
       request_type: "view_access_key", finality: "optimistic", account_id: opts.account, public_key: publicKey,
     }));
     const permission = permissions.get(publicKey).permission;
-    if (permission === "FullAccess") continue;
+    if (permission === "FullAccess") {
+      if (opts["require-scoped-keys"]) throw new Error("Full-access keeper keys are refused");
+      continue;
+    }
     const limited = permission?.FunctionCall;
     if (!limited || limited.receiver_id !== opts[action.contract]) throw new Error("Receiver permission does not allow " + action.contract);
+    if (opts["require-scoped-keys"] && (typeof limited.allowance !== "string" || !/^[1-9]\d{0,38}$/.test(limited.allowance)
+      || BigInt(limited.allowance) >= 2n ** 128n || !Array.isArray(limited.method_names)
+      || !limited.method_names.length || limited.method_names.some(method => !KEEPER_METHODS[action.contract]?.includes(method))))
+      throw new Error("Keeper keys require a finite allowance and only keeper methods");
     if (limited.method_names.length && !limited.method_names.includes(action.method)) throw new Error("Access key does not allow " + action.method);
     if (limited.allowance !== null && BigInt(limited.allowance) === 0n) throw new Error("Access key allowance is exhausted for " + action.contract);
   }
@@ -911,7 +933,7 @@ export function basisPoints(opts, name) {
   return value;
 }
 
-const BOOLEAN_FLAGS = new Set(["dry-run", "expect-sealed", "watch-dao"]);
+const BOOLEAN_FLAGS = new Set(["dry-run", "expect-sealed", "watch-dao", "prepare-feed", "require-live-feed", "require-scoped-keys"]);
 
 export function options(argv) {
   const opts = {};
@@ -950,7 +972,7 @@ async function main() {
     process.exit(2);
   }
   refuseKeyFlags(opts);
-  const keys = opts["dry-run"] ? {} : resolveKeys(opts, process.env);
+  const keys = opts["dry-run"] || opts["prepare-feed"] ? {} : resolveKeys(opts, process.env);
   const work=()=>queuedRun(opts,keys);
   await (opts["dry-run"] ? work() : withQueueLock(opts["state-file"],work));
 }

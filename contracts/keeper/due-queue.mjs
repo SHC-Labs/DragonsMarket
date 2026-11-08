@@ -121,7 +121,19 @@ export function ingestBlock(state, block) {
     }
   }
   for(const {kind,id} of updates.values())touch(state,kind,id,h.timestamp_nanosec);
-  state.cursor={height:String(h.height),hash:h.hash};return true;
+  state.cursor={height:String(h.height),hash:h.hash,timestampNs:String(h.timestamp_nanosec)};return true;
+}
+
+// A signing pass needs recent finalized evidence, not merely an existing feed file.
+export function feedIsCurrent(state, header, wallMs = Date.now()) {
+  const cursor = state.cursor;
+  if (!cursor || !DECIMAL.test(String(cursor.height)) || !DECIMAL.test(String(cursor.timestampNs))
+    || !DECIMAL.test(String(header.height)) || !DECIMAL.test(String(header.timestamp_nanosec))) return false;
+  const head = BigInt(header.height), indexed = BigInt(cursor.height);
+  const wall = BigInt(wallMs) * NS_PER_MS, at = BigInt(header.timestamp_nanosec), observed = BigInt(cursor.timestampNs);
+  if (indexed > head || head - indexed > 100n || observed > at || at - observed > 60_000n * NS_PER_MS) return false;
+  if (at > wall + 5_000n * NS_PER_MS || wall - at > 60_000n * NS_PER_MS) return false;
+  return indexed !== head || cursor.hash === header.hash;
 }
 // Read bounded complete JSONL records. A partial trailing line is retried next run.
 export function ingestFile(state, file, finalHeight, maxBytes=8_388_608, maxBlocks=32) {
