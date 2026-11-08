@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import { once } from 'node:events';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { toNodeHandler } from '@modelcontextprotocol/node';
 import { Backend } from '../src/backend.js';
 import { readMcpConfig } from '../src/config.js';
-import { createMcpApp, loadSkill } from '../src/server.js';
+import { createMcpApp, createMcpHttpServer, loadSkill } from '../src/server.js';
+import { clientKey } from '../src/client-address.js';
 import { TokenBudget } from '../src/token-budget.js';
 import { fromUnits, toUnits } from '../src/units.js';
 
@@ -90,8 +90,7 @@ async function withMcp(run: (h: { base: string; client: Client; fake: ReturnType
   Promise<void>, budget?: TokenBudget) {
   const fake = fakeBackend(), backendUrl = await listen(fake.server);
   const config = readMcpConfig({ DRAGONS_API_URL: backendUrl, MCP_PUBLIC_URL: 'http://127.0.0.1:1' });
-  const node = toNodeHandler(createMcpApp(config, new Backend(config.backendUrl), await loadSkill(), budget));
-  const mcp = createServer((req, res) => void node(req as Parameters<typeof node>[0], res));
+  const mcp = createMcpHttpServer(config, new Backend(config.backendUrl), await loadSkill(), budget);
   const base = await listen(mcp);
   const client = new Client({ name: 'dragons-market-test', version: '1.0.0' });
   try {
@@ -229,27 +228,109 @@ test('made-up tokens stop at their budget, and an agent already connected keeps 
     assert.equal((await attempt(1)).status, 401);
     assert.equal((await attempt(2)).status, 401);
     const before = sessions(), late = await attempt(3);
-    assert.equal(late.status, 400);
+    assert.equal(late.status, 429);
+    assert.equal(late.headers['retry-after'], '60');
     assert.match(late.body, /temporarily_unavailable/);
     assert.equal(sessions(), before, 'past the budget a made-up token never reaches the backend');
     const agent = structured(await client.callTool({ name: 'get_agent', arguments: {} }));
     assert.equal(agent.agent_id, AGENT_ID);
-  }, new TokenBudget(3)));
+  }, new TokenBudget({ newPerWindow: 3 })));
 
 test('the token budget refills each minute, and a real token cannot flood the server either', () => {
   let now = 1000;
-  const budget = new TokenBudget(1, 2, () => now);
-  assert.equal(budget.allows('one'), true);
-  assert.equal(budget.allows('two'), false);
+  const budget = new TokenBudget({ newPerWindow: 1, perToken: 2, now: () => now });
+  const allows = (token: string) => { const release = budget.acquire(token, 'client'); release?.(); return !!release; };
+  assert.equal(allows('one'), true);
+  assert.equal(allows('two'), false);
   budget.accepted('good');
-  assert.equal(budget.allows('good'), true, 'a known token spends none of the new tokens\' budget');
-  assert.equal(budget.allows('good'), false, 'and it has a limit of its own');
+  assert.equal(allows('good'), true, 'a known token spends none of the new tokens\' budget');
+  assert.equal(allows('good'), false, 'and it has a limit of its own');
   budget.refused('good');
-  assert.equal(budget.allows('good'), false, 'a revoked token is new again');
+  assert.equal(allows('good'), false, 'a revoked token is new again');
   now += 60000;
-  assert.equal(budget.allows('three'), true);
+  assert.equal(allows('three'), true);
   budget.accepted('good');
-  assert.equal(budget.allows('good'), true);
+  assert.equal(allows('good'), true);
+});
+
+test('fresh-token floods are isolated at the HTTP peer boundary, including trusted proxies', async () => {
+  for (const trusted of [false, true]) {
+    const fake = fakeBackend(), backendUrl = await listen(fake.server);
+    const config = readMcpConfig({ DRAGONS_API_URL: backendUrl, MCP_PUBLIC_URL: 'http://127.0.0.1',
+      ...(trusted ? { MCP_TRUSTED_PROXY_ADDRESSES: '127.0.0.1/32' } : {}) });
+    const mcp = createMcpHttpServer(config, new Backend(backendUrl), 'skill', new TokenBudget({ newPerWindow: 2 }));
+    const base = await listen(mcp);
+    const attempt = (token: string, ip: string) => raw(base, '/mcp', {
+      Authorization: `Bearer ${token}`, 'X-Real-IP': ip, 'X-Forwarded-For': ip,
+    }, '{}');
+    try {
+      for (const token of ['b', 'c']) assert.equal((await attempt(`dmk_${token.repeat(43)}`, '198.51.100.1')).status, 401);
+      assert.equal((await attempt(`dmk_${'d'.repeat(43)}`, '198.51.100.1')).status, 429);
+      const before = fake.seen.length;
+      const response = await attempt(TOKEN, '203.0.113.2');
+      if (trusted) {
+        assert.notEqual(response.status, 429, 'first-ever legitimate token from another caller is admitted');
+        assert.equal(fake.seen.length, before + 1);
+        assert.equal(fake.seen.at(-1)?.auth, `Bearer ${TOKEN}`);
+        fake.state.revoked = true;
+        assert.equal((await attempt(TOKEN, '203.0.113.2')).status, 401, 'accepted tokens are still checked for revocation');
+        assert.equal((await attempt(TOKEN, '203.0.113.2, 203.0.113.3')).status, 503);
+      } else {
+        assert.equal(response.status, 429, 'spoofed forwarding headers cannot mint another peer budget');
+        assert.equal(fake.seen.length, before);
+      }
+    } finally { mcp.close(); fake.server.close(); }
+  }
+});
+
+test('caller identities normalize IPv6 aliases, mapped IPv4, and privacy addresses', () => {
+  assert.equal(clientKey('::ffff:192.0.2.1'), '192.0.2.1');
+  assert.equal(clientKey('0:0:0:0:0:ffff:c000:0201'), '192.0.2.1');
+  assert.equal(clientKey('2001:DB8:0:1::1'), clientKey('2001:db8:0000:0001:1234::ffff'));
+  assert.notEqual(clientKey('2001:db8:0:1::1'), clientKey('2001:db8:0:2::1'));
+  for (const address of ['', 'unknown', '192.0.2.1, 192.0.2.2', 'fe80::1%eth0']) assert.equal(clientKey(address), null);
+  for (const value of ['*', '127.0.0.1/33', '::/129', '127.0.0.1/1/2', '127.0.0.1,']) {
+    assert.throws(() => readMcpConfig({ DRAGONS_API_URL: 'http://localhost', MCP_PUBLIC_URL: 'http://localhost',
+      MCP_TRUSTED_PROXY_ADDRESSES: value }), /MCP_TRUSTED_PROXY_ADDRESSES/);
+  }
+});
+
+test('admission state and concurrent verification stay bounded without evicting active callers', () => {
+  let now = 1000;
+  const budget = new TokenBudget({ newPerWindow: 1, maxCallers: 2, maxPending: 2, pendingPerCaller: 1, now: () => now });
+  const first = budget.acquire('bad1', 'a')!;
+  assert.equal(budget.acquire('bad2', 'a'), undefined, 'one caller cannot occupy all checks');
+  const second = budget.acquire('good', 'b')!;
+  assert.equal(typeof second, 'function', 'another caller still gets a check');
+  assert.equal(budget.acquire('bad3', 'c'), undefined, 'state has a fixed maximum');
+  first(); first(); second();
+  assert.equal(budget.acquire('bad4', 'a'), undefined, 'releasing a check does not reset rate limits');
+  now += 60000;
+  const third = budget.acquire('good2', 'c')!;
+  assert.equal(typeof third, 'function', 'expired state can be reclaimed');
+  third();
+});
+
+test('verification leases are released on backend failures and do not mix concurrent callers', async () => {
+  let calls = 0, finish: (() => void) | undefined;
+  const backend = new Backend('https://api.example.com', async () => {
+    calls++;
+    if (calls === 1) await new Promise<void>(resolve => { finish = resolve; });
+    throw new Error('backend disconnected');
+  });
+  const app = createMcpApp(readMcpConfig({ DRAGONS_API_URL: 'https://api.example.com', MCP_PUBLIC_URL: 'https://mcp.example.com' }),
+    backend, 'skill', new TokenBudget({ pendingPerCaller: 1, maxPending: 2 }));
+  const attempt = (client: string) => app.fetch(new Request('https://mcp.example.com/mcp', {
+    method: 'POST', headers: { Host: 'mcp.example.com', Authorization: `Bearer ${TOKEN}` }, body: '{}',
+  }), client);
+  const first = attempt('a');
+  for (let tries = 0; !finish && tries < 100; tries++) await new Promise(resolve => setImmediate(resolve));
+  assert.ok(finish, 'verification started');
+  assert.equal((await attempt('a')).status, 429);
+  assert.notEqual((await attempt('b')).status, 429);
+  finish(); await first;
+  assert.notEqual((await attempt('a')).status, 429, 'failed check releases its lease');
+  assert.equal(calls, 3);
 });
 
 test('the widest slippage a quote offers clears the backend\'s 10% limit', () =>

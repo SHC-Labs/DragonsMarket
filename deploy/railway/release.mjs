@@ -16,6 +16,14 @@ export const services = [
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const waiting = new Set(['INITIALIZING', 'QUEUED', 'WAITING', 'BUILDING', 'DEPLOYING']);
 const settings = JSON.parse(readFileSync(new URL('./services.json', import.meta.url), 'utf8'));
+const activationVariables = new Set([
+  'DEPLOYMENT_ID', 'DEPLOYMENT_START_BLOCK', 'MARKET_CONTRACT_ID', 'ROUNDS_CONTRACT_ID',
+  'ORACLE_CONTRACT_ID', 'COUNCIL_CONTRACT_ID', 'VERIFIER_CONTRACT_ID', 'NFT_CONTRACT_ID',
+  'COLLATERAL_TOKEN_ID', 'AGENT_WORKER_URL', 'AGENT_WORKER_TOKEN', 'AGENT_API_KEY', 'AGENT_GRANT_KEY',
+  'PUBLISH_ROUND_PRICES', 'NEXT_PUBLIC_MARKET_ID', 'NEXT_PUBLIC_ORACLE_ID', 'NEXT_PUBLIC_COUNCIL_ID',
+  'NEXT_PUBLIC_VERIFIER_ID', 'NEXT_PUBLIC_NFT_ID', 'NEXT_PUBLIC_TOKEN_ID', 'NEXT_PUBLIC_COLLATERAL_TOKEN_ID',
+  'NEXT_PUBLIC_AGENT_WALLET_CONTRACT', 'NEXT_PUBLIC_AGENT_API_HOST',
+]);
 
 export function verifySource(env, head, changes) {
   if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_REPOSITORY !== 'SHC-Labs/DragonsMarket' ||
@@ -32,7 +40,12 @@ export function verifyTarget(data) {
       data.environment?.projectId !== projectId || data.environment?.id !== environmentId) {
     throw new Error('Railway project token does not match Dragons Market production');
   }
-  if (data.environment.unmergedChangesCount) throw new Error('Apply or discard staged Railway changes before releasing');
+  const staged = data.environmentStagedChanges;
+  if (staged === undefined || (staged !== null &&
+      (!staged.patch || typeof staged.patch !== 'object' || Array.isArray(staged.patch) ||
+       Object.keys(staged.patch).length))) {
+    throw new Error('Apply or discard staged Railway changes before releasing');
+  }
   const defaults = { 'deploy.restartPolicyType': 'ON_FAILURE', 'deploy.sleepApplication': false };
   for (const service of services) {
     const actual = data.environment.config.services[service.id];
@@ -65,8 +78,31 @@ export async function checkTarget(query) {
   const data = await query(`query($environmentId: String!) {
     projectToken { projectId environmentId }
     environment(id: $environmentId) { id projectId unmergedChangesCount config(decryptVariables: false) }
+    environmentStagedChanges(environmentId: $environmentId) { patch }
   }`, { environmentId });
   verifyTarget(data);
+}
+
+export function verifyFoundationVariables(service, variables) {
+  if (!variables || typeof variables !== 'object' || Array.isArray(variables)) {
+    throw new Error(`Missing variable inventory for ${service.name}`);
+  }
+  const configured = Object.keys(variables).filter(key => activationVariables.has(key) && variables[key]);
+  if (configured.length) {
+    throw new Error(`Foundation release refuses activation settings on ${service.name}: ${configured.join(', ')}`);
+  }
+  if (service.name === 'mcp' && variables.MCP_TRUSTED_PROXY_ADDRESSES !== '0.0.0.0/0,::/0') {
+    throw new Error('Configure the documented MCP_TRUSTED_PROXY_ADDRESSES on Railway MCP before releasing');
+  }
+}
+
+export async function checkReleaseVariables(query) {
+  for (const service of services) {
+    const { variables } = await query(`query($projectId: String!, $environmentId: String!, $serviceId: String!) {
+      variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
+    }`, { projectId, environmentId, serviceId: service.id });
+    verifyFoundationVariables(service, variables);
+  }
 }
 
 export async function waitForDeployment(query, service, id, { sleep = delay, now = Date.now, timeout = 900000, log = console.log } = {}) {
@@ -103,6 +139,7 @@ export async function waitForDeployment(query, service, id, { sleep = delay, now
 
 export async function release({ query, upload, wait = waitForDeployment, report = console.log, backups = checkBackups }) {
   await checkTarget(query);
+  await checkReleaseVariables(query);
   await backups(query, projectId, environmentId);
   for (const service of services) {
     const { deploymentId } = await upload(service);
@@ -117,8 +154,9 @@ async function main() {
   const query = railwayQuery(process.env.RAILWAY_TOKEN);
   if (process.argv[2] === '--check') {
     await checkTarget(query);
+    await checkReleaseVariables(query);
     await checkBackups(query, projectId, environmentId);
-    console.log('Railway project token, release service settings and recent backups verified; no deployments started');
+    console.log('Hosting foundation settings, inactive chain/agent configuration and recent backups verified; no deployments started');
     return;
   }
   verifySource(process.env, execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }),

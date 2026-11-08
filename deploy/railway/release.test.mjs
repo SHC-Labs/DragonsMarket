@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { projectId, environmentId, services, verifySource, verifyTarget, railwayQuery, waitForDeployment, release } from './release.mjs';
+import { projectId, environmentId, services, verifySource, verifyTarget, railwayQuery, waitForDeployment, release, checkReleaseVariables, verifyFoundationVariables } from './release.mjs';
 
 const sha = 'a'.repeat(40);
 const env = { GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: 'SHC-Labs/DragonsMarket', GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: sha };
@@ -19,7 +19,9 @@ function target() {
       current[keys.at(-1)] = structuredClone(expected);
     }
   }
-  return { projectToken: { projectId, environmentId }, environment: { id: environmentId, projectId, unmergedChangesCount: 0, config } };
+  return { variables: { MCP_TRUSTED_PROXY_ADDRESSES: '0.0.0.0/0,::/0' },
+    projectToken: { projectId, environmentId }, environmentStagedChanges: null,
+    environment: { id: environmentId, projectId, unmergedChangesCount: 0, config } };
 }
 
 function deployment(service, state = {}) {
@@ -43,7 +45,7 @@ test('production scope and configured migration/health gates must match before a
     data => { data.projectToken.projectId = 'another-project'; },
     data => { data.projectToken.environmentId = 'another-environment'; },
     data => { data.environment.projectId = 'another-project'; },
-    data => { data.environment.unmergedChangesCount = 1; },
+    data => { data.environmentStagedChanges = { patch: { services: {} } }; },
     data => { data.environment.config.services[services[0].id].deploy.startCommand = 'node unsafe.js'; },
     data => { data.environment.config.services[services[1].id].deploy.preDeployCommand = []; },
     data => { data.environment.config.services[services[1].id].deploy.healthcheckPath = '/health/live'; },
@@ -51,6 +53,20 @@ test('production scope and configured migration/health gates must match before a
     data => { data.environment.config.services[services[3].id].build.builder = 'RAILPACK'; },
   ]) {
     const data = target(); mutate(data); assert.throws(() => verifyTarget(data));
+  }
+});
+
+test('actual staged changes block releases even when Railway reports a null summary count', async () => {
+  const data = target();
+  data.environment.unmergedChangesCount = null;
+  data.environmentStagedChanges = { patch: {} };
+  verifyTarget(data);
+  for (const staged of [undefined, {}, { patch: null }, { patch: [] },
+    { patch: { services: { [services[0].id]: { deploy: { startCommand: 'unsafe' } } } } }]) {
+    let uploads = 0;
+    await assert.rejects(release({ query: async () => ({ ...data, environmentStagedChanges: staged }),
+      backups: async () => {}, upload() { uploads++; } }), /staged Railway changes/);
+    assert.equal(uploads, 0);
   }
 });
 
@@ -134,4 +150,51 @@ test('a missing or stale backup prevents uploads and migrations', async () => {
   await assert.rejects(release({ query: async () => target(), backups: async () => { throw new Error('No recent backup'); },
     upload() { uploads++; } }), /No recent backup/);
   assert.equal(uploads, 0);
+});
+
+test('MCP ingress must be explicitly configured before any upload or migration', async () => {
+  let uploads = 0;
+  for (const value of [undefined, '', '127.0.0.1/32']) {
+    await assert.rejects(release({ query: async () => ({ ...target(), variables: { MCP_TRUSTED_PROXY_ADDRESSES: value } }),
+      backups: async () => {}, upload() { uploads++; } }), /MCP_TRUSTED_PROXY_ADDRESSES/);
+  }
+  assert.equal(uploads, 0);
+  const checked = [];
+  await checkReleaseVariables(async (_query, variables) => {
+    assert.equal(variables.projectId, projectId);
+    assert.equal(variables.environmentId, environmentId);
+    checked.push(variables.serviceId);
+    return target();
+  });
+  assert.deepEqual(checked, services.map(service => service.id));
+});
+
+test('foundation release refuses partial chain or agent activation before any migration or upload', async () => {
+  const keys = ['DEPLOYMENT_ID', 'DEPLOYMENT_START_BLOCK', 'MARKET_CONTRACT_ID', 'ROUNDS_CONTRACT_ID',
+    'ORACLE_CONTRACT_ID', 'COUNCIL_CONTRACT_ID', 'VERIFIER_CONTRACT_ID', 'NFT_CONTRACT_ID',
+    'COLLATERAL_TOKEN_ID', 'AGENT_WORKER_URL', 'AGENT_WORKER_TOKEN', 'AGENT_API_KEY', 'AGENT_GRANT_KEY',
+    'PUBLISH_ROUND_PRICES', 'NEXT_PUBLIC_MARKET_ID', 'NEXT_PUBLIC_ORACLE_ID', 'NEXT_PUBLIC_COUNCIL_ID',
+    'NEXT_PUBLIC_VERIFIER_ID', 'NEXT_PUBLIC_NFT_ID', 'NEXT_PUBLIC_TOKEN_ID', 'NEXT_PUBLIC_COLLATERAL_TOKEN_ID',
+    'NEXT_PUBLIC_AGENT_WALLET_CONTRACT', 'NEXT_PUBLIC_AGENT_API_HOST'];
+  let uploads = 0;
+  for (const service of services) {
+    for (const key of keys) {
+      await assert.rejects(release({ query: async (_query, variables) => {
+        const data = target();
+        if (variables.serviceId === service.id) data.variables[key] = 'private-value-never-log';
+        return data;
+      }, backups: async () => {}, upload() { uploads++; } }), error =>
+        error.message.includes(`activation settings on ${service.name}`) &&
+        error.message.includes(key) && !error.message.includes('private-value-never-log'));
+    }
+  }
+  assert.equal(uploads, 0);
+});
+
+test('empty activation variables are inactive; missing variable inventories fail closed', () => {
+  const service = services.find(service => service.name === 'server');
+  verifyFoundationVariables(service, { DEPLOYMENT_ID: '', NEXT_PUBLIC_MARKET_ID: '', NETWORK: 'testnet' });
+  for (const variables of [undefined, null, [], 'unreadable']) {
+    assert.throws(() => verifyFoundationVariables(service, variables), /Missing variable inventory/);
+  }
 });

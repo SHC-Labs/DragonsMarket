@@ -24,7 +24,7 @@ RUN pnpm build:web
 
 FROM caddy:2.11.9-alpine@sha256:0bbb055bda6793c999bde78b1b5ce3e89f829fb031af2cf50056ea1246559fee
 COPY Caddyfile /etc/caddy/Caddyfile
-COPY --from=build /app/web/out /app/web/out
+COPY --from=build /app/web/out-caddy /app/web/out
 USER 1000:1000
 ENV XDG_CONFIG_HOME=/tmp/caddy-config XDG_DATA_HOME=/tmp/caddy-data
 EXPOSE 8080

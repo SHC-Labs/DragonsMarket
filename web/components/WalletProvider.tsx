@@ -98,6 +98,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     import("@hot-labs/near-connect").then(async ({ NearConnector }) => {
       if (!live) return;
       c = new NearConnector({
+        // Caddy gives each HTML response a fresh nonce. The connector applies it
+        // to scripts in its sandboxed wallet frames, which inherit the page CSP.
+        cspNonce: document.querySelector<HTMLScriptElement>("script[nonce]")?.nonce || undefined,
         network: config.network === "mainnet" ? "mainnet" : "testnet",
         features: { signAndSendTransaction: true, ...(backendEnabled() ? { signMessage: true } : {}) },
       });

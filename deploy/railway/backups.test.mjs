@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readBackups, verifyBackups } from './backups.mjs';
 
 const now = Date.parse('2026-11-07T12:00:00Z');
-const schedules = [{ kind: 'DAILY' }, { kind: 'WEEKLY' }];
+const schedules = [{ kind: 'DAILY', retentionSeconds: 518400 }, { kind: 'WEEKLY', retentionSeconds: 2332800 }];
 const backup = { createdAt: '2026-11-07T02:00:00Z', expiresAt: '2026-11-13T02:00:00Z' };
 
 test('release needs both retention schedules and a recent unexpired backup', () => {
@@ -17,6 +17,12 @@ test('release needs both retention schedules and a recent unexpired backup', () 
   for (const bad of [[], [{ kind: 'MONTHLY' }], [{ kind: 'DAILY' }]]) {
     assert.throws(() => verifyBackups(bad, [backup], now), /daily and weekly/);
   }
+  for (const seconds of [undefined, 0, 518399, '518400']) {
+    assert.throws(() => verifyBackups([{ kind: 'DAILY', retentionSeconds: seconds }, schedules[1]],
+      [backup], now), /retained/);
+  }
+  assert.throws(() => verifyBackups([schedules[0], { kind: 'WEEKLY', retentionSeconds: 2332799 }],
+    [backup], now), /retained/);
 });
 
 test('backup reads target only the current Postgres mount in the approved environment', async () => {

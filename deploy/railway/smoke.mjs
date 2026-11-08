@@ -2,6 +2,19 @@ import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+export function verifyFoundation(ready, config) {
+  assert.equal(ready.status, 'ready');
+  assert.equal(ready.checks?.database, 'ok');
+  assert.equal(ready.checks?.schema, 'current');
+  assert.equal(ready.scope, 'foundation');
+  assert.equal(ready.deploymentConfigured, false, 'Chain activation needs its own release and checks');
+  assert.equal(ready.indexing, 'deployment_not_configured');
+  assert.equal(config.deployment, null);
+  for (const capability of ['trading', 'funding', 'indexing', 'agents']) {
+    assert.equal(config.capabilities?.[capability], false, `Unexpected active capability: ${capability}`);
+  }
+}
+
 export async function smoke(web, server, mcp, browserOrigin = 'https://dragons.market') {
 if (!web) throw new Error('Usage: node deploy/railway/smoke.mjs <web-origin> [server-origin] [mcp-origin]');
 const request = (url, init) => fetch(url, { redirect: 'error', signal: AbortSignal.timeout(15000), ...init });
@@ -13,7 +26,12 @@ for (const path of ['/', '/market', '/agents', '/health/live', '/__deployment-sm
   if (path === '/') html = body;
   if (path === '/market') assert.match(body, /<html/i);
   if (path === '/health/live') assert.equal(body, 'ok');
-  if (path === '/') assert.equal(response.headers.get('cache-control'), 'no-cache');
+  if (path === '/') {
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const nonce = response.headers.get('content-security-policy')?.match(/'nonce-([A-Za-z0-9]{32})'/)?.[1];
+    assert.ok(nonce, 'HTML must have a response-local CSP nonce');
+    assert.ok(body.includes(`nonce="${nonce}"`), 'HTML and policy nonces must match');
+  }
   console.log(`${path}: ${response.status}`);
 }
 const asset = html.match(/src="([^" ]*\/_next\/static\/[^" ]+)"/)?.[1];
@@ -27,9 +45,10 @@ if (server) {
   const response = await request(`${server}/health/ready`);
   assert.equal(response.status, 200);
   const ready = await response.json();
-  assert.equal(ready.checks?.database, 'ok');
-  assert.equal(ready.checks?.schema, 'current');
-  console.log(`Database ready; chain deployment configured: ${ready.deploymentConfigured === true}`);
+  const configuration = await request(`${server}/v1/config`);
+  assert.equal(configuration.status, 200);
+  verifyFoundation(ready, await configuration.json());
+  console.log('Hosting foundation ready; chain trading and agent execution are inactive');
   const session = await request(`${server}/v1/auth/session`, { headers: { Origin: browserOrigin } });
   assert.equal(session.status, 200);
   assert.equal(session.headers.get('access-control-allow-origin'), browserOrigin);

@@ -12,7 +12,7 @@ import { registerDeployment, ingestionStatus } from '../src/ingestion/store.js';
 import { ingest } from '../src/ingestion/engine.js';
 import { FixtureSource, type BlockSource } from '../src/ingestion/source.js';
 import { checkChain } from '../src/verify-chain.js';
-import { runPreflight } from '../src/preflight.js';
+import { runPreflight, preflightSummary } from '../src/preflight.js';
 import { generateKeyPairSync } from 'node:crypto';
 import { base58Encode } from '../src/base58.js';
 import { loadPublisherKey, publishOnce, reserveDecision, roundPriceMessage } from '../src/round-publisher.js';
@@ -197,15 +197,19 @@ test('chain integrity check passes on a clean history and names what tampering b
 test('preflight passes on a consistent chain and names what is wrong on an inconsistent one', async () => setup(async (pool) => {
   const config = readConfig({ DATABASE_URL: process.env.TEST_DATABASE_URL, DEPLOYMENT_ID: 'reads', DEPLOYMENT_START_BLOCK: '100', ROUNDS_CONTRACT_ID: 'rounds.fixture.near', VERIFIER_CONTRACT_ID: 'verifier.fixture.near', COLLATERAL_TOKEN_ID: 'nep141:usdc.fixture.near' });
   const hash = '2'.repeat(32);
-  const chain = (opts: { code?: string; verifier?: string } = {}) => ({
+  const chain = (opts: { code?: string; verifier?: string; paused?: boolean; upgrading?: boolean;
+    ageMs?: number; height?: number; unregistered?: boolean; decimals?: number; storage?: unknown; minimum?: unknown } = {}) => ({
     async call(method: string, params: object) {
       const p = params as { request_type?: string; method_name?: string; block_id?: string };
       if (method === 'status') return { chain_id: 'localnet' };
-      if (method === 'block') return { header: { hash, height: 1000, timestamp_nanosec: String(BigInt(Date.now()) * 1_000_000n) } };
+      if (method === 'block') return { header: { hash, height: opts.height ?? 1000, timestamp_nanosec: String(BigInt(Date.now() - (opts.ageMs ?? 0)) * 1_000_000n) } };
       if (p.request_type === 'view_account') return { code_hash: opts.code ?? 'CodeHash1111' };
       const values: Record<string, unknown> = {
-        config: { verifier: opts.verifier ?? 'verifier.fixture.near', collateral_token_id: 'nep141:usdc.fixture.near', paused: false, state_version: 6, owner: 'owner.near', publishers: ['ed25519:a', 'ed25519:b', 'ed25519:c'], price_threshold: 2, series: 1, network: 'sandbox' },
+        config: { verifier: opts.verifier ?? 'verifier.fixture.near', collateral_token_id: 'nep141:usdc.fixture.near', paused: opts.paused ?? false, upgrade_in_flight: opts.upgrading ?? false, state_version: 6, owner: 'owner.near', publishers: ['ed25519:a', 'ed25519:b', 'ed25519:c'], price_threshold: 2, series: 1, network: 'sandbox' },
         get_series: { asset: 'btc-usd', decimals: 8, first_start: '0', interval: '300000000000', price_window: '600000000000', close_before: '30000000000' },
+        ft_metadata: { decimals: opts.decimals ?? 6 },
+        storage_balance_bounds: { min: opts.minimum ?? '1250000000000000000000', max: null },
+        storage_balance_of: opts.unregistered ? null : opts.storage ?? { total: '1250000000000000000000', available: '0' },
         total_owed: '0', owed_breakdown: { pending_withdrawals: '0' }, mt_balance_of: '0',
       };
       return { block_hash: p.block_id, result: [...Buffer.from(JSON.stringify(values[p.method_name!]))] };
@@ -217,6 +221,45 @@ test('preflight passes on a consistent chain and names what is wrong on an incon
   assert.ok(bad.some(c => c.name === 'contract:rounds' && c.status === 'fail' && /no contract deployed/.test(c.detail)));
   const wrongVerifier = await runPreflight(config, chain({ verifier: 'someone.else.near' }), pool, null);
   assert.ok(wrongVerifier.some(c => c.name === 'contract:rounds' && c.status === 'fail' && /verifier is someone.else.near/.test(c.detail)));
+  for (const options of [{ paused: true }, { upgrading: true }, { ageMs: 120_000 }]) {
+    const checks = (await runPreflight(config, chain(options), pool, null))
+      .filter(check => !['network', 'links'].includes(check.name));
+    assert.equal(preflightSummary(checks, false).summary, 'warnings');
+    assert.equal(preflightSummary(checks, true).summary, 'not_ready');
+    assert.equal(preflightSummary(checks, true).failed, 0, 'warnings alone must block strict activation');
+  }
+  for (const options of [{ unregistered: true }, { storage: {} }, { storage: { total: '0' } },
+    { storage: { total: 'not-a-number' } }, { decimals: 18 }, { minimum: '-1' }, { minimum: 1 }]) {
+    const checks = await runPreflight(config, chain(options), pool, null);
+    assert.ok(checks.some(check => check.name.startsWith('collateral:') && check.status === 'fail'));
+    assert.equal(preflightSummary(checks, false).summary, 'not_ready');
+  }
+  const freeStorage = await runPreflight(config, chain({ minimum: '0', storage: { total: '0' } }), pool, null);
+  assert.equal(freeStorage.filter(check => check.name.startsWith('collateral:') && check.status !== 'pass').length, 0);
+  const sourceBlock = (height: number) => ({
+    block: { header: { height, hash, prev_hash: '1'.repeat(32), prev_height: height - 1,
+      timestamp_nanosec: '1700000000000000000' }, chunks: [{ shard_id: 0 }] },
+    shards: [{ shard_id: 0, receipt_execution_outcomes: [] }],
+  });
+  for (const [document, expected] of [[null, 'fail'], [{}, 'fail'],
+    [sourceBlock(101), 'fail'], [sourceBlock(100), 'pass']] as const) {
+    const source = { document: async (path: string) =>
+      path === '/v0/last_block/final' ? sourceBlock(1000) : document };
+    const checks = await runPreflight(config, chain(), pool, source);
+    assert.equal(checks.find(check => check.name === 'start-block-readable')?.status, expected);
+  }
+  const behind = await runPreflight(config, chain({ height: 1_000_000 }), pool, null);
+  assert.equal(behind.find(check => check.name === 'start-block')?.status, 'warn');
+  await ingest(pool, config, { id: 'fixture-jsonl-v1', mode: 'fixture', network: 'sandbox', async *blocks() {
+    yield { network: 'sandbox', finalized: true,
+      header: { height: '999999', hash: '5'.repeat(32), prev_hash: '4'.repeat(32), timestamp_nanosec: '1700000104000000000' }, receipts: [] };
+  } });
+  const caughtUp = await runPreflight(config, chain({ height: 1_000_000 }), pool, null);
+  assert.equal(caughtUp.find(check => check.name === 'start-block')?.status, 'pass');
+  assert.match(caughtUp.find(check => check.name === 'start-block')!.detail, /^1 blocks remain/);
+  const ahead = await runPreflight(config, chain({ height: 999_998 }), pool, null);
+  assert.equal(ahead.find(check => check.name === 'database')?.status, 'fail');
+  assert.equal(ahead.some(check => check.name === 'start-block' && check.status === 'pass'), false);
 }));
 
 test('round publisher signs one price per round from an exchange quorum, serves it, and refuses a conflicting second price', async () => setup(async (pool, root) => {

@@ -124,7 +124,7 @@
     ],
     "deploy.startCommand": "node dist/src/ingestion/follow.js",
     "deploy.preDeployCommand": [
-      "node dist/src/preflight.js"
+      "node dist/src/check-database.js --require-mainnet-deployment"
     ],
     "deploy.restartPolicyType": "ON_FAILURE",
     "deploy.restartPolicyMaxRetries": 3,
@@ -146,7 +146,7 @@
     ],
     "deploy.startCommand": "node dist/src/reconcile.js --follow",
     "deploy.preDeployCommand": [
-      "node dist/src/preflight.js"
+      "node dist/src/check-database.js --require-mainnet-deployment"
     ],
     "deploy.restartPolicyType": "ON_FAILURE",
     "deploy.restartPolicyMaxRetries": 3,
@@ -168,7 +168,7 @@
     ],
     "deploy.startCommand": "node dist/src/verify-chain.js",
     "deploy.preDeployCommand": [
-      "node dist/src/preflight.js"
+      "node dist/src/check-database.js --require-mainnet-deployment"
     ],
     "deploy.restartPolicyType": "NEVER",
     "deploy.sleepApplication": false,
@@ -190,7 +190,7 @@
     ],
     "deploy.startCommand": "node dist/src/prices.js --follow",
     "deploy.preDeployCommand": [
-      "node dist/src/preflight.js"
+      "node dist/src/check-database.js --require-mainnet-deployment"
     ],
     "deploy.restartPolicyType": "ON_FAILURE",
     "deploy.restartPolicyMaxRetries": 3,
