@@ -17,6 +17,8 @@ const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const waiting = new Set(['INITIALIZING', 'QUEUED', 'WAITING', 'BUILDING', 'DEPLOYING']);
 const settings = JSON.parse(readFileSync(new URL('./services.json', import.meta.url), 'utf8'));
 const activationVariables = new Set([
+  'REGISTER_DEPLOYMENT', 'KEEPER_MODE', 'KEEPER_APPROVAL_JSON', 'KEEPER_APPROVAL_SHA256',
+  'KEEPER_KEY', 'KEEPER_MARKET_KEY', 'KEEPER_ORACLE_KEY', 'KEEPER_COUNCIL_KEY',
   'DEPLOYMENT_ID', 'DEPLOYMENT_START_BLOCK', 'MARKET_CONTRACT_ID', 'ROUNDS_CONTRACT_ID',
   'ORACLE_CONTRACT_ID', 'COUNCIL_CONTRACT_ID', 'VERIFIER_CONTRACT_ID', 'NFT_CONTRACT_ID',
   'COLLATERAL_TOKEN_ID', 'AGENT_WORKER_URL', 'AGENT_WORKER_TOKEN', 'AGENT_API_KEY', 'AGENT_GRANT_KEY',
@@ -35,7 +37,7 @@ export function verifySource(env, head, changes) {
   }
 }
 
-export function verifyTarget(data) {
+export function verifyTarget(data, selected = services) {
   if (data.projectToken?.projectId !== projectId || data.projectToken?.environmentId !== environmentId ||
       data.environment?.projectId !== projectId || data.environment?.id !== environmentId) {
     throw new Error('Railway project token does not match Dragons Market production');
@@ -47,9 +49,10 @@ export function verifyTarget(data) {
     throw new Error('Apply or discard staged Railway changes before releasing');
   }
   const defaults = { 'deploy.restartPolicyType': 'ON_FAILURE', 'deploy.sleepApplication': false };
-  for (const service of services) {
+  for (const service of selected) {
     const actual = data.environment.config.services[service.id];
-    if (actual?.source?.repo || actual?.source?.image || actual?.deploy?.cronSchedule) {
+    if (actual?.source?.repo || actual?.source?.image ||
+        (actual?.deploy?.cronSchedule ?? null) !== (settings[service.name]?.['deploy.cronSchedule'] ?? null)) {
       throw new Error(`Unexpected source or schedule on ${service.name}`);
     }
     for (const [path, expected] of Object.entries(settings[service.name])) {
@@ -74,20 +77,29 @@ export function railwayQuery(token, request = fetch) {
   };
 }
 
-export async function checkTarget(query) {
+export async function checkTarget(query, selected = services) {
   const data = await query(`query($environmentId: String!) {
     projectToken { projectId environmentId }
-    environment(id: $environmentId) { id projectId unmergedChangesCount config(decryptVariables: false) }
+    environment(id: $environmentId) { id projectId unmergedChangesCount config(decryptVariables: false)
+      serviceInstances { edges { node { serviceId numReplicas
+        latestDeployment { id status deploymentStopped }
+        domains { serviceDomains { domain } customDomains { domain } }
+      } } }
+      volumeInstances { edges { node { serviceId mountPath } } }
+      variables { edges { node { id name serviceId isSealed updatedAt } } }
+    }
     environmentStagedChanges(environmentId: $environmentId) { patch }
   }`, { environmentId });
-  verifyTarget(data);
+  verifyTarget(data, selected);
+  return data;
 }
 
 export function verifyFoundationVariables(service, variables) {
   if (!variables || typeof variables !== 'object' || Array.isArray(variables)) {
     throw new Error(`Missing variable inventory for ${service.name}`);
   }
-  const configured = Object.keys(variables).filter(key => activationVariables.has(key) && variables[key]);
+  const configured = Object.keys(variables).filter(key => activationVariables.has(key) &&
+    variables[key] !== undefined && variables[key] !== '');
   if (configured.length) {
     throw new Error(`Foundation release refuses activation settings on ${service.name}: ${configured.join(', ')}`);
   }
@@ -99,7 +111,7 @@ export function verifyFoundationVariables(service, variables) {
 export async function checkReleaseVariables(query) {
   for (const service of services) {
     const { variables } = await query(`query($projectId: String!, $environmentId: String!, $serviceId: String!) {
-      variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
+      variables: variablesForServiceDeployment(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
     }`, { projectId, environmentId, serviceId: service.id });
     verifyFoundationVariables(service, variables);
   }
@@ -127,7 +139,9 @@ export async function waitForDeployment(query, service, id, { sleep = delay, now
         const { deploymentLogs } = await query(`query($id: String!) {
           deploymentLogs(deploymentId: $id, limit: 100) { message }
         }`, { id });
-        if (deploymentLogs.some(({ message }) => /^Applied \d+ migration\(s\); service database roles are ready$/.test(message))) return;
+        if (deploymentLogs.some(({ message }) => service.completed
+          ? service.completed(message)
+          : /^Applied \d+ migration\(s\); service database roles are ready$/.test(message))) return;
       }
     } else if (!waiting.has(deployment.status)) {
       throw new Error(`${service.name} deployment ended with ${deployment.status}; inspect ${id}`);
@@ -135,6 +149,18 @@ export async function waitForDeployment(query, service, id, { sleep = delay, now
     await sleep(10000);
   }
   throw new Error(`Timed out waiting for ${service.name}; inspect ${id} before retrying`);
+}
+
+export function uploadSource(service, sha) {
+  let output;
+  try {
+    output = execFileSync('railway', ['up', '--detach', '--json', '--project', projectId,
+      '--environment', environmentId, '--service', service.id, '--message', `GitHub ${sha}`],
+    { encoding: 'utf8', timeout: 180000, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch {
+    throw new Error(`Railway upload failed for ${service.name}; inspect Railway before retrying`);
+  }
+  return JSON.parse(output);
 }
 
 export async function release({ query, upload, wait = waitForDeployment, report = console.log, backups = checkBackups }) {
@@ -164,17 +190,7 @@ async function main() {
   const sha = process.env.GITHUB_SHA;
   await release({
     query,
-    upload(service) {
-      let output;
-      try {
-        output = execFileSync('railway', ['up', '--detach', '--json', '--project', projectId,
-          '--environment', environmentId, '--service', service.id, '--message', `GitHub ${sha}`],
-        { encoding: 'utf8', timeout: 180000, stdio: ['ignore', 'pipe', 'pipe'] });
-      } catch {
-        throw new Error(`Railway upload failed for ${service.name}; inspect Railway before retrying`);
-      }
-      return JSON.parse(output);
-    },
+    upload: service => uploadSource(service, sha),
     report(message) {
       console.log(message);
       if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${message}\n\n`);

@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import pg from 'pg';
 import { readConfig } from '../src/config.js';
 import { registerDeployment } from '../src/ingestion/store.js';
+import { keeperFixture } from './keeper-fixture.js';
 
 const run = promisify(execFile);
 const services = ['api', 'indexer', 'worker', 'publisher', 'agent'];
@@ -54,6 +55,31 @@ test('database release is repeatable and runtime checks reject owner credentials
     } finally { await api.end(); }
     const owner = new pg.Pool({ connectionString: url.href });
     try {
+      const approval = keeperFixture();
+      const deployment = approval.approval.deployment;
+      const registration = { ...env, NETWORK: 'mainnet', REGISTER_DEPLOYMENT: 'true', ...approval.encode(),
+        DEPLOYMENT_ID: deployment.id, DEPLOYMENT_START_BLOCK: deployment.startBlock,
+        COLLATERAL_TOKEN_ID: deployment.collateralTokenId,
+        ...Object.fromEntries(Object.entries(deployment.contracts).map(([role, account]) =>
+          [`${role.toUpperCase()}_CONTRACT_ID`, account])),
+      };
+      const register = (settings: NodeJS.ProcessEnv = {}) => run(process.execPath,
+        ['dist/src/release.js'], { env: { ...registration, ...settings } });
+      for (const invalid of [{ KEEPER_APPROVAL_JSON: '' }, { KEEPER_APPROVAL_SHA256: '0'.repeat(64) },
+        { DEPLOYMENT_START_BLOCK: '101' }, { REGISTER_DEPLOYMENT: 'yes' }]) {
+        await assert.rejects(register(invalid), /Database release failed/);
+      }
+      assert.equal((await owner.query('SELECT 1 FROM deployments')).rowCount, 0);
+      for (let run = 0; run < 2; run++) {
+        assert.match((await register()).stdout, /"registered":"keeper-fixture"/);
+      }
+      assert.equal((await owner.query('SELECT 1 FROM deployments WHERE id = $1', [deployment.id])).rowCount, 1);
+      const changed = structuredClone(approval.approval);
+      changed.deployment.startBlock = '101';
+      await assert.rejects(register({ ...approval.encode(changed), DEPLOYMENT_START_BLOCK: '101' }),
+        /Database release failed/);
+      const stored = await owner.query('SELECT start_block::text FROM deployments WHERE id = $1', [deployment.id]);
+      assert.equal(stored.rows[0].start_block, '100');
       const manifest = { NETWORK: 'mainnet', DEPLOYMENT_ID: 'worker-readiness',
         DEPLOYMENT_START_BLOCK: '100', ROUNDS_CONTRACT_ID: 'rounds.fixture.near',
         VERIFIER_CONTRACT_ID: 'verifier.fixture.near', COLLATERAL_TOKEN_ID: 'nep141:usdc.fixture.near',

@@ -32,6 +32,16 @@ try {
     await delay(100);
   }
   assert.ok(started, logs);
+  const deployment = await fetch(`${base}/deployment.json`);
+  assert.equal(deployment.status, 200);
+  assert.deepEqual(await deployment.json(), {
+    version: 1, sourceCommit: "c".repeat(40), network: "testnet", rpcUrl: "https://test.rpc.fastnear.com",
+    marketId: "market.csp-fixture.testnet", oracleId: "oracle.csp-fixture.testnet",
+    councilId: "council.csp-fixture.testnet", verifierId: "verifier.csp-fixture.testnet",
+    nftId: "nft.csp-fixture.testnet", collateralTokenId: "nep141:usdc.csp-fixture.testnet",
+    tokenId: "usdc.csp-fixture.testnet", tokenDecimals: 6, backendUrl: "", mcpUrl: "",
+    agentWalletContract: "", agentApiHost: "",
+  }, "the served build record matches the browser fixture configuration");
   const nonces = new Set();
   const pages = (await readdir(resolve(root, "web/out-caddy"), { recursive: true })).filter(name => name.endsWith(".html"));
   for (const path of [...pages.map(name => `/${name}`), "/", "/agents", "/__missing-csp-page"]) {

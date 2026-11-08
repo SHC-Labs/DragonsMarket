@@ -1,6 +1,6 @@
 # Keeper on Railway
 
-The `keeper` service defaults to a preparation job. This branch also implements guarded signing, but no live keeper service, signing approval or signing keys have been installed. It builds from the same backend image and runs `node dist/src/keeper-runner.js` every five minutes. It has no public domain or listening port. The foundation release workflow does not deploy it. Create it only as part of the reviewed chain configuration; adding an empty service does not activate trading.
+The `keeper` service defaults to a preparation job. This branch also implements guarded signing, but no live keeper service, signing approval or signing keys have been installed. It builds from the same backend image and runs `node dist/src/keeper-runner.js` every five minutes. It has no public domain or listening port. The foundation release workflow does not deploy it; the separate [activation workflow](ACTIVATED-RELEASE.md) includes keyless preparation and approved signing stages. Create it only as part of the reviewed chain configuration; adding an empty service does not activate trading.
 
 ## Configuration
 

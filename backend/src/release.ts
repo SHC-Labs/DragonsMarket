@@ -3,6 +3,8 @@ import { createPool } from './database.js';
 import { migrate } from './migrate.js';
 import { LOCK } from './locks.js';
 import { readConfig } from './config.js';
+import { parseKeeperApproval } from './keeper-approval.js';
+import { registerDeployment } from './ingestion/store.js';
 
 const services = ['api', 'indexer', 'worker', 'publisher', 'agent'] as const;
 
@@ -21,6 +23,9 @@ function credentials(env: NodeJS.ProcessEnv) {
 
 let pool: ReturnType<typeof createPool> | undefined;
 try {
+  if (process.env.REGISTER_DEPLOYMENT && process.env.REGISTER_DEPLOYMENT !== 'true') throw new Error('Invalid registration mode');
+  const registration = process.env.REGISTER_DEPLOYMENT === 'true' ? readConfig(process.env) : null;
+  if (registration) parseKeeperApproval(process.env.KEEPER_APPROVAL_JSON, process.env.KEEPER_APPROVAL_SHA256, registration);
   const logins = credentials(process.env);
   pool = createPool(readConfig({ DATABASE_URL: process.env.DATABASE_URL }).databaseUrl);
   const count = await migrate(pool);
@@ -43,6 +48,10 @@ try {
     throw error;
   } finally {
     client.release();
+  }
+  if (registration) {
+    await registerDeployment(pool, registration);
+    console.log(JSON.stringify({ service: 'database-release', registered: registration.deployment!.id }));
   }
   console.log(`Applied ${count} migration(s); service database roles are ready`);
 } catch {

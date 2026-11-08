@@ -59,10 +59,10 @@ jobs:
       - run: npm install --global pnpm@10.33.0
       - run: pnpm install --frozen-lockfile
       - run: node --check deploy/railway/configure.mjs
-      - run: node --test deploy/railway/*.test.mjs
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
+      - run: node --test deploy/railway/*.test.mjs
       - run: pnpm test:database
       - run: pnpm test:release
       - name: Install PostgreSQL 18 backup clients
@@ -73,6 +73,7 @@ jobs:
       - run: pnpm --filter dragons-market-backend test:backup
       - run: pnpm build
         env:
+          NEXT_PUBLIC_RELEASE_COMMIT: cccccccccccccccccccccccccccccccccccccccc
           NEXT_PUBLIC_NETWORK: testnet
           NEXT_PUBLIC_RPC_URL: https://test.rpc.fastnear.com
           NEXT_PUBLIC_MARKET_ID: market.csp-fixture.testnet

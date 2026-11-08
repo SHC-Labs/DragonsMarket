@@ -170,7 +170,9 @@ test('MCP ingress must be explicitly configured before any upload or migration',
 });
 
 test('foundation release refuses partial chain or agent activation before any migration or upload', async () => {
-  const keys = ['DEPLOYMENT_ID', 'DEPLOYMENT_START_BLOCK', 'MARKET_CONTRACT_ID', 'ROUNDS_CONTRACT_ID',
+  const keys = ['REGISTER_DEPLOYMENT', 'KEEPER_MODE', 'KEEPER_APPROVAL_JSON', 'KEEPER_APPROVAL_SHA256',
+    'KEEPER_KEY', 'KEEPER_MARKET_KEY', 'KEEPER_ORACLE_KEY', 'KEEPER_COUNCIL_KEY',
+    'DEPLOYMENT_ID', 'DEPLOYMENT_START_BLOCK', 'MARKET_CONTRACT_ID', 'ROUNDS_CONTRACT_ID',
     'ORACLE_CONTRACT_ID', 'COUNCIL_CONTRACT_ID', 'VERIFIER_CONTRACT_ID', 'NFT_CONTRACT_ID',
     'COLLATERAL_TOKEN_ID', 'AGENT_WORKER_URL', 'AGENT_WORKER_TOKEN', 'AGENT_API_KEY', 'AGENT_GRANT_KEY',
     'PUBLISH_ROUND_PRICES', 'NEXT_PUBLIC_MARKET_ID', 'NEXT_PUBLIC_ORACLE_ID', 'NEXT_PUBLIC_COUNCIL_ID',
@@ -194,6 +196,9 @@ test('foundation release refuses partial chain or agent activation before any mi
 test('empty activation variables are inactive; missing variable inventories fail closed', () => {
   const service = services.find(service => service.name === 'server');
   verifyFoundationVariables(service, { DEPLOYMENT_ID: '', NEXT_PUBLIC_MARKET_ID: '', NETWORK: 'testnet' });
+  for (const key of ['KEEPER_MARKET_KEY', 'AGENT_API_KEY', 'AGENT_GRANT_KEY']) {
+    assert.throws(() => verifyFoundationVariables(service, { [key]: null }), /activation settings/);
+  }
   for (const variables of [undefined, null, [], 'unreadable']) {
     assert.throws(() => verifyFoundationVariables(service, variables), /Missing variable inventory/);
   }

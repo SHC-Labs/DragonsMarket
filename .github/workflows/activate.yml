@@ -1,0 +1,61 @@
+name: Activate Railway
+run-name: Railway ${{ inputs.stage }} ${{ inputs.action }} from ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Prepare chain services or release the approved trading configuration
+        type: choice
+        default: prepare
+        options: [prepare, launch]
+      action:
+        description: Validate only or deploy after validation
+        type: choice
+        default: check
+        options: [check, deploy]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-production
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    if: github.repository == 'SHC-Labs/DragonsMarket' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/agents.yml
+
+  activate:
+    needs: checks
+    if: github.repository == 'SHC-Labs/DragonsMarket' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 170
+    environment:
+      name: production
+      url: https://dragons.market
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version-file: .node-version
+      - run: npm install --global pnpm@10.33.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:server
+      - name: Install the pinned deployment CLI
+        if: inputs.action == 'deploy'
+        run: |
+          npm install --prefix "$RUNNER_TEMP/railway-cli" @railway/cli@4.36.1
+          echo "$RUNNER_TEMP/railway-cli/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Run the approved activation stage
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          ACTIVATION_JSON: ${{ vars.ACTIVATION_JSON }}
+          ACTIVATION_SHA256: ${{ vars.ACTIVATION_SHA256 }}
+          ACTIVATION_STAGE: ${{ inputs.stage }}
+          ACTIVATION_ACTION: ${{ inputs.action }}
+        run: node deploy/railway/activate.mjs "$ACTIVATION_STAGE" "$ACTIVATION_ACTION"

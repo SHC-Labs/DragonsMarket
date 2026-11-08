@@ -15,7 +15,24 @@ export function verifyFoundation(ready, config) {
   }
 }
 
-export async function smoke(web, server, mcp, browserOrigin = 'https://dragons.market') {
+export function verifyActivated(ready, config, expected) {
+  assert.ok(expected && typeof expected === 'object' && expected.deployment?.id && typeof expected.agents === 'boolean', 'Invalid activated smoke expectation');
+  assert.equal(ready.status, 'ready');
+  assert.equal(ready.checks?.database, 'ok');
+  assert.equal(ready.checks?.schema, 'current');
+  assert.equal(ready.deploymentConfigured, true);
+  assert.equal(ready.indexing, 'see_indexer_status');
+  assert.equal(config.network, 'mainnet');
+  assert.deepEqual(config.deployment, expected.deployment);
+  assert.equal(config.capabilities?.indexing, true);
+  assert.equal(config.capabilities?.walletSessions, true);
+  assert.equal(config.capabilities?.agents, expected.agents);
+  // Human trades are wallet-signed; these API execution capabilities stay false.
+  assert.equal(config.capabilities?.trading, false);
+  assert.equal(config.capabilities?.funding, false);
+}
+
+export async function smoke(web, server, mcp, browserOrigin = 'https://dragons.market', expected = null) {
 if (!web) throw new Error('Usage: node deploy/railway/smoke.mjs <web-origin> [server-origin] [mcp-origin]');
 const request = (url, init) => fetch(url, { redirect: 'error', signal: AbortSignal.timeout(15000), ...init });
 let html = '';
@@ -41,14 +58,23 @@ assert.equal(response.status, 200);
 assert.match(response.headers.get('cache-control') ?? '', /immutable/);
 assert.equal((await request(`${web}/market`, { method: 'POST' })).status, 405);
 console.log('Static assets have immutable caching; unsupported POST returns 405');
+if (expected) {
+  const built = await request(`${web}/deployment.json`);
+  assert.equal(built.status, 200);
+  assert.ok(expected.browser && typeof expected.browser === 'object', 'Missing built-browser expectation');
+  assert.deepEqual(await built.json(), expected.browser, 'The deployed browser has a different chain configuration');
+}
 if (server) {
   const response = await request(`${server}/health/ready`);
   assert.equal(response.status, 200);
   const ready = await response.json();
   const configuration = await request(`${server}/v1/config`);
   assert.equal(configuration.status, 200);
-  verifyFoundation(ready, await configuration.json());
-  console.log('Hosting foundation ready; chain trading and agent execution are inactive');
+  const config = await configuration.json();
+  if (expected) verifyActivated(ready, config, expected);
+  else verifyFoundation(ready, config);
+  console.log(expected ? 'Activated deployment configuration verified; funded acceptance is separate' :
+    'Hosting foundation ready; chain trading and agent execution are inactive');
   const session = await request(`${server}/v1/auth/session`, { headers: { Origin: browserOrigin } });
   assert.equal(session.status, 200);
   assert.equal(session.headers.get('access-control-allow-origin'), browserOrigin);
@@ -92,5 +118,7 @@ if (mcp) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  smoke(...process.argv.slice(2)).catch(error => { console.error(error.message); process.exitCode = 1; });
+  const [web, server, mcp, browserOrigin] = process.argv.slice(2);
+  const expected = process.env.SMOKE_DEPLOYMENT_JSON ? JSON.parse(process.env.SMOKE_DEPLOYMENT_JSON) : null;
+  smoke(web, server, mcp, browserOrigin, expected).catch(error => { console.error(error.message); process.exitCode = 1; });
 }

@@ -1,4 +1,4 @@
-const postgresId = '130e30b5-c8b3-4a63-ae2f-2cc1e0901fc0';
+export const postgresId = '130e30b5-c8b3-4a63-ae2f-2cc1e0901fc0';
 const maxAge = 36 * 60 * 60 * 1000;
 const retention = { DAILY: 6 * 86400, WEEKLY: 27 * 86400 };
 
