@@ -21,6 +21,10 @@ async function rpc<T>(method: string, params: unknown): Promise<T> {
   return body.result as T;
 }
 
+export function finalTransaction(txHash: string, signerId: string): Promise<unknown> {
+  return rpc("EXPERIMENTAL_tx_status", { tx_hash: txHash, sender_account_id: signerId, wait_until: "FINAL" });
+}
+
 // Read a contract view method. No wallet needed.
 export async function view<T>(contractId: string, method: string, args: Record<string, unknown> = {}): Promise<T> {
   const result = await rpc<{ result: number[]; error?: string }>("query", {

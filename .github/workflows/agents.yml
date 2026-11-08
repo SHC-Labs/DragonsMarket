@@ -71,6 +71,14 @@ jobs:
           echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
       - run: pnpm --filter dragons-market-backend test:backup
       - run: pnpm build
+        env:
+          NEXT_PUBLIC_NETWORK: testnet
+          NEXT_PUBLIC_RPC_URL: https://test.rpc.fastnear.com
+          NEXT_PUBLIC_MARKET_ID: market.csp-fixture.testnet
+          NEXT_PUBLIC_ORACLE_ID: oracle.csp-fixture.testnet
+          NEXT_PUBLIC_VERIFIER_ID: verifier.csp-fixture.testnet
+          NEXT_PUBLIC_COLLATERAL_TOKEN_ID: nep141:usdc.csp-fixture.testnet
+          NEXT_PUBLIC_TOKEN_ID: usdc.csp-fixture.testnet
       - name: Install the pinned Caddy browser-test runtime
         run: |
           mkdir -p "$RUNNER_TEMP/caddy"

@@ -9,6 +9,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "@playwright/test";
+import { cashOutWalletMethod, installCashOutFixture, checkCashOutBrowser } from "./cash-out-browser.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const port = process.env.CSP_TEST_PORT ?? "3397", base = `http://127.0.0.1:${port}`;
@@ -50,7 +51,9 @@ try {
     assert.match(await response.text(), /^<!DOCTYPE html>/i);
   }
   browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const cashOut = await installCashOutFixture(page.context());
   const errors = [], violations = [];
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (/Content Security Policy|violates.*directive/i.test(message.text())) violations.push(message.text()); });
@@ -59,11 +62,12 @@ try {
     platform: ["web"], icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>", description: "Local test", website: "https://example.com",
     version: "1.0.0", executor, permissions: { storage: true },
     features: { testnet: true, mainnet: true, signMessage: true, signAndSendTransaction: true } }] };
-  await page.route("https://**/*manifest.json", route => route.fulfill({ json: manifest, headers: { "access-control-allow-origin": "*" } }));
-  await page.route(`${executor}*`, route => route.fulfill({ contentType: "application/javascript",
+  await page.context().route("https://**/*manifest.json", route => route.fulfill({ json: manifest, headers: { "access-control-allow-origin": "*" } }));
+  await page.context().route(`${executor}*`, route => route.fulfill({ contentType: "application/javascript",
     headers: { "access-control-allow-origin": "*" }, body: `window.selector.ready({
       signIn: async () => [{accountId: 'csp-test.testnet', publicKey: 'ed25519:test-only'}],
       getAccounts: async () => [{accountId: 'csp-test.testnet', publicKey: 'ed25519:test-only'}],
+      ${cashOutWalletMethod}
       signOut: async () => {}
     });` }));
   await page.goto(base, { waitUntil: "networkidle" });
@@ -83,6 +87,7 @@ try {
     await page.waitForURL(base + path);
     await page.getByRole("button", { name: "Connected as csp-test.testnet. Disconnect" }).waitFor();
   }
+  await checkCashOutBrowser(page, cashOut, base);
   for (const path of ["/agents", "/docs", "/api", "/council", "/privacy"]) {
     await page.goto(base + path, { waitUntil: "networkidle" });
     assert.equal(await page.locator("h1").count() > 0, true, path);

@@ -26,7 +26,7 @@ export function preflightSummary(checks: Check[], strict: boolean) {
 
 const MAX_HEAD_AGE_MS = 60_000;
 const MAX_SOURCE_LAG_BLOCKS = 100n;
-// The reader's 400ms request interval bounds throughput before network/database overhead and new blocks.
+// Planning baseline for the default 400ms interval; paid-provider throughput must be measured separately.
 const CATCH_UP_BLOCKS_PER_SECOND = 2.5;
 const LONG_CATCH_UP_HOURS = 24;
 const FIVE_MINUTES_NS = 300n * 10n ** 9n;
@@ -193,7 +193,7 @@ async function checkIndexingState(config: Config, pool: pg.Pool, headHeight: str
   if (start > head) return [...checks, fail('start-block', `start block ${start} is ahead of the head ${head}`)];
   const remaining = head - indexedThrough;
   const hours = Number(remaining) / CATCH_UP_BLOCKS_PER_SECOND / 3600;
-  const estimate = `${remaining} blocks remain; minimum ${hours.toFixed(1)} hours at 2.5 blocks/s, excluding new blocks and overhead`;
+  const estimate = `${remaining} blocks remain; default pacing estimate ${hours.toFixed(1)} hours at 2.5 blocks/s, excluding new blocks, redirects and overhead`;
   checks.push(hours > LONG_CATCH_UP_HOURS ? warn('start-block', estimate) : ok('start-block', estimate));
   return checks;
 }
