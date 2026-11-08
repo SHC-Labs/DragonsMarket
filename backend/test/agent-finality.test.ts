@@ -38,4 +38,8 @@ test('agent settlement requires FINAL and the complete transaction receipt graph
   const failed = proof();
   failed.receipts_outcome[0]!.outcome.status = { Failure: { ActionError: {} } };
   assert.deepEqual((await verify(failed)).failed, ['market.near']);
+  const rejected = { ...proof(), status: { Failure: {} },
+    transaction_outcome: { id: 'transaction', outcome: { executor_id: 'agent.near', receipt_ids: [], status: { Failure: {} } } },
+    receipts_outcome: [] };
+  assert.deepEqual((await verify(rejected)).failed, ['agent.near'], 'a root transaction failure cannot be reported as success');
 });

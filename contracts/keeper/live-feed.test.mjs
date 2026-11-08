@@ -77,6 +77,17 @@ test('a current feed reaches due work while dry-run never loads or uses a signin
   const result = await queuedRun({ rpc: 'https://rpc.invalid', market: 'market.near', oracle: 'oracle.near',
     council: 'council.near', 'events-file': file, 'require-live-feed': true, 'dry-run': true }, {});
   assert.deepEqual(result.actions.map(action => action.method), ['resolve_by_deadline']);
+  let guarded = false;
+  await assert.rejects(queuedRun({ rpc: 'https://rpc.invalid', market: 'market.near', oracle: 'oracle.near',
+    council: 'council.near', 'state-file': path.join(dir, 'queue.json'), 'events-file': file, 'require-live-feed': true }, {}, {
+    beforeBatch: async actions => {
+      guarded = true;
+      assert.equal(actions[0].method, 'resolve_by_deadline');
+      throw new Error('approval refused');
+    },
+    send: async () => assert.fail('a refused batch must not reach the sender'),
+  }), /approval refused/);
+  assert.equal(guarded, true, 'production execution guard runs before key reads and any broadcast');
 });
 
 test('production key mode refuses full access, unbounded allowance and unrelated methods', async t => {

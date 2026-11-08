@@ -58,7 +58,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { b58decode, b58encode, rpc, setRpcPace, view, viewer } from "./chain.mjs";
-export { setRpcPace, setRpcCredentials } from './chain.mjs';
+export { setRpcPace, setRpcCredentials, rpc as keeperRpc } from './chain.mjs';
 import { compareCodeHashes, describeRelease, liveCodeHashes, parseReleaseHashes, upgradeProposalProblems } from "./release-check.mjs";
 import { reviewKind, storageRunway } from "./treasury.mjs";
 import { readQueue, writeQueue, withQueueLock, touch, finish, retry, selectJobs, bounded, serializeByKey, ingestFile, feedIsCurrent } from "./due-queue.mjs";
@@ -207,7 +207,7 @@ export function nextMarketAt(market, c, locked, now, height) {
   return now;
 }
 
-export async function queuedRun(opts, keys) {
+export async function queuedRun(opts, keys, execution) {
   if (!opts["state-file"] && !opts["dry-run"]) throw new Error("run needs --state-file for its durable due-queue");
   if ((opts["prepare-feed"] || opts["require-live-feed"]) && !opts["events-file"])
     throw new Error("A current event feed is required");
@@ -298,6 +298,7 @@ export async function queuedRun(opts, keys) {
     dedupe.set(action.contract+":"+action.method+":"+JSON.stringify(action.args),action);
   }
   const actions=[...dedupe.values()];
+  if (!opts["dry-run"] && execution) await execution.beforeBatch(actions);
   if (!opts["dry-run"]) await validateActionKeys(opts, keys, actions);
   const save=()=>{if(opts["state-file"]&&!opts["dry-run"])writeQueue(opts["state-file"],state);};
   // Persist a batch once before dispatch, rather than rewriting a large queue for every action.
@@ -317,7 +318,7 @@ export async function queuedRun(opts, keys) {
     try{
       // One nonce stream per actual key, even when several receivers share the default key.
       const identity=crypto.createHash("sha256").update(keyFor(keys,action.contract)).digest("hex");
-      const outcome=await serial(identity,()=>send(opts,keys,action));
+      const outcome=await serial(identity,()=>execution ? execution.send(action) : send(opts,keys,action));
       console.log(label(action)+": "+outcome);
       if(outcome.startsWith("FAILED") && !outcome.includes(JURY_OPEN_REFUSAL))throw new Error(outcome);
       if(j){j.failures=0;delete j.error;j.attempting=false;}
@@ -352,6 +353,11 @@ export async function queuedRun(opts, keys) {
   return {actions,state};
 }
 
+export function keeperFeedCurrent(opts, header) {
+  const scope = { rpc: opts.rpc, market: opts.market, oracle: opts.oracle, council: opts.council };
+  return feedIsCurrent(readQueue(opts['state-file'], scope), header);
+}
+
 // ---- keys --------------------------------------------------------------------------------------------------------
 
 const KEY_SOURCES = {
@@ -360,7 +366,7 @@ const KEY_SOURCES = {
   market: { file: "market-key-file", env: "KEEPER_MARKET_KEY" },
   council: { file: "council-key-file", env: "KEEPER_COUNCIL_KEY" },
 };
-const KEEPER_METHODS = {
+export const KEEPER_METHODS = {
   oracle: ["finalize", "resolve_draw", "retry_apply", "retry_unlock", "resolve_by_deadline"],
   market: ["sweep_fees", "settle_leg"],
   council: ["advance_days"],

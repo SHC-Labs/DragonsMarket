@@ -1,6 +1,7 @@
 FROM node:24.22.2-bookworm-slim AS build
 WORKDIR /app
 RUN test -z "${DATABASE_URL:-}${AGENT_API_KEY:-}${AGENT_GRANT_KEY:-}${OPERATOR_TOKEN:-}"
+RUN test -z "${KEEPER_KEY:-}${KEEPER_ORACLE_KEY:-}${KEEPER_MARKET_KEY:-}${KEEPER_COUNCIL_KEY:-}"
 RUN npm install --global pnpm@10.33.0
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY backend/package.json ./backend/package.json

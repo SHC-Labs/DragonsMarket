@@ -145,13 +145,13 @@ test('receipt migration backfills existing journals without changing block check
   await pool.query('DROP TRIGGER deployments_immutable ON deployments');
   await pool.query('DROP FUNCTION refuse_deployment_change()');
   await pool.query('DROP TABLE indexed_receipts');
-  await pool.query('DROP TABLE agent_access_tokens,agent_intents,agent_grants,agent_accounts,chain_integrity_reports,source_heads,feed_exports,backend_jobs,user_operations,price_evidence,signing_decisions,reconciliation_reports,wallet_challenges,wallet_sessions,wallet_watchlist,policy_acknowledgements');
+  await pool.query('DROP TABLE keeper_status,agent_access_tokens,agent_intents,agent_grants,agent_accounts,chain_integrity_reports,source_heads,feed_exports,backend_jobs,user_operations,price_evidence,signing_decisions,reconciliation_reports,wallet_challenges,wallet_sessions,wallet_watchlist,policy_acknowledgements');
   await pool.query('DROP INDEX raw_events_read_page');
   await pool.query("DELETE FROM schema_migrations WHERE version >= '004_receipt_reads.sql'");
-  assert.equal(await migrate(pool), 10);
+  assert.equal(await migrate(pool), 11);
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM indexed_receipts')).rows[0].n, 3);
   assert.deepEqual((await pool.query('SELECT * FROM indexer_checkpoints')).rows, before);
-  assert.equal((await migrationFiles()).length, 13);
+  assert.equal((await migrationFiles()).length, 14);
 }));
 
 test('pending settlements: requests stay listed until their own terminal event lands', async () => setup(async (pool, root) => {

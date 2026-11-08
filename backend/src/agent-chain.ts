@@ -85,8 +85,9 @@ export function finalTransaction(rpc: Rpc, transactionHash: string, sender: stri
       || !Array.isArray(tx.actions) || !object(outcome) || !Array.isArray(outcome.receipts_outcome)) {
       throw new Error('invalid_transaction_outcome');
     }
-    return { signer: tx.signer_id, receiver: tx.receiver_id, calls: tx.actions.map(callAction),
-      ...receiptResults(completeReceipts(outcome, transactionHash, sender)) };
+    const receipts = receiptResults(completeReceipts(outcome, transactionHash, sender));
+    if (object(outcome.status) && Object.hasOwn(outcome.status, 'Failure') && !receipts.failed.length) receipts.failed.push(sender);
+    return { signer: tx.signer_id, receiver: tx.receiver_id, calls: tx.actions.map(callAction), ...receipts };
   });
 }
 

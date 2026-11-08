@@ -8,7 +8,8 @@ import { migrate } from '../src/migrate.js';
 import { registerDeployment } from '../src/ingestion/store.js';
 import { ingest } from '../src/ingestion/engine.js';
 import { FixtureSource } from '../src/ingestion/source.js';
-import { keeperSettings, prepareKeeper, withKeeperLock } from '../src/keeper-runner.js';
+import { keeperSettings, prepareKeeper, requireKeeperReports, withKeeperLock } from '../src/keeper-runner.js';
+import { backendStatus } from '../src/monitoring.js';
 
 test('keeper resumes its database-backed feed and queue after restart, excluding concurrent runners', async () => {
   const url = process.env.TEST_DATABASE_URL;
@@ -33,9 +34,27 @@ test('keeper resumes its database-backed feed and queue after restart, excluding
     await admin.query(`CREATE SCHEMA ${schema}`);
     await migrate(pool);
     await registerDeployment(pool, config);
+    await assert.rejects(requireKeeperReports(pool, schema), /requires current successful/);
+    await pool.query(`INSERT INTO reconciliation_reports(deployment_id,block_hash,report,solvent) VALUES($1,'test','{}',true)`, [schema]);
+    await pool.query(`INSERT INTO chain_integrity_reports(deployment_id,report,ok) VALUES($1,'{}',true)`, [schema]);
+    await requireKeeperReports(pool, schema);
+    await pool.query(`UPDATE reconciliation_reports SET checked_at=now() - interval '16 minutes' WHERE deployment_id=$1`, [schema]);
+    await assert.rejects(requireKeeperReports(pool, schema), /requires current successful/);
+    await pool.query(`UPDATE reconciliation_reports SET checked_at=now(),solvent=false WHERE deployment_id=$1`, [schema]);
+    await assert.rejects(requireKeeperReports(pool, schema), /requires current successful/);
+    await pool.query(`UPDATE reconciliation_reports SET solvent=true WHERE deployment_id=$1`, [schema]);
+    await pool.query(`UPDATE chain_integrity_reports SET ok=false WHERE deployment_id=$1`, [schema]);
+    await assert.rejects(requireKeeperReports(pool, schema), /requires current successful/);
+    await pool.query(`UPDATE chain_integrity_reports SET ok=true,checked_at=now()+interval '1 hour' WHERE deployment_id=$1`, [schema]);
+    await assert.rejects(requireKeeperReports(pool, schema), /requires current successful/);
     await ingest(pool, config, new FixtureSource('test/fixtures/blocks.jsonl'));
     const first = await prepareKeeper(pool, config, options, 'prepare');
     assert.deepEqual(first, { mode: 'prepare', exported: 3, current: false, height: '103', signing: false });
+    assert.equal((await pool.query('SELECT state FROM keeper_status WHERE deployment_id=$1', [schema])).rows[0].state, 'catching_up');
+    const monitored = await backendStatus(pool, config);
+    assert.equal(monitored.keeper.height, '103');
+    assert.ok(monitored.alerts.includes('keeper_feed_stale'));
+    assert.ok(monitored.alerts.includes('keeper_signing_disabled'));
     const feed = await readFile(options['events-file'], 'utf8');
     const queue = await readFile(options['state-file'], 'utf8');
     const second = await prepareKeeper(pool, config, options, 'check');
@@ -53,6 +72,17 @@ test('keeper resumes its database-backed feed and queue after restart, excluding
       actions: [], state: { cursor: { height: '103', hash: '4'.repeat(32) } }, current: opts['prepare-feed'] === true,
     }));
     assert.equal(stale.current, false, 'a feed that becomes stale during the check must not report ready');
+    await assert.rejects(prepareKeeper(pool, config, options, 'sign'), /must match its mode/);
+    let initialized = 0;
+    const signing = () => { initialized++; return { keys: {}, execution: { beforeBatch: async () => {}, send: async () => 'ok' } }; };
+    await prepareKeeper(pool, config, options, 'sign', undefined, signing);
+    assert.equal(initialized, 0, 'stale evidence cannot initialize a signer');
+    await withKeeperLock(pool, schema, async () => {
+      await assert.rejects(prepareKeeper(pool, config, options, 'sign', undefined, signing), /Another keeper runner/);
+      assert.equal(initialized, 0, 'journal loading and signing remain inside the deployment lock');
+    });
+    await assert.rejects(prepareKeeper(pool, config, options, 'check', async () => { throw new Error('test RPC failure'); }), /test RPC failure/);
+    assert.equal((await pool.query('SELECT state FROM keeper_status WHERE deployment_id=$1', [schema])).rows[0].state, 'failed');
   } finally {
     globalThis.fetch = originalFetch;
     await pool.end();
