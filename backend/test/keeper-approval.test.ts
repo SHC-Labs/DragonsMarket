@@ -33,6 +33,8 @@ test('both providers must prove approved code and controls at the same recent fi
   const { config, approval } = keeperFixture();
   const header = { hash: 'h'.repeat(32), height: 200, timestamp_nanosec: String(BigInt(Date.now()) * 1000000n) };
   let failure = '';
+  const checkedKeys = new Set<string>();
+  const checkedCustody = new Set<string>();
   const provider = (secondary: boolean): Pick<ReadRpcClient, 'call'> => ({ call: async (method, args) => {
     const p = args as Record<string, string>;
     if (method === 'status') return { chain_id: secondary && failure === 'network' ? 'testnet' : 'mainnet' };
@@ -40,13 +42,37 @@ test('both providers must prove approved code and controls at the same recent fi
       ...(secondary && failure === 'head' && p.block_id ? { hash: 'other' } : {}),
       ...(failure === 'stale' ? { timestamp_nanosec: '1000' } : {}) } };
     const role = Object.entries(approval.contracts).find(([, c]) => c.accountId === p.account_id)?.[0];
+    if (p.request_type === 'view_access_key_list') {
+      checkedKeys.add(`${secondary}:${role}`);
+      return { block_hash: secondary && failure === 'key-block' ? 'wrong' : header.hash,
+        keys: secondary && failure === `key:${role}` ? [{ access_key: { permission: 'FullAccess' } }]
+          : failure === 'malformed-keys' ? null : [] };
+    }
     if (p.request_type === 'view_account') {
       if (p.account_id === approval.keeper.accountId) return { block_hash: header.hash,
         amount: failure === 'balance' ? '0' : '1000000000000000000000000', storage_usage: 10 };
       return { block_hash: header.hash, code_hash: secondary && failure === 'code' && role === 'nft' ? 'wrong'
         : approval.contracts[role as keyof KeeperApproval['contracts']]!.codeHash };
     }
+    const decoded: Record<string, string> = JSON.parse(Buffer.from(p.args_base64!, 'base64').toString());
+    if (p.method_name !== 'config') {
+      assert.equal(p.account_id, 'intents.near');
+      const custodyRole = Object.entries(approval.contracts).find(([, c]) => c.accountId === decoded.account_id)?.[0];
+      checkedCustody.add(`${secondary}:${custodyRole}:${p.method_name}`);
+      const bad = secondary && failure === `${p.method_name}:${custodyRole}`;
+      const values: Record<string, unknown> = {
+        public_keys_of: bad ? ['ed25519:retained'] : [],
+        is_auth_by_predecessor_id_enabled: !bad,
+        is_account_locked: bad,
+        pa_is_paused: secondary && failure === 'verifier-paused',
+      };
+      assert.ok(Object.hasOwn(values, p.method_name!));
+      const value = secondary && failure === `malformed:${p.method_name}` ? 'false' : values[p.method_name!];
+      return { block_hash: secondary && failure === 'custody-block' ? 'wrong' : header.hash,
+        result: [...Buffer.from(JSON.stringify(value))] };
+    }
     const settings = { owner: approval.controls.owner, operator: approval.controls.operator, treasury: approval.controls.treasury,
+      upgrade_proven: failure === 'unproven' ? false : failure === 'missing-proof' ? undefined : true,
       pending_owner: failure === 'missing-control' ? undefined : null, upgrade_in_flight: false, paused: false, sells_paused: false,
       verifier: 'intents.near', collateral_token_id: 'nep141:usdc.near', oracle: 'oracle.near', council: 'council.near',
       revenue_pool: 'council.near', nft_contract: 'nft.near', markets: ['market.near'],
@@ -56,7 +82,36 @@ test('both providers must prove approved code and controls at the same recent fi
     return { block_hash: header.hash, result: [...Buffer.from(JSON.stringify(settings))] };
   } });
   await verifyKeeperApproval(approval, config, provider(false), provider(true));
-  for (failure of ['network', 'head', 'stale', 'code', 'balance', 'controls', 'pause', 'pending', 'upgrade', 'sells-paused', 'missing-control']) {
+  const financial = ['market', 'oracle', 'council', 'rounds'].filter(role => role in approval.contracts);
+  const custodyMethods = ['public_keys_of', 'is_auth_by_predecessor_id_enabled', 'is_account_locked'];
+  for (const secondary of [false, true]) {
+    for (const role of [...financial, 'nft']) assert.ok(checkedKeys.has(`${secondary}:${role}`));
+    for (const role of financial) for (const method of custodyMethods)
+      assert.ok(checkedCustody.has(`${secondary}:${role}:${method}`));
+  }
+  for (failure of ['network', 'head', 'stale', 'code', 'balance', 'controls', 'pause', 'pending', 'upgrade', 'sells-paused', 'missing-control',
+    'unproven', 'missing-proof', 'malformed-keys', 'key-block', 'custody-block', 'verifier-paused',
+    ...[...financial, 'nft'].map(role => `key:${role}`),
+    ...financial.flatMap(role => custodyMethods.map(method => `${method}:${role}`)),
+    ...[...custodyMethods, 'pa_is_paused'].map(method => `malformed:${method}`)]) {
     await assert.rejects(verifyKeeperApproval(approval, config, provider(false), provider(true)), { name: 'Error' }, failure);
   }
+  failure = '';
+  for (const role of ['market', 'oracle', 'council', 'rounds'] as const) {
+    const original = config.deployment!.contracts[role];
+    if (!original) continue;
+    config.deployment!.contracts[role] = '0x7e5f4552091a69125d5dfcb7b8c2659029395bdf';
+    approval.contracts[role]!.accountId = config.deployment!.contracts[role]!;
+    await assert.rejects(verifyKeeperApproval(approval, config, provider(false), provider(true)),
+      /approved_contract_custody_unverifiable/);
+    config.deployment!.contracts[role] = original;
+    approval.contracts[role]!.accountId = original;
+  }
+  delete approval.contracts.rounds;
+  delete config.deployment!.contracts.rounds;
+  checkedKeys.clear();
+  checkedCustody.clear();
+  await verifyKeeperApproval(approval, config, provider(false), provider(true));
+  assert.ok([...checkedKeys, ...checkedCustody].every(value => !value.includes(':rounds')),
+    'a human-only deployment without Rounds still verifies its configured contracts');
 });

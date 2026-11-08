@@ -204,6 +204,7 @@ Gas floors are enforced with `upgrade::require_gas` (`oracle/src/lib.rs:26-43`).
 | `set_operator` (`:538`) | Owner | `operator_id` | none | none | none | | `operator_set` |
 | `set_no_decision_recipient` (`:544`) | Owner | `recipient: AccountId` | none | none | none | | `no_decision_recipient_set` |
 | `add_publisher` (`:551`) | Owner | `key: PublicKey` | none | none | none | ed25519 only, no duplicates, at most `max_publishers` | `publisher_added` |
+| `set_publishers` | Owner | `publishers: Vec<PublicKey>`, `threshold: u32` | none | none | attach 30 TGas | Atomic replacement; nonempty distinct Ed25519 keys, at most `max_publishers`, threshold strictly above half and no greater than count | `publishers_set` |
 | `remove_publisher` (`:565`) | Operator or owner | `key: PublicKey` | none | none | none | Refuses a key that is not a publisher and a removal that leaves fewer than the threshold | `publisher_removed` |
 | `set_price_threshold` (`:581`) | Owner | `threshold: u32` | none | none | none | Between 1 and the publisher count | `price_threshold_set` |
 | `register_market` (`:596`) | An allowed market account | `market_id: U64`, `close_at: U64`, `resolve_by: U64`, `rule_hash: String`, `price_rule: Option<PriceRule>` | none | none | 20 TGas reserved by the market | Idempotent. Refuses a market with too little time and a price market with too few publishers | `market_registered` |

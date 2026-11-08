@@ -555,6 +555,11 @@ export async function reconcile(read, waitForBlocks) {
 // still be paid but cannot pay out.
 export function verifierProblems({ name, id, keys, predecessorAuth, locked }) {
   const problems = [];
+  if (/^0x[0-9a-f]{40}$/.test(id)) problems.push(`${name} ${id} is an Ethereum-style implicit account: an empty verifier key list cannot prove its implicit signing authority is removed`);
+  if (!Array.isArray(keys) || typeof predecessorAuth !== "boolean" || typeof locked !== "boolean") {
+    problems.push(`${name} ${id} has malformed verifier custody responses`);
+    return problems;
+  }
   if (keys.length) problems.push(`${name} ${id} has ${keys.length} public key${keys.length === 1 ? "" : "s"} registered in the verifier: a key can move its funds without the contract's rules`);
   if (!predecessorAuth) problems.push(`${name} ${id} does not authenticate by predecessor in the verifier: its own payout calls are refused`);
   if (locked) problems.push(`${name} ${id} is locked in the verifier: it keeps receiving money it cannot pay out, so stop advertising deposits`);
@@ -594,7 +599,7 @@ const brief = (value) => {
 // its arguments are inside the allow-list: a person reads it before the vote closes.
 const REVIEW_BY_HAND = new Set([
   "upgrade", "propose_owner", "accept_owner", "seal", "set_operator", "allow_market", "add_publisher", "set_nft_contract",
-  "set_treasury", "set_price_threshold", "set_fee_recipients", "set_no_decision_recipient", "set_jury_size", "set_bond",
+  "set_treasury", "set_price_threshold", "set_publishers", "set_fee_recipients", "set_no_decision_recipient", "set_jury_size", "set_bond",
   "set_window_ms", "set_panel_deadline_ms", "set_draw_window_ms", "set_min_proposal_ms", "set_draw_delay_blocks",
 ]);
 

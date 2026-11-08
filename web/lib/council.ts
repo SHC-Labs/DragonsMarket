@@ -95,7 +95,7 @@ export const requestUnstakeCall = (tokenId: string): FunctionCall => ({
   methodName: "request_unstake",
   args: { token_id: tokenId, accepts_cut: true },
   gas: "30000000000000",
-  deposit: "0",
+  deposit: "1",
 });
 
 export const unstakeCall = (tokenId: string): FunctionCall => ({

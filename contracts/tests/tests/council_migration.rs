@@ -307,6 +307,7 @@ async fn a_seat_staked_on_version_5_is_rewritten_in_the_new_layout_only_when_it_
         .alice
         .call(council.id(), "request_unstake")
         .args_json(json!({ "token_id": "a1", "accepts_cut": true }))
+        .deposit(NearToken::from_yoctonear(1))
         .transact()
         .await?
         .into_result()?;

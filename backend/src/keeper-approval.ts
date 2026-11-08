@@ -105,6 +105,10 @@ function recent(head: Awaited<ReturnType<typeof finalizedHead>>) {
 
 export async function verifyKeeperApproval(approval: KeeperApproval, config: Config, primary: Rpc, secondary: Rpc) {
   assertApprovalCurrent(approval);
+  const d = config.deployment!.contracts;
+  // Intents cannot enumerate the implicit signing key of an Ethereum-style account.
+  if (FINANCIAL.some(role => /^0x[0-9a-f]{40}$/.test(d[role] ?? '')))
+    throw new Error('approved_contract_custody_unverifiable');
   const heads = await Promise.all([finalizedHead(config, primary), finalizedHead(config, secondary)]);
   heads.forEach(recent);
   const head = BigInt(heads[0]!.height) <= BigInt(heads[1]!.height) ? heads[0]! : heads[1]!;
@@ -119,14 +123,28 @@ export async function verifyKeeperApproval(approval: KeeperApproval, config: Con
       const account = await rpc.call('query', { request_type: 'view_account', block_id: head.hash, account_id: expected.accountId });
       if (!object(account) || account.block_hash !== head.hash || account.code_hash !== expected.codeHash)
         throw new Error('approved_code_mismatch');
+      if (role === 'nft' || FINANCIAL.some(financial => financial === role)) {
+        const access = await rpc.call('query', { request_type: 'view_access_key_list', block_id: head.hash, account_id: expected.accountId });
+        if (!object(access) || access.block_hash !== head.hash || !Array.isArray(access.keys) || access.keys.length !== 0)
+          throw new Error('approved_contract_not_keyless');
+      }
     }
     const view = viewAt(rpc, head.hash);
-    const d = config.deployment!.contracts;
+    if (await view(d.verifier!, 'pa_is_paused', { key: 'mt_transfer' }) !== false)
+      throw new Error('approved_verifier_transfers_unavailable');
     for (const role of FINANCIAL) {
       if (!d[role]) continue;
+      const args = { account_id: d[role]! };
+      const [keys, predecessorAuth, locked] = await Promise.all([
+        view(d.verifier!, 'public_keys_of', args),
+        view(d.verifier!, 'is_auth_by_predecessor_id_enabled', args),
+        view(d.verifier!, 'is_account_locked', args),
+      ]);
+      if (!Array.isArray(keys) || keys.length !== 0 || predecessorAuth !== true || locked !== false)
+        throw new Error('approved_verifier_custody_changed');
       const settings = await view(d[role]!, 'config', {});
       if (!object(settings) || settings.owner !== approval.controls.owner || settings.pending_owner !== null
-        || settings.upgrade_in_flight !== false
+        || settings.upgrade_in_flight !== false || settings.upgrade_proven !== true
         || (['market', 'rounds'].includes(role) && settings.paused !== false)
         || (role === 'market' && settings.sells_paused !== false)
         || settings.verifier !== d.verifier || settings.collateral_token_id !== config.deployment!.collateralTokenId

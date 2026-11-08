@@ -1,8 +1,8 @@
-// Prepares wallet requests for the Trezu/SputnikDAO that owns the market, oracle and council. It reads the DAO and the
+// Prepares wallet requests for the Trezu/SputnikDAO that owns the market, oracle, council and optional rounds. It reads the DAO and the
 // contracts and never signs or submits anything.
 // ABI: near-daos/sputnik-dao-contract, revision 5434a59dec23ee0c49df8c8c4350c208a7e75b0b.
 //
-// Everything the DAO may call on the three contracts is in ALLOWED, with the arguments, deposit and gas each call takes.
+// Everything the DAO may call on the configured contracts is in ALLOWED, with the arguments, deposit and gas each call takes.
 // A method that is not there is refused, so a method added to a contract stays out until someone adds it here. The vote
 // helper applies the same table to a stored proposal, and refuses to approve any other kind of proposal unless the caller
 // names the kind. `view` is a function (account, method, args) that returns a contract view as JSON; see viewer() in
@@ -24,7 +24,6 @@ const VOID_GRACE_NS = { min: NS_PER_DAY, max: 60n * NS_PER_DAY };
 const RECONCILE_WAIT_NS = { min: 600n * 10n ** 9n, max: 7n * NS_PER_DAY };
 const U64_MAX = 2n ** 64n - 1n;
 const U128_MAX = 2n ** 128n - 1n;
-const NS_PER_MS = 1_000_000n;
 const YOCTO_PER_BYTE = 10n ** 19n;
 // upgrade::stage_code keeps the wasm under "staged_code:" plus the 32 byte hash, and the network adds 40 bytes to every
 // stored key. Whatever is attached beyond the real cost is refunded to the stager.
@@ -40,7 +39,7 @@ const HASH_BYTES = 32;
 const MAX_DECIMALS = 18;
 const WASM_MAGIC = Buffer.from("\0asm", "latin1");
 
-export const TARGETS = ["market", "oracle", "council"];
+export const TARGETS = ["market", "oracle", "council", "rounds"];
 // The most one market can hold, which the pricing math in the dpm crate also enforces (MAX_LOCKED).
 const DPM_MAX_LOCKED = 1_000_000_000_000n;
 
@@ -73,6 +72,10 @@ export const CONTRACT_LIMITS = {
   },
   oracle: {
     MAX_PANEL: 21,
+    MIN_JURY_SIZE: 5,
+    MIN_BOND: 5_000_000n,
+    MIN_WINDOW_MS: 3_600_000,
+    MAX_DRAW_DELAY_BLOCKS: 100_000,
     MIN_MAX_PUBLISHERS: 1,
     MAX_MAX_PUBLISHERS: 25,
     MIN_JUROR_SHARE_BPS: 500,
@@ -83,8 +86,14 @@ export const CONTRACT_LIMITS = {
     MAX_APPLY_BUFFER_NS: 300_000_000_000n,
   },
   council: { MAX_ALLOW_BATCH: 100 },
+  rounds: {
+    HARD_MAX_FEE_BPS: 1_000,
+    HARD_MIN_REGISTRATION_FEE: 10_000n,
+    HARD_MAX_REGISTRATION_FEE: 2_000_000n,
+    MAX_PUBLISHERS: 25,
+  },
 };
-const { market: LIMIT_MARKET, oracle: LIMIT_ORACLE, council: LIMIT_COUNCIL } = CONTRACT_LIMITS;
+const { market: LIMIT_MARKET, oracle: LIMIT_ORACLE, council: LIMIT_COUNCIL, rounds: LIMIT_ROUNDS } = CONTRACT_LIMITS;
 
 const reject = (message) => {
   throw new Error(message);
@@ -123,8 +132,8 @@ const slug = (v) =>
   typeof v === "string" && v.length > 0 && v.length <= SLUG_MAX && SLUG.test(v)
     ? v
     : reject(`a slug of at most ${SLUG_MAX} lowercase letters, digits and hyphens`);
-const oddUpTo = (max) => (v) =>
-  Number.isInteger(v) && v >= 1 && v <= max && v % 2 === 1 ? v : reject(`an odd number from 1 to ${max}`);
+const oddUpTo = (max, min) => (v) =>
+  Number.isInteger(v) && v >= min && v <= max && v % 2 === 1 ? v : reject(`an odd number from ${min} to ${max}`);
 const oneOf = (...values) => (v) => (values.includes(v) ? v : reject(`one of ${values.join(", ")}`));
 const optional = (check) => Object.assign((v, ids) => (v === null ? null : check(v, ids)), { optional: true });
 
@@ -193,7 +202,7 @@ const UPGRADE_GAS = { min: 100, def: 150, max: 250 };
 const call = (args, extra = {}) => ({ deposit: "0", gas: SETTER_GAS, args, ...extra });
 const calling = (args, extra = {}) => call(args, { gas: CALLING_GAS, ...extra });
 const ownDeposit = { deposit: "1" };
-const windowMs = u64(1n, U64_MAX / NS_PER_MS);
+const windowMs = u64(BigInt(LIMIT_ORACLE.MIN_WINDOW_MS), 365n * 86_400_000n);
 
 const upgradePath = {
   upgrade: call({ code_hash: hash32 }, { gas: UPGRADE_GAS, needs: "staged" }),
@@ -203,6 +212,13 @@ const upgradePath = {
   accept_owner: call({}),
 };
 const setOperator = call({ operator_id: account });
+const setPublishers = (maximum, configuredLimit = false) => call({ publishers: list(ed25519, maximum), threshold: integer(maximum, 1) }, {
+  check: ({ publishers, threshold }) => {
+    if (new Set(publishers).size !== publishers.length) reject("duplicate publisher");
+    if (threshold > publishers.length || threshold * 2 <= publishers.length) reject("threshold must be a strict majority of the publishers");
+  },
+  ...(configuredLimit ? { needs: "publisher_limit" } : {}),
+});
 const ordered = (first, last) => (args) => {
   if (BigInt(args[first]) > BigInt(args[last])) reject(`${first} must not be above ${last}`);
 };
@@ -281,13 +297,13 @@ export const ALLOWED = {
     set_operator: setOperator,
     allow_market: call({ market: account }),
     disallow_market: call({ market: account }),
-    set_bond: call({ bond: u128(1n) }),
+    set_bond: call({ bond: u128(LIMIT_ORACLE.MIN_BOND) }),
     set_window_ms: call({ window_ms: windowMs }),
     set_panel_deadline_ms: call({ panel_deadline_ms: windowMs }),
     set_min_proposal_ms: call({ min_proposal_ms: windowMs }),
     set_draw_window_ms: call({ draw_window_ms: windowMs }),
-    set_draw_delay_blocks: call({ draw_delay_blocks: u64() }),
-    set_jury_size: call({ jury_size: oddUpTo(LIMIT_ORACLE.MAX_PANEL) }),
+    set_draw_delay_blocks: call({ draw_delay_blocks: u64(0n, BigInt(LIMIT_ORACLE.MAX_DRAW_DELAY_BLOCKS)) }),
+    set_jury_size: call({ jury_size: oddUpTo(LIMIT_ORACLE.MAX_PANEL, LIMIT_ORACLE.MIN_JURY_SIZE) }),
     set_juror_shares: call({
       decided_bps: integer(LIMIT_ORACLE.MAX_JUROR_SHARE_BPS, LIMIT_ORACLE.MIN_JUROR_SHARE_BPS),
       no_decision_bps: integer(LIMIT_ORACLE.MAX_NO_DECISION_JUROR_SHARE_BPS, LIMIT_ORACLE.MIN_NO_DECISION_JUROR_SHARE_BPS),
@@ -297,6 +313,7 @@ export const ALLOWED = {
     }),
     set_max_publishers: call({ max_publishers: integer(LIMIT_ORACLE.MAX_MAX_PUBLISHERS, LIMIT_ORACLE.MIN_MAX_PUBLISHERS) }),
     set_no_decision_recipient: call({ recipient: exactly("treasury") }),
+    set_publishers: setPublishers(LIMIT_ORACLE.MAX_MAX_PUBLISHERS, true),
     add_publisher: call({ key: ed25519 }),
     remove_publisher: call({ key: ed25519 }),
     set_price_threshold: call({ threshold: integer(LIMIT_ORACLE.MAX_MAX_PUBLISHERS, 1) }),
@@ -318,9 +335,36 @@ export const ALLOWED = {
     set_reconcile_wait_ns: call({ reconcile_wait_ns: u64(RECONCILE_WAIT_NS.min, RECONCILE_WAIT_NS.max) }),
     reconcile_claim: call({ id: u64(1n), paid: flag }),
   },
+  rounds: {
+    ...upgradePath,
+    set_operator: setOperator,
+    set_paused: call({ paused: flag }),
+    set_fee_bps: call({ fee_bps: integer(LIMIT_ROUNDS.HARD_MAX_FEE_BPS) }),
+    set_registration_fee: call({ registration_fee: u128(LIMIT_ROUNDS.HARD_MIN_REGISTRATION_FEE, LIMIT_ROUNDS.HARD_MAX_REGISTRATION_FEE) }),
+    set_treasury: call({ treasury: exactly("treasury") }),
+    set_publishers: setPublishers(LIMIT_ROUNDS.MAX_PUBLISHERS),
+    add_publisher: call({ key: ed25519 }),
+    remove_publisher: call({ key: ed25519 }),
+    set_price_threshold: call({ threshold: integer(LIMIT_ROUNDS.MAX_PUBLISHERS, 1) }),
+    add_series: call({
+      asset: slug, decimals: integer(MAX_DECIMALS), first_start: u64(),
+      interval: u64(300_000_000_000n, NS_PER_DAY), price_window: u64(60_000_000_000n, NS_PER_DAY), close_before: u64(),
+    }, { check: ({ interval, close_before }) => {
+      if (2n * BigInt(close_before) < BigInt(interval) || BigInt(close_before) >= BigInt(interval))
+        reject("close_before must cover at least half of the interval and be below it");
+    } }),
+    reconcile_withdrawal: call({ id: u64(1n), paid: flag }),
+    withdraw: calling({ amount: u128(1n) }, ownDeposit),
+  },
 };
 
 const NEEDS = {
+  publisher_limit: async ({ view, receiver, args }) => {
+    const settings = await view(receiver, "config", {});
+    const maximum = isRecord(settings) ? settings.max_publishers : undefined;
+    if (!Number.isInteger(maximum) || maximum < 1 || maximum > 25 || args.publishers.length > maximum)
+      reject("publisher set exceeds the configured maximum or the maximum is unavailable");
+  },
   staged: async ({ view, receiver, args }) => {
     if ((await view(receiver, "is_staged", { code_hash: args.code_hash })) !== true) {
       reject(`no code with the hash ${args.code_hash} is staged on ${receiver}; stage it first`);
@@ -362,8 +406,11 @@ export const GUARDED_KINDS = {
 function daoIds(treasuryId, contracts, view) {
   if (typeof view !== "function") reject("A view function is required to read the DAO and the contracts");
   const ids = { treasury: accountId(treasuryId, "treasury") };
-  for (const name of TARGETS) ids[name] = accountId(contracts?.[name], `${name} contract`);
-  if (new Set(Object.values(ids)).size !== 1 + TARGETS.length) reject("the treasury, market, oracle and council must be four different accounts");
+  for (const name of TARGETS) {
+    if (name === "rounds" && contracts?.rounds === undefined) continue;
+    ids[name] = accountId(contracts?.[name], `${name} contract`);
+  }
+  if (new Set(Object.values(ids)).size !== Object.keys(ids).length) reject("the treasury and configured contracts must be different accounts");
   return ids;
 }
 
@@ -413,8 +460,8 @@ async function callDeposit(entry, receiver, view) {
 
 async function reviewCall(functionCall, ids, view) {
   if (!exactKeys(functionCall, ["receiver_id", "actions"])) reject("a function call proposal has a receiver_id and a list of actions");
-  const target = TARGETS.find((name) => ids[name] === functionCall.receiver_id);
-  if (!target) reject(`${functionCall.receiver_id} is not the market, oracle or council: a function call to any other account is refused`);
+  const target = TARGETS.find((name) => typeof ids[name] === "string" && ids[name] === functionCall.receiver_id);
+  if (!target) reject(`${functionCall.receiver_id} is not a configured market, oracle, council or rounds contract`);
   if (!Array.isArray(functionCall.actions) || functionCall.actions.length !== 1) reject("a proposal must carry exactly one action");
   const [action] = functionCall.actions;
   if (!exactKeys(action, ["method_name", "args", "deposit", "gas"])) reject("an action has a method_name, args, deposit and gas");
@@ -462,6 +509,7 @@ const walletCall = (receiverId, methodName, args, gas, deposit) => ({
 export async function prepareAdministrationProposal({ treasuryId, contracts, target, methodName, args, description, view, gasTgas }) {
   const ids = daoIds(treasuryId, contracts, view);
   if (!TARGETS.includes(target)) reject("Unknown application target");
+  accountId(ids[target], `${target} contract`);
   const entry = typeof methodName === "string" && Object.hasOwn(ALLOWED[target], methodName) ? ALLOWED[target][methodName] : null;
   if (!entry) {
     reject(

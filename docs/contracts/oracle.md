@@ -442,6 +442,7 @@ should do so promptly.
 | Method                           | Who               | Notes                                                                            |
 | -------------------------------- | ----------------- | -------------------------------------------------------------------------------- |
 | `add_publisher(key)`             | Owner             | An ed25519 public key in NEAR format (`ed25519:...`). At most `max_publishers` (10 at the start). No duplicates. |
+| `set_publishers(publishers, threshold)` | Owner | Atomically replaces both fields. Nonempty distinct Ed25519 keys, at most `max_publishers`, and a threshold strictly above half and no greater than the count. Emits `publishers_set`. Zero deposit; 30 TGas. |
 | `remove_publisher(key)`          | Operator or owner | Immediate. Refused if it would leave fewer publishers than `price_threshold`.    |
 | `set_price_threshold(threshold)` | Owner             | Between 1 and the number of publishers.                                          |
 | `set_max_publishers(max_publishers)` | Owner         | Between 1 and 25, and not below `price_threshold`. Lowering it removes no one.   |

@@ -204,6 +204,10 @@ test("the verifier's view of a contract is a problem when it has a key, refuses 
   assert.match(verifierProblems({ ...view, predecessorAuth: false })[0], /^market m\.near does not authenticate by predecessor/);
   assert.match(verifierProblems({ ...view, locked: true })[0], /^market m\.near is locked in the verifier.*stop advertising deposits/);
   assert.equal(verifierProblems({ ...view, keys: ["a"], predecessorAuth: false, locked: true }).length, 3);
+  assert.match(verifierProblems({ ...view, id: "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf" })[0], /implicit signing authority/);
+  assert.deepEqual(verifierProblems({ ...view, id: "0xcontract.near" }), []);
+  for (const invalid of [{ keys: null }, { keys: "" }, { predecessorAuth: "true" }, { locked: undefined }])
+    assert.match(verifierProblems({ ...view, ...invalid })[0], /malformed verifier custody/);
 });
 
 test("the token must know the market and the verifier, or a deposit or buy by token cannot arrive", () => {
@@ -262,7 +266,7 @@ test("the DAO report lists the open proposals that name the contracts and flags 
   const upgrade = (code_hash) => call(CONTRACTS.oracle, "upgrade", { code_hash }, { gas: "150000000000000" });
   const proposals = [
     pending(3, call(CONTRACTS.market, "set_fee_rate_bps", { fee_rate_bps: 150 })),
-    pending(4, call(CONTRACTS.oracle, "set_bond", { bond: "1" }), "Failed"),
+    pending(4, call(CONTRACTS.oracle, "set_bond", { bond: "5000000" }), "Failed"),
     pending(5, call(CONTRACTS.market, "settle_leg", { sweep_id: "1" })),
     pending(6, call(CONTRACTS.council, "set_cooldown_ns", { cooldown_ns: "0" })),
     pending(7, upgrade(unstaged)),
@@ -275,7 +279,7 @@ test("the DAO report lists the open proposals that name the contracts and flags 
   const report = await daoReport({ proposals, treasuryId: DAO, contracts: CONTRACTS, view });
   assert.deepEqual(report.lines, [
     'DAO proposal 3 (InProgress, by alice.near): market.set_fee_rate_bps {"fee_rate_bps":150}',
-    'DAO proposal 4 (Failed, by alice.near): oracle.set_bond {"bond":"1"}',
+    'DAO proposal 4 (Failed, by alice.near): oracle.set_bond {"bond":"5000000"}',
     "DAO proposal 5 (InProgress, by alice.near) names market.near",
     "DAO proposal 6 (InProgress, by alice.near) names council.near",
     "DAO proposal 7 (InProgress, by alice.near) names oracle.near",

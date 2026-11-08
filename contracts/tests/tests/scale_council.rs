@@ -259,6 +259,7 @@ async fn jury_draw_gas_by_seat_count() -> anyhow::Result<()> {
                     batch = batch.call(
                         Function::new("request_unstake")
                             .args_json(json!({ "token_id": t, "accepts_cut": true }))
+                            .deposit(NearToken::from_yoctonear(1))
                             .gas(Gas::from_tgas(LEAVE_PER_CALL)),
                     );
                 }

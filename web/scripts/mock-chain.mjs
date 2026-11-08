@@ -395,6 +395,7 @@ function applySend({ signer_id: signer, receiver_id: receiver, actions = [] }) {
       if (!aliceNfts.delete(String(args.token_id))) throw new Error("Smart contract panicked: not the owner");
       SEATS[args.token_id] = { owner: signer, staked_at: String(now()), unlock_requested_at: null, serving: null, earn_from_day: String(now() / DAY + 1n) };
     } else if (receiver === COUNCIL && method === "request_unstake") {
+      if (params.deposit !== "1" || args.accepts_cut !== true) throw new Error("Smart contract panicked: unstaking requires consent and exactly 1 yoctoNEAR");
       SEATS[args.token_id].unlock_requested_at = String(now() - 120n * SEC);
     } else if (receiver === COUNCIL && method === "unstake") {
       delete SEATS[args.token_id];

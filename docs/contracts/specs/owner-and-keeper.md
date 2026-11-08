@@ -1,6 +1,6 @@
 # Dragons Market: owner model, DAO proposals and keeper spec
 
-**How the DAO owns the three contracts, which methods it may call and how a proposal must be built, which Sputnik proposal kinds must be guarded, and what the keeper must do.**
+**How the DAO owns the financial contracts, which methods it may call and how a proposal must be built, which Sputnik proposal kinds must be guarded, and what the keeper must do.**
 
 | Field | Value |
 | --- | --- |
@@ -9,6 +9,14 @@
 | Scope | Owner and operator methods of `market`, `oracle` and `council`, `contracts/keeper/treasury.mjs`, `contracts/keeper/keeper.mjs` |
 | Source | Working tree on top of commit `6cad02e`, SputnikDAO source at revision `5434a59dec23ee0c49df8c8c4350c208a7e75b0b` (version 2.3.1), read 2026-10-21 |
 | Index | [README.md](README.md) |
+
+**Authority hardening, 2026-11-08.** The proposal builder and source-coverage tests now include
+Rounds: upgrades/ownership, operator/pause, fees/treasury, publishers, series, reconciliation
+and the DAO's own withdrawal. Its ID is optional for a human-only profile; proposals targeting
+Rounds require an explicit distinct ID. Oracle proposal bounds match the hard contract limits.
+Oracle and Rounds expose owner-only atomic publisher replacement, which the proposal monitor
+flags for manual review. The [current handoff](../governance.md) and
+[authority review](../../CONTRACT-AUTHORITY.md) describe these changes and remaining live evidence.
 
 **Dynamic parimutuel pricing, 2026-10-27.** The market lost `set_create_fee` and `set_open_price_bounds`, `set_void_rules` became `set_void_grace(grace_ns)`, and `set_fee_limits` dropped `max_create_fee`. The allow-list in `treasury.mjs`, its tests and the tables in sections 3.1 and 4 below are updated. `mt_on_transfer` no longer has an owner check, because the seed message it guarded is gone, so it is no longer in the excluded list.
 
@@ -165,6 +173,7 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `set_no_decision_recipient` | Owner | `recipient: AccountId` | 0 | 30 TGas | 2 | Receives the jurors' half when nobody revealed. Should be the treasury |
 | `add_publisher` | Owner | `key: PublicKey` | 0 | 30 TGas | 2 | Grants power over prices |
 | `set_price_threshold` | Owner | `threshold: u32` | 0 | 30 TGas | 2 | |
+| `set_publishers` | Owner | `publishers: Vec<PublicKey>`, `threshold: u32` | 0 | 30 TGas | 2 | Atomic replacement; distinct Ed25519 keys, strict majority and configured publisher cap |
 | NEW `set_reconcile_wait_ns` | Owner | `reconcile_wait_ns: U64` | 0 | 30 TGas | 2 | 10 minutes to 7 days, 1 hour to start. Live |
 | NEW `reconcile_bond_payout` | Owner | `id: U64`, `paid: bool` | 0 | 30 TGas | 2 | Decides a payout whose callback never arrived, after the reconcile wait. The owner checks the verifier's events first |
 | `upgrade`, `seal`, `propose_owner`, `accept_owner` | as the market | | 0 | as the market | 3 | |
@@ -287,16 +296,17 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | market | `retry_register` | `market_id`: U64 | 0 | 50 to 150, 100 attached |
 | market | `create_market` | the nine arguments with the contract's own limits: text of 200, 2,000, 300 and 500 bytes, slugs of up to 32 characters, `resolve_by` after `close_at`, and an optional `price_rule` with `observation_time` from `close_at` up to `resolve_by`, `strike` above 0 and at most 18 `decimals` | 0 | 50 to 150, 100 attached |
 | market | `withdraw` | `amount`: U128 above 0. The DAO's own balance, not an owner method | 1 | 50 to 150, 100 attached |
-| oracle | `set_bond` | `bond`: U128 above 0 | 0 | 5 to 30 |
-| oracle | `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms` | U64 from 1 to 18,446,744,073,709, the most whose product with 1,000,000 fits a U64 | 0 | 5 to 30 |
-| oracle | `set_draw_delay_blocks` | U64 | 0 | 5 to 30 |
-| oracle | `set_jury_size` | odd integer 1 to 21 | 0 | 5 to 30 |
+| oracle | `set_bond` | `bond`: U128 at least 5,000,000 (5 USDC) | 0 | 5 to 30 |
+| oracle | `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms` | U64 milliseconds from 3,600,000 to 31,536,000,000 | 0 | 5 to 30 |
+| oracle | `set_draw_delay_blocks` | U64 from 0 to 100,000 | 0 | 5 to 30 |
+| oracle | `set_jury_size` | odd integer 5 to 21 | 0 | 5 to 30 |
 | oracle | `set_juror_shares` | `decided_bps` 500 to 5000, `no_decision_bps` 1000 to 10000 | 0 | 5 to 30 |
 | oracle | `set_apply_buffer_ms` | decimal string 5000 to 300000 | 0 | 5 to 30 |
 | oracle | `set_max_publishers` | integer 1 to 25 | 0 | 5 to 30 |
 | oracle | `set_no_decision_recipient` | `recipient` must be the treasury | 0 | 5 to 30 |
 | oracle | `add_publisher`, `remove_publisher` | `key`: an ed25519 key | 0 | 5 to 30 |
-| oracle | `set_price_threshold` | integer 1 to 10 | 0 | 5 to 30 |
+| oracle | `set_price_threshold` | integer 1 to 25; the contract also checks current publisher count and strict majority | 0 | 5 to 30 |
+| oracle, rounds | `set_publishers` | distinct Ed25519 `publishers`, threshold strictly above half and no greater than count; Oracle's configured maximum is read before proposing or voting, Rounds caps at 25 | 0 | 5 to 30 |
 | oracle | `set_reconcile_wait_ns` | decimal string 600e9 to 604800e9 | 0 | 5 to 30 |
 | oracle | `reconcile_bond_payout` | `id`: decimal string from 1, `paid`: boolean | 0 | 5 to 30 |
 | oracle | `withdraw_bond` | none. The DAO's own claimable balance, not an owner method | 1 | 50 to 150, 100 attached |

@@ -52,6 +52,12 @@ interval. Both limits are checked in `add_series`, the only place a series is ma
 | The collateral token | `ft_on_transfer` (money in by `ft_transfer_call`) |
 | Anyone | `record_price` with valid signatures, `settle_round`, `claim` for any account, `storage_deposit` for any account, `sweep_fees`, the views |
 
+The owner may also call `set_publishers(publishers: Vec<PublicKey>, threshold: u32)` with zero
+deposit and 30 TGas. It atomically replaces the publisher set and quorum, including 1-of-1
+rotation or expansion. The complete set must contain 1 to 25 distinct Ed25519 keys, with a
+threshold strictly above half and no greater than its size. It emits `publishers_set`.
+Removed keys cannot authorize new submissions; already-recorded prices are unchanged.
+
 ## Starting it up: `new`
 
 `new(owner_id, operator_id, verifier_id, collateral_token_id, network, price_threshold)`, callable only by the contract

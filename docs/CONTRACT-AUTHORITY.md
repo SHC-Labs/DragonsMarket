@@ -50,28 +50,37 @@ timings and recipients as well as addresses. Read back every value after initial
 Initialization is not complete configuration: Market starts without fee recipients,
 Council without a collection or allowed markets/tokens, and Rounds without a treasury.
 Council's token allowlist defaults to enabled. Follow the configuration order in
-[deployment gates](contracts/DEPLOY.md), subject to the tooling gap below.
+[deployment gates](contracts/DEPLOY.md). The branch changes below close the identified tooling gaps;
+the deployment and handover still need their own evidence.
 
-## Findings to close before the final build
+## Branch fixes and remaining decisions
 
-1. **Council unstake consent.** `request_unstake(token_id, accepts_cut)` at Council line
-   1104 accepts zero deposit. A compromised user FunctionCall key already permitted to
+1. **Council unstake consent.** The reviewed revision accepted zero deposit for
+   `request_unstake(token_id, accepts_cut)`. A compromised user FunctionCall key already permitted to
    invoke that method can cut half the seat's running-quarter earnings and stop earning.
    It cannot act for an unrelated owner or return the NFT. No affected live user keys were
-   established. Make it payable with `assert_one_yocto`, update the web call and every
-   test/caller, then prove restricted-key rejection and normal wallet success. This review
-   has not changed the Rust method or frontend deposit.
-2. **Rounds DAO tooling.** `contracts/keeper/treasury.mjs` validates proposals only for
-   Market, Oracle and Council. Rounds owner methods, including `set_treasury`, need the
-   same reviewed argument/deposit/gas schema and proposal/vote tests. Existing tests scan
-   only those three targets. The helper prepares unsigned wallet calls; it does not
+   established. This branch adds `#[payable]` and `assert_one_yocto` before any mutation,
+   and updates wallet calls and current-contract fixtures. Regression tests cover unchanged
+   rewards on refusal, restricted-key rejection and full-access wallet success. Deploy the
+   contract before the updated browser: the old nonpayable method rejects the new deposit.
+   Historical v5 migration calls remain unchanged.
+2. **Rounds DAO tooling.** `contracts/keeper/treasury.mjs` now validates proposals for
+   all four financial contracts, including Rounds treasury, series, publishers and upgrades.
+   Rounds stays optional for a human-only profile, but its calls require an explicit ID.
+   Proposal and stored-vote validation share the argument/deposit/gas schema; source-coverage
+   tests scan all four contracts. Oracle bounds now match its minimum jury of 5, minimum bond
+   of 5 USDC, dispute windows of 1 hour to 365 days and maximum draw delay of 100,000 blocks.
+   The helper prepares unsigned wallet calls; it does not
    replace contract authorization or prove real DAO execution.
 3. **Publisher bootstrap and rotation.** At 1-of-1, adding a second publisher violates
    strict majority, raising the threshold violates the current count, and removing the
    only publisher violates availability. It cannot grow or rotate using normal setters.
-   Choose the quorum first. For an approved 2-of-3 design, initialize threshold 2, then
-   add the three independent keys before accepting price-based markets. An atomic
-   publisher-set replacement would be a separate reviewed contract change.
+   The branch adds owner-only `set_publishers(publishers, threshold)` to Oracle and Rounds.
+   It validates the entire nonempty, bounded, duplicate-free Ed25519 set and strict-majority
+   threshold before replacing either field. Existing incremental setters remain available.
+   The DAO proposal monitor flags replacement for manual review. No storage layout changes.
+   Coordinate publishers before rotation: removed keys cannot authorize new submissions,
+   including messages signed before rotation. Already-recorded observations stay intact.
 4. **Production NFT.** `contracts/mock-nft` explicitly says test-only. It offers owner-only
    nonpayable minting, no public purchase interface and none of the financial contracts'
    upgrade/seal path. Supply, sale price/storage, mint authority and upgrade policy need
@@ -123,11 +132,24 @@ verifier's predecessor-authentication settings separately; `remove_verifier_key`
 one such key and must also be verified. A retained verifier key can bypass an otherwise
 keyless account's collateral custody. Never retain keeper keys on contract accounts.
 
-The current activation approval checks hashes, owners and contract links; it does not
-inventory either key namespace. The standalone keeper's `check --expect-sealed` checks
-Market, Oracle, Council and NFT, but not Rounds. `verify-chain` verifies indexed database
-history, not access-key removal. Complete and record the missing Rounds/keyless checks
-before launch; a green activation check alone does not establish keyless custody.
+The backend activation approval now checks both RPC providers at the same recent finalized
+block. Market, Oracle, Council, optional Rounds and the NFT must have no NEAR access keys.
+Every financial contract must have proven its upgrade path, have no registered Intents keys,
+have predecessor authentication enabled and be unlocked. The verifier must permit `mt_transfer`.
+Missing, malformed or disagreeing responses fail closed. This observes custody; it does not
+remove keys or prove the DAO's policy and execution history.
+
+Ethereum-style implicit financial accounts (`0x` followed by 40 hex characters) are refused
+by activation and the standalone custody check. In the pinned Intents implementation,
+`public_keys_of` can return an empty list while `has_public_key` still accepts the implicit
+secp256k1 key. Use named contract accounts for the planned deployment. The sandbox regression
+`an_empty_intents_key_list_does_not_prove_an_eth_implicit_account_is_keyless` demonstrates
+the distinction using read-only calls to the pinned verifier.
+
+Correction to the original review: the standalone keeper's `check --expect-sealed` already
+includes Rounds when `--rounds` is supplied. It also checks the Council's NFT collection.
+`verify-chain` verifies indexed database history, not access-key removal. Keep the reviewed
+DAO policy, removal receipts and actual upgrade/recovery evidence alongside activation results.
 
 Required handoff: final account/initializer manifest, approved source/build/WASM hashes,
 actual DAO policy and execution receipts, publisher quorum/custodians, production NFT

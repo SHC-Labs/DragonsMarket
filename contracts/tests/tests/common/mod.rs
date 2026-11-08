@@ -114,11 +114,16 @@ pub fn wasm(name: &str) -> Vec<u8> {
     let own = root.join(name.replace('_', "-")).join("src");
     let shared = root.join("upgrade/src");
     let uses_upgrade = ["council", "market", "oracle", "rounds"].contains(&name);
-    let source = [Some(own), uses_upgrade.then_some(shared)]
-        .into_iter()
-        .flatten()
-        .filter_map(|d| newest_source(&d))
-        .max();
+    let uses_price_signatures = ["oracle", "rounds"].contains(&name);
+    let source = [
+        Some(own),
+        uses_upgrade.then_some(shared),
+        uses_price_signatures.then(|| root.join("price-signatures/src")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|d| newest_source(&d))
+    .max();
     if let (Some(built), Some(source)) = (built, source) {
         assert!(
             built >= source,
@@ -418,6 +423,7 @@ pub async fn request_unstake_with(
     Ok(who
         .call(w.council.id(), "request_unstake")
         .args_json(json!({ "token_id": token_id, "accepts_cut": accepts_cut }))
+        .deposit(NearToken::from_yoctonear(1))
         .transact()
         .await?)
 }

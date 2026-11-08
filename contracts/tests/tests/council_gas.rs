@@ -113,6 +113,7 @@ async fn claim_and_leave_gas_by_the_number_of_seats() -> anyhow::Result<()> {
     let r = leaver
         .call(w.council.id(), "request_unstake")
         .args_json(json!({ "token_id": tok(leaver), "accepts_cut": true }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?;
@@ -393,6 +394,7 @@ async fn the_first_call_after_a_quarter_boundary_pays_for_the_walk_and_the_close
                 "request_unstake" => {
                     j.call(w.council.id(), "request_unstake")
                         .args_json(json!({ "token_id": tok(j), "accepts_cut": true }))
+                        .deposit(NearToken::from_yoctonear(1))
                         .max_gas()
                         .transact()
                         .await?

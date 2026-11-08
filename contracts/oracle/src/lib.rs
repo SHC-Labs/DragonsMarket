@@ -1158,6 +1158,17 @@ impl OracleContract {
         self.no_decision_recipient = recipient;
     }
 
+    pub fn set_publishers(&mut self, publishers: Vec<PublicKey>, threshold: u32) {
+        require!(env::predecessor_account_id() == self.owner, "owner only");
+        price_signatures::validate_publishers(&publishers, threshold, self.max_publishers as usize);
+        emit(
+            "publishers_set",
+            json!({ "publishers": publishers, "threshold": threshold }),
+        );
+        self.publishers = publishers;
+        self.price_threshold = threshold;
+    }
+
     // Adding a publisher grants power over prices, so it is the owner's (a DAO proposal).
     pub fn add_publisher(&mut self, key: PublicKey) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
@@ -6098,6 +6109,53 @@ mod tests {
         assert!(c.upgrade_in_flight);
         c.on_upgrade_done(Err(PromiseError::Failed));
         assert!(!c.upgrade_in_flight);
+    }
+
+    #[test]
+    fn publisher_rotation_is_atomic_owner_only_and_changes_signature_authority() {
+        let (mut c, _) = price_oracle(true);
+        let old = signing_key(51);
+        let next = signing_key(52);
+        act_as(OWNER, 1);
+        c.set_publishers(vec![public(&old)], 1);
+        let before = c.config();
+        for who in [OPERATOR, "stranger.near"] {
+            act_as(who, 1);
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                c.set_publishers(vec![public(&next)], 1);
+            }));
+            assert!(refused.is_err());
+            assert_eq!(c.config(), before);
+        }
+        act_as(OWNER, 1);
+        let secp = PublicKey::from_parts(CurveType::SECP256K1, vec![7; 64]).unwrap();
+        for (publishers, threshold) in [
+            (vec![], 1),
+            (vec![public(&next)], 0),
+            (vec![public(&next)], 2),
+            (vec![public(&next), public(&old)], 1),
+            (vec![public(&next), public(&next)], 2),
+            (vec![secp], 1),
+            (vec![public(&next); c.max_publishers as usize + 1], 1),
+        ] {
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                c.set_publishers(publishers, threshold);
+            }));
+            assert!(refused.is_err());
+            assert_eq!(c.config(), before);
+        }
+        c.set_publishers(vec![public(&next)], 1);
+        let message = "rotation-test";
+        let old_sig = entry(&old, message);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            c.verified_signers(message, &old_sig)
+        }))
+        .is_err());
+        let next_sig = entry(&next, message);
+        assert_eq!(c.verified_signers(message, &next_sig), vec![public(&next)]);
+        c.set_publishers(vec![public(&next), public(&old), public(&signing_key(53))], 2);
+        assert_eq!(c.publishers.len(), 3);
+        assert_eq!(c.price_threshold, 2);
     }
 
     #[test]

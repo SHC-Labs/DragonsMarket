@@ -333,7 +333,7 @@ Removed in version 6: `pending_reward`, `current_quarter`, `get_quarter`, `list_
 | Action | Receiver | Method | Args | Deposit | Gas | Status |
 | --- | --- | --- | --- | --- | --- | --- |
 | Stake a seat | NFT contract | `nft_transfer_call` | `{receiver_id: council, token_id, msg: ""}` | `1` | 100 TGas | EXISTING contract, no builder. Check `is_allowed` first |
-| Ask to unstake | council | `request_unstake` | `{token_id, accepts_cut: true}` | `0` | 30 TGas | EXISTING. The contract refuses unless `accepts_cut` is true. A pop-up must show the warning first: leaving before the quarter ends costs 50% of the running quarter's earnings, and earlier quarters are paid in full |
+| Ask to unstake | council | `request_unstake` | `{token_id, accepts_cut: true}` | `1` | 30 TGas | Requires exactly 1 yoctoNEAR and `accepts_cut: true`. Show the warning first: leaving before the quarter ends costs 50% of the running quarter's earnings, and earlier quarters are paid in full. Upgrade the contract before releasing this wallet call |
 | Unstake | council | `unstake` | `{token_id}` | `1` | 100 TGas, floor 33 | EXISTING |
 | Claim | council | `claim` | `{token_ids}` (at most 10; an empty list pays what is already settled) | `1` | 100 TGas, floor 33. Attach 100: the first claim after about 100 idle days burns about 65 | EXISTING |
 

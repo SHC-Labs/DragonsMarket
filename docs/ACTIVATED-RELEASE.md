@@ -2,7 +2,7 @@
 
 This procedure is implemented on the private hardening branch. It has not activated production. It does not approve the rehearsal contracts, repair market 7, create a public NFT mint, provision credentials, fund accounts or prove partner API acceptance. Close the findings in [HUMAN-LAUNCH.md](HUMAN-LAUNCH.md) before admitting real users.
 
-The intended replacement deployment is under `dragonsmarket.near`. Its child accounts, owner DAO and treasury are separate configuration values. Complete the [contract authority handoff](CONTRACT-AUTHORITY.md) before building the final approval packet. The automated checks below do not prove that contract access keys or verifier-registered keys have been removed.
+The intended replacement deployment is under `dragonsmarket.near`. Its child accounts, owner DAO and treasury are separate configuration values. Complete the [contract authority handoff](CONTRACT-AUTHORITY.md) before building the final approval packet. The automated checks below verify current key inventories and custody at a finalized block; the handoff must separately prove the actual DAO policy, upgrade execution and recovery.
 
 The existing **Deploy Railway** workflow remains for the inactive hosting foundation. **Activate Railway** is a separate manual workflow with two stages and a default `check` action. Both workflows share the `railway-production` concurrency group and the protected public `production` environment. Only `SHC-Labs/DragonsMarket` public `main` can run either release. Private CI never receives production secrets. Application checks must pass again; contract checks remain a required public merge gate. Activation compares live contract hashes with the approved packet but does not rerun the contract build, deploy WASM or establish source equivalence itself.
 
@@ -26,6 +26,19 @@ The keeper packet expires after at most 30 days. Generate `KEEPER_APPROVAL_JSON`
 Agent evidence must cover every exposed financial tool, including rounds funding and settlement if the approved manifest includes rounds. The current rehearsal rounds compatibility and publisher findings remain blockers for that profile. This workflow keeps the local `prices` service and price publication disabled; an external publisher or another release needs its own review and operational evidence. It cannot be inferred from a valid Agent API key.
 
 ## Before preparation
+
+Deploy the approved Council consent update before the corresponding website build: its
+`request_unstake` call now attaches exactly one yoctoNEAR, which older nonpayable code rejects.
+Oracle/Rounds publisher replacement also needs the new approved contract build. Contract
+storage layouts are unchanged by these methods; normal upgrade proof and code-hash approval
+remain required.
+
+The live approval check now requires empty NEAR access-key lists on all selected financial
+contracts and the NFT, and a proven upgrade path on every financial contract. At the same
+finalized block, both providers must confirm no Intents keys on the financial accounts,
+predecessor authentication enabled, accounts unlocked and verifier `mt_transfer` unpaused.
+Missing or malformed responses stop preparation. This check only reads; it does not seal
+accounts, change custody or establish the real DAO's policy and execution evidence.
 
 1. Release the reviewed inactive foundation first, including the new `/deployment.json` browser build record. Verify HTTPS, wallet connection and sessions. Keep the old deployment IDs for recovery.
 2. Create the dedicated keeper service with one replica and an isolated volume at `/app/.local/feeds`. Initialize ownership and fsync access as described in [KEEPER.md](KEEPER.md). No signing keys during initialization. Use the committed `services.json` configuration for every service, no direct GitHub source/autodeploy connection, and no public domains or TCP proxies on workers. The normal keeper image runs as UID 65532. The workflow checks the mount, replica count, command, schedule and network exposure; the running job checks actual file access.
@@ -71,6 +84,8 @@ The job summary supplies the exact public `SMOKE_DEPLOYMENT_JSON` value. Set it 
 The workflow stops at the first failed gate. It does not retry uploads, undo migrations, cancel already-queued Railway builds, change on-chain state back, or erase a keeper journal. Keep deployment IDs and inspect them before rerunning. A successful keeper pass may have already submitted transactions even if a later API or web deployment fails; reconcile their final receipts. Never delete an ambiguous submission record to make the release pass.
 
 If activation fails before the web deployment, the previous website remains. Stop new signing through the reviewed keeper operating procedure when required, preserve its volume and database, and retain safe user exits. Rolling back frontend code does not undo chain transactions. Use only an application revision compatible with the current schema and approved contracts. Restoring an old database after new chain transactions requires chain reconciliation and replay; it is not an automatic application rollback.
+
+After deploying the Council consent fix, a rollback website must retain the one-yocto unstake call. An older zero-deposit client will be refused. Do not remove the contract guard to accommodate that client; recover with a compatible reviewed website build. Publisher rollback requires another reviewed owner replacement with a valid complete quorum, coordinated with the publishers.
 
 Repointing to the owner's replacement contracts requires new build/custody approval and an explicit migration plan for existing positions, sessions, balances, keeper state and indexing history. Do not edit the existing deployment row or discard the original volume to fit a new address.
 
