@@ -28,6 +28,7 @@
     "build.buildCommand": "",
     "build.watchPatterns": [
       "backend/**",
+      "contracts/keeper/**",
       "package.json",
       "pnpm-lock.yaml",
       "pnpm-workspace.yaml",
@@ -74,6 +75,7 @@
     "build.buildCommand": "",
     "build.watchPatterns": [
       "backend/**",
+      "contracts/keeper/**",
       "package.json",
       "pnpm-lock.yaml",
       "pnpm-workspace.yaml",
@@ -93,6 +95,7 @@
     "build.buildCommand": "",
     "build.watchPatterns": [
       "backend/**",
+      "contracts/keeper/**",
       "package.json",
       "pnpm-lock.yaml",
       "pnpm-workspace.yaml",
@@ -101,9 +104,9 @@
       ".dockerignore"
     ],
     "deploy.startCommand": "node dist/src/agent-worker.js",
-    "deploy.healthcheckPath": "/health",
+    "deploy.healthcheckPath": "/health/ready",
     "deploy.healthcheckTimeout": 120,
-    "deploy.preDeployCommand": [],
+    "deploy.preDeployCommand": ["node dist/src/check-agent-worker.js"],
     "deploy.restartPolicyType": "ON_FAILURE",
     "deploy.restartPolicyMaxRetries": 3,
     "deploy.sleepApplication": false,
@@ -115,6 +118,7 @@
     "build.buildCommand": "",
     "build.watchPatterns": [
       "backend/**",
+      "contracts/keeper/**",
       "package.json",
       "pnpm-lock.yaml",
       "pnpm-workspace.yaml",
@@ -137,6 +141,7 @@
     "build.buildCommand": "",
     "build.watchPatterns": [
       "backend/**",
+      "contracts/keeper/**",
       "package.json",
       "pnpm-lock.yaml",
       "pnpm-workspace.yaml",
@@ -159,6 +164,7 @@
     "build.buildCommand": "",
     "build.watchPatterns": [
       "backend/**",
+      "contracts/keeper/**",
       "package.json",
       "pnpm-lock.yaml",
       "pnpm-workspace.yaml",
@@ -175,12 +181,25 @@
     "build.dockerfilePath": "backend/Dockerfile",
     "deploy.cronSchedule": "0 */6 * * *"
   },
+  "keeper": {
+    "source.rootDirectory": "/",
+    "build.builder": "DOCKERFILE",
+    "build.buildCommand": "",
+    "build.watchPatterns": ["backend/**", "contracts/keeper/**", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".node-version", "deploy/railway/**", ".dockerignore"],
+    "deploy.startCommand": "node dist/src/keeper-runner.js",
+    "deploy.preDeployCommand": ["node dist/src/check-database.js --require-mainnet-deployment"],
+    "deploy.restartPolicyType": "NEVER",
+    "deploy.sleepApplication": false,
+    "build.dockerfilePath": "backend/Dockerfile",
+    "deploy.cronSchedule": "*/5 * * * *"
+  },
   "prices": {
     "source.rootDirectory": "/",
     "build.builder": "DOCKERFILE",
     "build.buildCommand": "",
     "build.watchPatterns": [
       "backend/**",
+      "contracts/keeper/**",
       "package.json",
       "pnpm-lock.yaml",
       "pnpm-workspace.yaml",

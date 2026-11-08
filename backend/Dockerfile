@@ -4,6 +4,7 @@ RUN test -z "${DATABASE_URL:-}${AGENT_API_KEY:-}${AGENT_GRANT_KEY:-}${OPERATOR_T
 RUN npm install --global pnpm@10.33.0
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY backend/package.json ./backend/package.json
+COPY contracts/keeper ./contracts/keeper
 RUN pnpm install --filter dragons-market-backend --frozen-lockfile
 COPY backend ./backend
 RUN pnpm build:server && pnpm --filter dragons-market-backend deploy --prod --legacy /runtime

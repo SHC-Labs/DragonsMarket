@@ -58,6 +58,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { b58decode, b58encode, rpc, setRpcPace, view, viewer } from "./chain.mjs";
+export { setRpcPace, setRpcCredentials } from './chain.mjs';
 import { compareCodeHashes, describeRelease, liveCodeHashes, parseReleaseHashes, upgradeProposalProblems } from "./release-check.mjs";
 import { reviewKind, storageRunway } from "./treasury.mjs";
 import { readQueue, writeQueue, withQueueLock, touch, finish, retry, selectJobs, bounded, serializeByKey, ingestFile, feedIsCurrent } from "./due-queue.mjs";

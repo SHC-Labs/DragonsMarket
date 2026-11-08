@@ -63,7 +63,7 @@ test("liveCodeHashes reads view_account at final for each account", async (t) =>
   t.mock.method(globalThis, "fetch", async (_url, init) => {
     const { params } = JSON.parse(init.body);
     seen.push(params);
-    return { ok: true, json: async () => ({ result: { code_hash: `hash-of-${params.account_id}` } }) };
+    return Response.json({ result: { code_hash: `hash-of-${params.account_id}` } });
   });
   const accounts = { market: "m.near", oracle: "o.near", council: "c.near" };
   const live = await liveCodeHashes("http://rpc.invalid", accounts);

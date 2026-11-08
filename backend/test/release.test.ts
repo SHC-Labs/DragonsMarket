@@ -9,7 +9,8 @@ import { registerDeployment } from '../src/ingestion/store.js';
 
 const run = promisify(execFile);
 const services = ['api', 'indexer', 'worker', 'publisher', 'agent'];
-const roles = [...services.map(name => `dm_${name}_login`), ...services.map(name => `dm_${name}`), 'dm_backup'];
+const roles = [...[...services, 'keeper', 'backup'].map(name => `dm_${name}_login`),
+  ...[...services, 'keeper', 'backup'].map(name => `dm_${name}`)];
 
 test('database release is repeatable and runtime checks reject owner credentials and schema drift', async () => {
   assert.ok(process.env.TEST_DATABASE_URL, 'Use a disposable PostgreSQL cluster for release tests');
@@ -27,6 +28,10 @@ test('database release is repeatable and runtime checks reject owner credentials
     for (const service of services) env[`${service.toUpperCase()}_DB_PASSWORD`] = randomBytes(32).toString('hex');
     const release = () => run(process.execPath, ['dist/src/release.js'], { env });
     assert.match((await release()).stdout, /service database roles are ready/);
+    assert.match((await release()).stdout, /Applied 0 migration/);
+    assert.equal((await admin.query("SELECT 1 FROM pg_roles WHERE rolname IN ('dm_keeper_login','dm_backup_login')")).rowCount, 0);
+    env.KEEPER_DB_PASSWORD = randomBytes(32).toString('hex');
+    env.BACKUP_DB_PASSWORD = randomBytes(32).toString('hex');
     assert.match((await release()).stdout, /Applied 0 migration/);
     const check = (databaseUrl: string, args: string[] = [], settings: NodeJS.ProcessEnv = {}) =>
       run(process.execPath, ['dist/src/check-database.js', ...args], {
@@ -55,7 +60,18 @@ test('database release is repeatable and runtime checks reject owner credentials
         RPC_URL: 'http://127.0.0.1:1' };
       await assert.rejects(check(runtime.href, workerArgs, manifest), /Database readiness check failed/);
       await registerDeployment(owner, readConfig({ ...manifest, DATABASE_URL: url.href }));
-      for (const service of ['indexer', 'worker']) {
+      const workerSettings = { ...manifest, AGENT_API_URL: 'https://agents.example.com',
+        AGENT_API_KEY: `naa_${'t'.repeat(43)}`, AGENT_API_WALLET_CONTRACT: 'wallets.near',
+        AGENT_GRANT_KEY: Buffer.alloc(32, 1).toString('base64'), AGENT_WORKER_TOKEN: 'w'.repeat(32) };
+      const agentCheck = (databaseUrl: string) => run(process.execPath, ['dist/src/check-agent-worker.js'], {
+        env: { ...workerSettings, DATABASE_URL: databaseUrl },
+      });
+      for (const databaseUrl of [url.href, runtime.href]) await assert.rejects(agentCheck(databaseUrl), /Agent worker readiness failed/);
+      const agentUrl = new URL(url);
+      agentUrl.username = 'dm_agent_login';
+      agentUrl.password = env.AGENT_DB_PASSWORD!;
+      assert.match((await agentCheck(agentUrl.href)).stdout, /restricted login and deployment verified/);
+      for (const service of ['indexer', 'worker', 'keeper', 'backup']) {
         const worker = new URL(url);
         worker.username = `dm_${service}_login`;
         worker.password = env[`${service.toUpperCase()}_DB_PASSWORD`]!;

@@ -18,8 +18,13 @@ Project: [dragons-market](https://railway.com/project/489b02ad-fd74-4413-ab91-83
 | `reconcile` | `backend/Dockerfile` | `node dist/src/reconcile.js --follow` | `dm_worker_login` | private only |
 | `verify-chain` | `backend/Dockerfile` | `node dist/src/verify-chain.js` | `dm_worker_login` | private, cron every six hours |
 | `prices` | `backend/Dockerfile` | `node dist/src/prices.js --follow` | `dm_worker_login` | private only |
+| `keeper` (prepared, not deployed) | `backend/Dockerfile` | `node dist/src/keeper-runner.js` | `dm_keeper_login` | private preparation job, cron every five minutes, dedicated volume |
 
 The agent worker owns partner credentials and sealed grants. The server cannot read those grants or write agent operations. MCP calls the server over Railway's private network. No Redis service is needed by the current implementation.
+
+The agent worker now uses `/health/ready` and `check-agent-worker.js` before deployment. These verify its configured manifest, schema and restricted login, not the validity of an unavailable external API key. Defuse portal credentials are still pending. [KEEPER.md](KEEPER.md) documents the keyless preparation job, dedicated role, volume initialization and signing boundary. The service settings include this additional job; `configure.mjs` therefore requires creating it before applying the full inventory. Do not apply the new inventory or deploy activation workers as part of a foundation release.
+
+Before releasing this revision's foundation, update the `server` and `database-release` watch patterns to include `contracts/keeper/**`, matching `services.json`; the release verifier checks those settings too. This can be done for those two existing services without creating or deploying the keeper. Apply agent-worker and keeper settings separately when their activation dependencies are ready.
 
 `indexer` copies finalized contract events into Postgres so the API can answer quickly. `reconcile` compares indexed liabilities with on-chain collateral and records discrepancies; it does not silently credit unexplained funds. `verify-chain` checks the database's stored block links, event counts and checkpoint consistency. `prices` collects external price evidence for settlement. Separate processes give each job its own failure lifecycle and database privileges. Only the indexer owns ingestion writes; price and reconciliation jobs cannot alter wallet sessions or agent grants.
 

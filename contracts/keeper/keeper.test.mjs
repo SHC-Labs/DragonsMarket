@@ -487,7 +487,7 @@ test("a batch validates every key scope before dispatch and caches shared key re
   const actions = [{contract:"oracle",method:"finalize"},{contract:"market",method:"sweep_fees"}];
   let calls = 0;
   let permission = "FullAccess";
-  t.mock.method(globalThis,"fetch",async()=>{ calls++;return {ok:true,json:async()=>({result:{permission}})}; });
+  t.mock.method(globalThis,"fetch",async()=>{ calls++;return Response.json({result:{permission}}); });
   await assert.rejects(validateActionKeys(opts,{},actions),/no key for oracle/);
   assert.equal(calls,0);
   await validateActionKeys(opts,{default:key},actions);

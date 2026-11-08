@@ -7,7 +7,9 @@ import { readConfig } from './config.js';
 const services = ['api', 'indexer', 'worker', 'publisher', 'agent'] as const;
 
 function credentials(env: NodeJS.ProcessEnv) {
-  return services.map(service => {
+  const requested = [...services, ...(['keeper', 'backup'] as const).filter(service =>
+    env[`${service.toUpperCase()}_DB_PASSWORD`] !== undefined)];
+  return requested.map(service => {
     const name = `${service.toUpperCase()}_DB_PASSWORD`;
     const password = env[name];
     if (!password || !/^[a-f0-9]{64}$/.test(password)) {

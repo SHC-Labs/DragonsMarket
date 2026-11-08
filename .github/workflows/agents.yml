@@ -7,6 +7,7 @@ on:
     branches: [main]
     paths:
       - backend/**
+      - contracts/keeper/**
       - mcp/**
       - web/**
       - package.json
@@ -76,6 +77,8 @@ jobs:
           NEXT_PUBLIC_RPC_URL: https://test.rpc.fastnear.com
           NEXT_PUBLIC_MARKET_ID: market.csp-fixture.testnet
           NEXT_PUBLIC_ORACLE_ID: oracle.csp-fixture.testnet
+          NEXT_PUBLIC_COUNCIL_ID: council.csp-fixture.testnet
+          NEXT_PUBLIC_NFT_ID: nft.csp-fixture.testnet
           NEXT_PUBLIC_VERIFIER_ID: verifier.csp-fixture.testnet
           NEXT_PUBLIC_COLLATERAL_TOKEN_ID: nep141:usdc.csp-fixture.testnet
           NEXT_PUBLIC_TOKEN_ID: usdc.csp-fixture.testnet

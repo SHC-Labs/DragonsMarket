@@ -13,7 +13,7 @@ test("planning does not read keys or contact RPC",async t=>{
   for(const bad of [{contracts:{...contracts,market:"market.near"}},{workers:9},{calls:[{...call,method:"set_owner"}]},{calls:[{...call,deposit:"1000000000000000000000001"}]},{calls:[{...call,expect:{receiver:"market",event:"buy",data:{}}}]},{calls:[{...call,target:"verifier",method:"mt_transfer_call",args:{receiver_id:"foreign.testnet"}}]}])assert.throws(()=>validatePlan({...plan,...bad}));
 });
 test("a mainnet RPC is refused before keys or transactions",async t=>{
-  t.mock.method(globalThis,"fetch",async()=>({ok:true,json:async()=>({result:{chain_id:"mainnet"}})}));
+  t.mock.method(globalThis,"fetch",async()=>Response.json({result:{chain_id:"mainnet"}}));
   await assert.rejects(run(plan,true),/not testnet/);
 });
 test("trade evidence needs finality, receipt success, receiver, event and entity",()=>{

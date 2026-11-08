@@ -15,6 +15,9 @@ importers:
 
   backend:
     dependencies:
+      '@dragons-market/keeper':
+        specifier: workspace:*
+        version: link:../contracts/keeper
       '@near-intents-agent-api/sdk':
         specifier: 0.7.3
         version: 0.7.3
@@ -37,6 +40,8 @@ importers:
       typescript:
         specifier: 5.9.3
         version: 5.9.3
+
+  contracts/keeper: {}
 
   mcp:
     dependencies:

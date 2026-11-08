@@ -22,7 +22,7 @@ test('guarded keeper catches up in bounded passes and persists without signing s
   t.mock.method(globalThis, 'fetch', async (_url, init) => {
     const request = JSON.parse(init.body); calls.push(request.method);
     assert.equal(request.method, 'block', 'preparation must not read signing keys or broadcast');
-    return { ok: true, json: async () => ({ result: { header: blocks.at(-1).header } }) };
+    return Response.json({ result: { header: blocks.at(-1).header } });
   });
   const first = await queuedRun(opts, {});
   assert.equal(first.current, false);
@@ -62,7 +62,7 @@ test('a current feed reaches due work while dry-run never loads or uses a signin
   const market = { id: '0', outcome: null, resolve_by: String(now - 1n) };
   t.mock.method(globalThis, 'fetch', async (_url, init) => {
     const request = JSON.parse(init.body);
-    if (request.method === 'block') return { ok: true, json: async () => ({ result: { header } }) };
+    if (request.method === 'block') return Response.json({ result: { header } });
     assert.equal(request.method, 'query');
     assert.equal(request.params.request_type, 'call_function', 'no access-key reads or broadcasts in dry-run');
     const { account_id, method_name } = request.params;
@@ -72,7 +72,7 @@ test('a current feed reaches due work while dry-run never loads or uses a signin
       : { get_fees: { collected: '0', revenue_due: '0', treasury_due: '0' },
         list_markets: [market], list_cases: [], get_market: market, get_case: null }[method_name];
     assert.notEqual(data, undefined, method_name);
-    return { ok: true, json: async () => ({ result: { result: [...Buffer.from(JSON.stringify(data))] } }) };
+    return Response.json({ result: { result: [...Buffer.from(JSON.stringify(data))] } });
   });
   const result = await queuedRun({ rpc: 'https://rpc.invalid', market: 'market.near', oracle: 'oracle.near',
     council: 'council.near', 'events-file': file, 'require-live-feed': true, 'dry-run': true }, {});
@@ -84,7 +84,7 @@ test('production key mode refuses full access, unbounded allowance and unrelated
   const keys = { oracle: 'ed25519:' + b58encode(Buffer.alloc(64, 7)) };
   const actions = [{ contract: 'oracle', method: 'finalize' }];
   let permission;
-  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => ({ result: { permission } }) }));
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ result: { permission } }));
   permission = 'FullAccess';
   await assert.rejects(validateActionKeys(opts, keys, actions), /Full-access/);
   for (const [method_names, allowance] of [[[], '1000'], [['finalize'], null], [['finalize'], '0'], [['finalize'], '-1'],

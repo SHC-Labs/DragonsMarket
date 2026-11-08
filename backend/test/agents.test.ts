@@ -631,11 +631,14 @@ test('a final transaction is its signer, receiver and calls, with events only fr
     const reply = (tx: Record<string, unknown>) => ({ call: async (method: string, params: unknown) => {
       assert.equal(method, 'EXPERIMENTAL_tx_status');
       assert.deepEqual(params, { tx_hash: 'tx1', sender_account_id: AGENT, wait_until: 'FINAL' });
-      return { transaction: { hash: 'tx1', signer_id: AGENT, receiver_id: 'rounds.fixture.near', ...tx },
+      return { final_execution_status: 'FINAL', status: ok,
+        transaction: { hash: 'tx1', signer_id: AGENT, receiver_id: 'rounds.fixture.near', ...tx },
+        transaction_outcome: { id: 'tx1', outcome: { executor_id: AGENT,
+          status: { SuccessReceiptId: 'r1' }, receipt_ids: ['r1', 'r2', 'r3'] } },
         receipts_outcome: [
-          { outcome: { executor_id: 'usdc.fixture.near', logs: ['Transfer 5000000'], status: ok } },
-          { outcome: { executor_id: 'rounds.fixture.near', logs: [log('deposit'), 'EVENT_JSON:{broken'], status: ok } },
-          { outcome: { executor_id: 'rounds.fixture.near', logs: [log('staked')], status: failed } },
+          { id: 'r1', outcome: { executor_id: 'usdc.fixture.near', logs: ['Transfer 5000000'], status: ok, receipt_ids: [] } },
+          { id: 'r2', outcome: { executor_id: 'rounds.fixture.near', logs: [log('deposit'), 'EVENT_JSON:{broken'], status: ok, receipt_ids: [] } },
+          { id: 'r3', outcome: { executor_id: 'rounds.fixture.near', logs: [log('staked')], status: failed, receipt_ids: [] } },
         ] };
     } });
     const actions = [{ FunctionCall: { method_name: 'stake', args, gas: 50000000000000, deposit: '1' } }, 'CreateAccount',

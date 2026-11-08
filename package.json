@@ -15,6 +15,7 @@
     "start:server": "pnpm --filter dragons-market-backend start",
     "start:mcp": "pnpm --filter dragons-market-mcp start",
     "start:agent-worker": "pnpm --filter dragons-market-backend agent-worker",
+    "start:keeper": "pnpm --filter dragons-market-backend keeper:prepare",
     "start:indexer": "pnpm --filter dragons-market-backend exec node dist/src/ingestion/follow.js",
     "start:reconcile": "pnpm --filter dragons-market-backend exec node dist/src/reconcile.js --follow",
     "start:verify-chain": "pnpm --filter dragons-market-backend exec node dist/src/verify-chain.js --follow",

@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "@playwright/test";
 import { cashOutWalletMethod, installCashOutFixture, checkCashOutBrowser } from "./cash-out-browser.mjs";
+import { checkStakeBrowser } from "./stake-browser.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const port = process.env.CSP_TEST_PORT ?? "3397", base = `http://127.0.0.1:${port}`;
@@ -88,6 +89,7 @@ try {
     await page.getByRole("button", { name: "Connected as csp-test.testnet. Disconnect" }).waitFor();
   }
   await checkCashOutBrowser(page, cashOut, base);
+  await checkStakeBrowser(page, base);
   for (const path of ["/agents", "/docs", "/api", "/council", "/privacy"]) {
     await page.goto(base + path, { waitUntil: "networkidle" });
     assert.equal(await page.locator("h1").count() > 0, true, path);

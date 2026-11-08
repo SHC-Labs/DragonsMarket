@@ -51,7 +51,7 @@ async function load(account: string) {
   const earnings = await Promise.all(tokens.map(token => seatEarnings(token).catch(() => null)));
   const seats: Seat[] = tokens.flatMap((token, i) => (stakes[i] ? [{ token, stake: stakes[i], earnings: earnings[i] }] : []));
   const owned = await nftTokensFor(account).then(list => list.map(t => t.token_id), () => null);
-  const eligible: Record<string, boolean> = {};
+  const eligible: Record<string, boolean> = Object.create(null);
   await Promise.all((owned ?? []).map(async token => { eligible[token] = await isAllowed(token); }));
   const claimable = await claimableOf(account).then(v => BigInt(v), () => null);
   const inProgress = await inProgressOf(account).then(v => BigInt(v), () => null);
@@ -60,11 +60,16 @@ async function load(account: string) {
 }
 
 export function StakeView() {
+  const { account } = useWallet();
+  return <AccountStakeView key={account ?? "disconnected"} />;
+}
+
+function AccountStakeView() {
   const { account, openConnect, walletAvailable, send } = useWallet();
   const now = useNow(1000);
   const { state, run, reset } = useTx(send, account);
   const [typed, setTyped] = useState("");
-  const [found, setFound] = useState<string[]>([]);
+  const [found, setFound] = useState<Record<string, boolean>>({});
   const [leaving, setLeaving] = useState<string | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
   const { data, error, loading, reload } = usePoll(async () => (account ? load(account) : null), [account], 6000);
@@ -89,7 +94,7 @@ export function StakeView() {
   const cap = data?.cfg.max_seats_per_account ?? 0;
   const seatsFull = data ? data.seats.length >= cap : true;
   const cooldown = data ? BigInt(data.cfg.cooldown_ns) : 0n;
-  const listed = data?.owned ?? found;
+  const listed = data?.owned ?? Object.keys(found);
   const tokens = data ? [...new Set([...listed])] : [];
 
   const lookup = async () => {
@@ -99,7 +104,8 @@ export function StakeView() {
     try {
       const record = await nftToken(token);
       if (!record || record.owner_id !== account) { setLookupError("That Dragon is not in your wallet."); return; }
-      setFound(list => (list.includes(token) ? list : [...list, token]));
+      const eligible = await isAllowed(token);
+      setFound(list => ({ ...list, [token]: eligible }));
       setTyped("");
       await reload();
     } catch {
@@ -133,7 +139,7 @@ export function StakeView() {
               <li className="position-row">
                 <div className="position-main"><span className="position-title">Revenue ready to claim</span><div className="position-shares num"><span>{formatMoney(data.claimable)} {config.tokenSymbol}</span></div></div>
                 <div className="position-status"><span className="position-outcome">Revenue share from quarters that have ended. It never expires.</span></div>
-                <div className="position-action"><Button size="sm" disabled={busy || data.claimable === 0n || data.seats.length === 0} onClick={() => act(claimCall(data.seats.map(s => s.token).slice(0, 10)), async () => BigInt(await claimableOf(account)) < data.claimable!, "Revenue claimed.")}>Claim</Button></div>
+                <div className="position-action"><Button size="sm" disabled={busy || data.claimable === 0n} onClick={() => act(claimCall(data.seats.map(s => s.token).slice(0, 10)), async () => BigInt(await claimableOf(account)) < data.claimable!, "Revenue claimed.")}>Claim</Button></div>
               </li>
               {data.inProgress !== null && data.inProgress > 0n && (
                 <li className="position-row">
@@ -159,7 +165,7 @@ export function StakeView() {
           {tokens.length > 0 && (
             <ul className="position-list">
               {tokens.map((token, i) => {
-                const ok = data.eligible[token] ?? true;
+                const ok = (data.eligible[token] ?? found[token]) === true;
                 return (
                   <li key={token} className="position-row enter" style={{ "--i": i } as React.CSSProperties}>
                     <div className="position-main"><span className="position-title">Dragon {token}</span></div>

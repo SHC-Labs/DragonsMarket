@@ -7,8 +7,12 @@ DO $$ BEGIN
  IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='dm_publisher') THEN CREATE ROLE dm_publisher NOLOGIN; END IF;
  IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='dm_backup') THEN CREATE ROLE dm_backup NOLOGIN; END IF;
  IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='dm_agent') THEN CREATE ROLE dm_agent NOLOGIN; END IF;
+ IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='dm_keeper') THEN CREATE ROLE dm_keeper NOLOGIN; END IF;
 END $$;
 GRANT USAGE ON SCHEMA public TO dm_api,dm_indexer,dm_worker,dm_publisher,dm_backup,dm_agent;
+GRANT USAGE ON SCHEMA public TO dm_keeper;
+GRANT SELECT ON schema_migrations,deployments,indexed_blocks,indexer_checkpoints TO dm_keeper;
+GRANT SELECT,INSERT,UPDATE ON feed_exports TO dm_keeper;
 GRANT SELECT ON schema_migrations,deployments,indexer_checkpoints,indexed_blocks,indexed_receipts,raw_events,indexer_status,source_heads TO dm_api,dm_indexer,dm_worker;
 GRANT INSERT,UPDATE ON indexed_blocks,indexed_receipts,raw_events,indexer_checkpoints,indexer_status,source_heads TO dm_indexer;
 -- Registration remains an explicit migration-owner/administrator action.

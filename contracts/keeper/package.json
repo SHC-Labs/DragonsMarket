@@ -1,0 +1,12 @@
+{
+  "name": "@dragons-market/keeper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "types": "./keeper.d.mts", "import": "./keeper.mjs" }
+  },
+  "files": ["*.mjs", "*.d.mts", "!*.test.mjs"],
+  "scripts": { "test": "node --test *.test.mjs" },
+  "engines": { "node": ">=24.21.0 <25" }
+}

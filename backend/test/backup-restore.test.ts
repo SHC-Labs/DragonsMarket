@@ -16,7 +16,7 @@ import { FixtureSource } from '../src/ingestion/source.js';
 const exec = promisify(execFile);
 const services = ['api', 'indexer', 'worker', 'publisher', 'agent'];
 const roles = [...services.map(name => `dm_${name}_login`),
-  ...services.map(name => `dm_${name}`), 'dm_backup_test_login', 'dm_backup'];
+  ...services.map(name => `dm_${name}`), 'dm_backup_test_login', 'dm_backup', 'dm_keeper'];
 const identifier = (name: string) => `"${name.replaceAll('"', '""')}"`;
 
 function pgEnvironment(url: URL, directory: string): NodeJS.ProcessEnv {
