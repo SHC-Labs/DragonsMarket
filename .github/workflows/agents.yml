@@ -3,6 +3,11 @@ name: applications
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      paid_private_checks:
+        description: Run the full suite in the private repo using its Actions budget
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -31,6 +36,9 @@ concurrency:
 
 jobs:
   agents:
+    if: >-
+      (github.repository == 'SHC-Labs/DragonsMarket' && github.event.repository.private == false) ||
+      (github.repository == 'SHC-Labs/Dragons-Market' && github.event_name == 'workflow_dispatch' && inputs.paid_private_checks)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     services:

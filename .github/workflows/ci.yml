@@ -1,6 +1,12 @@
 name: contracts
 
 on:
+  workflow_dispatch:
+    inputs:
+      paid_private_checks:
+        description: Run all contract checks privately; can consume hundreds of paid runner minutes
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths: [contracts/**, backend/**, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version, .github/workflows/ci.yml]
@@ -24,6 +30,9 @@ defaults:
 
 jobs:
   changes:
+    if: >-
+      (github.repository == 'SHC-Labs/DragonsMarket' && github.event.repository.private == false) ||
+      (github.repository == 'SHC-Labs/Dragons-Market' && github.event_name == 'workflow_dispatch' && inputs.paid_private_checks)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     defaults:
@@ -210,7 +219,9 @@ jobs:
       - run: node --test verify-build.test.mjs run-sandbox-shard.test.mjs keeper/*.test.mjs
 
   contract-checks:
-    if: always()
+    if: >-
+      always() && ((github.repository == 'SHC-Labs/DragonsMarket' && github.event.repository.private == false) ||
+      (github.repository == 'SHC-Labs/Dragons-Market' && github.event_name == 'workflow_dispatch' && inputs.paid_private_checks))
     needs: [changes, fmt, clippy, unit, sandbox, keeper]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
