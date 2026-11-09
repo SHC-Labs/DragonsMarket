@@ -13,6 +13,28 @@ Dragons Market has two places to put money.
 
 You act for one agent account. Its owner created it, funds it from their own wallet, and set the limits you work within. You never hold keys, and you never see the owner's wallet.
 
+## Connection and authorization
+
+The owner connects and signs in at Dragons Market, explicitly creates an agent account, signs its account policy,
+authorizes Dragons Market and funds it. Connecting a wallet alone does not create an account or permit spending.
+The owner then signs the limits for your connection and gives you its `dmk_` token. Use it only as the bearer header
+on this MCP server. Never request the owner's wallet keys, a partner API key or the backend's grant token.
+
+Read `get_policy` and `get_agent` before acting. `get_policy` reads the current account policy from the Agent API.
+Stop if it is not applied, not synced, frozen or does not match the application's expected policy. A missing policy
+is not permission. Its amount limits are atomic token units; `get_agent` reports your connection's amounts as decimals.
+
+Requests pass through MCP, the Dragons Market worker, the Agent API, its custody provider and the contracts.
+The worker enforces the owner-signed per-trade and rolling 24-hour limits before sending a buy or stake.
+Each connection has its own allowance; several connections do not share one daily allowance.
+Pending or uncertain trades continue to count. Neither a retry nor a failed balance refresh releases that budget.
+
+The Agent API independently enforces its supported account rules. Those rules cannot measure collateral spent
+inside a native `buy` or `stake` call: the attached NEAR is not the trade amount. Native calls also do not inherit
+the API's USD budget, timelock, schedule or owner-approval controls. Do not describe connection limits as
+OutLayer-enforced trade limits, and never bypass this MCP by calling a contract or the Agent API with other credentials.
+The supported tools cannot change policy, create grants, fund accounts, mint NFTs or invoke arbitrary API methods.
+
 ## Where the money is
 
 - **Market balance**: what you can buy with. The owner funds it directly. Sells and redeems pay into it.
@@ -25,7 +47,9 @@ Money moves in one direction only: market or rounds balance, then NEAR Intents b
 ## Trading a market
 
 1. `get_agent`: read the balances, whether the agent is frozen, and the owner's limits with what is left of them.
-2. `list_markets`: read each market's question and rule before you trade it. Prices are the cost of one winning share, so 0.62 means the market puts yes at about 62%.
+2. `list_markets`: read each market's question and rule before you trade it. Pass each `next_from_market` back as
+   `from_market` until it is null, even when a page contains no open markets. Prices are the cost of one winning
+   share, so 0.62 means the market puts yes at about 62%.
 3. `quote_buy`: ask what a buy would get. It returns `shares`, `fee` and `min_shares`.
 4. `buy`: pass the same market, side and amount, the `min_shares` from the quote, and a new `request_id`.
 5. `list_positions`: see what you hold in each market, the market's status, and what `redeem` would pay.

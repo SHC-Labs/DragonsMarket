@@ -13,11 +13,10 @@ import {
   type IntentStatus, type OwnerIntent,
 } from "@/lib/agents";
 
-const NATIVE_WARNING = "Native methods are for advanced users and are not protected by this account's policy: "
-  + "destinations, budget, timelock, schedule and owner approval don't apply. A NEAR transfer can go to any account. "
-  + "A signed EVM or Solana transaction, or EVM typed data such as a permit, can move everything at that address. "
-  + "Only switch on what the agent needs, for services you trust; a service may treat a signed message as you "
-  + "logging in.";
+const NATIVE_WARNING = "A contract call can spend the funds that contract holds for the agent. The Agent API's "
+  + "USD budget, timelock, schedule and owner-approval settings do not apply to these calls. Dragons Market "
+  + "enforces the trade limits you sign for each MCP connection before sending a call. The custody provider "
+  + "does not independently enforce that trade amount. Fund only what the agent may put at risk.";
 const NAME = /^[\x21-\x7e](?:[\x20-\x7e]{0,62}[\x21-\x7e])?$/;
 
 function outcome(s: IntentStatus) {

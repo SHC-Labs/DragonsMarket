@@ -9,7 +9,10 @@ interface Credentials { token: string; decimals: number }
 export const INSTRUCTIONS = [
   'Dragons Market lets you trade event markets and stake on price rounds for the one agent account its owner',
   'connected to you. Read the dragons-market://skill resource before your first action.',
-  'To trade a market call get_agent and list_markets, then quote_buy or quote_sell, then buy or sell with the minimum',
+  'Read get_policy and get_agent before acting. Trade amounts are enforced by Dragons Market, not by the native',
+  'call policy at the Agent API. Never bypass this MCP to trade with another credential.',
+  'To trade a market call list_markets, following next_from_market even through empty pages, then quote_buy or',
+  'quote_sell, then buy or sell with the minimum',
   'the quote returned. Call list_positions to find what you hold and what can be redeemed.',
   'To stake on a round call list_rounds, then quote_stake, then stake with the min_shares the quote returned.',
   'Stake only in a round whose taking_stakes is true, and call list_claimable to find stakes ready to claim.',
@@ -151,10 +154,11 @@ async function quote(backend: Backend, { token, decimals }: Credentials, args: Q
 
 const PRICE_DECIMALS = 6;
 
-async function markets(backend: Backend, { token, decimals }: Credentials) {
-  const answer = await backend.call(token, 'GET', 'markets');
+async function markets(backend: Backend, { token, decimals }: Credentials, fromMarket?: string) {
+  const answer = await backend.call(token, 'POST', 'markets', { from_market: fromMarket ?? '0' });
   const listed = Array.isArray(answer.markets) ? answer.markets.map(record) : [];
-  return ok({ rules: answer.rules ?? null, markets: listed.map(market => ({ ...market,
+  return ok({ rules: answer.rules ?? null, next_from_market: answer.next_from_market ?? null,
+    markets: listed.map(market => ({ ...market,
     price_yes: fromUnits(market.price_yes, PRICE_DECIMALS), price_no: fromUnits(market.price_no, PRICE_DECIMALS),
     locked: fromUnits(market.locked, decimals) })) });
 }
@@ -197,13 +201,21 @@ function guarded<A>(work: (credentials: Credentials, args: A) => Promise<CallToo
 }
 
 function registerTools(server: McpServer, backend: Backend) {
+  server.registerTool('get_policy', { title: 'Account and connection policy', annotations: READ,
+    inputSchema: z.object({}), description: 'Reads the account policy from the Agent API and the owner-signed '
+      + 'connection limits. Explains which service enforces each rule. Raw token limits use atomic units. '
+      + 'Stop if the account policy is unverified, unsynced or frozen. This tool cannot change permissions.' },
+  guarded(c => backend.call(c.token, 'GET', 'policy').then(ok)));
   server.registerTool('get_agent', { title: 'Agent account', annotations: READ, inputSchema: z.object({}),
     description: 'The agent account you act for: its balances, whether it is frozen or authorized, and the owner\'s '
       + 'spending limits with what is left of them in the last 24 hours.' },
   guarded(c => agentSummary(backend, c)));
-  server.registerTool('list_markets', { title: 'Open markets', annotations: READ, inputSchema: z.object({}),
-    description: 'The event markets open to trade now, with each one\'s question, rule, closing time and prices.' },
-  guarded(c => markets(backend, c)));
+  server.registerTool('list_markets', { title: 'Open markets', annotations: READ,
+    inputSchema: z.object({ from_market: MarketId.default('0').describe('Omit for the first page, then pass '
+      + 'next_from_market from the previous answer. Continue through empty pages until it is null.') }),
+    description: 'Scans up to 50 market ids for open event markets, with rules, closing time and prices. '
+      + 'An empty page is not the end when next_from_market is present.' },
+  guarded((c, args: { from_market: string }) => markets(backend, c, args.from_market)));
   server.registerTool('list_positions', { title: 'Market positions', annotations: READ, inputSchema: z.object({}),
     description: 'The agent\'s shares in each market, the market\'s status, and what redeem would pay now.' },
   guarded(c => positions(backend, c)));

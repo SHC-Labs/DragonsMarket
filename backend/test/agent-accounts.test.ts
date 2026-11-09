@@ -81,9 +81,18 @@ test('a policy the API shows back may not grant the agent more than the one sent
     ['no cap on the collateral', { ...sent, limits: { ...sent.limits,
       per_transaction: { 'nep141:wrap.near': sent.limits.per_transaction!['nep141:wrap.near'] } } }],
     ['no hourly cap', { ...sent, max_actions_per_hour: null }],
+    ['a changed budget', { ...sent, budget: { ...sent.budget, daily_usd: '1' } }],
+    ['a changed timelock', { ...sent, timelock_ms: 1000 }],
+    ['an unexpected schedule', { ...sent, schedule: { mode: 'only', time_zone: 'UTC', windows: [] } }],
+    ['an unknown signing permission', { ...sent, sign: { recipients: ['mallory.near'] } }],
+    ['an unknown native permission', { ...sent, native: { ...native,
+      near: { ...native.near, sign_intent: true } } }],
     ['no policy at all', undefined],
   ];
   for (const [why, policy] of wider) assert.equal(grantsNoMore(policy, sent), false, why);
+  const restricted = { ...sent, budget: { ...sent.budget, daily_usd: '5' }, timelock_ms: 60000 };
+  assert.equal(grantsNoMore({ ...restricted, budget: sent.budget }, restricted), false, 'budget removed');
+  assert.equal(grantsNoMore({ ...restricted, timelock_ms: 0 }, restricted), false, 'timelock removed');
 });
 
 test('a grant token is sealed to its agent and commitment, and anything else opens to nothing', () => {

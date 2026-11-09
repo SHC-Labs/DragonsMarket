@@ -43,6 +43,13 @@ export interface AgentStatus {
   details: Record<string, unknown>;
 }
 
+export interface AccountPolicy {
+  status: 'NONE' | 'SIGNED' | 'APPLIED' | 'FAILED';
+  revision: number | null;
+  synced: boolean;
+  policy: Record<string, unknown> | null;
+}
+
 export interface OwnerIntent {
   correlation_id: string;
   type: IntentType;
@@ -200,6 +207,20 @@ export class AgentApiClient {
     return answer(this.api.getPolicy(agentId, { signal: this.deadline() })).then(v => {
       if (!object(v) || !object(v.policy) || typeof v.policy.frozen !== 'boolean') return untrusted('policy');
       return v.policy.frozen;
+    });
+  }
+
+  policy(agentId: string): Promise<AccountPolicy> {
+    if (!AGENT_ID.test(agentId)) return Promise.reject(new Error('invalid_agent_id'));
+    return answer(this.api.getPolicy(agentId, { signal: this.deadline() })).then(v => {
+      if (!object(v) || typeof v.status !== 'string' || !['NONE', 'SIGNED', 'APPLIED', 'FAILED'].includes(v.status)
+        || typeof v.provider_policy_synced !== 'boolean'
+        || !(v.revision === null || (Number.isSafeInteger(v.revision) && (v.revision as number) >= 0))
+        || !(v.policy === null || (object(v.policy) && typeof v.policy.frozen === 'boolean'))) {
+        return untrusted('policy');
+      }
+      return { status: v.status as AccountPolicy['status'], revision: v.revision as number | null,
+        synced: v.provider_policy_synced, policy: v.policy as AccountPolicy['policy'] };
     });
   }
 

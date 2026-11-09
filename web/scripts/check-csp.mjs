@@ -11,6 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "@playwright/test";
 import { cashOutWalletMethod, installCashOutFixture, checkCashOutBrowser, checkMarketWithdrawalBrowser } from "./cash-out-browser.mjs";
 import { checkStakeBrowser } from "./stake-browser.mjs";
+import { checkMarketListBrowser } from "./market-list-browser.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const port = process.env.CSP_TEST_PORT ?? "3397", base = `http://127.0.0.1:${port}`;
@@ -101,6 +102,7 @@ try {
   await checkCashOutBrowser(page, cashOut, base);
   await checkMarketWithdrawalBrowser(page, base);
   await checkStakeBrowser(page, base);
+  await checkMarketListBrowser(page, base);
   for (const path of ["/agents", "/docs", "/api", "/council", "/privacy"]) {
     await page.goto(base + path, { waitUntil: "networkidle" });
     assert.equal(await page.locator("h1").count() > 0, true, path);

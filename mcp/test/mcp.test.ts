@@ -45,9 +45,17 @@ function fakeBackend() {
         limits: { max_spend: '5000000', daily_limit: '20000000', spent_today: '7500000',
           expires_at: '2099-01-01T00:00:00.000Z' } });
     }
+    if (path === 'policy') {
+      return reply(200, { agent_id: AGENT_ID,
+        account_policy: { status: 'APPLIED', revision: 2, provider_synced: true, matches_application_policy: true },
+        connection: { max_spend: '5000000', daily_limit: '20000000', scope: 'this_connection' },
+        enforcement: { trade_amounts: 'dragons_market', cash_out: 'agent_api',
+          native_call_trade_amounts_visible_to_provider: false } });
+    }
     if (path === 'markets') {
       return reply(200, { rules: { fee_rate_bps: 200, paused: false, sells_paused: false },
-        markets: [{ market: '7', title: 'Will it rain?', rule: 'If it rains.', resolution_source: 'https://x.test',
+        next_from_market: body?.from_market === '50' ? null : '50',
+        markets: body?.from_market === '50' ? [] : [{ market: '7', title: 'Will it rain?', rule: 'If it rains.', resolution_source: 'https://x.test',
           category: 'world', closes_at: '2030-01-01T00:00:00.000Z', price_yes: '620000', price_no: '380000',
           locked: '1500000' }] });
     }
@@ -350,7 +358,7 @@ test('an agent reads its account and the rounds, with amounts in the token and i
   withMcp(async ({ client }) => {
     assert.match(client.getInstructions() ?? '', /request_id/);
     const tools = (await client.listTools()).tools.map(t => t.name).sort();
-    assert.deepEqual(tools, ['buy', 'cash_out', 'claim', 'get_agent', 'list_claimable', 'list_markets',
+    assert.deepEqual(tools, ['buy', 'cash_out', 'claim', 'get_agent', 'get_policy', 'list_claimable', 'list_markets',
       'list_operations', 'list_positions', 'list_rounds', 'quote_buy', 'quote_sell', 'quote_stake', 'redeem', 'sell',
       'stake', 'withdraw']);
     const agent = structured(await client.callTool({ name: 'get_agent', arguments: {} }));
@@ -366,6 +374,11 @@ test('an agent reads its account and the rounds, with amounts in the token and i
     assert.deepEqual(claimable.stakes, [{ series: 0, round: '6', side: 'up', amount: '5', outcome: 'up' }]);
     const skill = await client.readResource({ uri: 'dragons-market://skill' });
     assert.match(String((skill.contents[0] as { text?: string }).text), /## request_id/);
+    assert.match(String((skill.contents[0] as { text?: string }).text), /cannot measure collateral/);
+    const policy = structured(await client.callTool({ name: 'get_policy', arguments: {} }));
+    assert.equal((policy.account_policy as Json).revision, 2);
+    assert.equal((policy.connection as Json).max_spend, '5000000', 'policy amounts remain atomic units');
+    assert.equal((policy.enforcement as Json).native_call_trade_amounts_visible_to_provider, false);
     const prompt = await client.getPrompt({ name: 'trade-dragons-market' });
     assert.match(JSON.stringify(prompt.messages), /dragons-market/);
   }));
@@ -375,6 +388,11 @@ test('an agent reads the markets, then buys, sells and redeems as quoted', () =>
     const listed = structured(await client.callTool({ name: 'list_markets', arguments: {} }));
     assert.deepEqual((listed.markets as Json[]).map(m => [m.market, m.title, m.price_yes, m.price_no, m.locked]),
       [['7', 'Will it rain?', '0.62', '0.38', '1.5']]);
+    assert.equal(listed.next_from_market, '50');
+    const next = structured(await client.callTool({ name: 'list_markets',
+      arguments: { from_market: listed.next_from_market } }));
+    assert.deepEqual([next.markets, next.next_from_market], [[], null]);
+    assert.deepEqual(fake.seen.at(-1)!.body, { from_market: '50' });
     const held = structured(await client.callTool({ name: 'list_positions', arguments: {} }));
     assert.deepEqual(held.positions, [{ market_id: '7', yes: '4000000', no: '0', status: 'resolved', outcome: 'yes',
       redeemable: '6.25' }]);
