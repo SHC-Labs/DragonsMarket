@@ -41,6 +41,11 @@ function Balance({ label, value, children, tone }: { label: string; value: bigin
 }
 
 export default function Portfolio() {
+  const { account } = useWallet();
+  return <AccountPortfolio key={account ?? "disconnected"} />;
+}
+
+function AccountPortfolio() {
   const { account, openConnect, walletAvailable, send } = useWallet();
   const { state, run, reset } = useTx(send, account);
   const { data, error, loading, reload } = usePoll(

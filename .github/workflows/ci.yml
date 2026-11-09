@@ -3,7 +3,7 @@ name: contracts
 on:
   push:
     branches: [main]
-    paths: [contracts/**, .github/workflows/ci.yml]
+    paths: [contracts/**, backend/**, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version, .github/workflows/ci.yml]
   pull_request:
     branches: [main]
 
@@ -31,22 +31,36 @@ jobs:
         working-directory: .
     outputs:
       contracts: ${{ steps.paths.outputs.contracts }}
+      chain: ${{ steps.paths.outputs.chain }}
     steps:
       - name: Detect contract changes without running pull request code
         id: paths
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+          limit=3000
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed-files"
+          elif [[ "$BEFORE_SHA" =~ ^[a-f0-9]{40}$ ]] && [ "$BEFORE_SHA" != 0000000000000000000000000000000000000000 ]; then
+            limit=300
+            gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE_SHA...$HEAD_SHA" --jq '.files[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed-files"
+          else
+            echo 'contracts=true' >> "$GITHUB_OUTPUT"
+            echo 'chain=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$(wc -l < "$RUNNER_TEMP/changed-files")" -ge "$limit" ] || grep -E '^(contracts/|\.github/workflows/ci\.yml$)' "$RUNNER_TEMP/changed-files" > /dev/null; then
             echo 'contracts=true' >> "$GITHUB_OUTPUT"
           else
-            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed-files"
-            if [ "$(wc -l < "$RUNNER_TEMP/changed-files")" -ge 3000 ] || grep -E '^(contracts/|\.github/workflows/ci\.yml$)' "$RUNNER_TEMP/changed-files" > /dev/null; then
-              echo 'contracts=true' >> "$GITHUB_OUTPUT"
-            else
-              echo 'contracts=false' >> "$GITHUB_OUTPUT"
-            fi
+            echo 'contracts=false' >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$(wc -l < "$RUNNER_TEMP/changed-files")" -ge "$limit" ] || grep -E '^(contracts/|backend/|package\.json$|pnpm-(lock\.yaml|workspace\.yaml)$|\.node-version$|\.github/workflows/ci\.yml$)' "$RUNNER_TEMP/changed-files" > /dev/null; then
+            echo 'chain=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'chain=false' >> "$GITHUB_OUTPUT"
           fi
 
   fmt:
@@ -105,14 +119,15 @@ jobs:
 
   sandbox:
     needs: changes
-    if: needs.changes.outputs.contracts == 'true'
+    if: needs.changes.outputs.chain == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
       max-parallel: 8
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        # Backend-only PRs need one compiled-contract integration runner, not eight Rust test shards.
+        shard: ${{ fromJSON(needs.changes.outputs.contracts == 'true' && '[0,1,2,3,4,5,6,7]' || '[0]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
@@ -139,6 +154,7 @@ jobs:
       - name: Install cargo-near
         run: cargo near --version 2>/dev/null | grep -q 0.22.0 || cargo install cargo-near --version 0.22.0 --locked
       - name: Build the version 5 Council migration fixture
+        if: needs.changes.outputs.contracts == 'true'
         run: bash build-council-v5.sh
       - name: Build the wasm the sandbox tests load
         run: ./build.sh
@@ -156,6 +172,7 @@ jobs:
           cp "$RUNNER_TEMP/intents-repro/defuse.wasm" target/intents/defuse.wasm
           echo "a1afab98916d9f213746544dcf8e4e6bdb22c0be6bc5dfbd8ea8814c9922b547  target/intents/defuse.wasm" | sha256sum --check
       - name: Sandbox tests
+        if: needs.changes.outputs.contracts == 'true'
         # near-workspaces downloads the nearcore sandbox binary itself the first time it runs. Sandbox chain time follows
         # the wall clock, so on a 2 core runner many parallel sandboxes slow each transaction until a short dispute
         # window closes mid-test. Two threads keep the tests inside their windows. With debug info the test binaries
@@ -166,6 +183,13 @@ jobs:
         # Partition every Cargo integration target, including newly added ones. Keep
         # two sandbox processes per runner; increasing threads breaks timed disputes.
         run: node run-sandbox-shard.mjs ${{ matrix.shard }} 8
+      - name: Agent, keeper and DAO integration with the compiled contracts
+        if: matrix.shard == 0
+        working-directory: .
+        run: |
+          npm install --global pnpm@10.33.0
+          pnpm install --frozen-lockfile --filter dragons-market-backend...
+          pnpm --filter dragons-market-backend test:agent-chain
       - name: Record the sha256 of each wasm
         run: sha256sum target/near/*/*.wasm | tee wasm-sha256.txt
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
@@ -201,9 +225,16 @@ jobs:
           node -e '
             const jobs = JSON.parse(process.env.RESULTS);
             if (jobs.changes.result !== "success") process.exit(1);
-            if (jobs.changes.outputs.contracts === "false") process.exit(0);
-            if (jobs.changes.outputs.contracts !== "true") process.exit(1);
+            const { contracts, chain } = jobs.changes.outputs;
+            if (![contracts, chain].every(value => ["true", "false"].includes(value))) process.exit(1);
+            const required = ["changes", ...(chain === "true" ? ["sandbox"] : []),
+              ...(contracts === "true" ? ["fmt", "clippy", "unit", "keeper", "sandbox"] : [])];
+            for (const name of required) {
+              if (jobs[name]?.result !== "success") { console.error(`${name}: not successful`); process.exit(1); }
+            }
             for (const [name, job] of Object.entries(jobs)) {
-              if (job.result !== "success") { console.error(`${name}: ${job.result}`); process.exit(1); }
+              if (!["success", "skipped"].includes(job.result)) {
+                console.error(`${name}: ${job.result}`); process.exit(1);
+              }
             }
           '

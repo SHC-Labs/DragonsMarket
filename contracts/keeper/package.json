@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": { "types": "./keeper.d.mts", "import": "./keeper.mjs" }
+    ".": { "types": "./keeper.d.mts", "import": "./keeper.mjs" },
+    "./treasury": { "types": "./treasury.d.mts", "import": "./treasury.mjs" }
   },
   "files": ["*.mjs", "*.d.mts", "!*.test.mjs"],
   "scripts": { "test": "node --test *.test.mjs" },

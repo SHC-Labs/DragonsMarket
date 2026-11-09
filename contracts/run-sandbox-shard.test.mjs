@@ -12,6 +12,33 @@ const metadata = { packages: [{ name: 'tests', targets: [
   { name: 'tests', kind: ['lib'] }, ...names.map(name => ({ name, kind: ['test'] })),
 ] }] };
 
+test('the required check refuses failed, cancelled or missing chain integration even on backend-only PRs', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const script = workflow.match(/node -e '\n([\s\S]+?)\n          '/)?.[1];
+  assert.ok(script, 'required check script is present');
+  const run = jobs => spawnSync(process.execPath, ['-e', script], {
+    env: { ...process.env, RESULTS: JSON.stringify(jobs) }, encoding: 'utf8',
+  }).status;
+  const jobs = { changes: { result: 'success', outputs: { contracts: 'false', chain: 'true' } },
+    fmt: { result: 'skipped' }, clippy: { result: 'skipped' }, unit: { result: 'skipped' },
+    keeper: { result: 'skipped' }, sandbox: { result: 'success' } };
+  assert.equal(run(jobs), 0);
+  for (const result of ['failure', 'cancelled', 'skipped', undefined]) {
+    assert.equal(run({ ...jobs, sandbox: { result } }), 1, String(result));
+  }
+  const missing = structuredClone(jobs);
+  delete missing.sandbox;
+  assert.equal(run(missing), 1);
+  assert.equal(run({ ...jobs, changes: { result: 'failure' } }), 1);
+  assert.equal(run({ ...jobs, changes: { result: 'success', outputs: { contracts: 'false' } } }), 1);
+  jobs.changes.outputs.chain = 'false'; jobs.sandbox.result = 'skipped';
+  assert.equal(run(jobs), 0, 'documentation-only changes may skip integration');
+  jobs.changes.outputs.contracts = 'true'; jobs.changes.outputs.chain = 'true'; jobs.sandbox.result = 'success';
+  assert.equal(run(jobs), 1, 'contract changes require the Rust checks too');
+  for (const job of Object.values(jobs)) job.result = 'success';
+  assert.equal(run(jobs), 0);
+});
+
 test('all integration targets occur exactly once, including targets added later', () => {
   for (const extra of [[], [{ name: 'new_regression', kind: ['test'] }]]) {
     const source = structuredClone(metadata);

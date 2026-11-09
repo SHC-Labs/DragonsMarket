@@ -23,6 +23,11 @@ type Quote = { mode: "buy"; q: BuyQuote } | { mode: "sell"; q: SellQuote };
 interface Action { label: string; onClick?: () => void; disabled?: boolean; locked?: boolean; note?: string }
 
 export function TradeTicket({ market, initialSide = "yes" }: { market: MarketView; initialSide?: Side }) {
+  const { account } = useWallet();
+  return <AccountTradeTicket key={`${account ?? "disconnected"}:${market.id}`} market={market} initialSide={initialSide} />;
+}
+
+function AccountTradeTicket({ market, initialSide }: { market: MarketView; initialSide: Side }) {
   const { account, walletAvailable, openConnect, send } = useWallet();
   const { state, run, reset } = useTx(send, account);
   const now = useNow(1000);

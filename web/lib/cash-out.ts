@@ -1,9 +1,7 @@
 import { config } from "./config";
 import { finalTransaction, view } from "./rpc";
 import { tokenBalance, type FunctionCall } from "./market";
-
-const record = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
+import { record, decoded, completedReceipts } from "./receipt-proof";
 
 function validate(account: string, amount: bigint) {
   if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(account) || account.length < 2 || account.length > 64)
@@ -35,38 +33,6 @@ export async function cashOutStorage(account: string, amount: bigint): Promise<F
     || BigInt(bounds.min) > 10n ** 22n) throw new Error("Token storage needs review before withdrawing.");
   return { receiverId: config.tokenId, methodName: "storage_deposit",
     args: { account_id: account, registration_only: true }, gas: "30000000000000", deposit: bounds.min };
-}
-
-function decoded(value: unknown): unknown {
-  if (typeof value !== "string") return null;
-  try { return JSON.parse(atob(value)); } catch { return null; }
-}
-
-function completedReceipts(result: Record<string, unknown>): Record<string, unknown>[] | null {
-  if (!record(result.transaction_outcome) || !record(result.transaction_outcome.outcome)
-    || !Array.isArray(result.receipts_outcome) || result.receipts_outcome.length > 256) return null;
-  const receipts = new Map<string, Record<string, unknown>>();
-  for (const item of result.receipts_outcome) {
-    if (!record(item) || typeof item.id !== "string" || receipts.has(item.id) || !record(item.outcome)) return null;
-    receipts.set(item.id, item.outcome);
-  }
-  const queue: unknown[] = [result.transaction_outcome.outcome];
-  const seen = new Set<string>();
-  const outcomes: Record<string, unknown>[] = [];
-  while (queue.length) {
-    const outcome = queue.shift();
-    if (!record(outcome) || !record(outcome.status) || !Array.isArray(outcome.receipt_ids)
-      || Object.keys(outcome.status).length !== 1
-      || !(typeof outcome.status.SuccessValue === "string" || typeof outcome.status.SuccessReceiptId === "string")) return null;
-    if (typeof outcome.status.SuccessReceiptId === "string"
-      && !outcome.receipt_ids.includes(outcome.status.SuccessReceiptId)) return null;
-    outcomes.push(outcome);
-    for (const id of outcome.receipt_ids) {
-      if (typeof id !== "string" || seen.has(id) || !receipts.has(id)) return null;
-      seen.add(id); queue.push(receipts.get(id));
-    }
-  }
-  return seen.size === receipts.size ? outcomes : null;
 }
 
 export function cashOutConfirmed(result: unknown, hash: string, account: string, amount: bigint): boolean {

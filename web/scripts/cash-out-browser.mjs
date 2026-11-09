@@ -94,3 +94,50 @@ export async function checkCashOutBrowser(page, fixture, base) {
   assert.equal(fixture.sent.length, 2, "recovery checks do not resend a transaction");
   console.log("Cash-out browser passed: storage, exact destination, cross-tab exclusion, reload recovery, final payout");
 }
+
+export async function checkMarketWithdrawalBrowser(page, base) {
+  const hash = "D".repeat(44), market = "market.csp-fixture.testnet";
+  let sent = 0, checks = 0, settled = false;
+  const handler = async route => {
+    const body = route.request().postDataJSON(), headers = { "access-control-allow-origin": "*" };
+    if (route.request().url().endsWith("/cash-out-fixture")) {
+      assert.equal(body.receiverId, market);
+      assert.equal(body.actions[0].params.methodName, "withdraw");
+      assert.deepEqual(body.actions[0].params.args, { amount: "1000000" });
+      sent++;
+      return route.fulfill({ json: { transaction: { hash } }, headers });
+    }
+    if (body.params?.method_name === "get_balance") return route.fulfill({ headers,
+      json: { jsonrpc: "2.0", id: body.id, result: { result: [...Buffer.from(JSON.stringify(sent ? "0" : "1000000"))] } } });
+    if (body.method !== "EXPERIMENTAL_tx_status" || body.params.tx_hash !== hash) return route.fallback();
+    checks++;
+    return route.fulfill({ headers, json: { jsonrpc: "2.0", id: body.id, result: {
+      final_execution_status: settled ? "FINAL" : "EXECUTED", status: { SuccessValue: "" },
+      transaction: { hash, signer_id: account, receiver_id: market, actions: [{ FunctionCall: {
+        method_name: "withdraw", deposit: "1", args: encoded({ amount: "1000000" }),
+      } }] },
+      transaction_outcome: { id: hash, outcome: { executor_id: account, receipt_ids: ["call"], status: { SuccessReceiptId: "call" } } },
+      receipts_outcome: [
+        { id: "call", outcome: { executor_id: market, receipt_ids: ["payout", "settle"], status: { SuccessReceiptId: "settle" } } },
+        { id: "payout", outcome: { executor_id: verifier, receipt_ids: [], status: settled ? { SuccessValue: "" } : { Unknown: null } } },
+        { id: "settle", outcome: { executor_id: market, receipt_ids: [], status: { SuccessValue: "" } } },
+      ],
+    } } });
+  };
+  await page.context().route(`${endpoint}/**`, handler);
+  try {
+    await page.goto(`${base}/portfolio`, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Withdraw", exact: true }).click();
+    await expect.poll(() => checks).toBeGreaterThanOrEqual(2);
+    await expect(page.getByText("Withdrawn to your Intents account.", { exact: true })).toHaveCount(0);
+    settled = true;
+    await expect(page.getByText("Withdrawn to your Intents account.", { exact: true })).toBeVisible();
+    assert.equal(sent, 1);
+    await page.getByRole("button", { name: `Connected as ${account}. Disconnect` }).click();
+    await page.getByRole("button", { name: /connect wallet/i }).first().click();
+    await page.getByText("CSP Test Wallet", { exact: true }).click();
+    await expect(page.getByText("Withdrawn to your Intents account.", { exact: true })).toHaveCount(0);
+    assert.equal(sent, 1, "reconnecting does not replay a withdrawal");
+    console.log("Market withdrawal browser passed: final payout checks and account-scoped transaction notices");
+  } finally { await page.context().unroute(`${endpoint}/**`, handler); }
+}

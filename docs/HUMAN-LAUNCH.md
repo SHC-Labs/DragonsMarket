@@ -64,6 +64,10 @@ Market and round operations now require `FINAL` transaction status, the requeste
 
 The cash-out test uses the repository-pinned real verifier, with a local mock fungible token. It proves the verifier's withdrawal and refund semantics at 100 Tgas; native-USDC behavior and the user's selected wallet still require the funded test. The UI intentionally blocks another cash-out while an earlier request is ambiguous. Clearing that notice requires checking wallet history and does not cancel a transaction.
 
+Council revenue claims now follow the same recovery rule. A reduced `claimable_of` balance is not payment evidence: the Council debits it before making the asynchronous transfer. The website requires the exact finalized claim transaction, a complete receipt graph, matching Council request/settlement events and the verifier's collateral transfer to the connected account. A failed transfer is reported as restored only after the Council's successful failure callback. An absent or failed callback remains unresolved. Requests persist by account and deployment across reloads, and a browser lock prevents simultaneous submissions from multiple tabs. Clearing a notice requires checking wallet history; it does not cancel or reconcile an on-chain claim.
+
+The shared wallet transaction hook also verifies the exact signer, receiver, method, deposit and arguments against a finalized transaction with a complete successful receipt graph before accepting a balance or position change. This covers market withdrawals, trading, funding, redemption and staking. An early debit or a successful refund callback cannot turn a failed payout into a success message. Transaction notices are scoped to the connected account.
+
 ## Recovery and alerts handoff
 
 Use [ALERTS.md](ALERTS.md) for the ten monitor conditions and delivery drill. The exposed Railway schema has dashboard/chart mutations but no monitor creation mutation or monitor input in chart configuration; the available browser connection fails before opening the dashboard. No alert-delivery claim can be made from a chart alone.

@@ -1,6 +1,6 @@
 # Contract authority before deployment
 
-Reviewed the current private branch on 8 November 2026, source revision
+Initial authorization review on 8 November 2026 used source revision
 `6602a4b63942da799546ce93e10fe4079f6d6cee`. This is an authorization-focused source review,
 not a complete economic audit, deployed-code approval or completed DAO handover.
 The intended deployment parent is `dragonsmarket.near`; final child accounts, DAO owner,
@@ -71,7 +71,10 @@ the deployment and handover still need their own evidence.
    tests scan all four contracts. Oracle bounds now match its minimum jury of 5, minimum bond
    of 5 USDC, dispute windows of 1 hour to 365 days and maximum draw delay of 100,000 blocks.
    The helper prepares unsigned wallet calls; it does not
-   replace contract authorization or prove real DAO execution.
+   replace contract authorization. The combined [DAO/keeper integration test](../backend/test/dao-chain.test.ts)
+   now submits these exact wallet requests through checksum-pinned Sputnik WASM on a sandbox,
+   including publisher replacement, upgrades and key removal. Final DAO policy and deployed
+   custody still require their own acceptance evidence.
 3. **Publisher bootstrap and rotation.** At 1-of-1, adding a second publisher violates
    strict majority, raising the threshold violates the current count, and removing the
    only publisher violates availability. It cannot grow or rotate using normal setters.

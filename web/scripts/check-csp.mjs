@@ -9,7 +9,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "@playwright/test";
-import { cashOutWalletMethod, installCashOutFixture, checkCashOutBrowser } from "./cash-out-browser.mjs";
+import { cashOutWalletMethod, installCashOutFixture, checkCashOutBrowser, checkMarketWithdrawalBrowser } from "./cash-out-browser.mjs";
 import { checkStakeBrowser } from "./stake-browser.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -99,6 +99,7 @@ try {
     await page.getByRole("button", { name: "Connected as csp-test.testnet. Disconnect" }).waitFor();
   }
   await checkCashOutBrowser(page, cashOut, base);
+  await checkMarketWithdrawalBrowser(page, base);
   await checkStakeBrowser(page, base);
   for (const path of ["/agents", "/docs", "/api", "/council", "/privacy"]) {
     await page.goto(base + path, { waitUntil: "networkidle" });

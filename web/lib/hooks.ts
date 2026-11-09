@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { txPanics } from "./rpc";
+import { finalTransaction, txPanics } from "./rpc";
+import { successfulCall } from "./receipt-proof";
 import { friendlyError, shortRef } from "./errors";
 import type { FunctionCall } from "./market";
 
@@ -57,13 +58,14 @@ export type TxState =
   | { phase: "done"; message: string }
   | { phase: "failed"; message: string };
 
-// Sends a call through the wallet, then waits for the chain to show the effect (`done()` returns true).
+// Proves the wallet's exact finalized call, then waits for its business effect (`done()` returns true).
 // If the effect never shows, the transaction is read back and its panic explained.
 export function useTx(send: (call: FunctionCall) => Promise<string>, account: string | null) {
   const [state, setState] = useState<TxState>({ phase: "idle" });
 
   const run = useCallback(
     async (call: FunctionCall, opts: { done: () => Promise<boolean>; doneMessage: string; timeoutMs?: number }) => {
+      if (!account) return false;
       setState({ phase: "waiting", since: Date.now() });
       let hash = "";
       try {
@@ -73,10 +75,12 @@ export function useTx(send: (call: FunctionCall) => Promise<string>, account: st
         return false;
       }
       const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
+      let proved = false;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1500));
         try {
-          if (await opts.done()) {
+          if (!proved) proved = successfulCall(await finalTransaction(hash, account), hash, account, call);
+          if (proved && await opts.done()) {
             setState({ phase: "done", message: opts.doneMessage });
             return true;
           }

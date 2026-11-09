@@ -8,6 +8,8 @@
 //   MOCK_QUIET=1                  no simulated trading: prices stay where they start
 import http from "node:http";
 import { existsSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { b58encode } from "../../contracts/keeper/chain.mjs";
 
 const PORT = Number(process.env.MOCK_CHAIN_PORT ?? 3030);
 const BACKEND_PORT = Number(process.env.MOCK_BACKEND_PORT ?? 3031);
@@ -369,7 +371,17 @@ const views = {
 };
 
 // sandbox_send: what the chain would do with a dev account's transaction, applied straight to the state above.
+const transactions = new Map();
 function applySend({ signer_id: signer, receiver_id: receiver, actions = [] }) {
+  const hash = b58encode(randomBytes(32));
+  const outcome = (executor_id, receipt_ids, status, logs = []) => ({ executor_id, receipt_ids, status, logs });
+  const result = { final_execution_status: "FINAL", status: { SuccessValue: "" },
+    transaction: { hash, signer_id: signer, receiver_id: receiver, actions: actions.map(({ params }) => ({ FunctionCall: {
+      method_name: params.methodName, deposit: params.deposit ?? "0", args: Buffer.from(JSON.stringify(params.args ?? {})).toString("base64"),
+    } })) },
+    transaction_outcome: { id: hash, outcome: outcome(signer, ["call"], { SuccessReceiptId: "call" }) },
+    receipts_outcome: [{ id: "call", outcome: outcome(receiver, [], { SuccessValue: "" }) }],
+  };
   for (const { params = {} } of actions) {
     const { methodName: method, args = {} } = params;
     if (receiver === VERIFIER && method === "mt_transfer_call" && args.receiver_id === MARKET) {
@@ -401,11 +413,25 @@ function applySend({ signer_id: signer, receiver_id: receiver, actions = [] }) {
       delete SEATS[args.token_id];
       aliceNfts.add(String(args.token_id));
     } else if (receiver === COUNCIL && method === "claim") {
-      walletBalance.set(signer, get(walletBalance, signer) + councilClaimable);
+      if (params.deposit !== "1" || councilClaimable === 0n) throw new Error("Smart contract panicked: no claim or missing consent deposit");
+      const amount = String(councilClaimable);
+      const data = { id: "1", account: signer, tokens: args.token_ids, amount, requested_at: String(now()) };
+      const event = name => `EVENT_JSON:${JSON.stringify({ standard: "council", version: "1.0.0", event: name, data })}`;
+      result.receipts_outcome[0].outcome = outcome(COUNCIL, ["transfer", "settle"], { SuccessReceiptId: "settle" }, [event("claim_requested")]);
+      result.receipts_outcome.push(
+        { id: "transfer", outcome: outcome(VERIFIER, [], { SuccessValue: "" }, [`EVENT_JSON:${JSON.stringify({
+          standard: "nep245", version: "1.0.0", event: "mt_transfer", data: [{ old_owner_id: COUNCIL,
+            new_owner_id: signer, token_ids: [`nep141:${TOKEN}`], amounts: [amount] }],
+        })}`]) },
+        { id: "settle", outcome: outcome(COUNCIL, [], { SuccessValue: "" }, [event("claim_paid")]) },
+      );
+      intentsBalance.set(signer, get(intentsBalance, signer) + councilClaimable);
       councilClaimable = 0n;
     } else throw new Error(`mock chain does not simulate ${receiver}.${method}`);
   }
-  return { transaction: { hash: `mock${Date.now().toString(36)}` }, status: { SuccessValue: "" } };
+  transactions.set(hash, result);
+  if (transactions.size > 1000) transactions.delete(transactions.keys().next().value);
+  return result;
 }
 
 function handle(body) {
@@ -414,7 +440,11 @@ function handle(body) {
     catch (e) { return { error: { message: e.message, data: e.message } }; }
   }
   if (body.method === "block") return { result: { header: { height: height(), timestamp_nanosec: String(now()), hash: "mock" } } };
-  if (body.method === "EXPERIMENTAL_tx_status") return { result: { status: { SuccessValue: "" }, receipts_outcome: [] } };
+  if (body.method === "EXPERIMENTAL_tx_status") {
+    const result = transactions.get(body.params?.tx_hash);
+    return result && result.transaction.signer_id === body.params?.sender_account_id
+      ? { result } : { error: { message: "Unknown mock transaction" } };
+  }
   if (body.method !== "query") return { error: { message: `mock chain does not answer ${body.method}` } };
   const { request_type: type, account_id: id, method_name, args_base64 } = body.params ?? {};
   if (type === "view_account") return { result: { amount: String(id?.endsWith(".agents.test.near") ? 1_840_000_000_000_000_000_000_000n : 25n * NEAR), locked: "0", storage_usage: 512, block_height: 1, block_hash: "mock" } };

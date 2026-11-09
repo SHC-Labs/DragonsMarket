@@ -5,12 +5,13 @@ import { AccountEmptyState, PageLandmark } from "@/components/PageHeader";
 import { Button, Notice } from "@/components/ui";
 import { Lock } from "@/components/icons";
 import { UnstakeCutDialog } from "@/components/UnstakeCutDialog";
+import { RevenueClaim } from "@/components/RevenueClaim";
 import { useWallet } from "@/components/WalletProvider";
 import { config } from "@/lib/config";
 import { formatDateTime, formatDateTimeUtc, formatMoney, timeLeft } from "@/lib/format";
 import { useNow, usePoll, useTx } from "@/lib/hooks";
 import {
-  claimableOf, claimCall, getCouncilConfig, inProgressOf, isAllowed, nftToken, nftTokensFor, quarterInfo, requestUnstakeCall, seatCount, seatEarnings, seatsOf,
+  claimableOf, getCouncilConfig, inProgressOf, isAllowed, nftToken, nftTokensFor, quarterInfo, requestUnstakeCall, seatCount, seatEarnings, seatsOf,
   stakeCall, stakeOf, unstakeCall, type SeatEarnings, type Stake,
 } from "@/lib/council";
 import type { FunctionCall } from "@/lib/market";
@@ -136,11 +137,7 @@ function AccountStakeView() {
 
           {data.claimable !== null && (
             <ul className="position-list">
-              <li className="position-row">
-                <div className="position-main"><span className="position-title">Revenue ready to claim</span><div className="position-shares num"><span>{formatMoney(data.claimable)} {config.tokenSymbol}</span></div></div>
-                <div className="position-status"><span className="position-outcome">Revenue share from quarters that have ended. It never expires.</span></div>
-                <div className="position-action"><Button size="sm" disabled={busy || data.claimable === 0n} onClick={() => act(claimCall(data.seats.map(s => s.token).slice(0, 10)), async () => BigInt(await claimableOf(account)) < data.claimable!, "Revenue claimed.")}>Claim</Button></div>
-              </li>
+              <RevenueClaim account={account} amount={data.claimable} tokens={data.seats.map(s => s.token).slice(0, 10)} disabled={busy} reload={reload} />
               {data.inProgress !== null && data.inProgress > 0n && (
                 <li className="position-row">
                   <div className="position-main"><span className="position-title">Earned this quarter</span><div className="position-shares num"><span>{formatMoney(data.inProgress)} {config.tokenSymbol}</span></div></div>
