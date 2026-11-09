@@ -175,5 +175,5 @@ export function createKeeperSigner(input: {
       return 'ok';
     } finally { busy = false; }
   }
-  return { beforeBatch, send, recover };
+  return { approvedMarketIds: Object.freeze([...approval.marketIds]), beforeBatch, send, recover };
 }

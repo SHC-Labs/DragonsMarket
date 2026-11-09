@@ -19,12 +19,23 @@ concurrency:
 
 jobs:
   checks:
-    if: github.repository == 'SHC-Labs/DragonsMarket' && github.ref == 'refs/heads/main'
+    if: github.repository == 'SHC-Labs/DragonsMarket' && github.ref == 'refs/heads/main' && inputs.action == 'deploy'
     uses: ./.github/workflows/agents.yml
+    with:
+      full: true
+
+  contracts:
+    if: github.repository == 'SHC-Labs/DragonsMarket' && github.ref == 'refs/heads/main' && inputs.action == 'deploy'
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: true
 
   deploy:
-    needs: checks
-    if: github.repository == 'SHC-Labs/DragonsMarket' && github.ref == 'refs/heads/main'
+    needs: [checks, contracts]
+    if: >-
+      always() && !cancelled() && github.repository == 'SHC-Labs/DragonsMarket' && github.ref == 'refs/heads/main' &&
+      ((inputs.action == 'check' && needs.checks.result == 'skipped' && needs.contracts.result == 'skipped') ||
+      (inputs.action == 'deploy' && needs.checks.result == 'success' && needs.contracts.result == 'success'))
     runs-on: ubuntu-24.04
     timeout-minutes: 70
     environment:

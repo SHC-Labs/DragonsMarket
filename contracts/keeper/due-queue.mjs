@@ -65,12 +65,12 @@ export function retry(job, now, error) {
   job.nextAt = String(now + BigInt(delay)*NS_PER_MS);
   job.error = String(error).slice(0,300);
 }
-export function selectJobs(state, now, limit=50) {
+export function selectJobs(state, now, limit=50, include=()=>true) {
   if (!Number.isInteger(limit)||limit<1||limit>500) throw new Error('Job batch must be 1 to 500');
-  const jobs=Object.values(state.jobs);
+  const jobs=Object.values(state.jobs).filter(include);
   const due=jobs.filter(j=>BigInt(j.nextAt)<=now).sort((a,b)=>BigInt(a.nextAt)<BigInt(b.nextAt)?-1:BigInt(a.nextAt)>BigInt(b.nextAt)?1:(a.kind+':'+a.id).localeCompare(b.kind+':'+b.id)).slice(0,limit);
   // A small rotating reconciliation sample repairs missed changes without a catalog scan.
-  const keys=Object.keys(state.jobs).sort();
+  const keys=jobs.map(j=>j.kind+':'+j.id).sort();
   const candidates=[...keys.filter(k=>k>state.reconcileKey),...keys.filter(k=>k<=state.reconcileKey)];
   const chosen=new Set(due.map(j=>j.kind+':'+j.id));
   for (const key of candidates.slice(0,Math.min(10,limit-due.length))) { chosen.add(key); state.reconcileKey=key; }

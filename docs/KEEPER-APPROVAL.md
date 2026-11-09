@@ -12,7 +12,7 @@ The JSON shape is enforced by `backend/src/keeper-approval.ts`:
 | `deployment` | The exact registered backend deployment object: ID, start block, contract map, collateral ID and decimals. No later start block or missing rounds entry. |
 | `approvedBy`, `approvedAt`, `expiresAt` | Reviewer identity and ISO timestamps. Maximum approval lifetime is 30 days; expiry stops further signing. |
 | `reviewEvidence` | HTTPS review record covering deployed build equivalence, custody, economic parameters, market rules/deadlines and operating authorization. The process does not fetch this URL. |
-| `marketIds` | Explicit decimal-string IDs whose lifecycle the keeper may advance. Do not include market 7 until its owner-approved disposition is recorded. |
+| `marketIds` | Explicit decimal-string IDs whose lifecycle the keeper may advance. Excluded markets stay queued without taking batch slots. Do not include market 7 until its owner-approved disposition is recorded. |
 | `contracts` | One entry for every configured market/oracle/Council/rounds/verifier, plus `nft` and `collateral`. Each has `accountId`, base58 `codeHash`, 40-character `sourceCommit` and HTTPS `buildEvidence`. Evidence must link that source/build to those exact bytes. |
 | `controls` | Approved `owner`, `operator`, `treasury` NEAR accounts. Pending ownership, changed links, pauses and upgrades in flight stop signing. |
 | `governance` | Approved owner DAO `codeHash`, `sourceCommit`, HTTPS `buildEvidence`, canonical `policySha256` and integer `minApprovals` (2-100). Code may be inline WASM or an immutable global contract hash; mutable global account references are refused. |

@@ -12,31 +12,36 @@ const metadata = { packages: [{ name: 'tests', targets: [
   { name: 'tests', kind: ['lib'] }, ...names.map(name => ({ name, kind: ['test'] })),
 ] }] };
 
-test('the required check refuses failed, cancelled or missing chain integration even on backend-only PRs', () => {
+test('the workflow gate permits quick checks but requires every selected full-validation job', () => {
   const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  const script = workflow.match(/node -e '\n([\s\S]+?)\n          '/)?.[1];
+  const script = workflow.match(/node --input-type=module -e '\n([\s\S]+?)\n          '/)?.[1];
   assert.ok(script, 'required check script is present');
-  const run = jobs => spawnSync(process.execPath, ['-e', script], {
+  const run = jobs => spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: fileURLToPath(new URL('../', import.meta.url)),
     env: { ...process.env, RESULTS: JSON.stringify(jobs) }, encoding: 'utf8',
   }).status;
-  const jobs = { changes: { result: 'success', outputs: { contracts: 'false', chain: 'true' } },
-    fmt: { result: 'skipped' }, clippy: { result: 'skipped' }, unit: { result: 'skipped' },
-    keeper: { result: 'skipped' }, sandbox: { result: 'success' } };
-  assert.equal(run(jobs), 0);
-  for (const result of ['failure', 'cancelled', 'skipped', undefined]) {
-    assert.equal(run({ ...jobs, sandbox: { result } }), 1, String(result));
-  }
-  const missing = structuredClone(jobs);
-  delete missing.sandbox;
-  assert.equal(run(missing), 1);
+  const jobs = { changes: { result: 'success', outputs: { contracts: 'false', chain: 'false', keeper: 'false' } },
+    clippy: { result: 'skipped' }, unit: { result: 'skipped' },
+    keeper: { result: 'skipped' }, sandbox: { result: 'skipped' } };
+  assert.equal(run(jobs), 0, 'routine backend and documentation changes need no sandbox');
   assert.equal(run({ ...jobs, changes: { result: 'failure' } }), 1);
   assert.equal(run({ ...jobs, changes: { result: 'success', outputs: { contracts: 'false' } } }), 1);
-  jobs.changes.outputs.chain = 'false'; jobs.sandbox.result = 'skipped';
-  assert.equal(run(jobs), 0, 'documentation-only changes may skip integration');
-  jobs.changes.outputs.contracts = 'true'; jobs.changes.outputs.chain = 'true'; jobs.sandbox.result = 'success';
-  assert.equal(run(jobs), 1, 'contract changes require the Rust checks too');
-  for (const job of Object.values(jobs)) job.result = 'success';
+  jobs.changes.outputs.contracts = jobs.changes.outputs.keeper = 'true';
+  assert.equal(run(jobs), 1, 'Rust changes require the selected quick checks');
+  jobs.unit.result = jobs.keeper.result = 'success';
+  assert.equal(run(jobs), 0, 'Rust quick checks need no sandbox');
+  jobs.changes.outputs.chain = 'true';
+  assert.equal(run(jobs), 1, 'full validation cannot inherit a quick pass');
+  jobs.clippy.result = jobs.sandbox.result = 'success';
   assert.equal(run(jobs), 0);
+  for (const job of ['unit', 'keeper', 'clippy', 'sandbox']) {
+    for (const result of ['failure', 'cancelled', 'skipped', undefined]) {
+      assert.equal(run({ ...jobs, [job]: { result } }), 1, `${job}: ${result}`);
+    }
+    const missing = structuredClone(jobs);
+    delete missing[job];
+    assert.equal(run(missing), 1, `missing ${job}`);
+  }
 });
 
 test('all integration targets occur exactly once, including targets added later', () => {

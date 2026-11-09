@@ -2,27 +2,20 @@ name: applications
 
 on:
   workflow_call:
-  workflow_dispatch:
     inputs:
-      paid_private_checks:
-        description: Run the full suite in the private repo using its Actions budget
+      full:
         type: boolean
         default: false
-  push:
-    branches: [main]
-    paths:
-      - backend/**
-      - contracts/keeper/**
-      - mcp/**
-      - web/**
-      - package.json
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - Caddyfile
-      - .node-version
-      - .dockerignore
-      - deploy/railway/**
-      - .github/workflows/**
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run every application check, build and browser/recovery test
+        type: boolean
+        default: false
+      paid_private_checks:
+        description: Allow full validation to use the private Actions budget
+        type: boolean
+        default: false
   pull_request:
     branches: [main]
     # A required check must report even for documentation-only PRs.
@@ -38,49 +31,74 @@ jobs:
   agents:
     if: >-
       (github.repository == 'SHC-Labs/DragonsMarket' && github.event.repository.private == false) ||
-      (github.repository == 'SHC-Labs/Dragons-Market' && github.event_name == 'workflow_dispatch' && inputs.paid_private_checks)
+      github.repository == 'SHC-Labs/Dragons-Market'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env:
-          POSTGRES_USER: dragons
-          POSTGRES_PASSWORD: dragons_local_only
-          POSTGRES_DB: dragons_market
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U dragons"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
+    timeout-minutes: 12
     env:
       TEST_DATABASE_URL: postgresql://dragons:dragons_local_only@127.0.0.1:5432/dragons_market
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
         with:
           node-version-file: .node-version
+      - name: Select checks for this change
+        id: scope
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_FULL: ${{ inputs.full || false }}
+          CI_PAID_PRIVATE: ${{ inputs.paid_private_checks || false }}
+        run: node .github/scripts/ci-scope.mjs
+      - run: node --test .github/scripts/*.test.mjs
       - run: npm install --global pnpm@10.33.0
+        if: steps.scope.outputs.install == 'true'
       - run: pnpm install --frozen-lockfile
+        if: steps.scope.outputs.install == 'true'
       - run: node --check deploy/railway/configure.mjs
-      - run: pnpm typecheck
-      - run: pnpm lint
-      - run: pnpm test
+        if: steps.scope.outputs.deploy == 'true'
+      - name: Backend types and unit tests
+        if: steps.scope.outputs.backend == 'true'
+        run: pnpm --filter dragons-market-backend check && pnpm --filter dragons-market-backend test
+      - name: MCP types and protocol tests
+        if: steps.scope.outputs.mcp == 'true'
+        run: pnpm --filter dragons-market-mcp check && pnpm --filter dragons-market-mcp test
+      - name: Web types, lint and unit tests
+        if: steps.scope.outputs.web == 'true'
+        run: pnpm --filter web check && pnpm lint && pnpm --filter web test
       - run: node --test deploy/railway/*.test.mjs
+        if: steps.scope.outputs.deploy == 'true'
+      - name: Start disposable PostgreSQL only for database checks
+        if: steps.scope.outputs.database == 'true'
+        run: |
+          docker run --detach --name ci-postgres --publish 127.0.0.1:5432:5432 \
+            --env POSTGRES_USER=dragons --env POSTGRES_PASSWORD=dragons_local_only \
+            --env POSTGRES_DB=dragons_market postgres:18-alpine
+          for attempt in {1..30}; do
+            if docker exec ci-postgres pg_isready -h 127.0.0.1 -U dragons -d dragons_market; then exit 0; fi
+            sleep 1
+          done
+          docker logs ci-postgres
+          exit 1
       - run: pnpm test:database
+        if: steps.scope.outputs.database == 'true'
       - run: pnpm test:release
+        if: steps.scope.outputs.database == 'true'
       - name: Install PostgreSQL 18 backup clients
+        if: steps.scope.outputs.backup == 'true'
         run: |
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y --no-install-recommends postgresql-client-18 age
           echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
       - run: pnpm --filter dragons-market-backend test:backup
-      - run: pnpm build
+        if: steps.scope.outputs.backup == 'true'
+      - name: Build the release or browser fixture
+        if: steps.scope.outputs.browser == 'true'
+        run: |
+          if [ "$CI_FULL" = true ]; then pnpm build; else pnpm build:web; fi
         env:
+          CI_FULL: ${{ inputs.full || false }}
           NEXT_PUBLIC_RELEASE_COMMIT: cccccccccccccccccccccccccccccccccccccccc
           NEXT_PUBLIC_NETWORK: testnet
           NEXT_PUBLIC_RPC_URL: https://test.rpc.fastnear.com
@@ -92,6 +110,7 @@ jobs:
           NEXT_PUBLIC_COLLATERAL_TOKEN_ID: nep141:usdc.csp-fixture.testnet
           NEXT_PUBLIC_TOKEN_ID: usdc.csp-fixture.testnet
       - name: Install the pinned Caddy browser-test runtime
+        if: steps.scope.outputs.browser == 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/caddy"
           curl --fail --location --retry 2 --retry-delay 10 --connect-timeout 15 --max-time 60 \
@@ -105,4 +124,6 @@ jobs:
           tar --no-same-owner -xzf "$RUNNER_TEMP/caddy/caddy.tar.gz" -C "$RUNNER_TEMP/caddy" caddy
           echo "$RUNNER_TEMP/caddy" >> "$GITHUB_PATH"
       - run: pnpm --filter web exec playwright install --with-deps --only-shell chromium
+        if: steps.scope.outputs.browser == 'true'
       - run: pnpm --filter web test:csp
+        if: steps.scope.outputs.browser == 'true'

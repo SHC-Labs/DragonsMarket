@@ -271,7 +271,13 @@ export async function queuedRun(opts, keys, execution) {
     for(const sweep of page)if(["pending","unresolved"].includes(sweep.council.status)||["pending","unresolved"].includes(sweep.treasury.status))touch(state,"sweep",sweep.id,now);
     state.sweepCursor=String(sweepFrom+BigInt(PAGE)<sweepEnd?sweepFrom+BigInt(PAGE):sweepEnd);
   }
-  const jobs=selectJobs(state,now,batch);
+  const approvedMarkets = execution?.approvedMarketIds === undefined ? null : new Set(execution.approvedMarketIds);
+  let excludedMarkets = 0;
+  const jobs = selectJobs(state, now, batch, job => {
+    if (job.kind !== "market" || approvedMarkets === null || approvedMarkets.has(job.id)) return true;
+    excludedMarkets++;
+    return false;
+  });
   const markets=[],cases={},locked={},sweeps=[],bondPayees=[],readErrors=new Set();
   await bounded(jobs,workers,async job=>{
     try{
@@ -379,7 +385,7 @@ export async function queuedRun(opts, keys, execution) {
     console.log("queue "+Object.keys(state.jobs).length+" jobs; bootstrap markets "+state.marketCursor+", sweeps "+state.sweepCursor);
   }
   if (actionFailures || readErrors.size) throw new Error(`Keeper scheduled retries: ${actionFailures} failed actions, ${readErrors.size} failed reads`);
-  return {actions,state};
+  return {actions,state,excludedMarkets};
 }
 
 export function keeperFeedCurrent(opts, header) {

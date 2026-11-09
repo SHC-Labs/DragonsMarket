@@ -87,7 +87,7 @@ async function keeperPass(pool: pg.Pool, config: Config, options: KeeperOptions,
     const signer = signing!();
     const result = await run(options, signer.keys, signer.execution);
     return { mode, exported, current: result.current !== false, height: result.state.cursor?.height ?? null,
-      dueActions: result.actions.length, signing: result.current !== false };
+      dueActions: result.actions.length, excludedMarkets: result.excludedMarkets ?? 0, signing: result.current !== false };
   }
   if (mode === 'check' && preparation.current) {
     const checked = await run({ ...options, 'dry-run': true }, {});

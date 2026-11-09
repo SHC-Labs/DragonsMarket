@@ -1,24 +1,29 @@
 name: contracts
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      paid_private_checks:
-        description: Run all contract checks privately; can consume hundreds of paid runner minutes
+      full:
         type: boolean
         default: false
-  push:
-    branches: [main]
-    paths: [contracts/**, backend/**, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .node-version, .github/workflows/ci.yml]
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run Clippy and every compiled-contract sandbox shard as well as quick checks
+        type: boolean
+        default: false
+      paid_private_checks:
+        description: Allow full private validation; can consume hundreds of runner minutes
+        type: boolean
+        default: false
   pull_request:
     branches: [main]
 
 permissions:
   contents: read
-  pull-requests: read
 
 concurrency:
-  group: contracts-${{ github.ref }}
+  group: contracts-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -32,64 +37,41 @@ jobs:
   changes:
     if: >-
       (github.repository == 'SHC-Labs/DragonsMarket' && github.event.repository.private == false) ||
-      (github.repository == 'SHC-Labs/Dragons-Market' && github.event_name == 'workflow_dispatch' && inputs.paid_private_checks)
+      github.repository == 'SHC-Labs/Dragons-Market'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 2
     defaults:
       run:
         working-directory: .
     outputs:
       contracts: ${{ steps.paths.outputs.contracts }}
       chain: ${{ steps.paths.outputs.chain }}
-    steps:
-      - name: Detect contract changes without running pull request code
-        id: paths
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BEFORE_SHA: ${{ github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
-        run: |
-          limit=3000
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed-files"
-          elif [[ "$BEFORE_SHA" =~ ^[a-f0-9]{40}$ ]] && [ "$BEFORE_SHA" != 0000000000000000000000000000000000000000 ]; then
-            limit=300
-            gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE_SHA...$HEAD_SHA" --jq '.files[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed-files"
-          else
-            echo 'contracts=true' >> "$GITHUB_OUTPUT"
-            echo 'chain=true' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$(wc -l < "$RUNNER_TEMP/changed-files")" -ge "$limit" ] || grep -E '^(contracts/|\.github/workflows/ci\.yml$)' "$RUNNER_TEMP/changed-files" > /dev/null; then
-            echo 'contracts=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'contracts=false' >> "$GITHUB_OUTPUT"
-          fi
-          if [ "$(wc -l < "$RUNNER_TEMP/changed-files")" -ge "$limit" ] || grep -E '^(contracts/|backend/|package\.json$|pnpm-(lock\.yaml|workspace\.yaml)$|\.node-version$|\.github/workflows/ci\.yml$)' "$RUNNER_TEMP/changed-files" > /dev/null; then
-            echo 'chain=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'chain=false' >> "$GITHUB_OUTPUT"
-          fi
-
-  fmt:
-    needs: changes
-    if: needs.changes.outputs.contracts == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+      keeper: ${{ steps.paths.outputs.keeper }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Install the pinned toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo fmt --all --check
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version-file: .node-version
+      - name: Select quick checks or explicit full validation
+        id: paths
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_FULL: ${{ inputs.full || false }}
+          CI_PAID_PRIVATE: ${{ inputs.paid_private_checks || false }}
+        run: node .github/scripts/ci-scope.mjs
 
   clippy:
     needs: changes
-    if: needs.changes.outputs.contracts == 'true'
+    if: needs.changes.outputs.chain == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: |
@@ -111,9 +93,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: |
@@ -124,6 +108,7 @@ jobs:
           restore-keys: unit-${{ runner.os }}-
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo fmt --all --check
       - run: cargo test -p market -p oracle -p council -p rounds -p dpm -p price-signatures -p upgrade
 
   sandbox:
@@ -135,10 +120,11 @@ jobs:
       fail-fast: false
       max-parallel: 8
       matrix:
-        # Backend-only PRs need one compiled-contract integration runner, not eight Rust test shards.
-        shard: ${{ fromJSON(needs.changes.outputs.contracts == 'true' && '[0,1,2,3,4,5,6,7]' || '[0]') }}
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
         with:
           node-version-file: web/.node-version
@@ -205,14 +191,17 @@ jobs:
         with:
           name: wasm-sha256-sandbox-build-${{ matrix.shard }}
           path: contracts/wasm-sha256.txt
+          retention-days: 7
 
   keeper:
     needs: changes
-    if: needs.changes.outputs.contracts == 'true'
+    if: needs.changes.outputs.keeper == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
         with:
           node-version-file: web/.node-version
@@ -221,31 +210,22 @@ jobs:
   contract-checks:
     if: >-
       always() && ((github.repository == 'SHC-Labs/DragonsMarket' && github.event.repository.private == false) ||
-      (github.repository == 'SHC-Labs/Dragons-Market' && github.event_name == 'workflow_dispatch' && inputs.paid_private_checks))
-    needs: [changes, fmt, clippy, unit, sandbox, keeper]
+      github.repository == 'SHC-Labs/Dragons-Market')
+    needs: [changes, clippy, unit, sandbox, keeper]
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 2
     defaults:
       run:
         working-directory: .
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - name: Require every applicable contract check
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          node -e '
-            const jobs = JSON.parse(process.env.RESULTS);
-            if (jobs.changes.result !== "success") process.exit(1);
-            const { contracts, chain } = jobs.changes.outputs;
-            if (![contracts, chain].every(value => ["true", "false"].includes(value))) process.exit(1);
-            const required = ["changes", ...(chain === "true" ? ["sandbox"] : []),
-              ...(contracts === "true" ? ["fmt", "clippy", "unit", "keeper", "sandbox"] : [])];
-            for (const name of required) {
-              if (jobs[name]?.result !== "success") { console.error(`${name}: not successful`); process.exit(1); }
-            }
-            for (const [name, job] of Object.entries(jobs)) {
-              if (!["success", "skipped"].includes(job.result)) {
-                console.error(`${name}: ${job.result}`); process.exit(1);
-              }
-            }
+          node --input-type=module -e '
+            import { requireContractChecks } from "./.github/scripts/ci-scope.mjs";
+            requireContractChecks(JSON.parse(process.env.RESULTS));
           '

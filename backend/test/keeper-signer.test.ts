@@ -56,6 +56,13 @@ test('signer journals before broadcasting, proves finality, and recovers ambiguo
       return {};
     } });
   const signer = make();
+  assert.deepEqual(signer.approvedMarketIds, approval.marketIds);
+  assert.notEqual(signer.approvedMarketIds, approval.marketIds);
+  assert.ok(Object.isFrozen(signer.approvedMarketIds));
+  await assert.rejects(signer.beforeBatch([action, { ...action, args: { ...action.args, market_id: '7' } }]),
+    /market_not_approved_for_keeper/);
+  assert.equal(verifies, 0);
+  assert.equal(sends, 0, 'queue selection does not replace the signing guard');
   await signer.beforeBatch([action]);
   assert.equal(await signer.send(action), 'ok');
   assert.equal(journal().pending, null);

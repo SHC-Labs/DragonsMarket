@@ -30,6 +30,7 @@ export interface KeeperAction {
 }
 
 export interface KeeperExecution {
+  readonly approvedMarketIds?: readonly string[];
   beforeBatch(actions: KeeperAction[]): Promise<void>;
   send(action: KeeperAction): Promise<string>;
 }
@@ -50,4 +51,5 @@ export function queuedRun(options: KeeperOptions, keys: KeeperKeys, execution?: 
   actions: KeeperAction[];
   state: { cursor: { height: string; hash: string; timestampNs?: string } | null };
   current?: boolean;
+  excludedMarkets?: number;
 }>;

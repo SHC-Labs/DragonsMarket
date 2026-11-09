@@ -1,5 +1,7 @@
 # Dragons Market operating handoff
 
+Current coordination is in PENDING.md. On 9 November the owner merged private PR 21 as `7bedd50`; public main remains `714877c`, and the last live API check reports foundation readiness with no configured deployment. The historical observations and procedures below do not establish that pending work is live.
+
 ## Verified live on 7 November 2026
 
 - `https://dragons.market`: static web app, valid HTTPS, deployed API/MCP origins verified in a fresh browser.
@@ -8,7 +10,7 @@
 - Postgres is private, with its persistent volume and separate application roles. The migration owner is not on public services.
 - `deploymentConfigured:false`. Chain workers and agent execution remain off. No real-contract account or retiring Agent API credential has been added.
 
-Private PR #19 and its public sync PR #3 have merged. Public `main` is `714877cca3394f89cccc122e32da515b2de0718d`. Additional hardening is accumulating on private `fix/mcp-admission-and-browser-csp` before a new PR. These additions are not live until Nameless syncs them and a public-main release succeeds. Do not describe a PR, passing CI or a healthy website as live trading.
+Private PR #19 and its public sync PR #3 have merged. Public `main` is `714877cca3394f89cccc122e32da515b2de0718d`. Hardening from private PR #21 is merged privately but still needs the team to sync it publicly and complete a public-main release. Follow-up keeper/CI changes need review and are not deployed. Do not describe a PR, passing CI or a healthy website as live trading.
 
 ## Finish the hosting setup
 
