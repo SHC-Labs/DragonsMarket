@@ -18,6 +18,16 @@ Oracle and Rounds expose owner-only atomic publisher replacement, which the prop
 flags for manual review. The [current handoff](../governance.md) and
 [authority review](../../CONTRACT-AUTHORITY.md) describe these changes and remaining live evidence.
 
+**Maintenance completion, 2026-11-09.** The current runner sweeps optional Rounds fees with a
+fourth scoped key and schedules Oracle `payout_bond(account_id)` from finalized `bond_claimable`
+events after seven days. The contract pays only the claim owner and uses the same pending-payout
+accounting as `withdraw_bond`. Owner/recipient drift checks already exist in standalone `check`;
+the production approval also pins the owner DAO's code, canonical policy hash, minimum votes
+and keyless account, and the Oracle no-decision recipient. Actual Sputnik WASM is exercised in
+the local DAO/keeper integration test. The dated October status tables below describe the older
+baseline; [KEEPER.md](../../KEEPER.md) and [KEEPER-APPROVAL.md](../../KEEPER-APPROVAL.md) are the
+current operating instructions. None of these tests authorizes a mainnet handover.
+
 **Dynamic parimutuel pricing, 2026-10-27.** The market lost `set_create_fee` and `set_open_price_bounds`, `set_void_rules` became `set_void_grace(grace_ns)`, and `set_fee_limits` dropped `max_create_fee`. The allow-list in `treasury.mjs`, its tests and the tables in sections 3.1 and 4 below are updated. `mt_on_transfer` no longer has an owner check, because the seed message it guarded is gone, so it is no longer in the excluded list.
 
 **Build status, 2026-10-21.** The new owner methods are in the allow-list of `contracts/keeper/treasury.mjs` with their argument checks: market `set_revenue_share_bps`, `set_min_sweep`, `set_next_sweep_id` (it must not be below the market's `next_sweep_id`), `reconcile_leg` and `reconcile_withdrawal`; oracle `set_reconcile_wait_ns` and `reconcile_bond_payout`; Council `reconcile_claim(id, paid)` (`set_close_grace_ns` was removed in Council version 6); oracle and Council `allow_market` and `disallow_market` (the Council's `set_market` is gone). `reconcile_revenue` is removed (see market.md). `set_fee_recipients` now takes `revenue_pool` and `treasury`. The Council reconciliation of section 9.2 uses `reward_totals`: the floor is total received less total paid less the claims in flight. `settle_leg` and `payout_bond` are still not prepared (anyone calls them). The keeper sends `advance_days` for the Council and `settle_leg` for the market (section 9.1). It has no finalize or quarter job since Council version 6, and holds back `sweep_fees` for an hour after the last sweep. Tests: `treasury.test.mjs` (`the next sweep id can only move up from where the market is`, the sample table, the limits) and `keeper.test.mjs` (`the Council's floor is what it took in less what it paid and less the claims on their way`).
@@ -199,7 +209,7 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | Method | Contract | Why | Better design |
 | --- | --- | --- | --- |
 | `withdraw(amount)` with 1 yocto | market | Collects the residual credited to the treasury's internal balance | market.md section 7.3 moves the residual onto the treasury leg, so no proposal is needed |
-| `withdraw_bond()` with 1 yocto | oracle | Collects the no-decision share. Needs 33 TGas at least | oracle.md section 8.2 specifies `payout_bond(account_id)` so a keeper pushes it. It is not built |
+| `withdraw_bond()` with 1 yocto | oracle | Collects the no-decision share. Needs 33 TGas at least | `payout_bond(account_id)` is now built and lets the keeper pay the same beneficiary without a proposal |
 
 The DAO's own Intents balance is moved by Trezu's treasury flows, which are outside the application allow-list.
 
@@ -484,9 +494,9 @@ Checked in source and by run on 2026-10-21: `contracts/keeper/keeper.mjs`, with 
 | Verifier feature not paused | `verifier.pa_is_paused({ key: "mt_transfer" })`, the near-plugins `Pausable` view the verifier derives. `mt_transfer` is the key its `mt_transfer` and `mt_transfer_call` check, and `pa_is_paused` is also true when `ALL` is paused | Problem | BUILT. Sandbox: transfers paused and unpaused with `pa_pause_feature` |
 | Access keys | `view_access_key_list` for M, O and C. The count is always printed. With `--expect-sealed` any key is a problem | Problem with the flag | BUILT. The flag is for use after `seal` |
 | Code hash | The code hash of each contract equals the release hash list (the tag message), passed with `--release`. `config.upgrade_in_flight` is false | Problem on a difference | PARTLY BUILT. The `--release` comparison is built and tested with a fake RPC; the `upgrade_in_flight` read is not |
-| Ownership | `config.owner` equals the configured DAO, `pending_owner` is null, `operator` is the expected account | Page | NOT BUILT |
-| Treasury and recipients | `market.config.business_wallet` (NEW name `treasury`) equals the verified treasury. `oracle.config.no_decision_recipient` equals it | Page | NOT BUILT |
-| DAO policy | Hash of `get_policy` equals the audited baseline. Member count and thresholds match section 7 | Page on a change | NOT BUILT |
+| Ownership | `config.owner` equals the configured DAO, `pending_owner` is null, `operator` is the expected account | Refuse a mismatched check/signing pass | BUILT: standalone `driftProblems`; production approval reads both providers |
+| Treasury and recipients | Market/Rounds `treasury` and Oracle `no_decision_recipient` equal approved destinations | Refuse a mismatched check/signing pass | BUILT; standalone `check` requires `--treasury` and `--operator` for expected identities |
+| DAO policy | Canonical `get_policy` hash equals the reviewed baseline; every named group and voting override meets minimum votes | Refuse signing; report keeper failure | BUILT in production approval; actual notification delivery remains an operational gate |
 | DAO proposals | Read the DAO's open proposals (`InProgress` or `Failed`, inside the voting period). List each that names M, O or C, and make it a problem when `reviewKind` refuses it. Count the others by kind. An `upgrade` whose hash is not staged is refused by the same review | Problem or listing. It never votes | BUILT (`--watch-dao --treasury ID`). The paging and the report are not run against a real DAO, and the staging time of a hash (24 hours) is not checked |
 | Revenue unresolved | `market.get_fees().revenue_unresolved` above zero for more than 10 minutes | Warn, then call `settle_leg` | NOT BUILT. `settle_leg` does not exist |
 | Storage margins | Existing check for M, O, C and the keeper account | Warn | BUILT |
@@ -500,9 +510,16 @@ Checked in source and by run on 2026-10-21: `contracts/keeper/keeper.mjs`, with 
 | Settle a lost Council result | A Council leg is `unresolved` for more than 10 minutes | `market.settle_leg(sweep_id)` | Market key |
 | Walk the days | `config.last_day` is behind the UTC day of now | `council.advance_days` | Council key |
 | Push a bond payout | `claimable_of(account) > 0` for more than 7 days | `oracle.payout_bond(account)` | Oracle key |
+| Sweep Rounds fees | Configured Rounds fees plus retriable treasury balance reach the keeper minimum | `rounds.sweep_fees` | Rounds key |
 | Price answers | A price market passes its observation time | `oracle` through a publisher service | Not built |
 
-Of the calls above the existing oracle calls, the threshold sweep (not within an hour of the last), `settle_leg` and `advance_days` are built, with the triggers listed in 9.1; the rest wait for the contract methods they call. The Council calls use the default key or `--council-key-file` / `KEEPER_COUNCIL_KEY`. Every call above attaches no deposit, so a function call access key scoped to one receiver and the methods it uses is enough. Scoped methods: oracle `finalize,resolve_draw,retry_apply,retry_unlock,resolve_by_deadline,payout_bond`; market `sweep_fees,settle_leg`; council `advance_days`.
+Maintenance calls above are built, including bond payouts and optional Rounds sweeping. Price
+publication is a separate service and custody decision. Maintenance attaches zero deposit and
+uses one finite-allowance function-call key per receiver: Oracle
+`finalize,resolve_draw,retry_apply,retry_unlock,resolve_by_deadline,payout_bond`; Market
+`sweep_fees,settle_leg`; Council `advance_days`; Rounds `sweep_fees`. Production refuses the
+standalone CLI's legacy default key. Its sealed service keys and reviewed packet are described
+in [KEEPER-APPROVAL.md](../../KEEPER-APPROVAL.md).
 
 Cadence (PROPOSED): `run` every minute, `check` every five minutes, no quarter-boundary job. Keep the allowance of each key under 1 NEAR and alert at half.
 

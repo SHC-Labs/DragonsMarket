@@ -6,7 +6,7 @@ import { ReadRpcClient } from './providers.js';
 
 async function main() {
   if (process.argv.length !== 2) throw new Error('Approval verification accepts environment configuration only');
-  if (['KEEPER_KEY', 'KEEPER_ORACLE_KEY', 'KEEPER_MARKET_KEY', 'KEEPER_COUNCIL_KEY'].some(key => process.env[key]))
+  if (['KEEPER_KEY', 'KEEPER_ORACLE_KEY', 'KEEPER_MARKET_KEY', 'KEEPER_COUNCIL_KEY', 'KEEPER_ROUNDS_KEY'].some(key => process.env[key]))
     throw new Error('Approval verification must not receive private signing keys');
   const config = readConfig(process.env);
   const approval = parseKeeperApproval(process.env.KEEPER_APPROVAL_JSON, process.env.KEEPER_APPROVAL_SHA256, config);

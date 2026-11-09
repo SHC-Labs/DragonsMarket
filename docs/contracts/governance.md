@@ -6,7 +6,7 @@ Trezu/SputnikDAO replaces the retired custom governance contract.
 | --- | --- |
 | Updated | 8 November 2026 |
 | Decision | Accepted |
-| Treasury account | Not created or configured |
+| Proposed DAO | `dragonsmarket.sputnik-dao.near`; production policy and treasury configuration awaiting review |
 | Contract integration | Contract team |
 | Product authority | [Specification](../spec.md#7-architecture-and-administration) |
 
@@ -39,7 +39,8 @@ are not the target administration ABI.
 
 ## 2. The helper and the keeper
 
-Status: BUILT on 21 October 2026. Nothing has run against a real SputnikDAO.
+Status: built and exercised against checksum-pinned Sputnik WASM on a local NEAR sandbox.
+The production DAO handover and funded acceptance remain separate gates.
 
 [treasury.mjs](../../contracts/keeper/treasury.mjs) prepares wallet requests using Sputnik's
 `add_proposal` and `act_proposal`. It does not sign or submit a transaction. It replaces the earlier
@@ -60,8 +61,10 @@ kinds that change membership, policy, DAO code, treasury funds, bounties or stak
 names the kind. `stage_code` carries the wasm as raw input and is not a proposal: `prepareStageCode`
 builds that request and `codeHash` gives the value `upgrade` takes. The rules and the tests are in
 [the owner model](specs/owner-and-keeper.md#5-the-allow-list-that-replaces-the-deny-list).
-Local owner fixtures test application permissions and upgrades; they do not prove real DAO
-membership, voting or execution behaviour.
+`backend/test/dao-chain.test.ts` exercises the actual proposal and vote builder through a
+two-of-three Sputnik DAO, including publisher rotation, upgrades, key removal and the
+production keeper's approval/signing path. This is local execution evidence, not evidence
+that the proposed mainnet DAO has the same policy or approved code.
 
 The keeper's `--treasury` option observes account funding. With `--watch-dao` it also lists the DAO's
 open proposals that name the configured contracts and flags any the allow-list refuses. It never votes,
@@ -71,14 +74,21 @@ and it does not configure the DAO or move ownership. The retired `--governance` 
 
 ## 3. Work to complete
 
-- [ ] Create the Trezu treasury and verify its actual account, code, policy and member roles.
+- [ ] Approve the proposed DAO's code, policy and member roles. Its policy at finalized block
+  223711328 allowed one-of-five approval for calls and transfers; resolve this before handover.
 - [x] Specify supported administrative actions, arguments, deposits and gas (the allow-list, with tests). Receipt handling is not specified: the helper does not submit anything.
 - [x] Replace the helper's deny-list with the allow-list.
-- [ ] Test that keys and direct calls cannot bypass DAO ownership. The keeper reports keys left on the contracts (`--expect-sealed`) and keys registered in the verifier; a test with a real DAO is missing.
+- [x] Exercise DAO voting, outsider refusal, upgrades and sealed contract accounts in a local
+  sandbox using actual Sputnik WASM. Repeat custody and execution acceptance on production.
 - [ ] Prove owner handover for Market, Oracle, Council and any active Rounds contract, including recovery from failed steps.
 - [ ] Configure the verified 75% recipient through that reviewed path.
 - [ ] Check authority over treasury Intents balances and separation from user/reward backing.
-- [ ] Replace the local owner fixture with dedicated DAO integration evidence where appropriate.
+- [x] Add dedicated DAO integration alongside the local owner fixtures.
+
+Keeper signing pins the approved DAO code and canonical policy hash, requires no DAO account
+keys and rejects approving roles below the reviewed minimum. It also checks financial-contract
+owners, pending ownership, operator and recipients on both providers. A policy change stops
+the keeper; it does not stop DAO transactions. The actual on-chain policy is the authority.
 
 Do not infer a deployment account from an example name or silently fall back to a personal wallet.
 The detailed product requirements are [R-01 through R-08](../spec.md#requirements-to-implementation-map).

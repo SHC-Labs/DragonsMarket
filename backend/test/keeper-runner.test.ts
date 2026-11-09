@@ -16,7 +16,7 @@ test('keeper preparation requires a complete registered-mainnet manifest and can
   assert.equal(settings.options['require-scoped-keys'], true);
   assert.equal(settings.options['events-file'], '.local/feeds/approved-market.jsonl');
   assert.equal(keeperSettings({ KEEPER_MODE: 'check' }, config).mode, 'check');
-  for (const key of ['KEEPER_KEY', 'KEEPER_ORACLE_KEY', 'KEEPER_MARKET_KEY', 'KEEPER_COUNCIL_KEY']) {
+  for (const key of ['KEEPER_KEY', 'KEEPER_ORACLE_KEY', 'KEEPER_MARKET_KEY', 'KEEPER_COUNCIL_KEY', 'KEEPER_ROUNDS_KEY']) {
     assert.throws(() => keeperSettings({ [key]: 'never-use-this-key' }, config), /must not receive signing keys/);
   }
   assert.throws(() => keeperSettings({ KEEPER_MODE: 'sign' }, config), /approval_digest_mismatch/);

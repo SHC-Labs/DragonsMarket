@@ -3,11 +3,13 @@
 // which the case ends with no decision: drawing a jury, finalizing, writing a final answer to the market, releasing a
 // jury's seats, and answering a market nobody answered once its resolve_by has passed. Every one of those calls is open
 // to anyone, so this script watches the chain and sends each one when it is due. It also sweeps the market's fees to the
-// Council and the treasury once enough have built up. It also moves the Council's start-day cursor forward, so seats whose
-// first earning day has come share the revenue that arrives, and settles a fee leg whose result the market lost.
+// Council and the treasury once enough have built up, and sweeps Rounds fees when Rounds is configured. It also moves the
+// Council's start-day cursor forward, settles a fee leg whose result the market lost, and pays Oracle bond claims to their
+// owners after seven days. Bond jobs come from authenticated finalized events.
 //
 //   node keeper.mjs run   --rpc URL --market ID --oracle ID --council ID --account ID [--dry-run]
 //                         [--key-file PATH] [--oracle-key-file PATH] [--market-key-file PATH] [--council-key-file PATH]
+//                         [--rounds ID] [--rounds-key-file PATH]
 //                         --state-file PATH [--events-file PATH] [--workers 2] [--job-batch 50] [--min-sweep UNITS]
 //                         [--prepare-feed] [--require-live-feed] [--require-scoped-keys]
 //   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID --rounds ID [--treasury ID] [--min-margin NEAR] [--release FILE|-]
@@ -33,20 +35,23 @@
 // Give it as the environment variable KEEPER_KEY, or as --key-file naming a file that only its owner can read
 // (chmod 600). --key is refused. The calls to one contract can use their own key: --oracle-key-file or KEEPER_ORACLE_KEY
 // for the oracle, --market-key-file or KEEPER_MARKET_KEY for the market, --council-key-file or KEEPER_COUNCIL_KEY for the
-// Council. A scoped key replaces the default for that
+// Council, and --rounds-key-file or KEEPER_ROUNDS_KEY for Rounds. A scoped key replaces the default for that
 // contract only. Create scoped keys on the keeper account with near-cli-rs, limited to one receiver, the methods the
 // keeper calls there and a small allowance (the gas the keeper attaches is charged against it, so watch what is left
 // with view_access_key and top up by adding a fresh key):
 //
 //   near account add-key KEEPER.near grant-function-call-access --allowance '1 NEAR' \
 //     --receiver-account-id ORACLE.near \
-//     --method-names 'finalize,resolve_draw,retry_apply,retry_unlock,resolve_by_deadline' \
+//     --method-names 'finalize,resolve_draw,retry_apply,retry_unlock,resolve_by_deadline,payout_bond' \
 //     autogenerate-new-keypair print-to-terminal network-config mainnet sign-with-keychain send
 //   near account add-key KEEPER.near grant-function-call-access --allowance '0.5 NEAR' \
 //     --receiver-account-id MARKET.near --method-names 'sweep_fees,settle_leg' \
 //     autogenerate-new-keypair print-to-terminal network-config mainnet sign-with-keychain send
 //   near account add-key KEEPER.near grant-function-call-access --allowance '0.5 NEAR' \
 //     --receiver-account-id COUNCIL.near --method-names 'advance_days' \
+//     autogenerate-new-keypair print-to-terminal network-config mainnet sign-with-keychain send
+//   near account add-key KEEPER.near grant-function-call-access --allowance '0.5 NEAR' \
+//     --receiver-account-id ROUNDS.near --method-names 'sweep_fees' \
 //     autogenerate-new-keypair print-to-terminal network-config mainnet sign-with-keychain send
 //
 // Legacy cursor helpers below are kept for inspecting old state files. Runtime uses the due-queue.
@@ -87,7 +92,7 @@ const SETTLE_GAS_TGAS = 50;
 // advance_days writes one map entry and one event per start day it walks, at most 100 days (MAX_DAY_STEPS in the council).
 const ADVANCE_GAS_TGAS = 50;
 const CONTRACTS = ["market", "oracle", "council"];
-// `check` also covers the rounds contract: it holds stakes and fees in the verifier like the others, but the keeper never calls it.
+// Rounds is optional; when configured the runner also sweeps its treasury fees.
 const CHECKED = [...CONTRACTS, "rounds"];
 // The verifier pauses transfers under this feature key, and a paused verifier refuses every mt_transfer and mt_transfer_call
 // (pause_and_lock_stop_payouts_but_not_receipts in intents_verifier.rs).
@@ -141,6 +146,12 @@ export function dueActions(snapshot) {
   const sweepOpen = snapshot.lastSweepAt == null || snapshot.now >= BigInt(snapshot.lastSweepAt) + snapshot.sweepIntervalNs;
   if (sweepOpen && snapshot.feesDue > 0n && snapshot.feesDue >= snapshot.minSweep) {
     actions.push({ contract: "market", method: "sweep_fees", args: {}, gas: BigInt(SWEEP_GAS_TGAS) * TGAS });
+  }
+  if (snapshot.roundsFeesDue > 0n && snapshot.roundsFeesDue >= snapshot.minSweep) {
+    actions.push({ contract: "rounds", method: "sweep_fees", args: {}, gas: 100n * TGAS });
+  }
+  for (const account of snapshot.bondPayees ?? []) {
+    actions.push({ contract: "oracle", method: "payout_bond", args: { account_id: account }, gas: 100n * TGAS });
   }
   return actions;
 }
@@ -211,7 +222,7 @@ export async function queuedRun(opts, keys, execution) {
   if (!opts["state-file"] && !opts["dry-run"]) throw new Error("run needs --state-file for its durable due-queue");
   if ((opts["prepare-feed"] || opts["require-live-feed"]) && !opts["events-file"])
     throw new Error("A current event feed is required");
-  const scope = { rpc:opts.rpc, market:opts.market, oracle:opts.oracle, council:opts.council };
+  const scope = queueScope(opts);
   const state = readQueue(opts["state-file"],scope);
   const workers = Number(opts.workers ?? 2);
   const batch = Number(opts["job-batch"] ?? 50);
@@ -230,6 +241,12 @@ export async function queuedRun(opts, keys, execution) {
   const [marketConfig,council,fees] = await Promise.all([
     read(opts.market,"config"), read(opts.council,"config"), read(opts.market,"get_fees")
   ]);
+  let roundsFeesDue = 0n;
+  if (opts.rounds) {
+    const [rounds, owed] = await Promise.all([read(opts.rounds, "config"), read(opts.rounds, "owed_breakdown")]);
+    if (!rounds.treasury) throw new Error("Rounds treasury must be configured before sweeping");
+    roundsFeesDue = BigInt(owed.fees) + BigInt(await read(opts.rounds, "get_balance", { account_id: rounds.treasury }));
+  }
   if (!opts["events-file"]) console.log("no event feed: using bounded bootstrap and rotating reconciliation; live deadlines need --events-file");
   // One page of markets and sweeps per run. Neither recovery cursor can be pinned by an open market.
   const marketFrom = BigInt(state.marketCursor);
@@ -255,9 +272,15 @@ export async function queuedRun(opts, keys, execution) {
     state.sweepCursor=String(sweepFrom+BigInt(PAGE)<sweepEnd?sweepFrom+BigInt(PAGE):sweepEnd);
   }
   const jobs=selectJobs(state,now,batch);
-  const markets=[],cases={},locked={},sweeps=[],readErrors=new Set();
+  const markets=[],cases={},locked={},sweeps=[],bondPayees=[],readErrors=new Set();
   await bounded(jobs,workers,async job=>{
     try{
+      if (job.kind === "bond") {
+        const amount = BigInt(await read(opts.oracle, "claimable_of", { account_id: job.id }));
+        if (amount === 0n) finish(state, job);
+        else if (BigInt(job.nextAt) <= now) bondPayees.push(job.id);
+        return;
+      }
       if(job.kind==="sweep"){
         const sweep=await read(opts.market,"get_sweep",{sweep_id:job.id});
         if(!sweep || (!["pending","unresolved"].includes(sweep.council.status)&&!["pending","unresolved"].includes(sweep.treasury.status)))finish(state,job);
@@ -281,7 +304,7 @@ export async function queuedRun(opts, keys, execution) {
   markets.sort((a,b)=>BigInt(a.id)<BigInt(b.id)?-1:1);
   const configuredMin=BigInt(marketConfig.min_sweep), requestedMin=opts["min-sweep"]===undefined?DEFAULT_MIN_SWEEP:BigInt(opts["min-sweep"]);
   const snap = {
-    market:opts.market,now,height,markets,cases,locked,sweeps,
+    market:opts.market,now,height,markets,cases,locked,sweeps,bondPayees,roundsFeesDue,
     feesDue:BigInt(fees.collected)+BigInt(fees.revenue_due)+BigInt(fees.treasury_due),
     minSweep:configuredMin>requestedMin?configuredMin:requestedMin,
     lastSweepAt:marketConfig.last_sweep_at??null,
@@ -290,10 +313,15 @@ export async function queuedRun(opts, keys, execution) {
     council:{lastDay:BigInt(council.last_day)}
   };
   state.globalRetry ??= {};
-  const jobKey=a=>a.args.market_id!==undefined?"market:"+a.args.market_id:a.args.sweep_id!==undefined?"sweep:"+a.args.sweep_id:null;
+  const jobKey=a=>a.args.account_id!==undefined?"bond:"+a.args.account_id:a.args.market_id!==undefined?"market:"+a.args.market_id:a.args.sweep_id!==undefined?"sweep:"+a.args.sweep_id:null;
+  const globalKey = a => a.contract + ":" + a.method;
+  for (const method of ["sweep_fees", "advance_days"]) {
+    const old = state.globalRetry[method];
+    if (old) { state.globalRetry[(method === "sweep_fees" ? "market:" : "council:") + method] ??= old; delete state.globalRetry[method]; }
+  }
   const dedupe = new Map();
   for(const action of dueActions(snap)){
-    const key=jobKey(action),j=key?state.jobs[key]:state.globalRetry[action.method];
+    const key=jobKey(action),j=key?state.jobs[key]:state.globalRetry[globalKey(action)];
     if(j?.failures && BigInt(j.nextAt)>now)continue;
     dedupe.set(action.contract+":"+action.method+":"+JSON.stringify(action.args),action);
   }
@@ -305,7 +333,7 @@ export async function queuedRun(opts, keys, execution) {
   // After a crash, fresh contract views decide whether an unacknowledged attempt needs retrying.
   for (const action of actions) {
     const key = jobKey(action);
-    const j = key ? state.jobs[key] : (state.globalRetry[action.method] ??= { nextAt: "0", failures: 0 });
+    const j = key ? state.jobs[key] : (state.globalRetry[globalKey(action)] ??= { nextAt: "0", failures: 0 });
     if (j) { j.attempting = true; j.lastAction = action.method; }
   }
   save();
@@ -313,7 +341,7 @@ export async function queuedRun(opts, keys, execution) {
   let actionFailures = 0;
   if(!actions.length)console.log("nothing due");
   await bounded(actions,workers,async action=>{
-    const key=jobKey(action),j=key?state.jobs[key]:(state.globalRetry[action.method]??={nextAt:"0",failures:0});
+    const key=jobKey(action),j=key?state.jobs[key]:(state.globalRetry[globalKey(action)]??={nextAt:"0",failures:0});
     if(opts["dry-run"]){console.log("due "+label(action));return;}
     try{
       // One nonce stream per actual key, even when several receivers share the default key.
@@ -336,6 +364,7 @@ export async function queuedRun(opts, keys, execution) {
       if(!state.jobs[key]||failed.has(key)||readErrors.has(key))continue;
       if(acted.has(key)){job.nextAt=String(now+1_000_000_000n);continue;}
       if(job.failures&&BigInt(job.nextAt)>now)continue;
+      if (job.kind === "bond") continue;
       if(job.kind==="market"){
         const m=markets.find(m=>m.id===job.id);if(!m)continue;
         const next=nextMarketAt(m,cases[job.id],locked[job.id],now,height);
@@ -354,8 +383,13 @@ export async function queuedRun(opts, keys, execution) {
 }
 
 export function keeperFeedCurrent(opts, header) {
-  const scope = { rpc: opts.rpc, market: opts.market, oracle: opts.oracle, council: opts.council };
+  const scope = queueScope(opts);
   return feedIsCurrent(readQueue(opts['state-file'], scope), header);
+}
+
+function queueScope(opts) {
+  return { rpc: opts.rpc, market: opts.market, oracle: opts.oracle, council: opts.council,
+    ...(opts.rounds ? { rounds: opts.rounds } : {}) };
 }
 
 // ---- keys --------------------------------------------------------------------------------------------------------
@@ -365,15 +399,17 @@ const KEY_SOURCES = {
   oracle: { file: "oracle-key-file", env: "KEEPER_ORACLE_KEY" },
   market: { file: "market-key-file", env: "KEEPER_MARKET_KEY" },
   council: { file: "council-key-file", env: "KEEPER_COUNCIL_KEY" },
+  rounds: { file: "rounds-key-file", env: "KEEPER_ROUNDS_KEY" },
 };
 export const KEEPER_METHODS = {
-  oracle: ["finalize", "resolve_draw", "retry_apply", "retry_unlock", "resolve_by_deadline"],
+  oracle: ["finalize", "resolve_draw", "retry_apply", "retry_unlock", "resolve_by_deadline", "payout_bond"],
   market: ["sweep_fees", "settle_leg"],
   council: ["advance_days"],
+  rounds: ["sweep_fees"],
 };
 
 export function refuseKeyFlags(opts) {
-  for (const flag of ["key", "oracle-key", "market-key", "council-key"]) {
+  for (const flag of ["key", "oracle-key", "market-key", "council-key", "rounds-key"]) {
     if (flag in opts) throw new Error(`--${flag} is refused: a key on the command line shows in the process list. Use KEEPER_KEY or --key-file`);
   }
 }
@@ -387,7 +423,7 @@ export function readKeyFile(path) {
 }
 
 // The secret key for each contract the keeper calls. A key given for one contract replaces the default for it.
-// Returns { default, oracle, market, council }, each a string or undefined.
+// Returns { default, oracle, market, council, rounds }, each a string or undefined.
 export function resolveKeys(opts, env) {
   const keys = {};
   for (const [name, source] of Object.entries(KEY_SOURCES)) {

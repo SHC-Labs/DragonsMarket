@@ -31,6 +31,10 @@ test('production signer executes a scoped Council call with real final receipts 
       collateral_token_id: 'nep141:usdc.near', cooldown_ns: '1000000000', max_seats_per_account: 5,
     }, teraToGas('100'))] });
     const { approval, env } = keeperFixture();
+    delete approval.deployment.contracts.rounds;
+    delete approval.contracts.rounds;
+    delete approval.keeper.publicKeys.rounds;
+    delete env.KEEPER_ROUNDS_KEY;
     const keeperKey = KeyPair.fromString(env.KEEPER_COUNCIL_KEY! as KeyPairString);
     const keeper = `keeper.${DEFAULT_ACCOUNT_ID}`;
     const adminKey = KeyPair.fromRandom('ed25519');

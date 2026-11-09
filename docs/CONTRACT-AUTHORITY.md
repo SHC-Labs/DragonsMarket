@@ -3,8 +3,12 @@
 Initial authorization review on 8 November 2026 used source revision
 `6602a4b63942da799546ce93e10fe4079f6d6cee`. This is an authorization-focused source review,
 not a complete economic audit, deployed-code approval or completed DAO handover.
-The intended deployment parent is `dragonsmarket.near`; final child accounts, DAO owner,
-treasury and publisher identities are not yet specified.
+The intended deployment parent is `dragonsmarket.near` and the proposed owner is
+`dragonsmarket.sputnik-dao.near`; final child accounts, treasury and publisher identities
+still require the team's release manifest. At finalized block 223711328 the proposed DAO
+had no account keys, but its Approver role allowed one of five members to approve calls
+and transfers. That policy is not approved for ownership handover. Admin thresholds do
+not override another role's call permissions.
 
 ## Caller map
 
@@ -108,16 +112,18 @@ requires its own FullAccess transaction key because the transfer attaches one yo
 that account should hold only its approved gas/bond float. It must never use a contract,
 DAO or treasury key. Rounds `record_price` is a zero-deposit signed-price relay.
 
-The maintenance keeper uses its own account and three finite-allowance FunctionCall keys:
+The maintenance keeper uses its own account and separate finite-allowance FunctionCall keys:
 
 | Receiver | Allowed methods |
 | --- | --- |
-| Oracle | `finalize`, `resolve_draw`, `retry_apply`, `retry_unlock`, `resolve_by_deadline` |
+| Oracle | `finalize`, `resolve_draw`, `retry_apply`, `retry_unlock`, `resolve_by_deadline`, `payout_bond` |
 | Market | `sweep_fees`, `settle_leg` |
 | Council | `advance_days` |
+| Rounds, when configured | `sweep_fees` |
 
-Require scoped-key mode. The maintenance keeper does not publish prices or operate
-Rounds. The Railway `prices` collector is not a substitute for publishers or a resolver.
+Require scoped-key mode. The maintenance keeper pays due Oracle bonds only to their owners
+and sweeps Rounds fees only to the configured treasury. It does not publish prices or place
+trades. The Railway `prices` collector is not a substitute for publishers or a resolver.
 
 ## Keyless handover evidence
 
@@ -139,8 +145,10 @@ The backend activation approval now checks both RPC providers at the same recent
 block. Market, Oracle, Council, optional Rounds and the NFT must have no NEAR access keys.
 Every financial contract must have proven its upgrade path, have no registered Intents keys,
 have predecessor authentication enabled and be unlocked. The verifier must permit `mt_transfer`.
-Missing, malformed or disagreeing responses fail closed. This observes custody; it does not
-remove keys or prove the DAO's policy and execution history.
+Missing, malformed or disagreeing responses fail closed. The approval also pins the owner's
+DAO code and policy, requires a keyless DAO account, and checks every approving role against
+the reviewed minimum vote count. The Oracle's no-decision recipient is pinned to the treasury.
+This observes custody and policy; it does not remove keys or prove production execution history.
 
 Ethereum-style implicit financial accounts (`0x` followed by 40 hex characters) are refused
 by activation and the standalone custody check. In the pinned Intents implementation,

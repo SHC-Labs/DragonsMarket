@@ -12,6 +12,7 @@ import { verifyKeeperApproval, type KeeperApproval } from '../src/keeper-approva
 import { createKeeperSigner, keeperSigningKeys } from '../src/keeper-signer.js';
 import { ReadRpcClient } from '../src/providers.js';
 import { keeperFixture } from './keeper-fixture.js';
+import { daoPolicyHash } from '../src/dao-policy.js';
 
 // The upstream repository tracks this deployed Sputnik fixture. It is test evidence for the
 // proposal ABI, not approval of a production DAO deployment or its policy.
@@ -167,6 +168,9 @@ test('DAO governance, sealing and the production keeper approval/signing path wo
     const nftKeys = await provider.viewAccessKeyList({ accountId: nft.accountId });
     landed(await nft.signAndSendTransaction({ receiverId: nft.accountId, waitUntil: 'FINAL',
       actions: nftKeys.keys.map(key => actions.deleteKey(PublicKey.fromString(key.public_key))) }));
+    const daoKeys = await provider.viewAccessKeyList({ accountId: dao.accountId });
+    landed(await dao.signAndSendTransaction({ receiverId: dao.accountId, waitUntil: 'FINAL',
+      actions: daoKeys.keys.map(key => actions.deleteKey(PublicKey.fromString(key.public_key))) }));
     // Synthetic approval and keys apply only to this isolated sandbox. The production parser still
     // requires mainnet, independent HTTPS providers and externally approved release evidence.
     const { approval, config, env } = keeperFixture();
@@ -176,6 +180,8 @@ test('DAO governance, sealing and the production keeper approval/signing path wo
       contracts: { ...contracts, verifier: verifier.accountId } };
     approval.deployment = config.deployment;
     approval.controls = { owner: dao.accountId, operator: outsider.accountId, treasury: dao.accountId };
+    approval.governance.codeHash = (await provider.viewAccount({ accountId: dao.accountId })).code_hash;
+    approval.governance.policySha256 = daoPolicyHash(await view(dao.accountId, 'get_policy'));
     for (const [role, accountId] of Object.entries({ ...config.deployment.contracts, nft: nft.accountId, collateral: collateral.accountId })) {
       const expected = approval.contracts[role as keyof KeeperApproval['contracts']];
       assert.ok(expected);
@@ -186,7 +192,7 @@ test('DAO governance, sealing and the production keeper approval/signing path wo
     approval.keeper.maxKeyAllowanceYocto = nearToYocto('0.1').toString();
     approval.keeper.minBalanceYocto = nearToYocto('1').toString();
     landed(await keeper.signAndSendTransaction({ receiverId: keeper.accountId, waitUntil: 'FINAL', actions:
-      (['market', 'oracle', 'council'] as const).map(role => actions.addFunctionCallAccessKey(
+      roles.map(role => actions.addFunctionCallAccessKey(
         KeyPair.fromString(env[`KEEPER_${role.toUpperCase()}_KEY`]! as KeyPairString).getPublicKey(), contracts[role],
         [...KEEPER_METHODS[role]], nearToYocto('0.1'))) }));
     // Two independent client queues against one local node exercise the real pacing and block binding.
@@ -210,6 +216,32 @@ test('DAO governance, sealing and the production keeper approval/signing path wo
     await approve(await propose('market', 'set_paused', { paused: true }));
     await assert.rejects(create().send(action), /approved_contract_controls_changed/);
     assert.deepEqual(JSON.parse(await readFile(journalFile, 'utf8')), journal, 'changed DAO controls prevent signing and leave no new submission');
+    await approve(await propose('market', 'set_paused', { paused: false }));
+    const weakPolicy = await view(dao.accountId, 'get_policy');
+    assert.ok(Array.isArray(weakPolicy.roles));
+    weakPolicy.roles.push({ name: 'Requestor', kind: { Group: members.map(member => member.accountId) },
+      permissions: ['*:AddProposal', 'call:VoteReject'],
+      vote_policy: { call: { weight_kind: 'RoleWeight', quorum: '0', threshold: '0' } } });
+    const change = landed(await members[0]!.signAndSendTransaction({ receiverId: dao.accountId, waitUntil: 'FINAL',
+      actions: [actions.functionCall('add_proposal', { proposal: { description: 'Prove policy drift refusal',
+        kind: { ChangePolicy: { policy: weakPolicy } } } }, teraToGas('100'), nearToYocto('0.1'))] }));
+    assert.ok(typeof change.status === 'object' && 'SuccessValue' in change.status);
+    const policyId: unknown = JSON.parse(Buffer.from(change.status.SuccessValue, 'base64').toString());
+    assert.ok(typeof policyId === 'number');
+    for (const member of members.slice(0, 2)) {
+      await call(member, dao.accountId, 'act_proposal', { id: policyId, action: 'VoteApprove',
+        proposal: { ChangePolicy: { policy: weakPolicy } } }, '300');
+    }
+    await assert.rejects(create().send(action), /approved_dao_policy_changed/);
+    approval.governance.policySha256 = daoPolicyHash(await view(dao.accountId, 'get_policy'));
+    await assert.rejects(create().send(action), /unsafe_dao_approval_threshold/,
+      'copying a new hash cannot authorize zero-vote execution through a nonvoting role');
+    assert.deepEqual(JSON.parse(await readFile(journalFile, 'utf8')), journal);
+    const pending = await propose('market', 'set_paused', { paused: true });
+    const stored = await view(dao.accountId, 'get_proposal', { id: pending.proposalId });
+    await call(members[1]!, dao.accountId, 'act_proposal', { id: pending.proposalId, action: 'VoteReject', proposal: stored.kind }, '300');
+    assert.equal((await view(contracts.market, 'config')).paused, true,
+      'a rejection can execute through a zero-threshold role that has no VoteApprove permission');
   } finally {
     if (sandbox) {
       const child = (sandbox as unknown as { childProcess: ChildProcess }).childProcess;

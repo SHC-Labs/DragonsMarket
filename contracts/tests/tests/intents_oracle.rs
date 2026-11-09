@@ -3,7 +3,7 @@
 mod common;
 use common::*;
 use near_workspaces::result::ExecutionFinalResult;
-use near_workspaces::types::NearToken;
+use near_workspaces::types::{AccessKey, Gas, KeyType, NearToken, SecretKey};
 use near_workspaces::{Account, AccountId};
 use serde_json::{json, Value};
 
@@ -462,7 +462,7 @@ async fn a_bond_withdrawal_the_verifier_refuses_restores_the_claimable() -> anyh
     let logs = withdraw_bond(&w, &w.carol).await?;
     assert_eq!(
         event_names(&logs),
-        vec!["bond_payout_requested", "bond_payout_failed"],
+        vec!["bond_payout_requested", "bond_claimable", "bond_payout_failed"],
         "{logs:?}"
     );
     assert_eq!(claimable(&w, w.carol.id()).await, BOND, "the claimable is back");
@@ -475,7 +475,7 @@ async fn a_bond_withdrawal_the_verifier_refuses_restores_the_claimable() -> anyh
     let logs = withdraw_bond(&w, &w.carol).await?;
     assert_eq!(
         event_names(&logs),
-        vec!["bond_payout_requested", "bond_payout_failed"],
+        vec!["bond_payout_requested", "bond_claimable", "bond_payout_failed"],
         "{logs:?}"
     );
     assert_eq!(claimable(&w, w.carol.id()).await, BOND);
@@ -493,6 +493,59 @@ async fn a_bond_withdrawal_the_verifier_refuses_restores_the_claimable() -> anyh
     assert_eq!(oracle_total_owed(&w).await, 0);
     assert_oracle_reconciled(&w).await;
     refused(withdraw_bond(&w, &w.carol).await, "nothing to withdraw");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_scoped_keeper_pays_only_the_bond_owner_and_recovers_a_refused_transfer() -> anyhow::Result<()> {
+    let w = setup().await?;
+    unchallenged_and_final(&w).await?;
+    let key = SecretKey::from_random(KeyType::ED25519);
+    w.dave
+        .batch(w.dave.id())
+        .add_key(
+            key.public_key(),
+            AccessKey::function_call_access(w.oracle.id(), &["payout_bond"], Some(NearToken::from_near(1))),
+        )
+        .transact()
+        .await?
+        .into_result()?;
+    let limited = Account::from_secret_key(w.dave.id().clone(), key, &w.worker);
+    let carol_before = intents_balance(&w, w.carol.id()).await;
+    let keeper_before = intents_balance(&w, w.dave.id()).await;
+    lock_account(&w, w.oracle.id()).await?;
+    for locked in [true, false] {
+        if !locked {
+            unlock_account(&w, w.oracle.id()).await?;
+        }
+        let result = limited
+            .call(w.oracle.id(), "payout_bond")
+            .args_json(json!({ "account_id": w.carol.id() }))
+            .gas(Gas::from_tgas(100))
+            .transact()
+            .await?
+            .into_result()?;
+        assert!(result
+            .logs()
+            .iter()
+            .any(|log| log.contains(if locked { "bond_payout_failed" } else { "bond_paid" })));
+        assert_eq!(claimable(&w, w.carol.id()).await, if locked { BOND } else { 0 });
+        assert_eq!(
+            intents_balance(&w, w.carol.id()).await,
+            carol_before + if locked { 0 } else { BOND }
+        );
+        assert_eq!(intents_balance(&w, w.dave.id()).await, keeper_before);
+        assert_oracle_reconciled(&w).await;
+    }
+    let replay = limited
+        .call(w.oracle.id(), "payout_bond")
+        .args_json(json!({ "account_id": w.carol.id() }))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?
+        .into_result();
+    refused(replay, "nothing to withdraw");
+    assert_eq!(oracle_total_owed(&w).await, 0);
     Ok(())
 }
 

@@ -4,6 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
+const ACCOUNT = /^(?=.{2,64}$)[a-z0-9]+(?:[-_.][a-z0-9]+)*$/;
+const BOND_WAIT_NS = 7n * 86_400n * 1_000_000_000n;
+const validId = (kind, id) => typeof id === 'string'
+  && (kind === 'bond' ? ACCOUNT.test(id) : ['market', 'sweep'].includes(kind) && DECIMAL.test(id));
 const MARKET_EVENTS = new Set(['market_created','market_registered','market_registration_failed','outcome_set','redeemed','market_pruned']);
 const ORACLE_EVENTS = new Set(['proposed','challenged','escalated','jury_drawn','draw_failed','final','outcome_applied','apply_failed','deadline_void']);
 const SWEEP_EVENTS = new Set(['fees_swept','fee_transfer_unresolved','fee_transfer_failed','fee_leg_settled','fee_leg_reconciled']);
@@ -17,7 +21,7 @@ export function readQueue(file, scope) {
   if (typeof state.finished_through === 'string' && DECIMAL.test(state.finished_through)) return { ...newQueue(scope), legacyCursor: state.finished_through };
   if (state.version !== 1 || JSON.stringify(state.scope) !== JSON.stringify(scope) || !state.jobs || !state.caseMarkets) throw new Error('Keeper queue version or contract scope differs; reconcile before reusing it');
   for (const [key,j] of Object.entries(state.jobs)) {
-    if (!['market','sweep'].includes(j.kind) || !DECIMAL.test(j.id) || key !== j.kind + ':' + j.id || !DECIMAL.test(j.nextAt)) throw new Error('Invalid keeper queue job');
+    if (!validId(j.kind, j.id) || key !== j.kind + ':' + j.id || !DECIMAL.test(j.nextAt)) throw new Error('Invalid keeper queue job');
   }
   return state;
 }
@@ -45,7 +49,8 @@ export function withQueueLock(file, work) {
   return Promise.resolve().then(work).finally(()=>fs.unlinkSync(lock));
 }
 export function touch(state, kind, id, now) {
-  id = String(id); if (!DECIMAL.test(id)) throw new Error('Invalid event entity id');
+  if (kind !== 'bond') id = String(id);
+  if (!validId(kind, id)) throw new Error('Invalid event entity id');
   const key = kind + ':' + id;
   state.jobs[key] = { ...(state.jobs[key]??{}), kind, id, nextAt:String(now), failures:0 };
   return state.jobs[key];
@@ -97,7 +102,7 @@ export function ingestBlock(state, block) {
     if(h.prev_hash!==state.cursor.hash)throw new Error('Event feed has a block gap; reconcile it before advancing');
   }
   const seen=new Set(), updates=new Map();
-  const enqueue=(kind,id)=>{id=String(id);if(!DECIMAL.test(id))throw new Error("Invalid event entity id");updates.set(kind+":"+id,{kind,id});};
+  const enqueue=(kind,id)=>{if(kind!=='bond')id=String(id);if(!validId(kind,id))throw new Error("Invalid event entity id");updates.set(kind+":"+id,{kind,id});};
   for(const receipt of block.receipts){
     const receiver=receipt.receiver_id;
     const role=['market','oracle','council'].find(k=>state.scope[k]===receiver);
@@ -112,6 +117,7 @@ export function ingestBlock(state, block) {
         if(data.market!==undefined&&data.market!==state.scope.market)continue;
         if((role==='market'&&MARKET_EVENTS.has(event.event))||(role==='oracle'&&ORACLE_EVENTS.has(event.event)))enqueue('market',data.market_id);
         if(role==='market'&&SWEEP_EVENTS.has(event.event))enqueue('sweep',data.sweep_id??data.id);
+        if(role==='oracle'&&['bond_claimable','bond_payout_failed'].includes(event.event))enqueue('bond',data.account);
         if(role==='council'&&['jury_drawn','jury_released'].includes(event.event)){
           const uid=String(BigInt(data.case_key)&((1n<<63n)-1n));
           if(state.caseMarkets[uid]!==undefined)enqueue('market',state.caseMarkets[uid]);
@@ -120,7 +126,13 @@ export function ingestBlock(state, block) {
       }
     }
   }
-  for(const {kind,id} of updates.values())touch(state,kind,id,h.timestamp_nanosec);
+  for(const {kind,id} of updates.values()) {
+    if (kind === 'bond') {
+      const key = 'bond:' + id;
+      // Existing retries keep their deadline; another credit must not postpone a payee forever.
+      if (!state.jobs[key]) touch(state, kind, id, BigInt(h.timestamp_nanosec) + BOND_WAIT_NS);
+    } else touch(state,kind,id,h.timestamp_nanosec);
+  }
   state.cursor={height:String(h.height),hash:h.hash,timestampNs:String(h.timestamp_nanosec)};return true;
 }
 

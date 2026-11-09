@@ -13,7 +13,7 @@ import { KEEPER_METHODS } from '@dragons-market/keeper';
 
 test('scoped secrets must derive the approved public keys', () => {
   const { env, approval } = keeperFixture();
-  assert.equal(Object.keys(keeperSigningKeys(env, approval)).length, 3);
+  assert.equal(Object.keys(keeperSigningKeys(env, approval)).length, 4);
   assert.throws(() => keeperSigningKeys({ ...env, KEEPER_KEY: 'forbidden' }, approval), /unscoped/);
   assert.throws(() => keeperSigningKeys({ ...env, KEEPER_ORACLE_KEY: env.KEEPER_MARKET_KEY }, approval), /does_not_match/);
   assert.throws(() => keeperSigningKeys({ ...env, KEEPER_MARKET_KEY: undefined }, approval), /missing/);
@@ -27,7 +27,8 @@ test('signer journals before broadcasting, proves finality, and recovers ambiguo
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const journalFile = join(dir, 'submission.json');
   const journal = () => JSON.parse(readFileSync(journalFile, 'utf8'));
-  const action = { contract: 'oracle', method: 'finalize', args: { market: 'market.near', market_id: '0' }, gas: 100_000_000_000_000n };
+  let action: { contract: 'market' | 'oracle' | 'council' | 'rounds'; method: string; args: Record<string, string>; gas: bigint } =
+    { contract: 'oracle', method: 'finalize', args: { market: 'market.near', market_id: '0' }, gas: 100_000_000_000_000n };
   let sends = 0, verifies = 0, final = true, failed = false, corrupted = false, allowance = '5000';
   let pendingHash = '';
   const permission = (key: string) => {
@@ -40,10 +41,10 @@ test('signer journals before broadcasting, proves finality, and recovers ambiguo
     if (method === 'query') return { nonce: 1, permission: permission((params as { public_key: string }).public_key) };
     if (!final) throw new Error('transaction_not_known_yet');
     return { final_execution_status: 'FINAL', status: failed ? { Failure: {} } : { SuccessValue: '' },
-      transaction: { hash: pendingHash, signer_id: approval.keeper.accountId, receiver_id: options.oracle,
-        actions: [{ FunctionCall: { method_name: corrupted ? 'upgrade' : 'finalize', args: Buffer.from(JSON.stringify(action.args)).toString('base64'), deposit: '0' } }] },
+      transaction: { hash: pendingHash, signer_id: approval.keeper.accountId, receiver_id: options[action.contract],
+        actions: [{ FunctionCall: { method_name: corrupted ? 'upgrade' : action.method, args: Buffer.from(JSON.stringify(action.args)).toString('base64'), deposit: '0' } }] },
       transaction_outcome: { id: pendingHash, outcome: { executor_id: approval.keeper.accountId, receipt_ids: ['receipt'], status: { SuccessReceiptId: 'receipt' } } },
-      receipts_outcome: [{ id: 'receipt', outcome: { executor_id: options.oracle, receipt_ids: [], logs: [],
+      receipts_outcome: [{ id: 'receipt', outcome: { executor_id: options[action.contract], receipt_ids: [], logs: [],
         status: failed ? { Failure: { ActionError: {} } } : { SuccessValue: '' } } }] };
   } };
   const make = () => createKeeperSigner({ approval, options, keys, journalFile, primary: rpc, secondary: rpc,
@@ -86,4 +87,13 @@ test('signer journals before broadcasting, proves finality, and recovers ambiguo
   await assert.rejects(restarted.send({ ...action, method: 'upgrade' }), /unexpected/);
   await assert.rejects(restarted.send({ ...action, args: { ...action.args, beneficiary: 'attacker.near' } }), /arguments/);
   await assert.rejects(restarted.send({ ...action, args: { ...action.args, market_id: '7' } }), /market_not_approved/);
+  allowance = '5000'; failed = false;
+  action = { contract: 'rounds', method: 'sweep_fees', args: {}, gas: 100_000_000_000_000n };
+  assert.equal(await restarted.send(action), 'ok');
+  await assert.rejects(restarted.send({ ...action, args: { receiver_id: 'attacker.near' } }), /arguments/);
+  action = { contract: 'oracle', method: 'payout_bond', args: { account_id: 'alice.near' }, gas: 100_000_000_000_000n };
+  assert.equal(await restarted.send(action), 'ok');
+  await assert.rejects(restarted.send({ ...action, args: { ...action.args, receiver_id: 'attacker.near' } }), /arguments/);
+  await assert.rejects(restarted.send({ ...action, args: { account_id: '../invalid' } }), /arguments/);
+  assert.equal(sends, 5, 'only the two exact new maintenance calls were broadcast');
 });

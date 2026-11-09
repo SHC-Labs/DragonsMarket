@@ -8,7 +8,7 @@ import { finalTransaction } from './agent-chain.js';
 import { object } from './ingestion/block.js';
 import { assertApprovalCurrent, type KeeperApproval } from './keeper-approval.js';
 import type { ReadRpcClient } from './providers.js';
-import { isHash, isUint, isUnits } from './validate.js';
+import { isAccount, isHash, isUint, isUnits } from './validate.js';
 
 type Rpc = Pick<ReadRpcClient, 'call'>;
 type Pending = { hash: string; receiver: string; method: string; args: Record<string, string>; gas: string };
@@ -47,7 +47,8 @@ function readJournal(file: string, deployment: string, account: string): Journal
 export function keeperSigningKeys(env: NodeJS.ProcessEnv, approval: KeeperApproval): KeeperKeys {
   if (env.KEEPER_KEY) throw new Error('unscoped_keeper_key_refused');
   const keys: KeeperKeys = {};
-  for (const role of ['market', 'oracle', 'council'] as const) {
+  if (!approval.deployment.contracts.rounds && env.KEEPER_ROUNDS_KEY) throw new Error('unexpected_rounds_key');
+  for (const role of Object.keys(approval.keeper.publicKeys) as (keyof KeeperKeys)[]) {
     const encoded = env[`KEEPER_${role.toUpperCase()}_KEY`];
     if (!encoded || !/^ed25519:[1-9A-HJ-NP-Za-km-z]{86,88}$/.test(encoded)) throw new Error('missing_scoped_keeper_key');
     const raw = base58Decode(encoded.slice(8));
@@ -65,10 +66,14 @@ export function keeperSigningKeys(env: NodeJS.ProcessEnv, approval: KeeperApprov
 function assertAction(action: KeeperAction, options: KeeperOptions) {
   if (!METHODS[action.contract]?.includes(action.method) || action.gas <= 0n || action.gas > 300_000_000_000_000n)
     throw new Error('unexpected_keeper_action');
-  const wanted = action.contract === 'oracle' ? { market: options.market, market_id: action.args.market_id }
+  if (!options[action.contract as keyof KeeperKeys]) throw new Error('keeper_receiver_missing');
+  const payout = action.contract === 'oracle' && action.method === 'payout_bond';
+  const wanted = payout ? { account_id: action.args.account_id }
+    : action.contract === 'oracle' ? { market: options.market, market_id: action.args.market_id }
     : action.method === 'settle_leg' ? { sweep_id: action.args.sweep_id } : {};
   if (!isDeepStrictEqual(action.args, wanted)
-    || (action.contract === 'oracle' && !isUint(action.args.market_id))
+    || (payout && !isAccount(action.args.account_id))
+    || (action.contract === 'oracle' && !payout && !isUint(action.args.market_id))
     || (action.method === 'settle_leg' && !isUint(action.args.sweep_id))) throw new Error('unexpected_keeper_arguments');
 }
 
@@ -125,7 +130,7 @@ export function createKeeperSigner(input: {
       || actions.reduce((sum, action) => sum + action.gas, 0n) > BigInt(approval.keeper.maxGasPerRunTgas) * 10n ** 12n)
       throw new Error('keeper_batch_exceeds_approved_budget');
     await recover();
-    for (const role of ['market', 'oracle', 'council'] as const) {
+    for (const role of Object.keys(approval.keeper.publicKeys) as (keyof KeeperKeys)[]) {
       checkedNonce(await primary.call('query', { request_type: 'view_access_key', finality: 'optimistic',
         account_id: journal.account, public_key: approval.keeper.publicKeys[role] }), role, options, approval);
     }
@@ -153,7 +158,7 @@ export function createKeeperSigner(input: {
       const nonce = checkedNonce(access, role, options, approval);
       if (!object(block) || !object(block.header) || !isHash(block.header.hash)) throw new Error('keeper_signing_block_invalid');
       const raw = base58Decode(keys[role]!.slice(8));
-      const receiver = options[role];
+      const receiver = options[role]!;
       const signed = signedFunctionCall({ signer: journal.account, seed: raw.subarray(0, 32), publicKey: raw.subarray(32),
         nonce, receiver, blockHash: base58Decode(block.header.hash), method: action.method,
         args: Buffer.from(JSON.stringify(action.args)), gas: action.gas });

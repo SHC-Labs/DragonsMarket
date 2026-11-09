@@ -17,9 +17,9 @@ export function keeperSettings(env: NodeJS.ProcessEnv, config: Config) {
   const mode = env.KEEPER_MODE ?? 'prepare';
   if (!['prepare', 'check', 'sign'].includes(mode)) throw new Error('Invalid keeper mode');
   if (config.network !== 'mainnet' || !config.deployment) throw new Error('A registered mainnet deployment is required');
-  const { market, oracle, council } = config.deployment.contracts;
+  const { market, oracle, council, rounds } = config.deployment.contracts;
   if (![market, oracle, council].every(isAccount)) throw new Error('Keeper requires market, oracle and Council accounts');
-  if (mode !== 'sign' && (env.KEEPER_KEY || env.KEEPER_ORACLE_KEY || env.KEEPER_MARKET_KEY || env.KEEPER_COUNCIL_KEY)) {
+  if (mode !== 'sign' && (env.KEEPER_KEY || env.KEEPER_ORACLE_KEY || env.KEEPER_MARKET_KEY || env.KEEPER_COUNCIL_KEY || env.KEEPER_ROUNDS_KEY)) {
     throw new Error('Read-only keeper preparation must not receive signing keys');
   }
   const approval = mode === 'sign' ? parseKeeperApproval(env.KEEPER_APPROVAL_JSON, env.KEEPER_APPROVAL_SHA256, config) : null;
@@ -28,6 +28,7 @@ export function keeperSettings(env: NodeJS.ProcessEnv, config: Config) {
   const options: KeeperOptions = {
     rpc: [config.rpc.primaryUrl, config.rpc.secondUrl].filter(Boolean).join(','),
     market: market!, oracle: oracle!, council: council!,
+    ...(rounds ? { rounds } : {}),
     'state-file': `.local/feeds/${config.deployment.id}.queue.json`,
     'events-file': `.local/feeds/${config.deployment.id}.jsonl`,
     'require-live-feed': true, 'require-scoped-keys': true, workers: 1, 'job-batch': approval ? 1 : 50,

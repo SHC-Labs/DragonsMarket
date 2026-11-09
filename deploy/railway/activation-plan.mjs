@@ -90,6 +90,7 @@ const secretOwners = {
   OPERATOR_TOKEN: ['server'], AGENT_WORKER_TOKEN: ['server', 'agent-worker'],
   AGENT_API_KEY: ['agent-worker'], AGENT_GRANT_KEY: ['agent-worker'],
   KEEPER_MARKET_KEY: ['keeper'], KEEPER_ORACLE_KEY: ['keeper'], KEEPER_COUNCIL_KEY: ['keeper'],
+  KEEPER_ROUNDS_KEY: ['keeper'],
   RPC_PRIMARY_BEARER_TOKEN: ['database-release', 'server', 'indexer', 'reconcile', 'verify-chain', 'keeper', 'agent-worker'],
   RPC_SECOND_BEARER_TOKEN: ['database-release', 'server', 'indexer', 'reconcile', 'verify-chain', 'keeper', 'agent-worker'],
   NEARDATA_BEARER_TOKEN: ['indexer'],
@@ -98,10 +99,12 @@ const secretOwners = {
 export function verifySealedExecutionKeys(plan, stage, entries) {
   requireValue(Array.isArray(entries), 'Missing variable metadata');
   const owners = { KEEPER_MARKET_KEY: plan.keeperServiceId, KEEPER_ORACLE_KEY: plan.keeperServiceId,
-    KEEPER_COUNCIL_KEY: plan.keeperServiceId, AGENT_API_KEY: agentService.id, AGENT_GRANT_KEY: agentService.id };
+    KEEPER_COUNCIL_KEY: plan.keeperServiceId, KEEPER_ROUNDS_KEY: plan.keeperServiceId,
+    AGENT_API_KEY: agentService.id, AGENT_GRANT_KEY: agentService.id };
   for (const [name, serviceId] of Object.entries(owners)) {
     const rows = entries.filter(entry => entry.name === name);
-    const active = stage === 'launch' && (serviceId === plan.keeperServiceId || plan.profile === 'agents');
+    const active = stage === 'launch' && (serviceId === plan.keeperServiceId || plan.profile === 'agents')
+      && (name !== 'KEEPER_ROUNDS_KEY' || Boolean(plan.approval.deployment.contracts.rounds));
     requireValue(active ? rows.length === 1 && rows[0].serviceId === serviceId && rows[0].isSealed === true
       : rows.length === 0, `Execution credential must match its sealed service boundary: ${name}`);
   }
@@ -176,9 +179,10 @@ function checkKeeperStage(plan, stage, inventory) {
     same(inventory[name].KEEPER_APPROVAL_SHA256, plan.approvalDigest, `${name} approval digest`);
   }
   same(inventory.keeper.KEEPER_MODE, stage === 'prepare' ? 'prepare' : 'sign', 'keeper mode');
-  for (const role of ['MARKET', 'ORACLE', 'COUNCIL']) {
+  for (const role of ['MARKET', 'ORACLE', 'COUNCIL', 'ROUNDS']) {
     const value = inventory.keeper[`KEEPER_${role}_KEY`];
-    requireValue(stage === 'prepare' ? value === undefined || value === '' : value === null,
+    const active = stage === 'launch' && (role !== 'ROUNDS' || Boolean(plan.approval.deployment.contracts.rounds));
+    requireValue(active ? value === null : value === undefined || value === '',
       'Keeper signing keys must be absent during preparation and sealed for launch');
   }
 }

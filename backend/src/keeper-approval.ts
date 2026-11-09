@@ -6,6 +6,7 @@ import { finalizedHead, viewAt } from './chain-view.js';
 import { object } from './ingestion/block.js';
 import type { ReadRpcClient } from './providers.js';
 import { isAccount, isUint, isUnits } from './validate.js';
+import { assertDaoPolicy, daoPolicyHash } from './dao-policy.js';
 
 type Rpc = Pick<ReadRpcClient, 'call'>;
 const ROLES = ['market', 'oracle', 'council', 'rounds', 'verifier', 'nft', 'collateral'] as const;
@@ -26,9 +27,11 @@ export interface KeeperApproval {
   marketIds: string[];
   contracts: Partial<Record<Role, { accountId: string; codeHash: string; sourceCommit: string; buildEvidence: string }>>;
   controls: { owner: string; operator: string; treasury: string };
+  governance: { codeHash: string; policySha256: string; minApprovals: number;
+    sourceCommit: string; buildEvidence: string };
   keeper: {
     accountId: string;
-    publicKeys: Record<'market' | 'oracle' | 'council', string>;
+    publicKeys: Record<'market' | 'oracle' | 'council', string> & { rounds?: string };
     minBalanceYocto: string;
     maxKeyAllowanceYocto: string;
     maxActionsPerRun: number;
@@ -81,12 +84,20 @@ export function parseKeeperApproval(raw: string | undefined, digest: string | un
   const controls = a.controls;
   if (!['owner', 'operator', 'treasury'].every(k => isAccount(controls[k]) && !(controls[k] as string).endsWith('.testnet')))
     throw new Error('invalid_approved_controls');
+  const g = a.governance;
+  if (!object(g) || typeof g.codeHash !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(g.codeHash)
+    || base58Decode(g.codeHash).length !== 32 || /^1+$/.test(g.codeHash)
+    || typeof g.policySha256 !== 'string' || !HEX.test(g.policySha256)
+    || !Number.isSafeInteger(g.minApprovals) || Number(g.minApprovals) < 2 || Number(g.minApprovals) > 100
+    || typeof g.sourceCommit !== 'string' || !COMMIT.test(g.sourceCommit) || /^0+$/.test(g.sourceCommit)
+    || !https(g.buildEvidence)) throw new Error('invalid_approved_governance');
   const k = a.keeper;
   const publicKeys = k.publicKeys;
+  const keyRoles = expected.rounds ? FINANCIAL : FINANCIAL.filter(role => role !== 'rounds');
   if (!isAccount(k.accountId) || k.accountId.endsWith('.testnet') || !object(k.publicKeys)
     || [controls.owner, controls.treasury, ...Object.values(expected)].includes(k.accountId)
-    || !object(publicKeys) || !['market', 'oracle', 'council'].every(role => publicKey(publicKeys[role]))
-    || new Set(Object.values(k.publicKeys)).size !== 3 || Object.keys(k.publicKeys).length !== 3
+    || !object(publicKeys) || !keyRoles.every(role => publicKey(publicKeys[role]))
+    || new Set(Object.values(k.publicKeys)).size !== keyRoles.length || Object.keys(k.publicKeys).length !== keyRoles.length
     || !isUnits(k.minBalanceYocto) || k.minBalanceYocto === '0'
     || !isUnits(k.maxKeyAllowanceYocto) || k.maxKeyAllowanceYocto === '0'
     || !Number.isInteger(k.maxActionsPerRun) || Number(k.maxActionsPerRun) < 1 || Number(k.maxActionsPerRun) > 10
@@ -130,6 +141,17 @@ export async function verifyKeeperApproval(approval: KeeperApproval, config: Con
       }
     }
     const view = viewAt(rpc, head.hash);
+    const dao = approval.controls.owner;
+    const identity = await rpc.call('query', { request_type: 'view_account', block_id: head.hash, account_id: dao });
+    if (!object(identity) || identity.block_hash !== head.hash || identity.global_contract_account_id
+      || (identity.global_contract_hash ?? identity.code_hash) !== approval.governance.codeHash)
+      throw new Error('approved_dao_code_changed');
+    const daoKeys = await rpc.call('query', { request_type: 'view_access_key_list', block_id: head.hash, account_id: dao });
+    if (!object(daoKeys) || daoKeys.block_hash !== head.hash || !Array.isArray(daoKeys.keys) || daoKeys.keys.length)
+      throw new Error('approved_dao_not_keyless');
+    const policy = await view(dao, 'get_policy', {});
+    if (daoPolicyHash(policy) !== approval.governance.policySha256) throw new Error('approved_dao_policy_changed');
+    assertDaoPolicy(policy, approval.governance.minApprovals);
     if (await view(d.verifier!, 'pa_is_paused', { key: 'mt_transfer' }) !== false)
       throw new Error('approved_verifier_transfers_unavailable');
     for (const role of FINANCIAL) {
@@ -151,7 +173,8 @@ export async function verifyKeeperApproval(approval: KeeperApproval, config: Con
         || (role !== 'council' && settings.operator !== approval.controls.operator)
         || (['market', 'rounds'].includes(role) && settings.treasury !== approval.controls.treasury)
         || (role === 'market' && (settings.oracle !== d.oracle || settings.revenue_pool !== d.council))
-        || (role === 'oracle' && settings.council !== d.council)
+        || (role === 'oracle' && (settings.council !== d.council
+          || settings.no_decision_recipient !== approval.controls.treasury))
         || (role === 'council' && (settings.oracle !== d.oracle || settings.nft_contract !== approval.contracts.nft!.accountId))
         || (['oracle', 'council'].includes(role) && (!Array.isArray(settings.markets) || !settings.markets.includes(d.market))))
         throw new Error('approved_contract_controls_changed');

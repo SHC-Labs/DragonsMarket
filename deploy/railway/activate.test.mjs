@@ -42,7 +42,7 @@ function fixture(stage = 'launch', profile = 'human') {
     inventory['database-release'][`${login.slice(3, -6).toUpperCase()}_DB_PASSWORD`] = password;
   }
   Object.assign(inventory.keeper, keeper.encode(), { KEEPER_MODE: stage === 'prepare' ? 'prepare' : 'sign' },
-    stage === 'launch' ? { KEEPER_MARKET_KEY: null, KEEPER_ORACLE_KEY: null, KEEPER_COUNCIL_KEY: null } : {});
+    stage === 'launch' ? { KEEPER_MARKET_KEY: null, KEEPER_ORACLE_KEY: null, KEEPER_COUNCIL_KEY: null, KEEPER_ROUNDS_KEY: null } : {});
   if (activeAgents) {
     Object.assign(inventory['agent-worker'], { AGENT_API_URL: plan.agent.apiUrl,
       AGENT_API_KEY: null, AGENT_API_WALLET_CONTRACT: 'wallets.near',
@@ -201,6 +201,8 @@ test('execution credentials must be sealed on their owning service before any va
     rows => { rows.find(row => row.name === 'KEEPER_MARKET_KEY').isSealed = false; },
     rows => { rows.find(row => row.name === 'KEEPER_ORACLE_KEY').serviceId = services[1].id; },
     rows => { rows.find(row => row.name === 'KEEPER_COUNCIL_KEY').serviceId = null; },
+    rows => { rows.find(row => row.name === 'KEEPER_ROUNDS_KEY').isSealed = false; },
+    rows => { rows.find(row => row.name === 'KEEPER_ROUNDS_KEY').serviceId = agentService.id; },
     rows => { rows.splice(rows.findIndex(row => row.name === 'KEEPER_MARKET_KEY'), 1); },
     rows => { rows.push({ ...rows.find(row => row.name === 'KEEPER_MARKET_KEY'), id: 'duplicate' }); },
     rows => { rows.find(row => row.name === 'AGENT_API_KEY').isSealed = false; },
@@ -220,6 +222,7 @@ test('execution credentials must be sealed on their owning service before any va
   }
   for (const [stage, profile, name, serviceId] of [
     ['prepare', 'human', 'KEEPER_MARKET_KEY', keeperId],
+    ['prepare', 'human', 'KEEPER_ROUNDS_KEY', keeperId],
     ['prepare', 'agents', 'AGENT_API_KEY', agentService.id],
     ['launch', 'human', 'AGENT_GRANT_KEY', agentService.id],
   ]) {

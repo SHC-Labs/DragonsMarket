@@ -338,12 +338,12 @@ test("a key comes from the environment or from a private file, a scoped key repl
     fs.chmodSync(p, mode);
     return p;
   };
-  assert.deepEqual(resolveKeys({}, { KEEPER_KEY: "env-key" }), { default: "env-key", oracle: undefined, market: undefined, council: undefined });
+  assert.deepEqual(resolveKeys({}, { KEEPER_KEY: "env-key" }), { default: "env-key", oracle: undefined, market: undefined, council: undefined, rounds: undefined });
   const keys = resolveKeys(
     { "key-file": file("d", 0o600, "file-key"), "oracle-key-file": file("o", 0o400, "oracle-key") },
     { KEEPER_KEY: "env-key", KEEPER_MARKET_KEY: "market-env" },
   );
-  assert.deepEqual(keys, { default: "file-key", oracle: "oracle-key", market: "market-env", council: undefined });
+  assert.deepEqual(keys, { default: "file-key", oracle: "oracle-key", market: "market-env", council: undefined, rounds: undefined });
   assert.throws(() => readKeyFile(file("group", 0o640, "x")), /can be read by group or others \(mode 640\)/);
   assert.throws(() => readKeyFile(file("world", 0o644, "x")), /chmod 600/);
   assert.throws(() => resolveKeys({ "market-key-file": file("loose", 0o604, "x") }, {}), /group or others/);

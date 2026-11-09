@@ -3,6 +3,7 @@ export interface KeeperOptions {
   market: string;
   oracle: string;
   council: string;
+  rounds?: string;
   account?: string;
   'state-file': string;
   'events-file': string;
@@ -18,6 +19,7 @@ export interface KeeperKeys {
   oracle?: string;
   market?: string;
   council?: string;
+  rounds?: string;
 }
 
 export interface KeeperAction {
@@ -31,7 +33,7 @@ export interface KeeperExecution {
   beforeBatch(actions: KeeperAction[]): Promise<void>;
   send(action: KeeperAction): Promise<string>;
 }
-export const KEEPER_METHODS: Readonly<Record<'market' | 'oracle' | 'council', readonly string[]>>;
+export const KEEPER_METHODS: Readonly<Record<'market' | 'oracle' | 'council' | 'rounds', readonly string[]>>;
 
 export function setRpcPace(milliseconds: number): void;
 export function setRpcCredentials(entries: [string, string][]): void;
