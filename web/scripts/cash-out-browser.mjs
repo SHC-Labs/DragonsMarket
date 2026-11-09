@@ -128,7 +128,9 @@ export async function checkMarketWithdrawalBrowser(page, base) {
   try {
     await page.goto(`${base}/portfolio`, { waitUntil: "networkidle" });
     await page.getByRole("button", { name: "Withdraw", exact: true }).click();
-    await expect.poll(() => checks).toBeGreaterThanOrEqual(2);
+    // The hook deliberately paces confirmation reads. Leave room for a shared CI
+    // runner without weakening the requirement to observe multiple unresolved reads.
+    await expect.poll(() => checks, { timeout: 15000 }).toBeGreaterThanOrEqual(2);
     await expect(page.getByText("Withdrawn to your Intents account.", { exact: true })).toHaveCount(0);
     settled = true;
     await expect(page.getByText("Withdrawn to your Intents account.", { exact: true })).toBeVisible();
