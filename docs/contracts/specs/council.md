@@ -185,7 +185,7 @@ The index only grows, so its `u128` bounds the whole life of the council, not on
 
 ### 6.5 Leaving
 
-`request_unstake(token_id, accepts_cut: bool)` refuses unless `accepts_cut` is true (`leaving before the quarter ends costs 50% of this quarter's earnings: pass accepts_cut true`). The flag is required on every request. After the days are walked:
+`request_unstake(token_id, accepts_cut: bool)` requires exactly 1 yoctoNEAR before changing any state and refuses unless `accepts_cut` is true (`leaving before the quarter ends costs 50% of this quarter's earnings: pass accepts_cut true`). Both are required on every request. Restricted FunctionCall keys cannot attach the deposit. After the days are walked:
 
 1. Settle finished quarters and move a pending slot whose quarter has closed into `accrued`. Earnings of earlier quarters are never cut.
 2. The running-quarter earnings `E` are the seat's earnings since its start or last settlement, less what is still to come off for a forfeit. They are zero if the seat has not started.
@@ -280,7 +280,7 @@ Gas floors are enforced with `upgrade::require_gas`.
 | `set_reconcile_wait_ns` | Owner | `reconcile_wait_ns: U64` | none | none | none | 10 minutes to 7 days. Live. `reconcile_claim` reads it | `reconcile_wait_set` |
 | `draw` | Oracle | `case_key: U64`, `n: u32`, `exclude: Vec<AccountId>` | `Vec<AccountId>` | none | 250 TGas reserved by the oracle | Reads the block seed itself. A repeat returns the cached jury. Walks up to 30 days. Skips seats that serve, are leaving, or are excluded, and sets aside seats staked within the last cooldown unless the older seats cannot make a jury of distinct accounts. Marks the jury serving and records the index | `jury_drawn` |
 | `unlock_case` | Oracle | `case_key: U64`, `delinquent: Vec<AccountId>` | none | none | 25 TGas reserved by the oracle | Releases the seats. With a silent juror it walks up to 30 days first and forfeits that seat's earnings (6.7) | `jury_released`, `seat_earnings_forfeited` |
-| `request_unstake` | Seat owner | `token_id: String`, `accepts_cut: bool` | none | none | none | 6.5. Refuses a missing `accepts_cut`, a seat that serves, or one that already asked | `seat_cut`, `unstake_requested` |
+| `request_unstake` | Seat owner | `token_id: String`, `accepts_cut: bool` | none | exactly 1 | none | 6.5. Refuses a missing `accepts_cut`, a seat that serves, or one that already asked | `seat_cut`, `unstake_requested` |
 | `unstake` | Seat owner | `token_id: String` | `Promise` | exactly 1 | 33 TGas floor | Removes the stake and returns the NFT, no payout. Refuses before the cooldown has passed | `unstaked`, `unstake_failed` |
 | `on_unstaked` | The account itself | | | | 10 TGas | Restores the stake when a transfer fails | |
 | `claim` | Seat owner | `token_ids: Vec<TokenId>` (at most 10) | `Promise` | exactly 1 | 33 TGas floor, attach 100 | 6.6 | `claim_requested`, `claim_paid`, `claim_failed` |

@@ -28,6 +28,8 @@ jobs:
           node-version-file: .node-version
       - name: Check HTTPS, database, browser origin and MCP connection
         # No package install, build, production secret or wallet operation.
+        env:
+          SMOKE_DEPLOYMENT_JSON: ${{ vars.SMOKE_DEPLOYMENT_JSON }}
         run: >-
           node deploy/railway/smoke.mjs
           https://dragons.market https://api.dragons.market https://mcp.dragons.market

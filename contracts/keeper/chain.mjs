@@ -5,11 +5,37 @@
 // (KEEPER_RPC_PACE_MS or --rpc-pace-ms), so a long run stays under the limits instead of hitting them and retrying.
 let paceMs = Number(process.env.KEEPER_RPC_PACE_MS ?? 0);
 let nextSlot = 0;
+let credentials = new Map();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function setRpcPace(ms) {
+  if (!Number.isInteger(ms) || ms < 0 || ms > 60000) throw new Error('Invalid RPC pacing');
   paceMs = ms;
   nextSlot = 0;
+}
+
+export function setRpcCredentials(entries) {
+  const next = new Map();
+  for (const [endpoint, token] of entries) {
+    const url = new URL(endpoint);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash
+      || typeof token !== 'string' || !/^[\x21-\x7e]{8,4096}$/.test(token)) throw new Error('Invalid RPC credential configuration');
+    next.set(url.href, token);
+  }
+  credentials = next;
+}
+
+async function responseBody(response) {
+  try {
+    let length = 0;
+    const chunks = [];
+    for await (const chunk of response.body ?? []) {
+      length += chunk.length;
+      if (length > 16 * 1024 * 1024) throw new Error('oversized_response');
+      chunks.push(chunk);
+    }
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+  } catch { throw new Error('RPC response unavailable or invalid'); }
 }
 
 async function waitForSlot() {
@@ -27,23 +53,33 @@ export async function rpc(urls, method, params) {
     await waitForSlot();
     let res;
     try {
-      res = await fetch(endpoints[attempt % endpoints.length], {
+      const endpoint = endpoints[attempt % endpoints.length];
+      const token = credentials.get(new URL(endpoint).href);
+      res = await fetch(endpoint, {
         signal: AbortSignal.timeout(30_000),
+        redirect: 'error',
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ jsonrpc: "2.0", id: "keeper", method, params }),
       });
-    } catch (e) {
-      last = `${method}: ${e.message}`;
+    } catch {
+      last = `${method}: transport unavailable`;
       continue;
     }
     if (res.status === 429 || res.status >= 500) {
+      await res.body?.cancel();
       last = `${method}: HTTP ${res.status}`;
       continue;
     }
-    if (!res.ok) throw new Error(`${method}: HTTP ${res.status}`);
-    const body = await res.json();
-    if (body.error) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
+    if (!res.ok) { await res.body?.cancel(); throw new Error(`${method}: HTTP ${res.status}`); }
+    const body = await responseBody(res);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error(`${method}: malformed RPC response`);
+    if (body.error) {
+      const name = ['UNKNOWN_BLOCK', 'UNKNOWN_ACCOUNT', 'UNKNOWN_ACCESS_KEY', 'TIMEOUT_ERROR', 'HANDLER_ERROR']
+        .includes(body.error.name) ? body.error.name : 'RPC_ERROR';
+      throw new Error(`${method}: ${name}`);
+    }
+    if (!Object.hasOwn(body, 'result')) throw new Error(`${method}: missing RPC result`);
     return body.result;
   }
   throw new Error(`every RPC endpoint refused: ${last}`);
@@ -58,8 +94,9 @@ export async function view(url, account, method, args = {}, blockId) {
     method_name: method,
     args_base64: Buffer.from(JSON.stringify(args)).toString("base64"),
   });
-  if (result.error) throw new Error(`${account}.${method}: ${result.error}`);
-  return JSON.parse(Buffer.from(result.result).toString());
+  if (result.error) throw new Error(`${account}.${method}: view rejected`);
+  try { return JSON.parse(Buffer.from(result.result).toString()); }
+  catch { throw new Error(`${account}.${method}: invalid view result`); }
 }
 
 // The same read as a function of (account, method, args), which is the shape the treasury helper asks for.

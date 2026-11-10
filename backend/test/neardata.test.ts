@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { NeardataReader, normalizeNeardata, parseNeardata, scopeCapture } from '../src/ingestion/neardata.js';
+import { NeardataReader, normalizeNeardata, parseNeardata, scopeCapture, readNeardataSettings } from '../src/ingestion/neardata.js';
+import { LiveNeardataSource } from '../src/ingestion/live-source.js';
 
 function raw(height = 100, parent = 99) {
   const blockHash = (height === 100 ? '3' : '2').repeat(32);
@@ -84,4 +85,70 @@ test('a cycle stops asking for blocks before its request budget runs out, so the
   assert.equal(reader.hasBudget(), false);
   reader.resetBudget();
   assert.equal(reader.hasBudget(), true);
+});
+
+test('historical redirects preserve the requested height and never send credentials to unapproved hosts', async () => {
+  const headers: unknown[] = [];
+  const reader = new NeardataReader(async (input, init) => {
+    headers.push(init?.headers);
+    return new URL(String(input)).hostname === 'mainnet.neardata.xyz'
+      ? new Response(null, { status: 302, headers: { location: 'https://a3.mainnet.neardata.xyz/v0/block/100' } })
+      : new Response(JSON.stringify(raw()));
+  }, async () => {}, 100, { bearerToken: 'fixture-token' });
+  assert.equal(normalizeNeardata(await reader.document('/v0/block/100')).header.height, '100');
+  assert.deepEqual(headers, [{ Authorization: 'Bearer fixture-token' }, { Authorization: 'Bearer fixture-token' }]);
+  for (const location of ['https://a3.mainnet.neardata.xyz.evil.test/v0/block/100',
+    'https://a3.mainnet.neardata.xyz/v0/block/101', 'https://a3.mainnet.neardata.xyz/v0/block/100?key=x',
+    'http://a3.mainnet.neardata.xyz/v0/block/100', 'https://user@a3.mainnet.neardata.xyz/v0/block/100']) {
+    let calls = 0;
+    const bad = new NeardataReader(async () => {
+      calls++; return new Response(null, { status: 302, headers: { location } });
+    }, async () => {}, 400, { bearerToken: 'fixture-token' });
+    await assert.rejects(bad.document('/v0/block/100'), /invalid_neardata_redirect/);
+    assert.equal(calls, 1);
+  }
+});
+
+test('parallel requests reserve separate rate slots and reject unbounded source settings', async () => {
+  const waits: number[] = [];
+  const reader = new NeardataReader(async () => new Response('null'), async ms => { waits.push(ms); }, 400);
+  await Promise.all([reader.document('/v0/block/1'), reader.document('/v0/block/2'), reader.document('/v0/block/3')]);
+  assert.ok(waits[1]! - waits[0]! >= 350);
+  assert.ok(waits[2]! - waits[1]! >= 350);
+  assert.throws(() => new NeardataReader(fetch, undefined, 100), /authenticated_source_required/);
+  assert.throws(() => new NeardataReader(fetch, undefined, 99, { bearerToken: 'fixture-token' }), /invalid_source_interval/);
+  assert.throws(() => new NeardataReader(fetch, undefined, 400, { concurrency: 5 }), /invalid_source_concurrency/);
+  assert.throws(() => new NeardataReader(fetch, undefined, 400, { bearerToken: 'bad\nheader' }), /invalid_source_token/);
+  assert.throws(() => readNeardataSettings({ NEARDATA_INTERVAL_MS: '1e3' }), /invalid_source_settings/);
+  assert.deepEqual(readNeardataSettings({}), { intervalMs: 400, concurrency: 1, bearerToken: undefined });
+});
+
+test('prefetched blocks commit in height order and stop before missing or conflicting evidence', async () => {
+  const block = (height: number) => {
+    const data = raw(height, height - 1);
+    data.block.header.hash = String(height - 96).repeat(32);
+    data.block.header.prev_hash = String(height - 97).repeat(32);
+    data.shards.forEach(shard => { shard.receipt_execution_outcomes = []; });
+    return data;
+  };
+  for (const mode of ['normal', 'failure', 'conflict'] as const) {
+    const completed: number[] = [], emitted: string[] = [];
+    const reader = new NeardataReader(async input => {
+      const height = Number(new URL(String(input)).pathname.split('/').pop());
+      await new Promise(resolve => setTimeout(resolve, (103 - height) * 10));
+      completed.push(height);
+      if (height === 101 && mode === 'failure') throw new Error('provider credential must not appear');
+      const value = block(height);
+      if (height === 101 && mode === 'conflict') value.block.header.prev_hash = 'Z'.repeat(32);
+      return new Response(JSON.stringify(value));
+    }, async () => {}, 400, { concurrency: 4 });
+    const source = new LiveNeardataSource(reader, normalizeNeardata(block(103)), '100', null);
+    const consume = async () => { for await (const item of source.blocks()) emitted.push(item.header.height); };
+    if (mode === 'normal') { await consume(); assert.deepEqual(emitted, ['100', '101', '102', '103']); }
+    else {
+      await assert.rejects(consume(), mode === 'failure' ? /neardata_unavailable/ : /source_ancestry_mismatch/);
+      assert.deepEqual(emitted, ['100']);
+    }
+    assert.deepEqual(completed, [102, 101, 100]);
+  }
 });

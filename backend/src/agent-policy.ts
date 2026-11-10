@@ -37,11 +37,10 @@ function powers(policy: unknown) {
   if (!object(policy) || !object(policy.destinations) || !object(policy.native) || !object(policy.native.near)) {
     return null;
   }
-  const { native: { near, evm, solana }, destinations } = policy;
-  return canonical({ frozen: policy.frozen, actions: set(policy.actions), confidential: policy.confidential,
-    owner_approval: policy.owner_approval, assets: set(policy.assets), limits: policy.limits,
-    max_actions_per_hour: policy.max_actions_per_hour, destinations: [destinations.mode, set(destinations.list)],
-    call: set(near.call), transfer: near.transfer, sign_message: set(near.sign_message), evm, solana });
+  const { native, destinations } = policy, near = native.near as Record<string, unknown>;
+  return canonical({ ...policy, actions: set(policy.actions), assets: set(policy.assets),
+    destinations: { ...destinations, list: set(destinations.list) },
+    native: { ...native, near: { ...near, call: set(near.call), sign_message: set(near.sign_message) } } });
 }
 export const grantsNoMore = (shown: unknown, asked: Policy) =>
   powers(shown) !== null && powers(shown) === powers(asked);

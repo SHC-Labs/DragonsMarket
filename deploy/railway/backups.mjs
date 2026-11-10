@@ -1,9 +1,12 @@
-const postgresId = '130e30b5-c8b3-4a63-ae2f-2cc1e0901fc0';
+export const postgresId = '130e30b5-c8b3-4a63-ae2f-2cc1e0901fc0';
 const maxAge = 36 * 60 * 60 * 1000;
+const retention = { DAILY: 6 * 86400, WEEKLY: 27 * 86400 };
 
 export function verifyBackups(schedules, backups, now = Date.now()) {
-  if (!['DAILY', 'WEEKLY'].every(kind => schedules.some(schedule => schedule.kind === kind))) {
-    throw new Error('Postgres requires daily and weekly Railway volume backups before release');
+  if (!Object.entries(retention).every(([kind, seconds]) => schedules.some(schedule =>
+    schedule.kind === kind && Number.isSafeInteger(schedule.retentionSeconds) &&
+    schedule.retentionSeconds >= seconds))) {
+    throw new Error('Postgres requires daily and weekly backups retained for at least 6 and 27 days');
   }
   if (!backups.some(backup => {
     const created = Date.parse(backup.createdAt), expires = Date.parse(backup.expiresAt);

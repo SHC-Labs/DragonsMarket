@@ -11,5 +11,6 @@
 **/*.pem
 web/.next
 web/out
+web/out-caddy
 web/test-results
 contracts/dev-chain.json

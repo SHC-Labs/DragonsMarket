@@ -4,9 +4,9 @@ Trezu/SputnikDAO replaces the retired custom governance contract.
 
 | Field | Value |
 | --- | --- |
-| Updated | 21 October 2026 |
+| Updated | 8 November 2026 |
 | Decision | Accepted |
-| Treasury account | Not created or configured |
+| Proposed DAO | `dragonsmarket.sputnik-dao.near`; production policy and treasury configuration awaiting review |
 | Contract integration | Contract team |
 | Product authority | [Specification](../spec.md#7-architecture-and-administration) |
 
@@ -39,16 +39,20 @@ are not the target administration ABI.
 
 ## 2. The helper and the keeper
 
-Status: BUILT on 21 October 2026. Nothing has run against a real SputnikDAO.
+Status: built and exercised against checksum-pinned Sputnik WASM on a local NEAR sandbox.
+The production DAO handover and funded acceptance remain separate gates.
 
 [treasury.mjs](../../contracts/keeper/treasury.mjs) prepares wallet requests using Sputnik's
 `add_proposal` and `act_proposal`. It does not sign or submit a transaction. It replaces the earlier
-deny-list of five method names with an allow-list of every owner method of the market, oracle and
-Council in the current source, including `upgrade`, `seal`, `propose_owner`, `accept_owner` and
+deny-list of five method names with an allow-list of every owner method of Market, Oracle,
+Council and Rounds in the current source, including `upgrade`, `seal`, `propose_owner`, `accept_owner` and
 `set_fee_recipients`. Each entry fixes the arguments and their limits, the deposit and the gas. Any
-other method is refused, and a test scans the three contracts so that a new owner method cannot be
-missing. The treasury account and the three contract ids are required inputs, and the proposal bond
-is read from the DAO's `get_policy`.
+other method is refused, and a test scans all four contracts so that a new owner method cannot be
+missing. The treasury account and Market/Oracle/Council IDs are required inputs; Rounds is optional,
+but its proposals require an explicit distinct Rounds ID. The proposal bond is read from `get_policy`.
+Oracle and Rounds support atomic `set_publishers(publishers, threshold)` rotation with a nonempty,
+bounded, distinct Ed25519 set and strict majority. Oracle's configured maximum is rechecked before
+proposal preparation and voting. Removed signers cannot authorize new price submissions.
 
 The vote helper builds `act_proposal` from the proposal the DAO stores, checks a `FunctionCall`
 against the same allow-list (a configured receiver, one action, the entry's deposit and gas, valid
@@ -57,25 +61,34 @@ kinds that change membership, policy, DAO code, treasury funds, bounties or stak
 names the kind. `stage_code` carries the wasm as raw input and is not a proposal: `prepareStageCode`
 builds that request and `codeHash` gives the value `upgrade` takes. The rules and the tests are in
 [the owner model](specs/owner-and-keeper.md#5-the-allow-list-that-replaces-the-deny-list).
-Local owner fixtures test application permissions and upgrades; they do not prove real DAO
-membership, voting or execution behaviour.
+`backend/test/dao-chain.test.ts` exercises the actual proposal and vote builder through a
+two-of-three Sputnik DAO, including publisher rotation, upgrades, key removal and the
+production keeper's approval/signing path. This is local execution evidence, not evidence
+that the proposed mainnet DAO has the same policy or approved code.
 
 The keeper's `--treasury` option observes account funding. With `--watch-dao` it also lists the DAO's
-open proposals that name the three contracts and flags any the allow-list refuses. It never votes,
+open proposals that name the configured contracts and flags any the allow-list refuses. It never votes,
 and it does not configure the DAO or move ownership. The retired `--governance` option is rejected.
 
 ---
 
 ## 3. Work to complete
 
-- [ ] Create the Trezu treasury and verify its actual account, code, policy and member roles.
+- [ ] Approve the proposed DAO's code, policy and member roles. Its policy at finalized block
+  223711328 allowed one-of-five approval for calls and transfers; resolve this before handover.
 - [x] Specify supported administrative actions, arguments, deposits and gas (the allow-list, with tests). Receipt handling is not specified: the helper does not submit anything.
 - [x] Replace the helper's deny-list with the allow-list.
-- [ ] Test that keys and direct calls cannot bypass DAO ownership. The keeper reports keys left on the contracts (`--expect-sealed`) and keys registered in the verifier; a test with a real DAO is missing.
-- [ ] Prove owner handover for market, oracle and Council, including recovery from failed steps.
+- [x] Exercise DAO voting, outsider refusal, upgrades and sealed contract accounts in a local
+  sandbox using actual Sputnik WASM. Repeat custody and execution acceptance on production.
+- [ ] Prove owner handover for Market, Oracle, Council and any active Rounds contract, including recovery from failed steps.
 - [ ] Configure the verified 75% recipient through that reviewed path.
 - [ ] Check authority over treasury Intents balances and separation from user/reward backing.
-- [ ] Replace the local owner fixture with dedicated DAO integration evidence where appropriate.
+- [x] Add dedicated DAO integration alongside the local owner fixtures.
+
+Keeper signing pins the approved DAO code and canonical policy hash, requires no DAO account
+keys and rejects approving roles below the reviewed minimum. It also checks financial-contract
+owners, pending ownership, operator and recipients on both providers. A policy change stops
+the keeper; it does not stop DAO transactions. The actual on-chain policy is the authority.
 
 Do not infer a deployment account from an example name or silently fall back to a personal wallet.
 The detailed product requirements are [R-01 through R-08](../spec.md#requirements-to-implementation-map).

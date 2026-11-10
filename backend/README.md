@@ -2,7 +2,7 @@
 
 The backend foundation provides PostgreSQL, versioned SQL migrations and a small HTTP API. Everything for this service lives here. The website and contracts keep their own build processes.
 
-A finalized-event ingestion engine supports sandbox fixture replay, bounded actual sandbox receipt capture, immutable deployment registration, atomic checkpoints and status reporting. Mainnet follower code and supervised worker profiles are available, but no Dragons Market deployment is configured. Trading, funding and price submission remain disabled pending final contracts and source policy. Trading projections will follow the team's contract decisions. The [root checklist](../PENDING.md) tracks remaining work; the [delivery plan](../docs/hackathon-plan.md) contains the specifications.
+A finalized-event ingestion engine supports sandbox fixture replay, bounded actual sandbox receipt capture, immutable deployment registration, atomic checkpoints and status reporting. Mainnet follower code and supervised worker profiles are available, but no Dragons Market deployment is configured. Trading, funding and price submission remain disabled pending final contracts and source policy. Trading projections will follow the team's contract decisions. The root checklist tracks remaining work; the [delivery plan](../docs/hackathon-plan.md) contains the specifications.
 
 ## Run locally
 
@@ -197,11 +197,11 @@ The test compares persisted receipts, originating transaction hashes, generated 
 
 On 2026-10-27 the final verified run captured blocks `221887552`–`221887556`, selected `intents.near`, and stored eight receipts, ten event logs and six distinct originating transaction hashes. One selected execution failed; its actual outcome was retained and its logs were excluded from events. The sampled head matched mainnet RPC by hash and timestamp. Reconnect and duplicate replay passed; the temporary schema was removed. Counts vary with actual mainnet activity.
 
-Source normalization is in `src/ingestion/neardata.ts`; verification persistence is in `src/ingestion/capture-store.ts`. The verification store stays separate from app deployment data. The app ingestion path now also stores transaction provenance and has a continuous follower. Actual Dragons Market deployment activation and financial integration remain pending. See [PENDING.md](../PENDING.md).
+Source normalization is in `src/ingestion/neardata.ts`; verification persistence is in `src/ingestion/capture-store.ts`. The verification store stays separate from app deployment data. The app ingestion path now also stores transaction provenance and has a continuous follower. Actual Dragons Market deployment activation and financial integration remain pending. See PENDING.md.
 
 ## Remaining backend services
 
-Contracts are **not deployed** and their trading interfaces are still being finalized. Keep deployment fields empty. The following commands provide tested infrastructure; they do not enable financial execution.
+The team has supplied deployed mainnet rehearsal contracts; they are not yet an approved production deployment. Keep deployment fields empty until the activation gates are resolved. The following commands provide tested infrastructure; they do not enable financial execution.
 
 ### Round price publisher
 
@@ -213,13 +213,14 @@ Recording is open to anyone: `node contracts/keeper/round-prices.mjs run --rpc U
 
 ### Running against mainnet
 
-Nothing runs until the contracts are deployed. When they are:
+Approve the immutable contract manifest and historical-ingestion plan before starting read-only workers. Financial activation is a separate gate after evidence collection and reconciliation:
 
 1. Put the real values in `.env`: `NETWORK=mainnet`, `DEPLOYMENT_ID`, `DEPLOYMENT_START_BLOCK` (the block of the earliest contract deployment), the `MARKET_`, `ROUNDS_`, `ORACLE_`, `COUNCIL_` and `VERIFIER_CONTRACT_ID` accounts, `COLLATERAL_TOKEN_ID` (native USDC is `nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`), `RPC_URL` and its bearer token, `WEB_ORIGIN`, and `TRUSTED_PROXY_HOPS`/`TRUSTED_PROXY_ADDRESSES` if a proxy fronts the API.
 2. `docker compose up -d postgres migrate roles`, then register the deployment as the database owner: `docker compose run --rm -e DATABASE_URL=postgresql://dragons:<owner password>@postgres:5432/dragons_market api node dist/src/ingestion/cli.js register`.
-3. `npm run preflight`. It reads the chain and writes nothing, and checks that the RPC is on mainnet and fresh, NEAR Data matches the RPC head, every configured account has code, each contract's verifier and collateral match the configuration, none is paused or mid-upgrade, the oracle, Council and market allow-lists name each other, the books are solvent at one finalized block, the database is current and the deployment matches, and the start block is behind the head (with a warning if catching up will take more than a day). It exits 1 if anything fails. Do not start the workers until it prints `ready`.
-4. `docker compose --profile indexing up --build -d`, then watch `GET /v1/operator/services`. `indexer_lagging` is expected while catching up. `reconciliation_stale` and `chain_integrity_stale` clear after the first pass of each worker. Any other alert, or `chain_integrity_failed`, means stop and read the worker logs.
-5. To stop, `docker compose --profile indexing down`. The checkpoint is in Postgres, so a restart continues from the last committed block.
+3. Run `npm run preflight` for read-only diagnostics and review failures and warnings. Check each worker's runtime database connection with `node dist/src/check-database.js --require-mainnet-deployment`; it rejects privileged credentials, schema drift and a missing or mismatched mainnet manifest. Read-only ingestion and diagnosis can run while a contract is paused or approved backfill is underway.
+4. `docker compose --profile indexing up --build -d`, then watch `GET /v1/operator/services`. `indexer_lagging` is expected while catching up. `reconciliation_stale` and `chain_integrity_stale` clear after the first pass of each worker. Investigate other alerts before proceeding; integrity failures must not be bypassed.
+5. Before enabling financial activity, run `npm run preflight -- --strict`. It checks RPC freshness, source history, contract configuration and links, collateral registration, balances, the database manifest and remaining catch-up. Strict mode exits 1 for warnings or failures. Require `ready` alongside approved code provenance and signer/keeper operating checks; preflight alone is not activation approval.
+6. To stop, `docker compose --profile indexing down`. The checkpoint is in Postgres, so a restart continues from the last committed block.
 
 ### Mainnet follower and keeper feed
 
@@ -278,7 +279,7 @@ Wallets must pass the challenge's exact `message`, base64-decoded 32-byte `nonce
 
 The browser must use `credentials: 'include'`. Cookies are HttpOnly and SameSite=Strict, and Secure for HTTPS origins. Mutations require the exact configured Origin and bounded JSON bodies; CORS allows credentials only for that origin. Keep web/API deployments same-site or explicitly review cookie strategy. Direct socket IP rate limits do not trust forwarded headers; production reverse-proxy policy needs explicit configuration. Request limits are 120/minute/IP and challenge issuance 5/minute/IP per process. Do not treat these as distributed production rate limiting.
 
-Set `POLICY_TERMS_HASH` and `POLICY_PRIVACY_HASH` to SHA-256 values for the actual published policies before enabling acknowledgement. Its recorded method is `authenticated_session`, not a wallet signature over the legal text and not age verification. Website policy/session integration is still pending. The API runs bounded hourly cleanup of up to 1,000 challenges and 1,000 sessions expired for more than 24 hours. Active sessions, legal acknowledgements and signing decisions are not deleted. Approve broader private-data retention before public deployment.
+Set `POLICY_TERMS_HASH` and `POLICY_PRIVACY_HASH` to SHA-256 values for the actual published policies before enabling acknowledgement. Its recorded method is `authenticated_session`, not a wallet signature over the legal text and not age verification. Website policy/session integration is still pending. The API runs bounded cleanup every ten minutes of up to 1,000 challenges and 1,000 sessions expired for more than 24 hours. Active sessions, legal acknowledgements and signing decisions are not deleted. Approve broader private-data retention before public deployment.
 
 ### Reconciliation, roles and backups
 
@@ -308,9 +309,13 @@ Agent accounts run in their own process, `agent-worker` (`docker compose --profi
 
 Behind a reverse proxy set `TRUSTED_PROXY_HOPS` to the number of proxies and `TRUSTED_PROXY_ADDRESSES` to the addresses (or CIDR ranges) they connect from. `X-Forwarded-For` is read only from those addresses, and only the entry the nearest proxy appended. Without both, every client is limited by its socket address, which behind a proxy means one shared limit. IPv6 clients are limited per /64.
 
-`npm run backup` needs `PGHOST`, `PGPORT`, `PGDATABASE` and `PGUSER` set explicitly (it refuses to guess a local default server) and keeps the newest `BACKUP_KEEP` archives (default 14).
+`npm run backup` needs `PGHOST`, `PGPORT`, `PGDATABASE` and `PGUSER` set explicitly (it refuses to guess a local default server). Use a protected `.pgpass` or PostgreSQL environment for credentials. It keeps the newest `BACKUP_KEEP` archives (default 14; integer 1-999). `BACKUP_DIR` selects the destination; its default is ignored `backend/.local/backups`. The directory must belong to the invoking user, have mode 700 and not be a symlink. Use an encrypted filesystem for real database contents. Archives and checksums have mode 600, concurrent backups to the same directory are refused, and retention runs only after a successful dump and checksum. Filenames are unique even for two backups in the same second.
 
-The backup command writes a custom-format pg_dump archive with a SHA-256 file under ignored `.local/backups` and checks that pg_restore can list it. Never copy the live PostgreSQL data directory. `test:backup` dumps/restores an isolated full backend schema, verifies migration checksums/deployment identity, indexed events/checkpoint, unknown operation state and exact amounts. Production restore drills with the actual deployment and feed files, off-host backup storage, retention, alert routing and operational ownership remain deployment work. The website/contracts are not changed by these backend commands.
+The command checks that `pg_restore` can list the custom-format archive; this alone does not prove it restores. From the archive directory, run `sha256sum --check <archive>.sha256` before restoring. Checksums detect accidental corruption; they do not encrypt or authenticate a backup. Never copy the live PostgreSQL data directory, commit dumps, or upload them as CI artifacts. PostgreSQL clients must match the server major version (18 on Railway).
+
+Application CI runs `test:backup` against a disposable PostgreSQL 18 cluster. The test invokes this actual backup command, restores the whole database into a newly created database, compares all public-table values, indexes, constraints and sequence positions, and verifies migration checksums, deployment identity and exact large amounts. It then runs the normal database release to recreate grants omitted by `--no-acl`, proves API/agent isolation and checks sequence continuity. It also exercises retention, concurrent-run refusal, failed dumps and checksum corruption. Both databases and all fixture archives are removed afterwards. This test requires a local disposable cluster without existing `dm_*` roles; never point it at production.
+
+Production restore drills with the actual backup destination and feed files, encrypted offsite storage, tested key recovery, alert routing and operational ownership remain deployment work. See [OPERATIONS.md](../docs/OPERATIONS.md) for those separate gates.
 
 ## Host development and checks
 

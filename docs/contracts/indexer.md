@@ -40,7 +40,7 @@ In one database transaction per block, insert receipt outcomes, successful event
 
 ## Evidence read API
 
-The evidence read API serves only the configured deployment: block headers, paginated successful events and receipt outcomes (including failures). Receipt rows are committed atomically with the block and checkpoint. Migration 004 backfills prior journals. Requests and cursor walks use fixed indexed checkpoints; source labels remain explicit and live coverage is not claimed. Transaction-hash receipt lookup is implemented for configured contracts only; complete execution-tree tracing and financial projections remain open. See the [backend API contract](../../backend/README.md#api) and [remaining work](../../PENDING.md).
+The evidence read API serves only the configured deployment: block headers, paginated successful events and receipt outcomes (including failures). Receipt rows are committed atomically with the block and checkpoint. Migration 004 backfills prior journals. Requests and cursor walks use fixed indexed checkpoints; source labels remain explicit and live coverage is not claimed. Transaction-hash receipt lookup is implemented for configured contracts only; complete execution-tree tracing and financial projections remain open. See the [backend API contract](../../backend/README.md#api) and remaining work.
 
 ## Read model and reconciliation
 

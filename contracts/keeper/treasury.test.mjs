@@ -10,7 +10,7 @@ import {
 import { b58encode } from "./chain.mjs";
 
 const DAO = "dao.sputnik-dao.near";
-const CONTRACTS = { market: "market.example.near", oracle: "oracle.example.near", council: "council.example.near" };
+const CONTRACTS = { market: "market.example.near", oracle: "oracle.example.near", council: "council.example.near", rounds: "rounds.example.near" };
 const IDS = { treasuryId: DAO, contracts: CONTRACTS };
 const BOND = "2500000000000000000000000";
 const TGAS = 10n ** 12n;
@@ -21,7 +21,7 @@ const CONTRACTS_DIR = path.resolve(import.meta.dirname, "..");
 const NEXT_SWEEP_ID = "5";
 const MARKET_STORAGE_DEPOSIT = "47750000000000000000000";
 
-// A DAO and three contracts that answer only the views the helper is meant to ask.
+// A DAO and contracts that answer only the views the helper is meant to ask.
 function chain({ bond = BOND, proposals = [], staged = true, proven = true } = {}) {
   const byId = new Map(proposals.map((p) => [p.id, p]));
   return async (account, method, args) => {
@@ -31,7 +31,7 @@ function chain({ bond = BOND, proposals = [], staged = true, proven = true } = {
       return byId.get(args.id);
     }
     if (Object.values(CONTRACTS).includes(account) && method === "is_staged") return staged;
-    if (Object.values(CONTRACTS).includes(account) && method === "config") return { upgrade_proven: proven, next_sweep_id: NEXT_SWEEP_ID, market_storage_deposit: MARKET_STORAGE_DEPOSIT };
+    if (Object.values(CONTRACTS).includes(account) && method === "config") return { upgrade_proven: proven, max_publishers: 10, next_sweep_id: NEXT_SWEEP_ID, market_storage_deposit: MARKET_STORAGE_DEPOSIT };
     throw new Error(`unexpected view ${account}.${method}`);
   };
 }
@@ -95,10 +95,10 @@ const SAMPLES = {
     set_operator: { operator_id: "keeper.example.near" },
     allow_market: { market: "second-market.example.near" },
     disallow_market: { market: "old-market.example.near" },
-    set_bond: { bond: "1000000" },
+    set_bond: { bond: "5000000" },
     set_window_ms: { window_ms: "7200000" },
     set_panel_deadline_ms: { panel_deadline_ms: "172800000" },
-    set_min_proposal_ms: { min_proposal_ms: "60000" },
+    set_min_proposal_ms: { min_proposal_ms: "3600000" },
     set_draw_window_ms: { draw_window_ms: "3600000" },
     set_draw_delay_blocks: { draw_delay_blocks: "2" },
     set_jury_size: { jury_size: 11 },
@@ -106,6 +106,7 @@ const SAMPLES = {
     set_apply_buffer_ms: { apply_buffer_ms: "30000" },
     set_max_publishers: { max_publishers: 10 },
     set_no_decision_recipient: { recipient: DAO },
+    set_publishers: { publishers: [ED_KEY], threshold: 1 },
     add_publisher: { key: ED_KEY },
     remove_publisher: { key: ED_KEY },
     set_price_threshold: { threshold: 2 },
@@ -131,8 +132,63 @@ const SAMPLES = {
     set_allowlist_enabled: { enabled: true },
     set_reconcile_wait_ns: { reconcile_wait_ns: "3600000000000" },
   },
+  rounds: {
+    upgrade: { code_hash: HASH }, seal: { public_key: ED_KEY }, remove_verifier_key: { public_key: ED_KEY },
+    propose_owner: { new_owner: DAO }, accept_owner: {}, set_operator: { operator_id: "keeper.example.near" },
+    set_paused: { paused: true }, set_fee_bps: { fee_bps: 1000 }, set_registration_fee: { registration_fee: "250000" },
+    set_treasury: { treasury: DAO }, set_publishers: { publishers: [ED_KEY], threshold: 1 },
+    add_publisher: { key: ED_KEY }, remove_publisher: { key: ED_KEY }, set_price_threshold: { threshold: 1 },
+    add_series: { asset: "btc-usd", decimals: 2, first_start: "1", interval: "300000000000", price_window: "60000000000", close_before: "150000000000" },
+    reconcile_withdrawal: { id: "1", paid: false }, withdraw: { amount: "100" },
+  },
 };
 const entries = () => TARGETS.flatMap((target) => Object.keys(ALLOWED[target]).map((method) => [target, method]));
+
+test("Rounds is optional but cannot be targeted without an explicit distinct account", async () => {
+  const { rounds: _rounds, ...contracts } = CONTRACTS;
+  await propose("market", "set_paused", { paused: true }, { contracts });
+  await assert.rejects(propose("rounds", "set_paused", { paused: true }, { contracts }), /rounds contract/);
+  await assert.rejects(vote(stored(1, functionCall(undefined, "set_paused", { paused: true })), { contracts }), /not a configured/);
+  await assert.rejects(propose("rounds", "set_paused", { paused: true }, { contracts: { ...CONTRACTS, rounds: CONTRACTS.market } }), /different accounts/);
+});
+
+test("publisher replacement enforces a complete majority set before proposing or approving", async () => {
+  const keys = Array.from({ length: 26 }, (_, i) => `ed25519:${b58encode(Buffer.alloc(32, i + 1))}`);
+  for (const target of ["oracle", "rounds"]) {
+    for (const args of [
+      { publishers: [], threshold: 1 }, { publishers: [ED_KEY], threshold: 0 },
+      { publishers: [ED_KEY], threshold: 2 }, { publishers: [ED_KEY, ED_KEY], threshold: 2 },
+      { publishers: keys.slice(0, 4), threshold: 2 }, { publishers: [SECP_KEY], threshold: 1 },
+      { publishers: keys, threshold: 14 },
+    ]) {
+      await assert.rejects(propose(target, "set_publishers", args));
+      await assert.rejects(vote(stored(1, functionCall(CONTRACTS[target], "set_publishers", args))));
+    }
+    const good = { publishers: keys.slice(0, 3), threshold: 2 };
+    await propose(target, "set_publishers", good);
+    await vote(stored(1, functionCall(CONTRACTS[target], "set_publishers", good)));
+  }
+  const aboveLiveLimit = { publishers: keys.slice(0, 11), threshold: 6 };
+  await assert.rejects(propose("oracle", "set_publishers", aboveLiveLimit), /configured maximum/);
+  await assert.rejects(vote(stored(1, functionCall(CONTRACTS.oracle, "set_publishers", aboveLiveLimit))), /configured maximum/);
+  await assert.rejects(propose("oracle", "set_publishers", SAMPLES.oracle.set_publishers, { view: async () => ({}) }), /maximum/);
+  await propose("rounds", "set_publishers", { publishers: keys.slice(0, 25), threshold: 13 });
+});
+
+test("Rounds proposals preserve the hard limits and the treasury destination", async () => {
+  for (const [method, args] of [
+    ["set_fee_bps", { fee_bps: 1001 }], ["set_registration_fee", { registration_fee: "9999" }],
+    ["set_registration_fee", { registration_fee: "2000001" }], ["set_treasury", { treasury: "wrong.near" }],
+    ["reconcile_withdrawal", { id: "0", paid: true }],
+    ...[{ interval: "299999999999" }, { interval: "86400000000001" }, { price_window: "59999999999" },
+      { price_window: "86400000000001" }, { decimals: 19 }, { asset: "BTC" },
+      { close_before: "149999999999" }, { close_before: "300000000000" }]
+      .map(change => ["add_series", { ...SAMPLES.rounds.add_series, ...change }]),
+  ]) {
+    await assert.rejects(propose("rounds", method, args));
+    await assert.rejects(vote(stored(1, functionCall(CONTRACTS.rounds, method, args))));
+  }
+});
 
 test("every allow-list entry has a sample, so a new entry cannot go untested", () => {
   assert.deepEqual(
@@ -157,7 +213,7 @@ test("each entry prepares one FunctionCall proposal to the DAO with its own depo
     const action = kind.FunctionCall.actions[0];
     assert.equal(action.method_name, method, label);
     assert.deepEqual(JSON.parse(Buffer.from(action.args, "base64")), SAMPLES[target][method], label);
-    const owns = ["market.withdraw", "oracle.withdraw_bond"].includes(label);
+    const owns = ["market.withdraw", "oracle.withdraw_bond", "rounds.withdraw"].includes(label);
     assert.equal(action.deposit, label === "market.create_market" ? MARKET_STORAGE_DEPOSIT : owns ? "1" : "0", `${label} deposit`);
     assert.equal(action.gas, (BigInt(ALLOWED[target][method].gas.def) * TGAS).toString(), `${label} gas`);
   }
@@ -229,15 +285,15 @@ test("a value past what the contract allows is refused, and the value at the lim
     ["market", "upgrade", { code_hash: HASH }, { code_hash: `${HASH.slice(1)}0` }],
     ["market", "seal", { public_key: SECP_KEY }, { public_key: "ed25519:short" }],
     ["market", "seal", { public_key: ED_KEY }, { public_key: ED_KEY.replace("ed25519", "rsa") }],
-    ["oracle", "set_jury_size", { jury_size: 1 }, { jury_size: 4 }],
+    ["oracle", "set_jury_size", { jury_size: 5 }, { jury_size: 4 }],
     ["oracle", "set_jury_size", { jury_size: limit.oracle.MAX_PANEL }, { jury_size: limit.oracle.MAX_PANEL + 2 }],
-    ["oracle", "set_jury_size", { jury_size: 3 }, { jury_size: 0 }],
+    ["oracle", "set_jury_size", { jury_size: 5 }, { jury_size: 3 }],
     ["oracle", "set_price_threshold", { threshold: limit.oracle.MAX_MAX_PUBLISHERS }, { threshold: limit.oracle.MAX_MAX_PUBLISHERS + 1 }],
     ["oracle", "set_price_threshold", { threshold: 1 }, { threshold: 0 }],
-    ["oracle", "set_bond", { bond: "1" }, { bond: "0" }],
-    ["oracle", "set_window_ms", { window_ms: "1" }, { window_ms: "0" }],
-    ["oracle", "set_window_ms", { window_ms: "18446744073709" }, { window_ms: "18446744073710" }],
-    ["oracle", "set_draw_delay_blocks", { draw_delay_blocks: "0" }, { draw_delay_blocks: "18446744073709551616" }],
+    ["oracle", "set_bond", { bond: "5000000" }, { bond: "4999999" }],
+    ["oracle", "set_window_ms", { window_ms: "3600000" }, { window_ms: "3599999" }],
+    ["oracle", "set_window_ms", { window_ms: "31536000000" }, { window_ms: "31536000001" }],
+    ["oracle", "set_draw_delay_blocks", { draw_delay_blocks: "100000" }, { draw_delay_blocks: "100001" }],
     ["oracle", "set_no_decision_recipient", { recipient: DAO }, { recipient: "typo.near" }],
     ["oracle", "add_publisher", { key: ED_KEY }, { key: SECP_KEY }],
     ["oracle", "remove_publisher", { key: ED_KEY }, { key: `ed25519:${b58encode(Buffer.alloc(33, 7))}` }],
@@ -308,14 +364,14 @@ test("a method that is not on the list is refused for every contract, whatever i
   await assert.rejects(propose("market", "set_operator", { operator_id: "a.near" }, { description: " " }), /description/);
 });
 
-test("the DAO and the three contracts are always inputs, four different accounts, and a view is needed to read them", async () => {
+test("the DAO and configured contracts are distinct explicit inputs and need a view", async () => {
   const sample = ["market", "set_paused", { paused: true }];
   await assert.rejects(propose(...sample, { treasuryId: undefined }), /treasury: a verified NEAR account ID is required, there is no default/);
   await assert.rejects(propose(...sample, { treasuryId: "Not An Account" }), /treasury/);
   await assert.rejects(propose(...sample, { contracts: { ...CONTRACTS, oracle: undefined } }), /oracle contract: a verified NEAR account ID/);
   await assert.rejects(propose(...sample, { contracts: undefined }), /market contract/);
-  await assert.rejects(propose(...sample, { contracts: { ...CONTRACTS, market: DAO } }), /four different accounts/);
-  await assert.rejects(propose(...sample, { contracts: { ...CONTRACTS, oracle: CONTRACTS.market } }), /four different accounts/);
+  await assert.rejects(propose(...sample, { contracts: { ...CONTRACTS, market: DAO } }), /different accounts/);
+  await assert.rejects(propose(...sample, { contracts: { ...CONTRACTS, oracle: CONTRACTS.market } }), /different accounts/);
   await assert.rejects(propose(...sample, { view: undefined }), /view function/);
   await assert.rejects(prepareTreasuryVote({ ...IDS, proposalId: 1, approve: false }), /view function/);
 });
@@ -476,8 +532,8 @@ test("only a proposal still in progress can be approved", async () => {
 
 test("a function call is approved only when its receiver is a configured contract and its one action is on the allow-list", async () => {
   const bad = [
-    ["another account", functionCall("intents.near", "mt_transfer", { receiver_id: "eve.near", token_id: "x", amount: "1" }), /is not the market, oracle or council/],
-    ["the DAO itself", functionCall(DAO, "set_fee_rate_bps", { fee_rate_bps: 1 }), /is not the market, oracle or council/],
+    ["another account", functionCall("intents.near", "mt_transfer", { receiver_id: "eve.near", token_id: "x", amount: "1" }), /is not a configured/],
+    ["the DAO itself", functionCall(DAO, "set_fee_rate_bps", { fee_rate_bps: 1 }), /is not a configured/],
     ["a method that is not listed", functionCall(CONTRACTS.market, "stage_code", {}), /market\.stage_code is not on the allow-list/],
     ["a name every object has", functionCall(CONTRACTS.market, "constructor", {}), /market\.constructor is not on the allow-list/],
     ["a name that sets the prototype", functionCall(CONTRACTS.oracle, "__proto__", {}), /oracle\.__proto__ is not on the allow-list/],
@@ -565,6 +621,7 @@ const EXCLUDED = {
   market: UPGRADE_PATH_EXCLUDED,
   oracle: UPGRADE_PATH_EXCLUDED,
   council: UPGRADE_PATH_EXCLUDED,
+  rounds: UPGRADE_PATH_EXCLUDED,
 };
 
 test("the scan finds owner-checked and upgrade-path methods in source text", () => {
@@ -618,14 +675,14 @@ test("every owner or upgrade-path method in the contract sources is prepared by 
   }
 });
 
-test("the methods the DAO calls for itself, and not as the owner, are the two that take 1 yocto", () => {
-  for (const [target, method] of [["market", "withdraw"], ["oracle", "withdraw_bond"]]) {
+test("the methods the DAO calls for itself take 1 yocto", () => {
+  for (const [target, method] of [["market", "withdraw"], ["oracle", "withdraw_bond"], ["rounds", "withdraw"]]) {
     const body = publicMethods(source(target)).find((m) => m.name === method).body;
     assert.match(body, /assert_one_yocto\(\)/, `${target}.${method}`);
     assert.doesNotMatch(body, /only_owner|== self\.owner/, `${target}.${method} has no owner check`);
   }
   const takesOneYocto = entries().filter(([t, m]) => ALLOWED[t][m].deposit === "1").map(([t, m]) => `${t}.${m}`);
-  assert.deepEqual(takesOneYocto, ["market.withdraw", "oracle.withdraw_bond"]);
+  assert.deepEqual(takesOneYocto, ["market.withdraw", "oracle.withdraw_bond", "rounds.withdraw"]);
 });
 
 test("the limits and the gas floor the helper enforces are the ones in the contract source", () => {

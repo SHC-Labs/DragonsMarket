@@ -3,6 +3,7 @@ import { ReadError } from './read-api.js';
 import type { AgentRoutes, Body, Owner } from './agent-paths.js';
 
 const WORKER_TIMEOUT_MS = 60000;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const CODE = /^[a-z0-9_]{1,64}$/;
 
 export interface Forwarded {
@@ -32,11 +33,23 @@ function answerOf(status: number, text: string): unknown {
     ? new ReadError(status, code) : unavailable();
 }
 
+async function responseText(response: Response) {
+  let size = 0;
+  const parts: Uint8Array[] = [];
+  for await (const chunk of response.body ?? []) {
+    size += chunk.byteLength;
+    if (size > MAX_RESPONSE_BYTES) throw unavailable();
+    parts.push(chunk);
+  }
+  return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(parts));
+}
+
 export function agentGateway(link: AgentWorkerLink, fetcher: typeof fetch = fetch): AgentRoutes {
   const forward = (request: Forwarded) => fetcher(`${link.url}/internal/agents`, { method: 'POST', redirect: 'error',
     headers: { Authorization: `Bearer ${link.token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(request), signal: AbortSignal.timeout(WORKER_TIMEOUT_MS) })
-    .then(async response => ({ status: response.status, text: await response.text() }), () => { throw unavailable(); })
+    .then(async response => ({ status: response.status, text: await responseText(response) }))
+    .catch(() => { throw unavailable(); })
     .then(({ status, text }) => answerOf(status, text));
   return {
     owner: (method, path, owner, body) => readBody(method, body).then(sent =>

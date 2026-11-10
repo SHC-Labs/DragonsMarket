@@ -36,7 +36,7 @@ The oracle's dispute logic is complete and well tested: propose, challenge namin
 | --- | --- | --- |
 | The verifier and the exact collateral token id in place of a bond token; `mt_on_transfer` in place of `ft_on_transfer` | BUILT | 8.1 |
 | `withdraw_bond` pays with `mt_transfer` from the oracle's own Intents account | BUILT | 8.2 |
-| A permissionless `payout_bond` | PROPOSED, not built | 8.2 |
+| A permissionless `payout_bond` | BUILT; deployment requires reviewed upgrade and keeper-key rotation | 8.2 |
 | Bonds held and bonds owed counted so the keeper can reconcile the oracle's Intents balance | BUILT | 8.3 |
 | Case list view, events for bond movement, `jury_size` event | BUILT | 8.4, 8.5 |
 
@@ -71,7 +71,7 @@ The oracle needs its own Intents account `O`. It must have no key registered in 
 | Challenger bond arrives | Same, `msg = challenge:<market account>:<market id>:<answer>` |
 | A case settles | `claimable[account] += amount` in the oracle's own ledger. No verifier call. The money stays in `O` |
 | Winner, jurors or recipient collects | `withdraw_bond` calls verifier `mt_transfer(receiver_id=caller, token_id, amount, null, null)` with 1 yocto from `O` |
-| A third party pushes a payout | Not possible today. PROPOSED: `payout_bond(account_id)` pays `claimable[account_id]` to that same account's own Intents account |
+| A third party pushes a payout | `payout_bond(account_id)` pays `claimable[account_id]` to that same account's own Intents account |
 | Failed payout | `on_bond_withdrawn` restores `claimable` on error. An error means the verifier receipt failed and nothing moved. `reconcile_bond_payout` settles a payout whose callback never came |
 
 Settlement math is unchanged and already built (`oracle/src/lib.rs:1179-1250`). The ruling decides who is paid:
@@ -204,6 +204,7 @@ Gas floors are enforced with `upgrade::require_gas` (`oracle/src/lib.rs:26-43`).
 | `set_operator` (`:538`) | Owner | `operator_id` | none | none | none | | `operator_set` |
 | `set_no_decision_recipient` (`:544`) | Owner | `recipient: AccountId` | none | none | none | | `no_decision_recipient_set` |
 | `add_publisher` (`:551`) | Owner | `key: PublicKey` | none | none | none | ed25519 only, no duplicates, at most `max_publishers` | `publisher_added` |
+| `set_publishers` | Owner | `publishers: Vec<PublicKey>`, `threshold: u32` | none | none | attach 30 TGas | Atomic replacement; nonempty distinct Ed25519 keys, at most `max_publishers`, threshold strictly above half and no greater than count | `publishers_set` |
 | `remove_publisher` (`:565`) | Operator or owner | `key: PublicKey` | none | none | none | Refuses a key that is not a publisher and a removal that leaves fewer than the threshold | `publisher_removed` |
 | `set_price_threshold` (`:581`) | Owner | `threshold: u32` | none | none | none | Between 1 and the publisher count | `price_threshold_set` |
 | `register_market` (`:596`) | An allowed market account | `market_id: U64`, `close_at: U64`, `resolve_by: U64`, `rule_hash: String`, `price_rule: Option<PriceRule>` | none | none | 20 TGas reserved by the market | Idempotent. Refuses a market with too little time and a price market with too few publishers | `market_registered` |
@@ -241,11 +242,16 @@ BUILT. The accepted decision puts bonds in Intents until an authorised exit.
 
 | Item | Specification |
 | --- | --- |
-| `withdraw_bond()` | Exactly 1 yocto. Zeroes `claimable[caller]`, moves the amount from `claimable_total` to `pending_payouts_total`, sends `mt_transfer(caller, collateral_token_id, amount, null, memo "bp:<n>")` from the oracle, then `on_bond_withdrawn`. 33 TGas floor |
-| `payout_bond(account_id: AccountId)` PROPOSED, not built | Anyone. Same as `withdraw_bond` for `account_id`, paid to that same account's own Intents account. No yocto needed from the caller. This lets a keeper pay jurors and the treasury without a DAO proposal. Nobody can redirect the money, because the receiver is always the account that owns the claim |
+| `withdraw_bond()` | Exactly 1 yocto. Zeroes `claimable[caller]`, moves the amount from `claimable_total` to `pending_payouts_total`, sends `mt_transfer(caller, collateral_token_id, amount, null, null)` from the oracle, then `on_bond_withdrawn`. 33 TGas floor |
+| `payout_bond(account_id: AccountId)` | Anyone, zero deposit. Same pending-payout accounting as `withdraw_bond`, paid only to `account_id`'s own Intents account. Requires the withdrawal gas floor. This lets a scoped keeper pay jurors and the treasury without a DAO proposal. Nobody can redirect the money |
 | `on_bond_withdrawn(id)` | On error restores `claimable` and `claimable_total`, emits `bond_payout_failed`. On success emits `bond_paid {account, amount}`. Both paths reduce `pending_payouts_total` |
 
 An error from `mt_transfer` means the verifier receipt failed and nothing moved. The verifier call returns nothing and is one receipt, so no unknown state exists unless the callback runs out of gas. The callback has 10 TGas.
+
+Each positive claim credit emits `bond_claimable {account, amount}`, including a restored failed
+payout. The keeper reads successful finalized Oracle receipts, retains a bounded due-work batch
+and rechecks `claimable_of` before paying. Existing claims predating this event need their old
+beneficiary evidence or a recipient-initiated withdrawal; the contract's lookup map is not enumerable.
 
 ### 8.3 Accounting views (R-08)
 

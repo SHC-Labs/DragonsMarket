@@ -18,6 +18,27 @@ test('a future market never pins unrelated due work and batches stay bounded',()
  for(let i=3;i<1000;i++)touch(s,'market',i,999999n);
  assert.ok(selectJobs(s,2n,50).length<=12,'only due jobs and ten repair reads, never the catalog');
 });
+test('excluded markets consume neither due slots nor rotating reconciliation slots', () => {
+ const state = newQueue(scope);
+ const excluded = touch(state, 'market', '0', 0n);
+ touch(state, 'market', '1', 1n);
+ touch(state, 'bond', 'alice.near', 2n);
+ touch(state, 'sweep', '0', 3n);
+ const include = job => job.kind !== 'market' || job.id === '1';
+ assert.deepEqual(selectJobs(state, 10n, 1, include).map(j => j.kind + ':' + j.id), ['market:1']);
+ finish(state, state.jobs['market:1']);
+ assert.deepEqual(selectJobs(state, 10n, 1, include).map(j => j.kind), ['bond']);
+ finish(state, state.jobs['bond:alice.near']);
+ assert.deepEqual(selectJobs(state, 10n, 1, include).map(j => j.kind), ['sweep']);
+ finish(state, state.jobs['sweep:0']);
+ assert.deepEqual(selectJobs(state, 10n, 1, include), []);
+ touch(state, 'market', '2', 100n);
+ assert.deepEqual(selectJobs(state, 10n, 1, include), [], 'rotating reads also respect exclusions');
+ const approved = job => job.kind !== 'market' || job.id === '2';
+ assert.deepEqual(selectJobs(state, 10n, 1, approved).map(j => j.id), ['2']);
+ assert.deepEqual(excluded, { kind: 'market', id: '0', nextAt: '0', failures: 0 });
+ assert.deepEqual(selectJobs(state, 10n, 1, () => true).map(j => j.id), ['0'], 'approval can resume retained work');
+});
 test('receipt success, receiver, standard and market scope govern event ingestion',()=>{
  const s=newQueue(scope);
  ingestBlock(s,block(1,[

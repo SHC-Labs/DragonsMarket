@@ -21,6 +21,18 @@ export async function transaction<T>(pool: pg.Pool, work: (client: pg.PoolClient
   } finally { client.release(); }
 }
 
+export async function verifyRuntimeLogin(pool: pg.Pool, expectedLogin?: string): Promise<void> {
+  const { rows } = await pool.query(`SELECT current_user AS login, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls,
+    pg_has_role(current_user, (SELECT tableowner FROM pg_tables WHERE schemaname = 'public'
+      AND tablename = 'schema_migrations'), 'MEMBER') AS owns_schema
+    FROM pg_roles WHERE rolname = current_user`);
+  const role = rows[0];
+  if (!role || (expectedLogin !== undefined && role.login !== expectedLogin) || role.rolsuper || role.rolcreaterole
+    || role.rolcreatedb || role.rolreplication || role.rolbypassrls || role.owns_schema !== false) {
+    throw new Error('Runtime database credentials must use a restricted service login');
+  }
+}
+
 // The migration files cannot change while the process runs, so they are read and hashed once.
 let expectedMigrations: Promise<Awaited<ReturnType<typeof import('./migrate.js').migrationFiles>>> | undefined;
 function loadExpectedMigrations() {

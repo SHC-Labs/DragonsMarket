@@ -24,8 +24,8 @@ function recording(answer: () => Promise<unknown> = () => Promise.resolve({ ok: 
   return { calls, routes };
 }
 
-async function withWorker(routes: AgentRoutes, run: (url: string) => Promise<void>) {
-  const server = createAgentWorkerServer(routes, TOKEN);
+async function withWorker(routes: AgentRoutes, run: (url: string) => Promise<void>, ready?: () => Promise<void>) {
+  const server = createAgentWorkerServer(routes, TOKEN, ready);
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   try {
@@ -39,6 +39,21 @@ async function withWorker(routes: AgentRoutes, run: (url: string) => Promise<voi
 const post = (url: string, authorization: string | undefined, body: unknown) =>
   fetch(`${url}/internal/agents`, { method: 'POST', body: typeof body === 'string' ? body : JSON.stringify(body),
     headers: { 'Content-Type': 'application/json', ...(authorization ? { Authorization: authorization } : {}) } });
+
+test('worker readiness follows database availability and exposes no failure details', async () => {
+  let available = true;
+  await withWorker(recording().routes, async url => {
+    assert.equal((await fetch(`${url}/health/ready`)).status, 200);
+    available = false;
+    const response = await fetch(`${url}/health/ready`);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { status: 'not_ready' });
+    assert.equal((await fetch(`${url}/health`)).status, 200);
+  }, async () => { if (!available) throw new Error('private database credential'); });
+  await withWorker(recording().routes, async url => {
+    assert.equal((await fetch(`${url}/health/ready`)).status, 503);
+  });
+});
 
 test('the worker acts only for the holder of its token', () => withWorker(recording().routes, async url => {
   const asked = { method: 'POST', path: OWNER_PATH, owner: OWNER, body: {} };
@@ -135,6 +150,17 @@ test('the gateway sends the service token, and follows no redirect', async () =>
   assert.equal(url, 'http://agent-worker.test/internal/agents');
   assert.equal(init?.redirect, 'error');
   assert.equal((init?.headers as Record<string, string>).Authorization, `Bearer ${TOKEN}`);
+});
+
+test('oversized, invalid UTF-8 and interrupted worker replies fail without leaking their body', async () => {
+  const responses = [new Response('x'.repeat(2 * 1024 * 1024 + 1)),
+    new Response(new Uint8Array([0xff])),
+    new Response(new ReadableStream({ start(controller) { controller.error(new Error('private upstream detail')); } }))];
+  for (const response of responses) {
+    const gateway = agentGateway(LINK, async () => response);
+    await assert.rejects(gateway.access('GET', '/v1/agent-access/agent', 'Bearer x', noBody),
+      (error: unknown) => error instanceof ReadError && error.status === 502 && error.code === 'agent_api_unavailable');
+  }
 });
 
 async function reachable(entry: string, sources: string) {

@@ -1158,6 +1158,17 @@ impl OracleContract {
         self.no_decision_recipient = recipient;
     }
 
+    pub fn set_publishers(&mut self, publishers: Vec<PublicKey>, threshold: u32) {
+        require!(env::predecessor_account_id() == self.owner, "owner only");
+        price_signatures::validate_publishers(&publishers, threshold, self.max_publishers as usize);
+        emit(
+            "publishers_set",
+            json!({ "publishers": publishers, "threshold": threshold }),
+        );
+        self.publishers = publishers;
+        self.price_threshold = threshold;
+    }
+
     // Adding a publisher grants power over prices, so it is the owner's (a DAO proposal).
     pub fn add_publisher(&mut self, key: PublicKey) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
@@ -1593,9 +1604,16 @@ impl OracleContract {
     // refuses. A callback that never reports leaves the amount pending, still owed and never credited back.
     #[payable]
     pub fn withdraw_bond(&mut self) -> Promise {
-        upgrade::require_gas(GAS_WITHDRAW_FLOOR, "a withdrawal sends the payout and then settles it");
         assert_one_yocto();
-        let who = env::predecessor_account_id();
+        self.pay_bond(env::predecessor_account_id())
+    }
+
+    pub fn payout_bond(&mut self, account_id: AccountId) -> Promise {
+        self.pay_bond(account_id)
+    }
+
+    fn pay_bond(&mut self, who: AccountId) -> Promise {
+        upgrade::require_gas(GAS_WITHDRAW_FLOOR, "a withdrawal sends the payout and then settles it");
         let amount = self.claimable.get(&who).copied().unwrap_or(0);
         require!(amount > 0, "nothing to withdraw");
         self.claimable.remove(&who);
@@ -1875,6 +1893,12 @@ impl OracleContract {
         let have = self.claimable.get(who).copied().unwrap_or(0);
         self.claimable.insert(who.clone(), have + amount);
         self.claimable_total += amount;
+        if amount > 0 {
+            emit(
+                "bond_claimable",
+                json!({ "account": who, "amount": amount.to_string() }),
+            );
+        }
     }
 
     // `signers` are the publishers behind a price answer, empty for any other. They go into the event, which is where the
@@ -5102,6 +5126,30 @@ mod tests {
     }
 
     #[test]
+    fn a_permissionless_bond_payout_cannot_redirect_or_duplicate_a_claim() {
+        let mut o = unchallenged_and_final();
+        act_unpaid("keeper.near", 10 * DEADLINE);
+        let _ = o.payout_bond(acct("carol.near"));
+        let (args, deposit, gas) = mt_transfer_sent();
+        assert_eq!((deposit, gas), (1, GAS_MT_TRANSFER.as_gas()));
+        assert_eq!(args["receiver_id"], "carol.near");
+        assert_eq!(args["amount"], BOND.to_string());
+        assert_eq!(owed(&o, "keeper.near"), 0);
+        assert_eq!(
+            refusal(|| drop(o.payout_bond(acct("carol.near")))),
+            "nothing to withdraw"
+        );
+        assert_eq!((o.pending_payouts_total, o.total_owed().0), (BOND, BOND));
+        settle(&mut o, 1, false);
+        assert_eq!((owed(&o, "carol.near"), o.pending_payouts_total), (BOND, 0));
+        act_unpaid("another.near", 10 * DEADLINE);
+        let _ = o.payout_bond(acct("carol.near"));
+        settle(&mut o, 2, true);
+        settle(&mut o, 2, true);
+        assert_eq!((owed(&o, "carol.near"), o.total_owed().0), (0, 0));
+    }
+
+    #[test]
     fn a_payout_the_verifier_refused_gives_the_balance_back_and_a_paid_one_stays_paid() {
         let mut o = unchallenged_and_final();
         act_as("carol.near", 10 * DEADLINE);
@@ -6098,6 +6146,53 @@ mod tests {
         assert!(c.upgrade_in_flight);
         c.on_upgrade_done(Err(PromiseError::Failed));
         assert!(!c.upgrade_in_flight);
+    }
+
+    #[test]
+    fn publisher_rotation_is_atomic_owner_only_and_changes_signature_authority() {
+        let (mut c, _) = price_oracle(true);
+        let old = signing_key(51);
+        let next = signing_key(52);
+        act_as(OWNER, 1);
+        c.set_publishers(vec![public(&old)], 1);
+        let before = c.config();
+        for who in [OPERATOR, "stranger.near"] {
+            act_as(who, 1);
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                c.set_publishers(vec![public(&next)], 1);
+            }));
+            assert!(refused.is_err());
+            assert_eq!(c.config(), before);
+        }
+        act_as(OWNER, 1);
+        let secp = PublicKey::from_parts(CurveType::SECP256K1, vec![7; 64]).unwrap();
+        for (publishers, threshold) in [
+            (vec![], 1),
+            (vec![public(&next)], 0),
+            (vec![public(&next)], 2),
+            (vec![public(&next), public(&old)], 1),
+            (vec![public(&next), public(&next)], 2),
+            (vec![secp], 1),
+            (vec![public(&next); c.max_publishers as usize + 1], 1),
+        ] {
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                c.set_publishers(publishers, threshold);
+            }));
+            assert!(refused.is_err());
+            assert_eq!(c.config(), before);
+        }
+        c.set_publishers(vec![public(&next)], 1);
+        let message = "rotation-test";
+        let old_sig = entry(&old, message);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            c.verified_signers(message, &old_sig)
+        }))
+        .is_err());
+        let next_sig = entry(&next, message);
+        assert_eq!(c.verified_signers(message, &next_sig), vec![public(&next)]);
+        c.set_publishers(vec![public(&next), public(&old), public(&signing_key(53))], 2);
+        assert_eq!(c.publishers.len(), 3);
+        assert_eq!(c.price_threshold, 2);
     }
 
     #[test]

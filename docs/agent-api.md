@@ -1,11 +1,48 @@
 # Trading from an Agent API agent
 
 For developers whose agent runs on the NEAR Intents Agent API and should stake in Dragons Market rounds or trade its
-markets. The contracts are not deployed, so account names here are placeholders:
+markets. Account names here are placeholders; use only the reviewed deployment's manifest, never a rehearsal account
+copied from a message:
 
 - `<rounds>` and `<market>`, the two contracts;
 - `<token>`, the collateral token: `collateral_token_id` in either contract's `config`, without its `nep141:` prefix;
 - `<agent>`, the agent's `near_account_id` from `GET /v1/agents/{agent_id}/wallet`.
+
+## The site's MCP connection
+
+The website uses an explicit owner-signed flow: wallet login, agent creation and account policy, a grant to Dragons
+Market, owner funding, then a separate signed MCP connection. Wallet login alone authorizes no spending. The AI gets
+only its `dmk_` connection token. The worker keeps the partner key and sealed `ngt_` grant; neither reaches MCP clients.
+
+The skill is served at `/skill.md`, through the `dragons-market://skill` resource and the `trade-dragons-market` prompt.
+`get_policy` reads the account policy from the Agent API, reports whether it is applied and provider-synced, and
+compares it with the application's expected policy. A changed or unrecognized policy is marked for owner review,
+never represented as the expected policy. It also reports the signed connection limits and their enforcement scope.
+Policy amounts are atomic units. `get_agent` reports connection amounts as decimals and includes remaining allowance.
+
+The MCP only exposes the supported Dragons Market actions. Account administration, policy changes, funding, NFT
+minting and arbitrary native calls are not MCP tools. Its `list_markets` scans 50 ids at a time: pass
+`next_from_market` as `from_market`, including after empty pages, until it is null.
+
+There are two distinct checks before signing:
+
+| Rule | Enforcer | Scope |
+| --- | --- | --- |
+| Per-buy/stake amount and rolling 24-hour allowance | Dragons Market worker and transactional Postgres reservation | One signed MCP connection, across both venues |
+| Revoked/expired connection, allowed action and cash-out recipient | Dragons Market worker | One connection and its owner |
+| Grant, freeze, native receiver permissions and supported custody policy | Agent API and custody provider | The agent account |
+| Cash-out asset and amount caps | Agent API and custody provider | The agent account's Intents withdrawals |
+| Exact call and finalized business outcome | Dragons Market worker reading chain receipts | One idempotent operation |
+
+MCP connection limits are not copied into the API's account-wide withdrawal limits: those describe different money
+flows and would not constrain USDC already held inside a market. Native `buy` and `stake` attach one yoctoNEAR;
+the provider cannot infer their USDC trade size from that deposit. Native calls do not inherit USD budgets,
+timelocks, schedules or owner approvals. Enforcing those trade amounts independently at custody requires a provider
+capability that binds method arguments to value, or a reviewed change to the trading/funding route. It is not achieved
+by adding unsupported fields to an API request. Do not advertise that protection as available.
+
+Concurrent requests reserve their spend under a database lock before dispatch. Pending, uncertain and review-needed
+actions keep their allowance reserved; only proved failures release it. Separate connections have separate limits.
 
 ## How it fits together
 

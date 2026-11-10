@@ -5,6 +5,20 @@ import { ingestionStatus } from './ingestion/store.js';
 const MAX_LAG_BLOCKS = 1000n;
 const MAX_RECONCILIATION_AGE_MS = 15 * 60 * 1000;
 const MAX_INTEGRITY_AGE_MS = 13 * 60 * 60 * 1000;
+const MAX_KEEPER_AGE_MS = 15 * 60 * 1000;
+
+export function keeperAlerts(expected: boolean, status: { mode: string; state: string; last_success_at: Date | string | null } | null,
+  now = Date.now()) {
+  if (!expected) return [];
+  const last = status?.last_success_at ? new Date(status.last_success_at).getTime() : NaN;
+  return [
+    ...(!status || !Number.isFinite(last) || now - last > MAX_KEEPER_AGE_MS || last > now ? ['keeper_stale'] : []),
+    ...(status?.mode !== 'sign' ? ['keeper_signing_disabled'] : []),
+    ...(status?.state === 'failed' ? ['keeper_failed'] : []),
+    ...(status?.state === 'catching_up' ? ['keeper_feed_stale'] : []),
+  ];
+}
+
 export async function backendStatus(pool: pg.Pool, config: Config) {
   const indexing = await ingestionStatus(pool, config);
   const jobs = config.deployment
@@ -16,6 +30,9 @@ export async function backendStatus(pool: pg.Pool, config: Config) {
   const integrity = config.deployment
     ? ((await pool.query('SELECT ok,checked_at FROM chain_integrity_reports WHERE deployment_id=$1 ORDER BY checked_at DESC LIMIT 1', [config.deployment.id]))
         .rows[0] ?? null)
+    : null;
+  const keeper = config.deployment
+    ? ((await pool.query('SELECT mode,state,height::text,started_at,finished_at,last_success_at FROM keeper_status WHERE deployment_id=$1', [config.deployment.id])).rows[0] ?? null)
     : null;
   // True only while a publisher has signed a price in the last hour, so the status cannot claim signing is off when it is running.
   const priceSigning = config.deployment
@@ -36,12 +53,14 @@ export async function backendStatus(pool: pg.Pool, config: Config) {
   return {
     reconciliation,
     chainIntegrity: integrity,
+    keeper,
     deploymentConfigured: config.deployment !== null,
     indexing,
     jobs,
     operations,
     execution: { trading: false, funding: false, priceSigning, reason: 'contracts_not_finalized_or_deployed' },
     alerts: [
+      ...keeperAlerts(Boolean(config.deployment?.contracts.market), keeper),
       ...(integrity && !integrity.ok ? ['chain_integrity_failed'] : []),
       ...(config.deployment && (!integrity || Date.now() - new Date(integrity.checked_at).getTime() > MAX_INTEGRITY_AGE_MS) ? ['chain_integrity_stale'] : []),
       ...(reconciliation && !reconciliation.solvent ? ['liability_shortfall_needs_review'] : []),

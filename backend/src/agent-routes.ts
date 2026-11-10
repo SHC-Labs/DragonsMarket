@@ -7,7 +7,7 @@ import {
   parseOwnedAction, revokeGrants, runOwnedAction, sessionLimits, submitOwnerIntent, type AgentAccounts,
 } from './agent-accounts.js';
 import {
-  accessClaimable, accessFor, accessMarkets, accessOperations, accessPositions, accessQuote, accessQuoteBuy,
+  accessClaimable, accessFor, accessMarkets, accessOperations, accessPolicy, accessPositions, accessQuote, accessQuoteBuy,
   accessQuoteSell, accessRounds, accessSession, accessSummary, listAccessTokens, requestAccess, revokeAccessToken,
   runAccessAction, signAccess, type Access,
 } from './agent-access.js';
@@ -47,9 +47,11 @@ const ownerHandlers: Record<string, OwnerHandler> = {
 const accessHandlers: Record<string, AccessHandler> = {
   'GET session': (s, access) => Promise.resolve(accessSession(s, access)),
   'GET agent': (s, access) => accessSummary(s, access),
+  'GET policy': (s, access) => accessPolicy(s, access),
   'GET rounds': s => accessRounds(s),
   'POST quote': (s, _access, body) => body().then(b => accessQuote(s, b)),
   'GET markets': s => accessMarkets(s),
+  'POST markets': (s, _access, body) => body().then(b => accessMarkets(s, b.from_market)),
   'GET positions': (s, access) => accessPositions(s, access),
   'POST quote-buy': (s, _access, body) => body().then(b => accessQuoteBuy(s, b)),
   'POST quote-sell': (s, _access, body) => body().then(b => accessQuoteSell(s, b)),

@@ -10,38 +10,46 @@ import { toNodeHandler } from '@modelcontextprotocol/node';
 import { Backend, BackendRefusal } from './backend.js';
 import { readMcpConfig, type McpConfig } from './config.js';
 import { TokenBudget } from './token-budget.js';
+import { clientAddress } from './client-address.js';
 import { buildServer } from './tools.js';
 
 const TOKEN = /^dmk_[A-Za-z0-9_-]{43}$/;
 const MAX_BODY = 64 * 1024;
 
 export function createMcpApp(config: McpConfig, backend: Backend, skill: string, budget = new TokenBudget()) {
-  const verifier = {
-    verifyAccessToken: (token: string) => {
-      if (!TOKEN.test(token)) {
-        return Promise.reject(new OAuthError(OAuthErrorCode.InvalidToken, 'Not a Dragons Market access token'));
-      }
-      if (!budget.allows(token)) {
-        return Promise.reject(new OAuthError(OAuthErrorCode.TemporarilyUnavailable, 'Too many requests, try again soon'));
-      }
-      return backend.session(token).then(session => {
-        budget.accepted(token);
-        return { token, clientId: session.agentId, scopes: [], expiresAt: session.expiresAt,
-          extra: { decimals: session.decimals } };
-      }, (error: unknown) => {
-        if (error instanceof BackendRefusal && error.status === 401) {
-          budget.refused(token);
-          throw new OAuthError(OAuthErrorCode.InvalidToken, 'The access token is not live');
+  const authenticate = async (request: Request, client: string) => {
+    let limited = false;
+    const verifier = {
+      verifyAccessToken: (token: string) => {
+        if (!TOKEN.test(token)) {
+          return Promise.reject(new OAuthError(OAuthErrorCode.InvalidToken, 'Not a Dragons Market access token'));
         }
-        throw error;
-      });
-    },
+        const release = budget.acquire(token, client);
+        if (!release) {
+          limited = true;
+          return Promise.reject(new OAuthError(OAuthErrorCode.TemporarilyUnavailable, 'Too many requests, try again soon'));
+        }
+        return Promise.resolve().then(() => backend.session(token)).then(session => {
+          budget.accepted(token);
+          return { token, clientId: session.agentId, scopes: [], expiresAt: session.expiresAt,
+            extra: { decimals: session.decimals } };
+        }, (error: unknown) => {
+          if (error instanceof BackendRefusal && error.status === 401) {
+            budget.refused(token);
+            throw new OAuthError(OAuthErrorCode.InvalidToken, 'The access token is not live');
+          }
+          throw error;
+        }).finally(release);
+      },
+    };
+    const auth = await requireBearerAuth({ verifier })(request);
+    return limited ? Response.json({ error: 'temporarily_unavailable', error_description: 'Too many requests, try again soon' },
+      { status: 429, headers: { 'Retry-After': '60' } }) : auth;
   };
-  const gate = requireBearerAuth({ verifier });
   const handler = createMcpHandler(() => buildServer(backend, skill), { maxRequestBodySize: MAX_BODY });
   const hosts = [config.publicUrl.hostname];
   let readiness: { expires: number; result: Promise<boolean> } | undefined;
-  const fetchRequest = async (request: Request) => {
+  const fetchRequest = async (request: Request, client: string | null) => {
     if (new URL(request.url).pathname === '/health/ready' && ['GET', 'HEAD'].includes(request.method)) {
       if (!readiness || readiness.expires <= Date.now()) {
         const check = { expires: Infinity, result: Promise.resolve(false) };
@@ -53,9 +61,9 @@ export function createMcpApp(config: McpConfig, backend: Backend, skill: string,
       return Response.json({ status: ready ? 'ready' : 'not_ready', scope: 'foundation',
         checks: { backend: ready ? 'ok' : 'unavailable' } }, { status: ready ? 200 : 503 });
     }
-    return appRequest(request);
+    return appRequest(request, client);
   };
-  const appRequest = async (request: Request): Promise<Response> => {
+  const appRequest = async (request: Request, client: string | null): Promise<Response> => {
     const { pathname } = new URL(request.url);
     // Railway probes use their own Host header. These routes expose health only;
     // MCP and skill requests retain the public-host and origin checks below.
@@ -66,12 +74,13 @@ export function createMcpApp(config: McpConfig, backend: Backend, skill: string,
       return new Response(skill, { headers: { 'content-type': 'text/markdown; charset=utf-8' } });
     }
     if (pathname !== '/mcp') return new Response('Not found', { status: 404 });
-    const auth = await gate(request);
+    if (!client) return Response.json({ error: 'temporarily_unavailable' }, { status: 503 });
+    const auth = await authenticate(request, client);
     return auth instanceof Response ? auth : handler.fetch(request, { authInfo: auth });
   };
   return {
-    fetch: async (request: Request) => {
-      const response = await fetchRequest(request);
+    fetch: async (request: Request, client: string | null = null) => {
+      const response = await fetchRequest(request, client);
       response.headers.set('Cache-Control', 'no-store');
       response.headers.set('X-Content-Type-Options', 'nosniff');
       response.headers.set('X-Frame-Options', 'DENY');
@@ -85,13 +94,23 @@ export function createMcpApp(config: McpConfig, backend: Backend, skill: string,
 
 export const loadSkill = () => readFile(new URL('../../skill/SKILL.md', import.meta.url), 'utf8');
 
+export function createMcpHttpServer(config: McpConfig, backend: Backend, skill: string, budget?: TokenBudget) {
+  const app = createMcpApp(config, backend, skill, budget);
+  const server = createServer((req, res) => {
+    const client = clientAddress(req, config.trustedProxies);
+    // The adapter does not expose socket identity. A request-local closure keeps
+    // it out of spoofable headers and prevents concurrent requests mixing callers.
+    const node = toNodeHandler({ fetch: request => app.fetch(request, client) }, { maxRequestBodySize: MAX_BODY });
+    void node(req as Parameters<typeof node>[0], res);
+  });
+  server.requestTimeout = 120000;
+  return server;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const config = readMcpConfig(process.env);
-    const app = createMcpApp(config, new Backend(config.backendUrl), await loadSkill());
-    const node = toNodeHandler(app, { maxRequestBodySize: MAX_BODY });
-    const server = createServer((req, res) => void node(req as Parameters<typeof node>[0], res));
-    server.requestTimeout = 120000;
+    const server = createMcpHttpServer(config, new Backend(config.backendUrl), await loadSkill());
     server.listen(config.port, config.host, () => console.log(JSON.stringify({ service: 'mcp', port: config.port, node: process.version, uid: process.getuid?.() })));
     const stop = () => server.close(() => process.exit(0));
     process.on('SIGTERM', stop);

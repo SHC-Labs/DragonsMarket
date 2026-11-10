@@ -17,6 +17,7 @@ container_build_command = ["cargo", "near", "build", "non-reproducible-wasm", "-
 [dependencies]
 near-sdk = { workspace = true }
 upgrade = { path = "../upgrade" }
+price-signatures = { path = "../price-signatures" }
 
 [dev-dependencies]
 near-sdk = { workspace = true, features = ["unit-testing"] }

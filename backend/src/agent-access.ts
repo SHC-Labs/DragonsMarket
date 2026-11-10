@@ -12,6 +12,7 @@ import {
 } from './agent-accounts.js';
 import type { Owner } from './agent-paths.js';
 import { spentToday } from './operations.js';
+import { dragonsPolicy, grantsNoMore } from './agent-policy.js';
 
 export interface Access {
   tokenId: string; label: string; agentId: string; agentAccount: string; nearAccount: string; owner: string;
@@ -146,6 +147,25 @@ export const accessSession = (s: AgentAccounts, access: Access) => ({
   collateral: { token_id: s.deployment.collateralTokenId, decimals: s.deployment.collateralDecimals },
 });
 
+export async function accessPolicy(s: AgentAccounts, access: Access) {
+  const current = await s.api.policy(access.agentId);
+  const expected = { ...dragonsPolicy(s.deployment, access.owner), frozen: current.policy?.frozen === true };
+  const matches = grantsNoMore(current.policy, expected);
+  return {
+    agent_id: access.agentId,
+    account_policy: { status: current.status, revision: current.revision, provider_synced: current.synced,
+      matches_application_policy: matches, policy: matches ? expected : null },
+    connection: { max_spend: String(access.maxSpend), daily_limit: String(access.dailyLimit),
+      expires_at: access.expiresAt, scope: 'this_connection', actions: ACCESS_KINDS },
+    enforcement: { trade_amounts: 'dragons_market', cash_out: 'agent_api',
+      native_call_trade_amounts_visible_to_provider: false,
+      native_call_budget_timelock_schedule_owner_approval: false },
+    next: matches && current.synced && current.status === 'APPLIED' && !expected.frozen && !access.frozen
+      ? 'Read get_agent for balances, local freeze state and remaining connection limits before acting.'
+      : 'Stop and ask the owner to review the account policy. Its application or expected rules are unverified.',
+  };
+}
+
 const digits = (value: unknown) => (isUnits(value) ? value : null);
 const moment = (ns: unknown) => (isUint(ns) ? new Date(Number(BigInt(ns) / 1_000_000n)).toISOString() : null);
 const roundsOf = (s: AgentAccounts) => s.deployment.contracts.rounds ?? (() => {
@@ -215,16 +235,25 @@ function listedMarket(entry: unknown) {
     price_no: digits(entry.price_no), locked: digits(entry.locked) };
 }
 
-export async function accessMarkets(s: AgentAccounts) {
+export async function accessMarkets(s: AgentAccounts, fromMarket: unknown = '0') {
+  if (!isUint(fromMarket)) throw new ReadError(400, 'invalid_market_cursor');
   const market = marketOf(s), config = await s.chain.view(market, 'config', {});
   if (!object(config) || !isUint(config.markets)) throw new Error('invalid_market_config');
-  const total = BigInt(config.markets), from = total > MARKET_WINDOW ? total - MARKET_WINDOW : 0n;
-  const listed = await s.chain.view(market, 'list_markets', { from_index: String(from), limit: String(MARKET_WINDOW) });
-  if (!Array.isArray(listed)) throw new Error('invalid_market_list');
+  const total = BigInt(config.markets), from = BigInt(fromMarket), end = from + MARKET_WINDOW;
+  const listed = from >= total ? [] : await s.chain.view(market, 'list_markets',
+    { from_index: String(from), limit: String(MARKET_WINDOW) });
+  if (!Array.isArray(listed) || listed.length > Number(MARKET_WINDOW)) throw new Error('invalid_market_list');
+  const seen = new Set<string>();
+  for (const entry of listed) {
+    if (!object(entry) || !isUint(entry.id) || BigInt(entry.id) < from || BigInt(entry.id) >= end
+      || BigInt(entry.id) >= total || seen.has(entry.id)) throw new Error('invalid_market_list');
+    seen.add(entry.id);
+  }
   return { rules: { fee_rate_bps: config.fee_rate_bps, paused: config.paused === true,
     sells_paused: config.sells_paused === true,
     max_positions: Number.isSafeInteger(config.max_positions) ? config.max_positions : null },
-  markets: listed.filter(entry => object(entry) && entry.status === 'open').map(listedMarket) };
+  markets: listed.filter(entry => object(entry) && entry.status === 'open').map(listedMarket),
+  next_from_market: end < total ? String(end) : null };
 }
 
 export const accessPositions = (s: AgentAccounts, access: Access) => marketPositions(s, access.nearAccount);

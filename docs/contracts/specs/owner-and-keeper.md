@@ -1,6 +1,6 @@
 # Dragons Market: owner model, DAO proposals and keeper spec
 
-**How the DAO owns the three contracts, which methods it may call and how a proposal must be built, which Sputnik proposal kinds must be guarded, and what the keeper must do.**
+**How the DAO owns the financial contracts, which methods it may call and how a proposal must be built, which Sputnik proposal kinds must be guarded, and what the keeper must do.**
 
 | Field | Value |
 | --- | --- |
@@ -9,6 +9,24 @@
 | Scope | Owner and operator methods of `market`, `oracle` and `council`, `contracts/keeper/treasury.mjs`, `contracts/keeper/keeper.mjs` |
 | Source | Working tree on top of commit `6cad02e`, SputnikDAO source at revision `5434a59dec23ee0c49df8c8c4350c208a7e75b0b` (version 2.3.1), read 2026-10-21 |
 | Index | [README.md](README.md) |
+
+**Authority hardening, 2026-11-08.** The proposal builder and source-coverage tests now include
+Rounds: upgrades/ownership, operator/pause, fees/treasury, publishers, series, reconciliation
+and the DAO's own withdrawal. Its ID is optional for a human-only profile; proposals targeting
+Rounds require an explicit distinct ID. Oracle proposal bounds match the hard contract limits.
+Oracle and Rounds expose owner-only atomic publisher replacement, which the proposal monitor
+flags for manual review. The [current handoff](../governance.md) and
+[authority review](../../CONTRACT-AUTHORITY.md) describe these changes and remaining live evidence.
+
+**Maintenance completion, 2026-11-09.** The current runner sweeps optional Rounds fees with a
+fourth scoped key and schedules Oracle `payout_bond(account_id)` from finalized `bond_claimable`
+events after seven days. The contract pays only the claim owner and uses the same pending-payout
+accounting as `withdraw_bond`. Owner/recipient drift checks already exist in standalone `check`;
+the production approval also pins the owner DAO's code, canonical policy hash, minimum votes
+and keyless account, and the Oracle no-decision recipient. Actual Sputnik WASM is exercised in
+the local DAO/keeper integration test. The dated October status tables below describe the older
+baseline; [KEEPER.md](../../KEEPER.md) and [KEEPER-APPROVAL.md](../../KEEPER-APPROVAL.md) are the
+current operating instructions. None of these tests authorizes a mainnet handover.
 
 **Dynamic parimutuel pricing, 2026-10-27.** The market lost `set_create_fee` and `set_open_price_bounds`, `set_void_rules` became `set_void_grace(grace_ns)`, and `set_fee_limits` dropped `max_create_fee`. The allow-list in `treasury.mjs`, its tests and the tables in sections 3.1 and 4 below are updated. `mt_on_transfer` no longer has an owner check, because the seed message it guarded is gone, so it is no longer in the excluded list.
 
@@ -165,6 +183,7 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | `set_no_decision_recipient` | Owner | `recipient: AccountId` | 0 | 30 TGas | 2 | Receives the jurors' half when nobody revealed. Should be the treasury |
 | `add_publisher` | Owner | `key: PublicKey` | 0 | 30 TGas | 2 | Grants power over prices |
 | `set_price_threshold` | Owner | `threshold: u32` | 0 | 30 TGas | 2 | |
+| `set_publishers` | Owner | `publishers: Vec<PublicKey>`, `threshold: u32` | 0 | 30 TGas | 2 | Atomic replacement; distinct Ed25519 keys, strict majority and configured publisher cap |
 | NEW `set_reconcile_wait_ns` | Owner | `reconcile_wait_ns: U64` | 0 | 30 TGas | 2 | 10 minutes to 7 days, 1 hour to start. Live |
 | NEW `reconcile_bond_payout` | Owner | `id: U64`, `paid: bool` | 0 | 30 TGas | 2 | Decides a payout whose callback never arrived, after the reconcile wait. The owner checks the verifier's events first |
 | `upgrade`, `seal`, `propose_owner`, `accept_owner` | as the market | | 0 | as the market | 3 | |
@@ -190,7 +209,7 @@ Tier meaning: Tier 1 changes a bounded setting and another proposal can reverse 
 | Method | Contract | Why | Better design |
 | --- | --- | --- | --- |
 | `withdraw(amount)` with 1 yocto | market | Collects the residual credited to the treasury's internal balance | market.md section 7.3 moves the residual onto the treasury leg, so no proposal is needed |
-| `withdraw_bond()` with 1 yocto | oracle | Collects the no-decision share. Needs 33 TGas at least | oracle.md section 8.2 specifies `payout_bond(account_id)` so a keeper pushes it. It is not built |
+| `withdraw_bond()` with 1 yocto | oracle | Collects the no-decision share. Needs 33 TGas at least | `payout_bond(account_id)` is now built and lets the keeper pay the same beneficiary without a proposal |
 
 The DAO's own Intents balance is moved by Trezu's treasury flows, which are outside the application allow-list.
 
@@ -287,16 +306,17 @@ The helper refuses everything not listed. `ALLOWED` in `treasury.mjs` holds one 
 | market | `retry_register` | `market_id`: U64 | 0 | 50 to 150, 100 attached |
 | market | `create_market` | the nine arguments with the contract's own limits: text of 200, 2,000, 300 and 500 bytes, slugs of up to 32 characters, `resolve_by` after `close_at`, and an optional `price_rule` with `observation_time` from `close_at` up to `resolve_by`, `strike` above 0 and at most 18 `decimals` | 0 | 50 to 150, 100 attached |
 | market | `withdraw` | `amount`: U128 above 0. The DAO's own balance, not an owner method | 1 | 50 to 150, 100 attached |
-| oracle | `set_bond` | `bond`: U128 above 0 | 0 | 5 to 30 |
-| oracle | `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms` | U64 from 1 to 18,446,744,073,709, the most whose product with 1,000,000 fits a U64 | 0 | 5 to 30 |
-| oracle | `set_draw_delay_blocks` | U64 | 0 | 5 to 30 |
-| oracle | `set_jury_size` | odd integer 1 to 21 | 0 | 5 to 30 |
+| oracle | `set_bond` | `bond`: U128 at least 5,000,000 (5 USDC) | 0 | 5 to 30 |
+| oracle | `set_window_ms`, `set_panel_deadline_ms`, `set_min_proposal_ms`, `set_draw_window_ms` | U64 milliseconds from 3,600,000 to 31,536,000,000 | 0 | 5 to 30 |
+| oracle | `set_draw_delay_blocks` | U64 from 0 to 100,000 | 0 | 5 to 30 |
+| oracle | `set_jury_size` | odd integer 5 to 21 | 0 | 5 to 30 |
 | oracle | `set_juror_shares` | `decided_bps` 500 to 5000, `no_decision_bps` 1000 to 10000 | 0 | 5 to 30 |
 | oracle | `set_apply_buffer_ms` | decimal string 5000 to 300000 | 0 | 5 to 30 |
 | oracle | `set_max_publishers` | integer 1 to 25 | 0 | 5 to 30 |
 | oracle | `set_no_decision_recipient` | `recipient` must be the treasury | 0 | 5 to 30 |
 | oracle | `add_publisher`, `remove_publisher` | `key`: an ed25519 key | 0 | 5 to 30 |
-| oracle | `set_price_threshold` | integer 1 to 10 | 0 | 5 to 30 |
+| oracle | `set_price_threshold` | integer 1 to 25; the contract also checks current publisher count and strict majority | 0 | 5 to 30 |
+| oracle, rounds | `set_publishers` | distinct Ed25519 `publishers`, threshold strictly above half and no greater than count; Oracle's configured maximum is read before proposing or voting, Rounds caps at 25 | 0 | 5 to 30 |
 | oracle | `set_reconcile_wait_ns` | decimal string 600e9 to 604800e9 | 0 | 5 to 30 |
 | oracle | `reconcile_bond_payout` | `id`: decimal string from 1, `paid`: boolean | 0 | 5 to 30 |
 | oracle | `withdraw_bond` | none. The DAO's own claimable balance, not an owner method | 1 | 50 to 150, 100 attached |
@@ -474,9 +494,9 @@ Checked in source and by run on 2026-10-21: `contracts/keeper/keeper.mjs`, with 
 | Verifier feature not paused | `verifier.pa_is_paused({ key: "mt_transfer" })`, the near-plugins `Pausable` view the verifier derives. `mt_transfer` is the key its `mt_transfer` and `mt_transfer_call` check, and `pa_is_paused` is also true when `ALL` is paused | Problem | BUILT. Sandbox: transfers paused and unpaused with `pa_pause_feature` |
 | Access keys | `view_access_key_list` for M, O and C. The count is always printed. With `--expect-sealed` any key is a problem | Problem with the flag | BUILT. The flag is for use after `seal` |
 | Code hash | The code hash of each contract equals the release hash list (the tag message), passed with `--release`. `config.upgrade_in_flight` is false | Problem on a difference | PARTLY BUILT. The `--release` comparison is built and tested with a fake RPC; the `upgrade_in_flight` read is not |
-| Ownership | `config.owner` equals the configured DAO, `pending_owner` is null, `operator` is the expected account | Page | NOT BUILT |
-| Treasury and recipients | `market.config.business_wallet` (NEW name `treasury`) equals the verified treasury. `oracle.config.no_decision_recipient` equals it | Page | NOT BUILT |
-| DAO policy | Hash of `get_policy` equals the audited baseline. Member count and thresholds match section 7 | Page on a change | NOT BUILT |
+| Ownership | `config.owner` equals the configured DAO, `pending_owner` is null, `operator` is the expected account | Refuse a mismatched check/signing pass | BUILT: standalone `driftProblems`; production approval reads both providers |
+| Treasury and recipients | Market/Rounds `treasury` and Oracle `no_decision_recipient` equal approved destinations | Refuse a mismatched check/signing pass | BUILT; standalone `check` requires `--treasury` and `--operator` for expected identities |
+| DAO policy | Canonical `get_policy` hash equals the reviewed baseline; every named group and voting override meets minimum votes | Refuse signing; report keeper failure | BUILT in production approval; actual notification delivery remains an operational gate |
 | DAO proposals | Read the DAO's open proposals (`InProgress` or `Failed`, inside the voting period). List each that names M, O or C, and make it a problem when `reviewKind` refuses it. Count the others by kind. An `upgrade` whose hash is not staged is refused by the same review | Problem or listing. It never votes | BUILT (`--watch-dao --treasury ID`). The paging and the report are not run against a real DAO, and the staging time of a hash (24 hours) is not checked |
 | Revenue unresolved | `market.get_fees().revenue_unresolved` above zero for more than 10 minutes | Warn, then call `settle_leg` | NOT BUILT. `settle_leg` does not exist |
 | Storage margins | Existing check for M, O, C and the keeper account | Warn | BUILT |
@@ -490,9 +510,16 @@ Checked in source and by run on 2026-10-21: `contracts/keeper/keeper.mjs`, with 
 | Settle a lost Council result | A Council leg is `unresolved` for more than 10 minutes | `market.settle_leg(sweep_id)` | Market key |
 | Walk the days | `config.last_day` is behind the UTC day of now | `council.advance_days` | Council key |
 | Push a bond payout | `claimable_of(account) > 0` for more than 7 days | `oracle.payout_bond(account)` | Oracle key |
+| Sweep Rounds fees | Configured Rounds fees plus retriable treasury balance reach the keeper minimum | `rounds.sweep_fees` | Rounds key |
 | Price answers | A price market passes its observation time | `oracle` through a publisher service | Not built |
 
-Of the calls above the existing oracle calls, the threshold sweep (not within an hour of the last), `settle_leg` and `advance_days` are built, with the triggers listed in 9.1; the rest wait for the contract methods they call. The Council calls use the default key or `--council-key-file` / `KEEPER_COUNCIL_KEY`. Every call above attaches no deposit, so a function call access key scoped to one receiver and the methods it uses is enough. Scoped methods: oracle `finalize,resolve_draw,retry_apply,retry_unlock,resolve_by_deadline,payout_bond`; market `sweep_fees,settle_leg`; council `advance_days`.
+Maintenance calls above are built, including bond payouts and optional Rounds sweeping. Price
+publication is a separate service and custody decision. Maintenance attaches zero deposit and
+uses one finite-allowance function-call key per receiver: Oracle
+`finalize,resolve_draw,retry_apply,retry_unlock,resolve_by_deadline,payout_bond`; Market
+`sweep_fees,settle_leg`; Council `advance_days`; Rounds `sweep_fees`. Production refuses the
+standalone CLI's legacy default key. Its sealed service keys and reviewed packet are described
+in [KEEPER-APPROVAL.md](../../KEEPER-APPROVAL.md).
 
 Cadence (PROPOSED): `run` every minute, `check` every five minutes, no quarter-boundary job. Keep the allowance of each key under 1 NEAR and alert at half.
 

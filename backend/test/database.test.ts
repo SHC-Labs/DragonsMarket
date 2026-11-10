@@ -16,7 +16,7 @@ test('real PostgreSQL migrations, deduplication, atomic rollback and reconnect p
   try {
     await admin.query(`CREATE SCHEMA ${schema}`);
     pool = connect();
-    assert.equal(await migrate(pool), 13);
+    assert.equal(await migrate(pool), 14);
     assert.equal(await migrate(pool), 0);
     const config = readConfig({ DATABASE_URL: databaseUrl });
     await verifyDatabase(pool, config);

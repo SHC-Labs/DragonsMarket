@@ -5,7 +5,7 @@ import type pg from 'pg';
 import { readConfig, type Config } from '../config.js';
 import { createPool, verifyDatabase } from '../database.js';
 import { IngestionError, type Header } from './block.js';
-import { NeardataReader, normalizeNeardata } from './neardata.js';
+import { NeardataReader, normalizeNeardata, readNeardataSettings } from './neardata.js';
 import { LiveNeardataSource } from './live-source.js';
 import { ingest } from './engine.js';
 import { ReadRpcClient } from '../providers.js';
@@ -41,7 +41,8 @@ export async function followCycle(pool: pg.Pool, config: Config, reader: Neardat
   );
   return ingest(pool, config, new LiveNeardataSource(reader, head, d.startBlock, checkpoint, signal));
 }
-export async function follow(pool: pg.Pool, config: Config, signal: AbortSignal) {
+export async function follow(pool: pg.Pool, config: Config, signal: AbortSignal,
+  source = readNeardataSettings({})) {
   if (config.network !== 'mainnet' || !config.deployment) throw new IngestionError('mainnet_deployment_required');
   const lock = await pool.connect();
   let acquired = false,
@@ -54,7 +55,7 @@ export async function follow(pool: pg.Pool, config: Config, signal: AbortSignal)
     acquired = (await lock.query(`SELECT pg_try_advisory_lock(${LOCK.follow},hashtext($1)) AS ok`, [config.deployment.id])).rows[0].ok;
     if (!acquired) throw new IngestionError('follower_already_running');
     const rpc = new ReadRpcClient(config.rpc.primaryUrl, config.rpc, config.rpc.primaryBearerToken);
-    const reader = new NeardataReader(fetch, sleep, 400);
+    const reader = new NeardataReader(fetch, sleep, source.intervalMs, source);
     let failures = 0;
     let networkChecked = false;
     while (!signal.aborted) {
@@ -101,7 +102,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   try {
     const config = readConfig(process.env);
     pool = createPool(config.databaseUrl);
-    await follow(pool, config, stop.signal);
+    await follow(pool, config, stop.signal, readNeardataSettings(process.env));
   } catch (e) {
     console.error(e instanceof IngestionError ? e.code : 'follower_failed');
     process.exitCode = 1;

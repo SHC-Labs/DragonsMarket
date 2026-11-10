@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Funnel_Display, IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 import { WalletProvider } from "@/components/WalletProvider";
 import { WatchlistProvider } from "@/components/WatchlistProvider";
@@ -8,9 +8,19 @@ import { Header } from "@/components/Header";
 import { SmoothScroll } from "@/components/SmoothScroll";
 import { Footer } from "@/components/Footer";
 
-const plex = IBM_Plex_Sans({ variable: "--font-plex", subsets: ["latin"], weight: ["300", "400", "500", "600"] });
-const funnel = Funnel_Display({ variable: "--font-funnel", subsets: ["latin"], weight: ["400", "500", "600", "700"], display: "swap" });
-const plexMono = IBM_Plex_Mono({ variable: "--font-plex-mono", subsets: ["latin"], weight: ["400", "500"] });
+const plex = localFont({
+  src: "./fonts/ibm-plex-sans.woff2", variable: "--font-plex", weight: "300 600", display: "swap",
+});
+const funnel = localFont({
+  src: "./fonts/funnel-display.woff2", variable: "--font-funnel", weight: "400 700", display: "swap",
+});
+const plexMono = localFont({
+  src: [
+    { path: "./fonts/ibm-plex-mono-400.woff2", weight: "400" },
+    { path: "./fonts/ibm-plex-mono-500.woff2", weight: "500" },
+  ],
+  variable: "--font-plex-mono", display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "Dragons Market | Prediction markets",

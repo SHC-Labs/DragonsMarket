@@ -36,6 +36,7 @@ function fakeAgentApi() {
   const intents = new Map<string, { type: string; agentId: string; credential?: unknown; submitted: boolean }>();
   const operations = new Map<string, { type: string; agentId: string; details: Body; call: Body }>();
   const owners = new Map<string, unknown>();
+  const policies = new Map<string, Body>();
   const frozen = new Set<string>();
   const state = { created: 0, forge: false, widen: false, foreignGrant: false, reuseHash: false, slowSend: false,
     busy: false, settling: false, refuse: null as string | null, event: 'staked' };
@@ -53,7 +54,10 @@ function fakeAgentApi() {
   const generated = (body: Body) => {
     const id = `intent_${randomUUID()}`, type = String(body.type);
     const agentId = type === 'agent_create' ? (++state.created).toString(16).padStart(64, 'c') : String(body.agent_id);
-    if (type === 'agent_create') owners.set(agentId, body.owner);
+    if (type === 'agent_create') {
+      owners.set(agentId, body.owner);
+      policies.set(agentId, body.policy as Body);
+    }
     intents.set(id, { type, agentId, credential: body.credential, submitted: false });
     const policy = state.widen && body.policy ? { ...body.policy as Body, actions: ['withdraw', 'swap'] } : body.policy;
     return { correlation_id: id, type, agent_id: agentId, status: 'PENDING_SIGNATURE',
@@ -131,7 +135,8 @@ function fakeAgentApi() {
       return reply(200, status(id, op.type, op.agentId, s, { ...op.details, tx_hash: txHash }));
     }
     if (wallet) return reply(200, { wallet_id: 'w1', near_account_id: nearAccountOf(wallet[1]!) });
-    if (policy) return reply(200, { wallet_id: 'w1', status: 'APPLIED', policy: { frozen: frozen.has(policy[1]!) } });
+    if (policy) return reply(200, { wallet_id: 'w1', revision: 1, status: 'APPLIED', provider_policy_synced: true,
+      policy: { ...policies.get(policy[1]!), frozen: frozen.has(policy[1]!) } });
     if (write && frozen.has(write[1]!)) return refused(409, 'wallet_frozen');
     if (write && state.refuse) return refused(409, state.refuse);
     if (write && state.busy) return refused(409, 'operation_in_flight', true);
@@ -139,7 +144,7 @@ function fakeAgentApi() {
     if (write && body) return reply(202, send(write[1]!, write[2]!, body));
     return refused(404, 'not_found');
   };
-  return { transport, requests, state, transaction, land, frozen };
+  return { transport, requests, state, transaction, land, frozen, policies };
 }
 
 interface Wallet { token: string; publicKey: string; account: string; signer: KeyPairSigner }
@@ -190,9 +195,14 @@ async function withAgents(run: (h: Harness) => Promise<void>) {
     if (method === 'quote_buy') return { shares_out: held.bought, fee: '20000' };
     if (method === 'quote_sell') return { ...held.sold, shares_in: '1' };
     if (method === 'get_positions') return held.positions;
-    if (method === 'list_markets') return held.markets;
+    if (method === 'list_markets') {
+      const page = args as { from_index: string; limit: string };
+      return held.markets.filter(m => BigInt(String(m.id)) >= BigInt(page.from_index)
+        && BigInt(String(m.id)) < BigInt(page.from_index) + BigInt(page.limit));
+    }
     if (method === 'config' && contract === MARKET) {
-      return { markets: String(held.markets.length), fee_rate_bps: 200, paused: false, sells_paused: false };
+      const total = held.markets.reduce((n, m) => BigInt(String(m.id)) >= n ? BigInt(String(m.id)) + 1n : n, 0n);
+      return { markets: String(total), fee_rate_bps: 200, paused: false, sells_paused: false };
     }
     if (method === 'get_account' && contract === MARKET) {
       return { registered: true, available: '7000000', pending_withdrawals: '0', positions: held.positions.length };
@@ -781,6 +791,8 @@ test('stakes through one token cannot overrun its daily limit even all at once',
     const burst = await Promise.all(Array.from({ length: 6 }, (_, i) => h.raw('POST', '/v1/agent-access/actions',
       { request_id: `burst-000${i}`, action: { ...STAKE, amount: '5000000' } }, auth)));
     assert.equal(burst.filter(r => r.body.state === 'confirmed').length, 2);
+    assert.equal(h.fake.requests.filter(r => r.path.endsWith('/native/near/call')).length, 2,
+      'the other four requests are refused before reaching the Agent API');
     assert.ok(burst.filter(r => r.body.state !== 'confirmed').every(r => r.body.error?.code === 'daily_limit_reached'));
     assert.equal(await spent(h), '10000000');
   }));
@@ -940,8 +952,10 @@ test('an access token trades within the limits the owner signed', { timeout: 600
     (summary.balances as Body).positions], ['7000000', true, 1]);
 
   assert.equal((await act('over-000001', { ...BUY, amount: '5000001' })).body.error?.code, 'spend_over_limit');
+  assert.equal(h.fake.requests.filter(r => r.path.endsWith('/native/near/call')).length, 0);
   assert.equal((await act('buy-0000001', BUY)).body.state, 'confirmed');
   assert.equal((await act('buy-0000002', { ...BUY, amount: '3000001' })).body.error?.code, 'daily_limit_reached');
+  assert.equal(h.fake.requests.filter(r => r.path.endsWith('/native/near/call')).length, 1);
   assert.equal((await act('stake-00001', { ...STAKE, amount: '3000000' })).body.state, 'confirmed',
     'a stake and a buy draw on the one limit the owner signed');
   assert.equal(((await access('GET', 'agent')).body.limits as Body).spent_today, '8000000');
@@ -949,6 +963,49 @@ test('an access token trades within the limits the owner signed', { timeout: 600
   assert.equal((await act('sell-000001', sell)).body.state, 'confirmed');
   assert.equal((await act('redeem-0001', { kind: 'redeem', market: '7' })).body.state, 'confirmed');
 }));
+
+test('MCP policy reads are scoped and distinguish provider policy from signed connection allowances',
+  { timeout: 60000 }, () => withAgents(async h => {
+    const alice = await h.signIn('alice.near'), agentId = await openAgent(h, alice.token);
+    const issued = await giveAccess(h, alice, agentId,
+      { label: 'Policy reader', max_spend: '3000000', daily_limit: '7000000' });
+    const auth = { Authorization: `Bearer ${String(issued.body.token)}` };
+    const read = () => h.raw('GET', '/v1/agent-access/policy', undefined, auth);
+    const policy = await read();
+    assert.equal(policy.status, 200);
+    assert.equal((policy.body.account_policy as Body).matches_application_policy, true);
+    assert.deepEqual([(policy.body.connection as Body).max_spend, (policy.body.connection as Body).daily_limit],
+      ['3000000', '7000000']);
+    assert.equal((policy.body.enforcement as Body).native_call_trade_amounts_visible_to_provider, false);
+    assert.equal(h.fake.requests.at(-1)!.path, `/v1/agents/${agentId}/policy`);
+    assert.ok(!JSON.stringify(policy.body).includes('ngt_'));
+    h.fake.frozen.add(agentId);
+    assert.match(String((await read()).body.next), /Stop/);
+    h.fake.policies.set(agentId, { ...h.fake.policies.get(agentId)!, actions: ['withdraw', 'swap'] });
+    const changed = (await read()).body.account_policy as Body;
+    assert.deepEqual([changed.matches_application_policy, changed.policy], [false, null]);
+    assert.equal((await h.raw('GET', '/v1/agent-access/policy', undefined, {})).status, 401);
+  }));
+
+test('MCP market pages include older markets and continue through an empty open-market page',
+  { timeout: 60000 }, () => withAgents(async h => {
+    const alice = await h.signIn('alice.near'), agentId = await openAgent(h, alice.token);
+    const issued = await giveAccess(h, alice, agentId,
+      { label: 'Market reader', max_spend: '1', daily_limit: '1' });
+    const auth = { Authorization: `Bearer ${String(issued.body.token)}` };
+    h.chain.markets = Array.from({ length: 103 }, (_, i) => ({ id: String(i),
+      status: i === 7 || i === 102 ? 'open' : 'closed', title: `Market ${i}`, close_at: '4102444800000000000',
+      price_yes: '500000', price_no: '500000', locked: '0' }));
+    const read = (cursor: unknown) => h.raw('POST', '/v1/agent-access/markets', { from_market: cursor }, auth);
+    const first = (await read('0')).body, middle = (await read('50')).body, last = (await read('100')).body;
+    assert.deepEqual([(first.markets as Body[]).map(m => m.market), first.next_from_market], [['7'], '50']);
+    assert.deepEqual([middle.markets, middle.next_from_market], [[], '100']);
+    assert.deepEqual([(last.markets as Body[]).map(m => m.market), last.next_from_market], [['102'], null]);
+    assert.deepEqual((await read('103')).body.markets, []);
+    for (const cursor of ['-1', '01', '18446744073709551616', {}, null]) {
+      assert.equal((await read(cursor)).body.error?.code, 'invalid_market_cursor');
+    }
+  }));
 
 function rawRequest(port: number, path: string, authorization: string) {
   return new Promise<number>((done, fail) => {

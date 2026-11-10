@@ -4,6 +4,7 @@ import Link from "next/link";
 import { AccountEmptyState, PageLandmark } from "@/components/PageHeader";
 import { Button, Notice } from "@/components/ui";
 import { CountUp } from "@/components/CountUp";
+import { CashOut } from "@/components/CashOut";
 import { MarketIcon } from "@/components/MarketIcon";
 import { Embers } from "@/components/Embers";
 import { Award, Wallet } from "@/components/icons";
@@ -40,6 +41,11 @@ function Balance({ label, value, children, tone }: { label: string; value: bigin
 }
 
 export default function Portfolio() {
+  const { account } = useWallet();
+  return <AccountPortfolio key={account ?? "disconnected"} />;
+}
+
+function AccountPortfolio() {
   const { account, openConnect, walletAvailable, send } = useWallet();
   const { state, run, reset } = useTx(send, account);
   const { data, error, loading, reload } = usePoll(
@@ -116,6 +122,7 @@ export default function Portfolio() {
             </Balance>
           </dl>
           <p id="portfolio-integration" className="portfolio-note">Redeem a resolved position to move its payout into your market balance, then withdraw the balance to your Intents account.</p>
+          <CashOut key={account} account={account} balance={data.inWallet} reload={reload} />
           {state.phase === "waiting" && <Notice>Waiting for your wallet and the chain.</Notice>}
           {state.phase === "done" && <Notice>{state.message}</Notice>}
           {state.phase === "failed" && <Notice tone="danger"><span>{state.message} </span><Button variant="ghost" size="sm" onClick={reset}>Dismiss</Button></Notice>}

@@ -12,20 +12,37 @@
 		Referrer-Policy strict-origin-when-cross-origin
 		Strict-Transport-Security "max-age=31536000"
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
-		Content-Security-Policy "base-uri 'none'; object-src 'none'; frame-ancestors 'none'"
-		-Server
+		Content-Security-Policy "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'"
 	}
+	# Keep deferred deletion separate: otherwise it also re-applies the fallback
+	# CSP after the HTML template has set its response-specific nonce policy.
+	header -Server
 	@immutable path /_next/static/*
 	header @immutable Cache-Control "public, max-age=31536000, immutable"
 	@mutable not path /_next/static/*
 	header @mutable Cache-Control "no-cache"
+	# HTML nonces must never be reused via conditional/range responses. Immutable
+	# bundles retain normal caching; these headers cannot alter a rendered page.
+	request_header @mutable -If-None-Match
+	request_header @mutable -If-Modified-Since
+	request_header @mutable -Range
 	@unsupported not method GET HEAD
 	respond @unsupported 405
 	respond /health/live "ok" 200
+	# Only build-owned HTML is templated, with reserved delimiters checked by the
+	# export step. No proxy responses, RSC payloads, uploads or request data.
+	templates {
+		mime text/html
+		between [[DM_CSP DM_CSP]]
+	}
 	try_files {path} {path}.html {path}/index.html
 	file_server
 	handle_errors {
 		rewrite * /404.html
+		templates {
+			mime text/html
+			between [[DM_CSP DM_CSP]]
+		}
 		file_server
 	}
 }

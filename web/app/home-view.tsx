@@ -39,20 +39,25 @@ function featuredHistory(id: string): Promise<Pt[]> {
 }
 
 async function load(category: string, subcategory: string) {
+  if (!isConfigured) return null;
   const markets = (await listMarkets()).filter(isMarketListed);
   const stages: Record<string, string | null> = {};
+  let stagesUnavailable = false;
   const histories: Record<string, Pt[]> = {};
   const scope = markets.filter(m => m.status === "open" && (!category || m.category === category) && (!subcategory || m.subcategory === subcategory));
   const featured = sortMarkets(scope, "volume").slice(0, 5);
   await Promise.all([
-    ...markets.filter(m => m.status === "closed").map(async m => { stages[m.id] = (await getCase(m.id))?.stage ?? null; }),
+    ...markets.filter(m => m.status === "closed").map(async m => {
+      try { stages[m.id] = (await getCase(m.id))?.stage ?? null; }
+      catch { stages[m.id] = null; stagesUnavailable = true; }
+    }),
     ...featured.map(async m => {
       try { histories[m.id] = await featuredHistory(m.id); }
       catch { histories[m.id] = []; } // A chart failure must not hide the market list.
     }),
   ]);
   rememberStages(stages);
-  return { markets, stages, histories };
+  return { markets, stages, histories, stagesUnavailable };
 }
 
 export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean }) {
@@ -113,7 +118,13 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
 
   if (watching && !account) return <div className="page-content"><PageLandmark title="Watchlist" /><AccountEmptyState title="Keep an eye on your markets" description="Connect your wallet and select Watch on any market. This browser keeps a separate list for each wallet." actions={<><Button onClick={openConnect} disabled={!walletAvailable}>Connect wallet</Button><Link href="/">Browse markets</Link></>} /></div>;
   const intro = <PageLandmark title={watching ? "Watchlist" : "Prediction markets"} />;
-  if (!isConfigured) return <div className="page-content">{intro}</div>;
+  if (!isConfigured) return <div className="page-content">
+    {intro}
+    <Notice tone="warning">
+      <span>Markets are not active yet. Trading will become available when the market launch is complete.
+        Connecting a wallet will not enable trading early.</span>
+    </Notice>
+  </div>;
   if (loading && !data) return <div className="page-content">{intro}<p role="status" className="sr-only">Loading markets</p><MarketsSkeleton /></div>;
   if (error && !data) {
     return (
@@ -138,6 +149,13 @@ export function HomeView({ watchlistOnly = false }: { watchlistOnly?: boolean })
   return (
     <div className="page-content">
       {intro}
+      {error && <Notice tone="warning">
+        <span>Market updates are temporarily unavailable. Showing the last successful update. </span>
+        <Button variant="ghost" size="sm" onClick={reload}>Retry</Button>
+      </Notice>}
+      {data.stagesUnavailable && <Notice tone="warning">
+        Resolution updates are temporarily unavailable. Market listings are still shown.
+      </Notice>}
       {!watching && <Ticker markets={markets} histories={data.histories} />}
 
       {browsing && featuredMarkets.length>0 && (

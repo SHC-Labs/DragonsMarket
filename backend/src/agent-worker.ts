@@ -8,7 +8,7 @@ import { readAgentWorkerConfig, type AgentWorkerConfig } from './agent-worker-co
 import { createAgentWorkerServer } from './agent-worker-server.js';
 import type { AgentRunner } from './agents.js';
 import { finalView } from './chain-view.js';
-import { createPool, verifyDatabase } from './database.js';
+import { createPool, verifyDatabase, verifyRuntimeLogin } from './database.js';
 import { operationStore } from './operations.js';
 import { ReadRpcClient } from './providers.js';
 
@@ -30,19 +30,25 @@ function agentAccounts(config: AgentWorkerConfig, pool: ReturnType<typeof create
     signing: { walletContract, messageRecipient: new URL(agentApi.url).hostname } };
 }
 
+let pool: ReturnType<typeof createPool> | undefined;
 try {
   const config = readAgentWorkerConfig(process.env);
-  const pool = createPool(config.shared.databaseUrl);
+  const database = pool = createPool(config.shared.databaseUrl);
+  await verifyRuntimeLogin(pool, 'dm_agent_login');
   await verifyDatabase(pool, config.shared);
   const agents = agentAccounts(config, pool);
-  const server = createAgentWorkerServer(createAgentRoutes(agents), config.token);
+  const server = createAgentWorkerServer(createAgentRoutes(agents), config.token,
+    () => verifyDatabase(database, config.shared));
+  let sweep: ReturnType<typeof startAgentSweep> | undefined;
   server.on('error', () => {
     console.error('The agent worker failed to listen');
-    void pool.end();
+    void database.end();
     process.exitCode = 1;
   });
-  server.listen(config.port, config.host, () => console.log(`Agent worker listening on port ${config.port}`));
-  const sweep = startAgentSweep(agents);
+  server.listen(config.port, config.host, () => {
+    sweep = startAgentSweep(agents);
+    console.log(`Agent worker listening on port ${config.port}`);
+  });
   let stopping = false;
   const stop = () => {
     if (stopping) return;
@@ -50,12 +56,13 @@ try {
     const timeout = setTimeout(() => process.exit(1), 10000);
     timeout.unref();
     server.close(() => {
-      void sweep.stop().then(() => pool.end()).then(() => clearTimeout(timeout));
+      void (sweep?.stop() ?? Promise.resolve()).then(() => database.end()).then(() => clearTimeout(timeout));
     });
   };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
-} catch (error) {
-  console.error(error instanceof Error ? error.message : 'Invalid agent worker configuration');
+} catch {
+  await pool?.end();
+  console.error('Agent worker startup failed; check its configuration, restricted database role and deployment');
   process.exitCode = 1;
 }

@@ -198,6 +198,25 @@ test('a status read can ask the API to look again, and frozen is read from the p
   await assert.rejects(api.frozen('A'.repeat(64)), /invalid_agent_id/);
 });
 
+test('policy inspection preserves unsynced and missing states and rejects malformed readbacks', async () => {
+  const seen: Seen = [];
+  const applied = { status: 'APPLIED', revision: 3, provider_policy_synced: true, policy: { frozen: false } };
+  const invalid = [{ ...applied, provider_policy_synced: 'yes' }, { ...applied, revision: -1 },
+    { ...applied, status: ['APPLIED'] }, { ...applied, policy: { frozen: 'false' } }];
+  const api = new AgentApiClient(settings, transport([
+    applied, { ...applied, provider_policy_synced: false },
+    { status: 'NONE', revision: null, provider_policy_synced: false, policy: null }, ...invalid,
+  ].map(body => ({ status: 200, body })), seen));
+  assert.deepEqual(await api.policy(AGENT_ID), {
+    status: 'APPLIED', revision: 3, synced: true, policy: { frozen: false },
+  });
+  assert.equal((await api.policy(AGENT_ID)).synced, false);
+  assert.deepEqual(await api.policy(AGENT_ID), { status: 'NONE', revision: null, synced: false, policy: null });
+  for (const _ of invalid) await assert.rejects(api.policy(AGENT_ID), AgentApiUnavailable);
+  await assert.rejects(api.policy('A'.repeat(64)), /invalid_agent_id/);
+  assert.ok(seen.every(r => new URL(r.url).pathname === `/v1/agents/${AGENT_ID}/policy`));
+});
+
 test('owner intents go out with the partner key alone and must be for this owner and agent', async () => {
   const seen: Seen = [];
   const generated = { correlation_id: 'intent_1', type: 'grant_issue', agent_id: AGENT_ID,
@@ -631,11 +650,14 @@ test('a final transaction is its signer, receiver and calls, with events only fr
     const reply = (tx: Record<string, unknown>) => ({ call: async (method: string, params: unknown) => {
       assert.equal(method, 'EXPERIMENTAL_tx_status');
       assert.deepEqual(params, { tx_hash: 'tx1', sender_account_id: AGENT, wait_until: 'FINAL' });
-      return { transaction: { hash: 'tx1', signer_id: AGENT, receiver_id: 'rounds.fixture.near', ...tx },
+      return { final_execution_status: 'FINAL', status: ok,
+        transaction: { hash: 'tx1', signer_id: AGENT, receiver_id: 'rounds.fixture.near', ...tx },
+        transaction_outcome: { id: 'tx1', outcome: { executor_id: AGENT,
+          status: { SuccessReceiptId: 'r1' }, receipt_ids: ['r1', 'r2', 'r3'] } },
         receipts_outcome: [
-          { outcome: { executor_id: 'usdc.fixture.near', logs: ['Transfer 5000000'], status: ok } },
-          { outcome: { executor_id: 'rounds.fixture.near', logs: [log('deposit'), 'EVENT_JSON:{broken'], status: ok } },
-          { outcome: { executor_id: 'rounds.fixture.near', logs: [log('staked')], status: failed } },
+          { id: 'r1', outcome: { executor_id: 'usdc.fixture.near', logs: ['Transfer 5000000'], status: ok, receipt_ids: [] } },
+          { id: 'r2', outcome: { executor_id: 'rounds.fixture.near', logs: [log('deposit'), 'EVENT_JSON:{broken'], status: ok, receipt_ids: [] } },
+          { id: 'r3', outcome: { executor_id: 'rounds.fixture.near', logs: [log('staked')], status: failed, receipt_ids: [] } },
         ] };
     } });
     const actions = [{ FunctionCall: { method_name: 'stake', args, gas: 50000000000000, deposit: '1' } }, 'CreateAccount',

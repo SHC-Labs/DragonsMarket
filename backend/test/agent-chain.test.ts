@@ -116,7 +116,7 @@ function memoryOperations(): AgentRunner['operations'] {
 }
 
 test('an owner funds an agent, which trades a market and stakes a round under its policy, each proven on chain',
-  { timeout: 300000 }, async () => {
+  { timeout: 600000 }, async t => {
   const wasm = (path: string) => readFile(resolve('../contracts/target', path)).catch(() => {
     throw new Error(`Build the contracts first: missing ../contracts/target/${path}`);
   });
@@ -221,11 +221,27 @@ test('an owner funds an agent, which trades a market and stakes a round under it
     assert.equal(tooSoon.state, 'failed', 'and it cannot be claimed yet');
     const rpcUrl = sandbox.rpcUrl;
     const skipTo = async (target: bigint) => {
-      while (BigInt((await provider.viewBlock({ finality: 'final' })).header.timestamp_nanosec) < target) {
-        await fetch(rpcUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      const started = Date.now(), deadline = started + 360_000;
+      // Match the Rust sandbox helper: jump by the remaining simulated time, then read
+      // the finalized clock again. Large jumps can take longer than a normal RPC read;
+      // bound their size and duration and surface failures instead of looping silently.
+      for (let attempt = 0; attempt < 100 && Date.now() < deadline; attempt++) {
+        const current = BigInt((await provider.viewBlock({ finality: 'final' })).header.timestamp_nanosec);
+        if (current >= target) {
+          t.diagnostic(`Advanced sandbox time in ${attempt} calls and ${Date.now() - started} ms`);
+          return;
+        }
+        const blocks = Number((target - current) / 300_000_000n + 5n);
+        const response = await fetch(rpcUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(Math.max(1, Math.min(120000, deadline - Date.now()))),
           body: JSON.stringify({ jsonrpc: '2.0', id: 'dontcare', method: 'sandbox_fast_forward',
-            params: { delta_height: 600 } }) });
+            params: { delta_height: Math.min(blocks, 600) } }) });
+        assert.equal(response.status, 200);
+        const result = await response.json() as { error?: unknown; result?: unknown };
+        assert.equal(result.error, undefined, 'sandbox time advance must succeed');
+        assert.ok(result.result, 'sandbox time advance must return a result');
       }
+      assert.fail('sandbox finalized time did not reach the requested deadline');
     };
     await skipTo(now + 150_000_000_000n);
     assert.equal(await outcome(), 'refund', 'a one-sided round refunds, and the page can offer the claim');

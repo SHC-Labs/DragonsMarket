@@ -38,15 +38,22 @@ function route(routes: AgentRoutes, { method, path, owner, authorization, body }
   return routes.owner(method, path, owner, read);
 }
 
-export function createAgentWorkerServer(routes: AgentRoutes, token: string) {
+export function createAgentWorkerServer(routes: AgentRoutes, token: string, ready?: () => Promise<void>) {
   const expected = digest(`Bearer ${token}`);
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
     if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true });
+    if (req.method === 'GET' && req.url === '/health/ready') {
+      try {
+        if (!ready) throw new Error('readiness_unconfigured');
+        await ready();
+        return reply(res, 200, { status: 'ready' });
+      } catch { return reply(res, 503, { status: 'not_ready' }); }
+    }
     if (req.method !== 'POST' || req.url !== '/internal/agents') throw new ReadError(404, 'not_found');
     if (!timingSafeEqual(digest(req.headers.authorization ?? ''), expected)) throw new ReadError(401, 'unauthorized');
     return reply(res, 200, await route(routes, await requestOf(req)) ?? null);
   };
-  return createServer((req, res) => {
+  return createServer({ requestTimeout: 15000, headersTimeout: 10000, maxHeaderSize: 16384 }, (req, res) => {
     handle(req, res).catch((error: unknown) => {
       if (error instanceof ReadError) return reply(res, error.status, { error: { code: error.code } });
       console.error('The agent worker could not finish a request');

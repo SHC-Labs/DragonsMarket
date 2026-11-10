@@ -23,7 +23,7 @@ type Queryable = Pick<pg.Pool, 'query'>;
 export interface AgentAccounts {
   db: pg.Pool;
   deployment: Deployment;
-  api: Pick<AgentApiClient, 'generateIntent' | 'submitIntent' | 'status' | 'wallet' | 'frozen'>;
+  api: Pick<AgentApiClient, 'generateIntent' | 'submitIntent' | 'status' | 'wallet' | 'frozen' | 'policy'>;
   runner: AgentRunner;
   chain: { view: View; nearBalance(account: string): Promise<string> };
   grantKey: Buffer;

@@ -1101,7 +1101,9 @@ impl CouncilContract {
     // the other half waits in the owner's pending slot until the quarter closes. The numbers are fixed by this call, whenever
     // the snapshot is taken. A seat that has not started yet comes off the count of seats starting on its day, loses nothing
     // and never earns. Every request must say it accepts the cut, so the chain shows the holder was told.
+    #[payable]
     pub fn request_unstake(&mut self, token_id: TokenId, accepts_cut: bool) {
+        assert_one_yocto();
         require!(
             accepts_cut,
             "leaving before the quarter ends costs 50% of this quarter's earnings: pass accepts_cut true"
@@ -3897,6 +3899,26 @@ mod tests {
     }
 
     // ---- leaving -----------------------------------------------------------------------------------------------
+
+    #[test]
+    fn requesting_an_unstake_requires_exactly_one_yocto_before_changing_rewards() {
+        let mut c = two_seats_paid();
+        let before = c.config();
+        for deposit in [0, 2] {
+            testing_env!(context("a.near")
+                .attached_deposit(NearToken::from_yoctonear(deposit))
+                .build());
+            assert!(refusal(|| c.request_unstake("1".into(), true)).contains("exactly 1 yoctoNEAR"));
+            assert_eq!(c.config(), before);
+            assert_eq!(c.cut_pool, 0);
+            assert_eq!(c.in_progress_of(acct("a.near")).0, 500);
+            assert!(c.stake_of("1".into()).unwrap().unlock_requested_at.is_none());
+        }
+        request(&mut c, "1", "a.near");
+        assert_eq!(c.cut_pool, 250);
+        assert_eq!(c.in_progress_of(acct("a.near")).0, 250);
+        assert!(c.stake_of("1".into()).unwrap().unlock_requested_at.is_some());
+    }
 
     #[test]
     fn a_request_to_leave_is_refused_without_accepts_cut_and_for_a_seat_that_is_not_the_callers() {

@@ -38,7 +38,9 @@ async fn run_keeper(w: &World, args: &[&str], env: &[(&str, String)]) -> (String
     command
         .env_remove("KEEPER_KEY")
         .env_remove("KEEPER_ORACLE_KEY")
-        .env_remove("KEEPER_MARKET_KEY");
+        .env_remove("KEEPER_MARKET_KEY")
+        .env_remove("KEEPER_COUNCIL_KEY")
+        .env_remove("KEEPER_ROUNDS_KEY");
     for (name, value) in env {
         command.env(name, value);
     }

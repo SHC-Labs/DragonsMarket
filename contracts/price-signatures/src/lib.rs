@@ -1,7 +1,26 @@
 // The publisher signature check the oracle makes on a signed price, for any contract that settles on k of n publishers. A
 // submission lists `<publisher key>.<signature in hex>` entries separated by commas, each over the caller's own message.
 
-use near_sdk::{env, require, PublicKey};
+use near_sdk::{env, require, CurveType, PublicKey};
+
+pub fn validate_publishers(publishers: &[PublicKey], threshold: u32, maximum: usize) {
+    require!(
+        !publishers.is_empty() && publishers.len() <= maximum,
+        "publisher count outside limits"
+    );
+    require!(
+        threshold > 0 && threshold as usize <= publishers.len(),
+        "the threshold must be between 1 and the number of publishers"
+    );
+    require!(
+        2 * threshold as usize > publishers.len(),
+        "the threshold must be more than half of the publishers"
+    );
+    for (i, key) in publishers.iter().enumerate() {
+        require!(key.curve_type() == CurveType::ED25519, "publishers use ed25519 keys");
+        require!(!publishers[..i].contains(key), "duplicate publisher");
+    }
+}
 
 pub fn decode_signature(hex: &str) -> [u8; 64] {
     require!(hex.len() == 128 && hex.is_ascii(), "a signature is 128 hex characters");

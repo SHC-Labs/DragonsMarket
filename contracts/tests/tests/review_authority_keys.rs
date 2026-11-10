@@ -10,6 +10,101 @@ use sha2::{Digest, Sha256};
 
 const STAGE_DEPOSIT: NearToken = NearToken::from_near(5);
 
+#[tokio::test]
+async fn an_empty_intents_key_list_does_not_prove_an_eth_implicit_account_is_keyless() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let account = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf";
+    let generator = concat!(
+        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+    );
+    let bytes: Vec<u8> = (0..generator.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&generator[i..i + 2], 16).unwrap())
+        .collect();
+    let public_key = format!("secp256k1:{}", bs58::encode(bytes).into_string());
+    let listed: Vec<String> = w
+        .verifier
+        .view("public_keys_of")
+        .args_json(json!({ "account_id": account }))
+        .await?
+        .json()?;
+    assert!(listed.is_empty());
+    let authorized: bool = w
+        .verifier
+        .view("has_public_key")
+        .args_json(json!({ "account_id": account, "public_key": public_key }))
+        .await?
+        .json()?;
+    assert!(
+        authorized,
+        "the implicit key remains authorized without appearing in the list"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_restricted_holder_key_cannot_request_an_unstake_but_the_wallet_can() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let holder = &w.jurors[0];
+    let args = json!({ "token_id": holder.id(), "accepts_cut": true });
+    let before: serde_json::Value = w
+        .council
+        .view("stake_of")
+        .args_json(json!({ "token_id": holder.id() }))
+        .await?
+        .json()?;
+    assert!(before["unlock_requested_at"].is_null());
+    let secret = SecretKey::from_random(KeyType::ED25519);
+    holder
+        .batch(holder.id())
+        .add_key(
+            secret.public_key(),
+            AccessKey::function_call_access(w.council.id(), &["request_unstake"], Some(NearToken::from_near(1))),
+        )
+        .transact()
+        .await?
+        .into_result()?;
+    let limited = Account::from_secret_key(holder.id().clone(), secret, &w.worker);
+    refused(
+        limited
+            .call(w.council.id(), "request_unstake")
+            .args_json(args.clone())
+            .gas(Gas::from_tgas(30))
+            .transact()
+            .await?
+            .into_result(),
+        "exactly 1 yoctoNEAR",
+    );
+    let paid = limited
+        .call(w.council.id(), "request_unstake")
+        .args_json(args.clone())
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(30))
+        .transact()
+        .await;
+    assert!(
+        format!("{:?}", paid.expect_err("a function-call key cannot attach a deposit"))
+            .contains("DepositWithFunctionCall")
+    );
+    let unchanged: serde_json::Value = w
+        .council
+        .view("stake_of")
+        .args_json(json!({ "token_id": holder.id() }))
+        .await?
+        .json()?;
+    assert_eq!(unchanged, before);
+    request_unstake(&w, holder, holder.id().as_str()).await?;
+    let after: serde_json::Value = w
+        .council
+        .view("stake_of")
+        .args_json(json!({ "token_id": holder.id() }))
+        .await?
+        .json()?;
+    assert!(after["unlock_requested_at"].is_string());
+    Ok(())
+}
+
 fn rebuilt(name: &str, tag: &str) -> Vec<u8> {
     let mut code = wasm(name);
     let body = [&[tag.len() as u8][..], tag.as_bytes()].concat();
@@ -59,6 +154,69 @@ async fn seal_all(admin: &Account, target: &Contract) -> anyhow::Result<()> {
 
 fn ed25519_public(key: &SigningKey) -> String {
     format!("ed25519:{}", bs58::encode(key.verifying_key().as_bytes()).into_string())
+}
+
+#[tokio::test]
+async fn publisher_replacement_uses_the_owner_and_fits_the_dao_gas_budget() -> anyhow::Result<()> {
+    let (w, admin) = setup_admin_owned().await?;
+    let rounds = w.worker.dev_deploy(&wasm("rounds")).await?;
+    rounds
+        .call("new")
+        .args_json(json!({
+            "owner_id": admin.id(), "operator_id": w.owner.id(), "verifier_id": w.verifier.id(),
+            "collateral_token_id": token_id(&w), "network": "sandbox", "price_threshold": 1,
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    admin
+        .call(w.oracle.id(), "set_max_publishers")
+        .args_json(json!({ "max_publishers": 25 }))
+        .gas(Gas::from_tgas(30))
+        .transact()
+        .await?
+        .into_result()?;
+    let keys: Vec<String> = (1..=25)
+        .map(|seed| ed25519_public(&SigningKey::from_bytes(&[seed; 32])))
+        .collect();
+    for target in [&w.oracle, &rounds] {
+        for (publishers, threshold) in [(&keys[0..1], 1), (&keys[1..2], 1), (&keys[..], 13)] {
+            let args = json!({ "publishers": publishers, "threshold": threshold });
+            refused(
+                w.owner
+                    .call(target.id(), "set_publishers")
+                    .args_json(args.clone())
+                    .gas(Gas::from_tgas(30))
+                    .transact()
+                    .await?
+                    .into_result(),
+                "owner only",
+            );
+            admin
+                .call(target.id(), "set_publishers")
+                .args_json(args)
+                .gas(Gas::from_tgas(30))
+                .transact()
+                .await?
+                .into_result()?;
+            let settings = config(target).await;
+            assert_eq!(settings["publishers"], json!(publishers));
+            assert_eq!(settings["price_threshold"], threshold);
+        }
+        let before = config(target).await;
+        refused(
+            admin
+                .call(target.id(), "set_publishers")
+                .args_json(json!({ "publishers": keys, "threshold": 12 }))
+                .gas(Gas::from_tgas(30))
+                .transact()
+                .await?
+                .into_result(),
+            "more than half",
+        );
+        assert_eq!(config(target).await, before);
+    }
+    Ok(())
 }
 
 // A batch that fails clears upgrade_in_flight in a callback, so the account key cannot call the private migrate by hand to fake
@@ -143,7 +301,7 @@ async fn a_function_call_key_on_the_market_account_spends_a_users_balance_throug
 
 // VIOLATION (property 3, what seal does not protect). A public key registered in the verifier under the market's account
 // before seal survives the upgrade proof and seal of every NEAR access key, and moves the market's whole Intents balance,
-// user collateral included, by a signed intent that anyone relays. The contracts have no way to remove it.
+// user collateral included, by a signed intent that anyone relays. Sealing NEAR keys does not remove the verifier key.
 #[tokio::test]
 async fn an_intents_key_registered_before_seal_survives_seal_and_moves_the_market_collateral() -> anyhow::Result<()> {
     let (w, admin) = setup_admin_owned().await?;

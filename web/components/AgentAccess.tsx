@@ -30,7 +30,8 @@ function Issued({ issued, onDone }: { issued: IssuedAccess; onDone: () => void }
     <p className="text-muted">
       {issued.label} may spend {money(issued.max_spend)} at a time and {money(issued.daily_limit)} in any 24 hours,
       until {new Date(issued.expires_at).toLocaleDateString()}. These limits cover buys and stakes. It can also sell
-      what the agent holds.
+      what the agent holds. Dragons Market enforces these connection limits before calling the Agent API;
+      they do not change the account&apos;s separate custody policy.
     </p>
     <div><Button variant="secondary" onClick={onDone}>I have copied it</Button></div>
   </div>;
@@ -97,6 +98,8 @@ export function AgentAccess({ agentId }: { agentId: string }) {
       <p className="text-muted">
         Give an AI agent this account through the Dragons Market MCP server. It trades only from the balances you fund
         and pays out only to you. Your limits cover buys and stakes, and it can sell what the agent holds at any time.
+        Each connection has its own allowance, enforced by Dragons Market. The Agent API separately checks the
+        account policy before execution; it cannot measure a trade from funds already inside a market.
       </p>
       <Endpoints />
     </div>
