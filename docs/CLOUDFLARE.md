@@ -39,4 +39,4 @@ After saving, tell the hosting owner the records are in place. Railway must show
 
 The public MCP endpoint is `https://mcp.dragons.market/mcp`; its skill is `/skill.md`. It requires a live Dragons Market access token for tool calls.
 
-DNS readiness and database readiness do not establish that real contracts are configured. the hosting owner must finish the chain deployment checks before the owner advertises a functioning trading demo. The Railway website URL is `https://web-production-0ecbb.up.railway.app`; it can be used to inspect the site while DNS is pending, but the configured API, CORS and wallet sessions use the custom domains.
+DNS readiness and database readiness do not establish that real contracts are configured. The hosting owner must finish the chain deployment checks before the owner advertises a functioning trading demo. The Railway website URL is `https://web-production-0ecbb.up.railway.app`; it can be used to inspect the site while DNS is pending, but the configured API, CORS and wallet sessions use the custom domains.
