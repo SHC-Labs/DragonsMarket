@@ -2,7 +2,7 @@
 
 The backend foundation provides PostgreSQL, versioned SQL migrations and a small HTTP API. Everything for this service lives here. The website and contracts keep their own build processes.
 
-A finalized-event ingestion engine supports sandbox fixture replay, bounded actual sandbox receipt capture, immutable deployment registration, atomic checkpoints and status reporting. Mainnet follower code and supervised worker profiles are available, but no Dragons Market deployment is configured. Trading, funding and price submission remain disabled pending final contracts and source policy. Trading projections will follow the team's contract decisions. The [root checklist](../PENDING.md) tracks remaining work; the [delivery plan](../docs/hackathon-plan.md) contains the specifications.
+A finalized-event ingestion engine supports sandbox fixture replay, bounded actual sandbox receipt capture, immutable deployment registration, atomic checkpoints and status reporting. Mainnet follower code and supervised worker profiles are available, but no Dragons Market deployment is configured. Trading, funding and price submission remain disabled pending final contracts and source policy. Trading projections will follow the team's contract decisions. The root checklist tracks remaining work; the [delivery plan](../docs/hackathon-plan.md) contains the specifications.
 
 ## Run locally
 
@@ -197,7 +197,7 @@ The test compares persisted receipts, originating transaction hashes, generated 
 
 On 2026-10-27 the final verified run captured blocks `221887552`–`221887556`, selected `intents.near`, and stored eight receipts, ten event logs and six distinct originating transaction hashes. One selected execution failed; its actual outcome was retained and its logs were excluded from events. The sampled head matched mainnet RPC by hash and timestamp. Reconnect and duplicate replay passed; the temporary schema was removed. Counts vary with actual mainnet activity.
 
-Source normalization is in `src/ingestion/neardata.ts`; verification persistence is in `src/ingestion/capture-store.ts`. The verification store stays separate from app deployment data. The app ingestion path now also stores transaction provenance and has a continuous follower. Actual Dragons Market deployment activation and financial integration remain pending. See [PENDING.md](../PENDING.md).
+Source normalization is in `src/ingestion/neardata.ts`; verification persistence is in `src/ingestion/capture-store.ts`. The verification store stays separate from app deployment data. The app ingestion path now also stores transaction provenance and has a continuous follower. Actual Dragons Market deployment activation and financial integration remain pending. See PENDING.md.
 
 ## Remaining backend services
 

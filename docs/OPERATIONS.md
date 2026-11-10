@@ -12,7 +12,7 @@ Private PR #18 contains the next hardening release. These code additions are not
 
 ## Finish the hosting setup
 
-1. Upgrade Filmer's Projects to **Railway Pro**, currently a $20 monthly minimum including $20 usage. Native volume backups and resource monitors require Pro. No upgrade has been performed by this work.
+1. Upgrade the team's Railway workspace to **Railway Pro**, currently a $20 monthly minimum including $20 usage. Native volume backups and resource monitors require Pro. No upgrade has been performed by this work.
 2. On **Postgres > Backups**, enable **Daily** and **Weekly**, then create the first manual backup and wait for it to appear. Daily copies retain six days and weekly copies 27 days. The release preflight requires both schedules and an unexpired backup less than 36 hours old. A newly created schedule alone is insufficient.
 3. In Railway project **Settings > Tokens**, create `github-actions-production` scoped to `production`. Paste it directly into the **public** repository's **Settings > Environments > production > Environment secrets** as `RAILWAY_TOKEN`. No personal-account token, repository-wide secret or chat paste.
 4. Complete private PR review. Nameless copies the selected changes into a fresh public branch/commit and opens a PR to public `main`. Do not merge or cherry-pick private history if contributor identities must stay private. Public `main` requires one independent review and the `agents` and `contract-checks` checks. These workflow changes must be part of the first sync.

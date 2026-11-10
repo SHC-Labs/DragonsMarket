@@ -2,7 +2,7 @@
 
 Dragons Market uses one pnpm workspace, one Railway project and separately deployed services. This follows the live Agent API and TLA layout inspected on 6 November 2026: root build/start commands, builds from the repository root, service-specific watch paths, private PostgreSQL references, and a deployment gate for database changes. Existing `backend/`, `web/` and `mcp/` paths remain intact; the Rust contracts are deployed to NEAR separately.
 
-Project: [dragons-market](https://railway.com/project/489b02ad-fd74-4413-ab91-835da8b86542), Filmer's Projects, `production` environment. A Railway environment named production does not select a NEAR network.
+Project: [dragons-market](https://railway.com/project/489b02ad-fd74-4413-ab91-835da8b86542), the team's Railway workspace, `production` environment. A Railway environment named production does not select a NEAR network.
 
 ## Services
 
