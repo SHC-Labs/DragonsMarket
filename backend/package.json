@@ -26,7 +26,7 @@
     "verify:chain": "npm run build && node --env-file-if-exists=.env dist/src/verify-chain.js",
     "preflight": "npm run build && node --env-file-if-exists=.env dist/src/preflight.js",
     "reconcile": "npm run build && node --env-file-if-exists=.env dist/src/reconcile.js",
-    "test:agent-chain": "npm run build && node --test --test-concurrency=1 dist/test/agent-chain.test.js dist/test/keeper-signing-chain.test.js dist/test/dao-chain.test.js",
+    "test:agent-chain": "npm run build && node --test --test-concurrency=1 dist/test/agent-chain.test.js dist/test/keeper-signing-chain.test.js dist/test/dao-chain.test.js dist/test/deploy-production.test.js",
     "prices:collect": "npm run build && node --env-file-if-exists=.env dist/src/prices.js",
     "indexer:follow": "npm run build && node --env-file-if-exists=.env dist/src/ingestion/follow.js",
     "keeper:feed": "npm run build && node --env-file-if-exists=.env dist/src/ingestion/feed.js",

@@ -1,0 +1,97 @@
+{
+  "note": "Copy this file, complete every placeholder value, then run plan. The paths in decide are defaults the owner must confirm.",
+  "network": "mainnet",
+  "parent": "dragonsmarket.near",
+  "dao": "dragonsmarket.sputnik-dao.near",
+  "nft": "techdragons.nft.cookon.near",
+  "verifier": "intents.near",
+  "collateral": "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+  "operator": "FILL_operator_account",
+  "decide": [
+    "operator",
+    "contracts.market.fundingNear",
+    "contracts.oracle.fundingNear",
+    "contracts.council.fundingNear",
+    "contracts.rounds.fundingNear",
+    "contracts.oracle.init.bond",
+    "contracts.oracle.init.window_ms",
+    "contracts.oracle.init.panel_deadline_ms",
+    "contracts.oracle.init.draw_window_ms",
+    "contracts.oracle.init.min_proposal_ms",
+    "contracts.oracle.init.jury_size",
+    "contracts.oracle.init.draw_delay_blocks",
+    "contracts.oracle.init.price_threshold",
+    "contracts.council.init.cooldown_ns",
+    "contracts.council.init.max_seats_per_account",
+    "contracts.council.init.allowlist_enabled",
+    "contracts.rounds.init.price_threshold"
+  ],
+  "contracts": {
+    "market": {
+      "account": "FILL_market.dragonsmarket.near",
+      "wasm": "target/near/market/market.wasm",
+      "codeHash": "FILL_approved_market_code_hash",
+      "fundingNear": "20",
+      "init": {
+        "owner_id": "dragonsmarket.sputnik-dao.near",
+        "operator_id": "FILL_operator_account",
+        "oracle_id": "FILL_oracle.dragonsmarket.near",
+        "verifier_id": "intents.near",
+        "collateral_token_id": "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"
+      }
+    },
+    "oracle": {
+      "account": "FILL_oracle.dragonsmarket.near",
+      "wasm": "target/near/oracle/oracle.wasm",
+      "codeHash": "FILL_approved_oracle_code_hash",
+      "fundingNear": "20",
+      "init": {
+        "owner_id": "dragonsmarket.sputnik-dao.near",
+        "market_contract": "FILL_market.dragonsmarket.near",
+        "verifier_id": "intents.near",
+        "collateral_token_id": "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "bond": "100000000",
+        "window_ms": "86400000",
+        "panel_deadline_ms": "172800000",
+        "draw_window_ms": "86400000",
+        "council": "FILL_council.dragonsmarket.near",
+        "jury_size": 5,
+        "draw_delay_blocks": "2",
+        "min_proposal_ms": "3600000",
+        "operator_id": "FILL_operator_account",
+        "network": "mainnet",
+        "price_threshold": 2,
+        "no_decision_recipient": "dragonsmarket.sputnik-dao.near"
+      }
+    },
+    "council": {
+      "account": "FILL_council.dragonsmarket.near",
+      "wasm": "target/near/council/council.wasm",
+      "codeHash": "FILL_approved_council_code_hash",
+      "fundingNear": "20",
+      "init": {
+        "owner_id": "dragonsmarket.sputnik-dao.near",
+        "oracle_id": "FILL_oracle.dragonsmarket.near",
+        "verifier_id": "intents.near",
+        "collateral_token_id": "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "cooldown_ns": "604800000000000",
+        "max_seats_per_account": 5,
+        "allowlist_enabled": true
+      }
+    },
+    "rounds": {
+      "account": "FILL_rounds.dragonsmarket.near",
+      "wasm": "target/near/rounds/rounds.wasm",
+      "codeHash": "FILL_approved_rounds_code_hash",
+      "fundingNear": "15",
+      "init": {
+        "owner_id": "dragonsmarket.sputnik-dao.near",
+        "operator_id": "FILL_operator_account",
+        "verifier_id": "intents.near",
+        "collateral_token_id": "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "network": "mainnet",
+        "price_threshold": 2
+      }
+    }
+  }
+}
