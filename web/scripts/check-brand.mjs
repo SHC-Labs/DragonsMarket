@@ -10,7 +10,6 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const COLOUR_ALLOWED = {
   'app/tokens.generated.css': 'generated from design/tokens.json',
   'app/tokens.css': 'derived roles: shadows and highlights mixed from tokens',
-  'components/ArenaArt.tsx': 'illustration of physical playing cards for the Arena partner',
 };
 
 // Pure black and white carry light and shadow, not brand colour: masks, highlights, shadows.

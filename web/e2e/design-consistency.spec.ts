@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
-const routes = ["/", "/watchlist", "/council", "/partnerships", "/portfolio"];
+const routes = ["/", "/watchlist", "/council", "/portfolio"];
 
 test("main pages start with content and keep Dragons Market as the shared brand", async ({ page }) => {
   for (const theme of ["dark", "light"]) {
@@ -26,14 +26,15 @@ test("main pages start with content and keep Dragons Market as the shared brand"
     await expect(page.getByRole("region", { name: "NFT collection" }).getByRole("img")).toHaveCount(10);
     await page.locator(".membership-faq summary").first().click();
     await expect(page.locator(".membership-faq details").first()).toHaveAttribute("open", "");
-    await page.goto("/partnerships");
-    await expect(page.locator(".partner-hero-art figcaption")).toHaveCount(0);
-    await expect(page.locator(".partner-logos a")).toHaveCount(2);
-    const partner = page.getByRole("link", { name: "Explore Degen Arena", exact: false });
-    await expect(partner).toHaveAttribute("href", "https://degenarena.gg");
     const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
     expect(results.violations).toEqual([]);
   }
+});
+
+test("the partnerships page is gone", async ({ page }) => {
+  expect((await page.goto("/partnerships"))?.status()).toBe(404);
+  await page.goto("/");
+  await expect(page.locator('header a[href="/partnerships"]')).toHaveCount(0);
 });
 
 test("the header guide works as a modal on every page", async ({ page }) => {
