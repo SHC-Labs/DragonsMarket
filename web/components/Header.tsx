@@ -32,7 +32,7 @@ export function Header() {
     const active = nav?.querySelector<HTMLElement>('[aria-current="page"]');
     if (nav && active) nav.scrollLeft = active.offsetLeft - Math.max(0, (nav.clientWidth - active.offsetWidth) / 2);
   }, [pathname]);
-  const links = [{ href: "/", label: "Markets" }, { href: "/watchlist", label: "Watchlist" }, { href: "/council", label: "Council" }, { href: "/stake", label: "Stake" }, { href: "/partnerships", label: "Partnerships" }, { href: "/portfolio", label: "Portfolio" }, { href: "/agents", label: "Agents" }];
+  const links = [{ href: "/", label: "Markets" }, { href: "/watchlist", label: "Watchlist" }, { href: "/council", label: "Council" }, { href: "/stake", label: "Stake" }, { href: "/portfolio", label: "Portfolio" }, { href: "/agents", label: "Agents" }];
   const navigation = links.map(({ href, label }) => (
     <Link key={href} href={href} aria-current={pathname === href || (href === "/" && pathname === "/market") ? "page" : undefined} className="site-nav-link">{label}</Link>
   ));

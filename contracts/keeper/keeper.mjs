@@ -446,10 +446,10 @@ function keyFor(keys, contract) {
 
 // ---- sending a call ----------------------------------------------------------------------------------------------
 
-const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32LE(n); return b; };
-const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); return b; };
-const u128 = (n) => Buffer.concat([u64(BigInt(n) & ((1n << 64n) - 1n)), u64(BigInt(n) >> 64n)]);
-const str = (s) => { const b = Buffer.from(s); return Buffer.concat([u32(b.length), b]); };
+export const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32LE(n); return b; };
+export const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); return b; };
+export const u128 = (n) => Buffer.concat([u64(BigInt(n) & ((1n << 64n) - 1n)), u64(BigInt(n) >> 64n)]);
+export const str = (s) => { const b = Buffer.from(s); return Buffer.concat([u32(b.length), b]); };
 
 // A signed transaction with one function call, borsh encoded as NEAR expects, base64 for the RPC.
 export function signedFunctionCall({ signer, seed, publicKey, nonce, receiver, blockHash, method, args, gas, deposit = 0n }) {

@@ -15,7 +15,6 @@ const PAGES = [
   { path: "/membership", label: "Membership" },
   { path: "/watchlist", label: "Watchlist" },
   { path: "/portfolio", label: "Portfolio" },
-  { path: "/partnerships", label: "Partnerships" },
 ];
 
 async function waitForServer() {

@@ -155,6 +155,37 @@ every contract, that its policy matches the
 [The treasury handoff](governance.md) describes what remains unconfigured. Do not turn its
 proposal-preparation helper into a production submitter without reviewing the chosen interfaces.
 
+### Production deploy tooling
+
+`contracts/deploy-production.mjs` deploys market, oracle, council and rounds as children of the parent account,
+owned by the DAO, and ends with every contract account keyless. It uses no dependencies and never signs for the DAO.
+Copy `contracts/deploy-production.example.json`, fill every `FILL` value and read the paths listed in its `decide`
+array: each holds a default the owner must confirm. The wasm files must be the release build, and `codeHash` is the
+approved hash from the release tag.
+
+1. `node deploy-production.mjs plan --manifest FILE` validates the manifest against the contracts' own bounds and prints
+   every transaction (signer, receiver, actions, deposit, gas). It sends nothing and is the default command.
+2. `node deploy-production.mjs deploy --manifest FILE --send --rpc URL --parent-key-file FILE [--key-dir DIR]` creates each child
+   from the parent with a fresh key, then signs as the child to deploy the wasm, call the private `new` in the same
+   transaction and stage the same wasm for the upgrade proof. It reads `config()` back, stops on any difference from the
+   manifest and records the wasm sha256 and on-chain code hash in `deployment-<network>.json`. Child keys are written
+   with mode 0600 to `--key-dir` (default `~/.dragons-market/keys/<network>`); a directory inside the repository is
+   refused. Without `--send` it only prints the plan. Running it again continues where it stopped.
+3. `node deploy-production.mjs proposals --manifest FILE --rpc URL` prints the DAO proposals. The first run holds one
+   `upgrade` per contract to its own approved hash (this proves the upgrade path) and `set_nft_contract`. `seal` is
+   refused until the upgrade has run, so run `proposals` again after the DAO executes the upgrades to get one `seal` per
+   child key. Members submit them through the DAO interface or the near CLI line printed under each one.
+4. `node deploy-production.mjs verify --manifest FILE --rpc URL` is read-only. For each contract it prints PASS or FAIL for
+   owner equals the DAO, upgrade path proven, no access keys and code hash equals the manifest, plus the council's NFT
+   collection. It exits 1 on any FAIL.
+
+After the Tech Dragons mint, `node deploy-production.mjs nft-ready --manifest FILE --rpc URL` reads the collection's
+supply and token ids. It reports the collection's access keys (activation refuses a collection that still has any) and
+prints the council allowlist proposal only when the supply is above zero and no key remains: `set_token_range` for a
+contiguous decimal range, otherwise `allow_tokens` in batches of at most 100. It is not part of the first-day proposals.
+
+Every command checks that the RPC endpoint is on the manifest's network.
+
 ---
 
 ## 4. Website and operations

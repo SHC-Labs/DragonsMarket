@@ -2,7 +2,7 @@
 
 /* ---------- Display type (Funnel Display) ---------- */
 :is(.spotlight-title, .market-title, .market-card h3, .section-title, .council-hub h2, .council-hero-copy h2, .account-empty h2,
-  .page-title, .partner-intro h2, .partner-section-heading h2, .guide-stage-copy h3, .legal-heading h1, .trending-panel h2,
+  .page-title, .guide-stage-copy h3, .legal-heading h1, .trending-panel h2,
   .collection-gallery-heading h2, .council-call h2, .view-title h2) {
   font-family: var(--font-display-stack); font-weight: 600; letter-spacing: -0.025em;
 }
@@ -175,76 +175,6 @@
   ::view-transition-old(*), ::view-transition-new(*), ::view-transition-group(*) { animation-duration: 0s !important; animation-delay: 0s !important; }
 }
 
-/* ---------- Degen Arena ---------- */
-.partnership-page { --rocket-spark: var(--partner-spark); --rocket-smoke: var(--partner-flare); --arena-smoke: var(--partner-smoke); }
-.partner-intro h2 { font-size: clamp(3rem, 1.6rem + 5vw, 6.5rem); line-height: 0.92; letter-spacing: -0.035em; }
-/* The handshake: both marks slide in and the × strikes between them. */
-@media (prefers-reduced-motion: no-preference) {
-  .partner-dragon-logo { animation: lockup-left 900ms var(--ease-emph) 150ms both; }
-  .partner-arena-logo { animation: lockup-right 900ms var(--ease-emph) 150ms both; }
-}
-@keyframes lockup-left { from { opacity: 0; transform: translateX(-2.5rem) rotate(-8deg); } }
-@keyframes lockup-right { from { opacity: 0; transform: translateX(2.5rem) rotate(6deg); } }
-@keyframes lockup-strike { from { opacity: 0; transform: scale(2.4) rotate(-90deg); } }
-
-/* Hero art turns toward the pointer; rocket sparks rise through it. */
-.partner-hero-art { transform: perspective(1200px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, -4deg)); transition: transform 420ms var(--ease-out), box-shadow 420ms var(--ease-out); }
-.partner-hero-art:hover { transform: perspective(1200px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) scale(1.01); box-shadow: var(--elev-3), 0 40px 120px -30px color-mix(in oklab, var(--rocket-smoke) 50%, transparent); }
-.partner-hero-art .embers { z-index: 1; }
-
-/* Game cards: the art leans in and a drawing of how the game plays rises over it. */
-.partner-game-art { position: relative; }
-.partner-game-art::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, transparent 35%, color-mix(in oklab, var(--brand-night) 72%, transparent)); opacity: 0; transition: opacity var(--dur-4) var(--ease-out); }
-.game-hint { position: absolute; z-index: 1; left: 50%; bottom: 10%; width: 46%; transform: translate(-50%, 12px); opacity: 0; transition: opacity var(--dur-4) var(--ease-out), transform var(--dur-4) var(--ease-out); pointer-events: none; overflow: visible; }
-.partner-game:is(:hover, :focus-visible) .partner-game-art::after { opacity: 1; }
-.partner-game:is(:hover, :focus-visible) .game-hint { opacity: 1; transform: translate(-50%, 0); }
-.hint-climb { fill: none; stroke: var(--partner-gold); stroke-width: 4; stroke-linecap: round; stroke-dasharray: 1; stroke-dashoffset: 1; filter: drop-shadow(0 0 6px var(--partner-spark)); }
-.hint-rocket { fill: #fff; opacity: 0; }
-.hint-crash { stroke: var(--partner-flare); stroke-width: 3; stroke-linecap: round; opacity: 0; }
-.hint-blackjack { display: flex; justify-content: center; width: 46%; bottom: 8%; }
-.hint-card { width: 44%; height: auto; margin: 0 -6%; filter: drop-shadow(0 10px 18px rgb(0 0 0 / 0.5)); transform-origin: 50% 100%; overflow: visible; }
-.card-rank { font: 700 9px Georgia, "Times New Roman", serif; }
-.card-court { font: 700 20px Georgia, "Times New Roman", serif; }
-.hint-peg { fill: rgb(255 255 255 / 0.85); }
-.hint-ball { fill: var(--partner-flare); filter: drop-shadow(0 0 6px var(--partner-flare)); }
-@media (prefers-reduced-motion: no-preference) {
-  .partner-game:is(:hover, :focus-visible) .hint-climb { animation: climb 1.3s var(--ease-in-out) 120ms forwards; }
-  .partner-game:is(:hover, :focus-visible) .hint-rocket { animation: hint-show 200ms 1.3s forwards; }
-  .partner-game:is(:hover, :focus-visible) .hint-crash { animation: hint-show 120ms 1.45s forwards; }
-  .partner-game:is(:hover, :focus-visible) .hint-card:nth-child(1) { animation: deal-left 600ms var(--ease-emph) 80ms both; }
-  .partner-game:is(:hover, :focus-visible) .hint-card:nth-child(2) { animation: deal-right 600ms var(--ease-emph) 220ms both; }
-  .partner-game:is(:hover, :focus-visible) .hint-ball { animation: plinko 1.8s cubic-bezier(0.5, 0, 0.75, 1) 150ms infinite; }
-}
-@media (prefers-reduced-motion: reduce) { .hint-climb { stroke-dashoffset: 0; } .hint-rocket, .hint-crash { opacity: 1; } .hint-card:nth-child(1) { transform: rotate(-10deg); } .hint-card:nth-child(2) { transform: rotate(10deg); } }
-@keyframes climb { to { stroke-dashoffset: 0; } }
-@keyframes hint-show { to { opacity: 1; } }
-@keyframes deal-left { from { opacity: 0; transform: translateY(40%) rotate(0deg); } to { transform: rotate(-12deg); } }
-@keyframes deal-right { from { opacity: 0; transform: translateY(40%) rotate(0deg); } to { transform: rotate(12deg); } }
-@keyframes plinko {
-  0% { transform: translate(0, 0); } 16% { transform: translate(-9px, 18px); } 32% { transform: translate(0, 36px); }
-  48% { transform: translate(9px, 54px); } 64% { transform: translate(18px, 72px); } 80% { transform: translate(9px, 90px); }
-  92%, 100% { transform: translate(9px, 104px); opacity: 0; }
-}
-/* An arcade marquee of the three games, moved by the scroll itself rather than a timer. */
-.arena-marquee { display: grid; gap: var(--s-2); width: 100cqw; margin: var(--s-4) calc(50% - 50cqw) var(--s-9); overflow: hidden; mask-image: linear-gradient(90deg, transparent, black 10%, black 90%, transparent); }
-.arena-marquee-row { display: flex; width: max-content; }
-.arena-marquee-row span { display: flex; }
-.arena-marquee b { padding: 0 0.35em; font: 700 clamp(3rem, 2rem + 4vw, 6.5rem)/1 var(--font-display-stack); letter-spacing: -0.03em; color: transparent; -webkit-text-stroke: 1.5px color-mix(in oklab, var(--text) 35%, transparent); white-space: nowrap; }
-.arena-marquee b::after { content: "✦"; padding-left: 0.7em; font-size: 0.4em; vertical-align: middle; -webkit-text-stroke: 0; color: var(--rocket-spark); }
-.arena-marquee-row:nth-child(2) b:nth-child(2n) { color: var(--brand); -webkit-text-stroke: 0; }
-.arena-marquee-row:nth-child(1) b:nth-child(3n+1) { color: var(--rocket-spark); -webkit-text-stroke: 0; }
-.arena-marquee { position: relative; }
-.arena-marquee-rows { display: grid; gap: var(--s-2); }
-@media (prefers-reduced-motion: no-preference) {
-  .arena-marquee-row { animation: marquee-left 46s linear infinite; }
-  .arena-marquee-row:nth-child(2) { animation-name: marquee-right; animation-duration: 54s; }
-  .arena-marquee:is(:hover, [data-paused]) :is(.arena-marquee-row, .arena-marquee-row b) { animation-play-state: paused; }
-}
-@keyframes marquee-left { from { transform: translateX(0); } to { transform: translateX(-50%); } }
-@keyframes marquee-right { from { transform: translateX(-50%); } to { transform: translateX(0); } }
-.arena-marquee-toggle { position: absolute; right: var(--gutter); bottom: calc(var(--s-7) * -1 - var(--s-2)); z-index: 2; background: var(--bg); }
-@media (prefers-reduced-motion: reduce) { .arena-marquee-toggle { display: none; } }
-
 /* ---------- v2.1 ---------- */
 /* The seal's outer ring keeps turning slowly once struck: reeding, inscription and the four element marks. */
 .seal-ring { transform-origin: 100px 100px; }
@@ -260,58 +190,13 @@
 /* Council hero: the ember layer fades out at the bottom instead of ending on a line. */
 .council-membership-intro .embers { mask-image: linear-gradient(180deg, black 55%, transparent), linear-gradient(90deg, transparent, black 12%, black 88%, transparent); mask-composite: intersect; -webkit-mask-image: linear-gradient(180deg, black 55%, transparent), linear-gradient(90deg, transparent, black 12%, black 88%, transparent); -webkit-mask-composite: source-in; }
 
-/* Arena marquee: every word drifts on its own path, on top of the scroll slide. */
-@media (prefers-reduced-motion: no-preference) {
-  .arena-marquee b { display: inline-block; animation: word-drift var(--dur, 7s) var(--ease-in-out) var(--delay, 0s) infinite alternate; }
-}
-@keyframes word-drift { 0% { transform: translate(0, 0) rotate(0deg); } 50% { transform: translate(var(--dx), var(--dy)) rotate(calc(var(--dx) * 0.08deg)); } 100% { transform: translate(calc(var(--dx) * -0.6), calc(var(--dy) * -0.8)) rotate(0deg); } }
-
-/* Arena hero: an engine glow that flickers at the rocket's nozzle, under the rising sparks and smoke. */
-.arena-exhaust { position: absolute; z-index: 1; left: 45%; top: 60%; width: 32%; height: 30%; pointer-events: none; background: radial-gradient(closest-side, color-mix(in oklab, var(--rocket-spark) 75%, white) 0%, color-mix(in oklab, var(--rocket-spark) 45%, transparent) 40%, transparent 72%); mix-blend-mode: screen; opacity: 0.55; filter: blur(6px); }
-@media (prefers-reduced-motion: no-preference) { .arena-exhaust { animation: exhaust-flicker 1.1s steps(1, end) infinite, exhaust-breathe 3.2s var(--ease-in-out) infinite alternate; } }
-@keyframes exhaust-flicker { 0% { opacity: 0.55; } 18% { opacity: 0.4; } 31% { opacity: 0.68; } 47% { opacity: 0.5; } 66% { opacity: 0.62; } 82% { opacity: 0.45; } }
-@keyframes exhaust-breathe { to { transform: scale(1.12) translateX(3%); } }
-:root[data-theme="light"] .arena-exhaust { opacity: 0.3; }
-
-/* The whole Arena page sits in a slow haze of smoke behind its content. */
-.arena-atmosphere { position: fixed; inset: 0; z-index: 0; pointer-events: none; } /* app-frame (z 1) paints above it */
-.smoke, .smoke-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.arena-atmosphere .smoke { mask-image: linear-gradient(180deg, transparent, black 25%, black 80%, transparent); -webkit-mask-image: linear-gradient(180deg, transparent, black 25%, black 80%, transparent); }
-
 /* Light theme: the same embers in the palette's dark inks, multiplied onto the paper so they read. */
 .embers[data-theme-mode="light"] .embers-canvas { mix-blend-mode: multiply; }
 
-/* ---------- The partnership lockup: bigger, a running rim of light, crossing blades ---------- */
-@property --rim { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
-.partner-logos { position: relative; isolation: isolate; gap: clamp(1.5rem, 3vw, 3rem); padding: clamp(1.5rem, 2.5vw, 2.5rem) clamp(2rem, 4vw, 3.5rem); border: 0; border-radius: var(--r-lg); background: radial-gradient(120% 140% at 50% 120%, color-mix(in oklab, var(--rocket-smoke) 22%, transparent), transparent 60%), var(--surface); box-shadow: var(--elev-3), 0 30px 80px -30px color-mix(in oklab, var(--rocket-spark) 45%, transparent); }
-.partner-logos::before { content: ""; position: absolute; inset: 0; z-index: 2; border-radius: inherit; padding: 2px; pointer-events: none;
-  background: conic-gradient(from var(--rim), transparent 0deg, var(--rocket-spark) 50deg, var(--brand) 110deg, var(--council) 160deg, transparent 220deg, transparent 360deg);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); }
-.partner-logos::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; border: 1px solid var(--line); }
-.partner-logos .embers { z-index: 0; border-radius: inherit; }
-.partner-logos > a, .partner-logos > svg { position: relative; z-index: 1; }
-.partner-dragon-logo .brand-mark { width: clamp(4.5rem, 7vw, 7rem); height: clamp(5.4rem, 8.4vw, 8.4rem); filter: drop-shadow(0 0 22px var(--glow-council)); }
-.partner-arena-logo { width: clamp(11rem, 17vw, 17rem); filter: drop-shadow(0 10px 24px color-mix(in oklab, var(--partner-flare) 35%, transparent)); }
-.partner-logo-separator { width: clamp(2rem, 3vw, 3rem); height: clamp(2rem, 3vw, 3rem); overflow: visible; }
-.blade { fill: none; stroke: var(--text); stroke-width: 3.2; stroke-linecap: round; stroke-dasharray: 1; filter: drop-shadow(0 0 4px var(--rocket-spark)); }
-.blade-b { stroke: var(--brand); }
-.blade-flash { fill: var(--rocket-spark); opacity: 0; transform-box: fill-box; transform-origin: center; }
-@media (prefers-reduced-motion: no-preference) {
-  .partner-logos::before { animation: rim-run 5.5s linear infinite; }
-  .blade-a { animation: blade-draw 420ms var(--ease-out) 700ms both; }
-  .blade-b { animation: blade-draw 420ms var(--ease-out) 860ms both; }
-  .blade-flash { animation: blade-flash 900ms var(--ease-out) 1.1s both; }
-  .partner-dragon-logo .brand-mark { animation: crest-breathe 3.6s var(--ease-in-out) 1.6s infinite alternate; }
-  .partner-arena-logo img { animation: arena-bob 4.2s var(--ease-in-out) 1.6s infinite alternate; }
-  .partner-logos:hover .partner-dragon-logo { transform: translateX(0.5rem) rotate(4deg); }
-  .partner-logos:hover .partner-arena-logo { transform: translateX(-0.5rem) rotate(-3deg); }
-}
-.partner-logos > a { transition: transform var(--dur-4) var(--ease-emph); }
-@keyframes rim-run { to { --rim: 360deg; } }
-@keyframes blade-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
-@keyframes blade-flash { 0% { opacity: 0; transform: scale(0.2); } 30% { opacity: 0.95; transform: scale(1.6); } 100% { opacity: 0; transform: scale(3); } }
+/* Shared by the agent crest, the category halo and the page frame. */
 @keyframes crest-breathe { to { filter: drop-shadow(0 0 34px color-mix(in oklab, var(--council) 55%, transparent)); } }
-@keyframes arena-bob { to { transform: translateY(-4px) rotate(-1.5deg); } }
+@keyframes aura-pulse { from { scale: 0.85; opacity: 0.55; } to { scale: 1.15; opacity: 0.95; } }
+.app-frame { overflow-x: clip; } /* page-wide: decorative light may spill past the gutter without side-scrolling */
 
 /* Cases: heading above, then the list and the jury card as one band of equal height. */
 .council-cases { display: block; }
@@ -336,52 +221,12 @@
   .market-ticket-slot > .ticket > .btn-lg { margin-top: auto; }
 }
 
-/* ---------- Lockup v3: no plate; the marks float in their own light ---------- */
-.partner-logos { width: 100%; max-width: 36rem; justify-content: space-between; padding: clamp(1.5rem, 3vw, 3rem) 0; margin-bottom: var(--s-6); background: none; box-shadow: none; border-radius: 0; overflow: visible; }
-.partner-logos::before, .partner-logos::after { display: none; }
-.lockup-light { position: absolute; inset: -30% -12%; z-index: 0; pointer-events: none; }
-.lockup-light .embers { inset: 0; border-radius: 0; mask-image: radial-gradient(closest-side, black 40%, transparent); -webkit-mask-image: radial-gradient(closest-side, black 40%, transparent); }
-.lockup-aura { position: absolute; top: 50%; border-radius: 50%; filter: blur(28px); mix-blend-mode: screen; }
-.aura-dragon { left: 4%; width: 38%; aspect-ratio: 1; translate: 0 -50%; background: radial-gradient(closest-side, color-mix(in oklab, var(--council) 70%, transparent), transparent); }
-.aura-arena { right: 0; width: 56%; aspect-ratio: 1.2; translate: 0 -50%; background: conic-gradient(from 0deg, var(--rocket-smoke), var(--rocket-spark), var(--partner-cyan), var(--rocket-smoke)); opacity: 0.55; mask-image: radial-gradient(closest-side, black, transparent); -webkit-mask-image: radial-gradient(closest-side, black, transparent); }
-.aura-core { left: 42%; width: 16%; aspect-ratio: 1; translate: -50% -50%; background: radial-gradient(closest-side, #fff, color-mix(in oklab, var(--brand) 60%, transparent), transparent); opacity: 0.35; }
-:root[data-theme="light"] .lockup-aura { mix-blend-mode: multiply; opacity: 0.45; }
-@media (prefers-reduced-motion: no-preference) {
-  .aura-dragon { animation: aura-pulse 4.5s var(--ease-in-out) infinite alternate; }
-  .aura-arena { animation: aura-spin 9s linear infinite; }
-  .aura-core { animation: aura-pulse 2.8s var(--ease-in-out) 1.2s infinite alternate; }
-}
-@keyframes aura-pulse { from { scale: 0.85; opacity: 0.55; } to { scale: 1.15; opacity: 0.95; } }
-@keyframes aura-spin { to { rotate: 1turn; } }
-.partner-dragon-logo .brand-mark { width: clamp(5rem, 8vw, 8rem); height: clamp(6rem, 9.6vw, 9.6rem); }
-.partner-arena-logo { width: clamp(11rem, 19vw, 19rem); }
-@media (max-width: 620px) { .partner-logos { gap: var(--s-4); } .lockup-light { inset: -20% 0; } }
-.app-frame { overflow-x: clip; } /* page-wide: decorative light may spill past the gutter without side-scrolling */
-
 /* ---------- Spotlight: one fixed card size, whatever the question's length ---------- */
 .featured-slide-stage { flex: none; height: 37rem; }
 .featured-slide-current > .spotlight-card, .featured-slide-outgoing > .spotlight-card { height: 100%; min-height: 0; }
 .spotlight-title { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 @media (max-width: 899px) { .featured-slide-stage { height: 46rem; } .spotlight-title { -webkit-line-clamp: 3; } }
 @media (max-width: 767px) { .featured-slide-stage { height: 44rem; } }
-
-/* The lockup's join: the marquee's four-point spark, struck in with a flash, then twinkling. */
-.lockup-spark { fill: var(--rocket-spark); filter: drop-shadow(0 0 6px var(--rocket-spark)) drop-shadow(0 0 16px color-mix(in oklab, var(--rocket-smoke) 70%, transparent)); transform-box: fill-box; transform-origin: center; }
-@media (prefers-reduced-motion: no-preference) {
-  .lockup-spark { animation: spark-strike 700ms var(--ease-emph) 650ms both, spark-twinkle 3.2s var(--ease-in-out) 1.4s infinite; }
-}
-@keyframes spark-strike { from { opacity: 0; transform: scale(0.1) rotate(-135deg); } }
-@keyframes spark-twinkle { 0%, 100% { transform: scale(1) rotate(0deg); } 50% { transform: scale(0.82) rotate(45deg); } }
-
-/* The lockup's join: a plain, thin X in the text colour, drawn in once. */
-.lockup-x { fill: none; stroke: color-mix(in oklab, var(--text) 75%, transparent); stroke-width: 2; stroke-linecap: round; stroke-dasharray: 1; }
-@media (prefers-reduced-motion: no-preference) {
-  .lockup-x { animation: blade-draw 380ms var(--ease-out) 650ms both; }
-  .lockup-x-b { animation-delay: 800ms; }
-}
-
-/* Partnerships keeps its original mint glow around the Dragons' mark. */
-.partnership-page { --council: var(--crest); --council-tint: color-mix(in oklab, var(--crest) 14%, transparent); --glow-council: color-mix(in oklab, var(--crest) 22%, transparent); }
 
 /* ---------- Market page: the category in its own colours ---------- */
 .price-panel { isolation: isolate; }

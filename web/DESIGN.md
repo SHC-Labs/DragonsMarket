@@ -247,7 +247,6 @@ Use roles through CSS variables or the Tailwind utilities in `app/theme.css`. Ne
 | Council and disputes     | `--council`, `--council-soft`                                            |
 | Category chip or emblem  | `--category-<name>-bg`, `--category-<name>-ink`                          |
 | The crest                | `--crest` (mint)                                                         |
-| Partner art only         | `--partner-*`                                                            |
 
 Mix with `color-mix(in oklab, var(--role) N%, transparent)`. Derived roles already exist in
 `app/tokens.css` (`--glass`, `--glow-brand`, `--elev-1` to `--elev-3`, `--accent-fill`); reuse them.
