@@ -11,9 +11,9 @@ The JSON shape is enforced by `backend/src/keeper-approval.ts`:
 | `version`, `network` | `1`, `mainnet` |
 | `deployment` | The exact registered backend deployment object: ID, start block, contract map, collateral ID and decimals. No later start block or missing rounds entry. |
 | `approvedBy`, `approvedAt`, `expiresAt` | Reviewer identity and ISO timestamps. Maximum approval lifetime is 30 days; expiry stops further signing. |
-| `reviewEvidence` | HTTPS review record covering deployed build equivalence, custody, economic parameters, market rules/deadlines and operating authorization. The process does not fetch this URL. |
+| `reviewEvidence` | HTTPS review record covering deployed build equivalence or explicit external-contract acceptance, custody, economic parameters, market rules/deadlines and operating authorization. The process does not fetch this URL. |
 | `marketIds` | Explicit decimal-string IDs whose lifecycle the keeper may advance. Excluded markets stay queued without taking batch slots. Do not include market 7 until its owner-approved disposition is recorded. |
-| `contracts` | One entry for every configured market/oracle/Council/rounds/verifier, plus `nft` and `collateral`. Each has `accountId`, base58 `codeHash`, 40-character `sourceCommit` and HTTPS `buildEvidence`. Evidence must link that source/build to those exact bytes. |
+| `contracts` | One entry for every configured market/oracle/Council/rounds/verifier, plus `nft` and `collateral`. Every entry pins `accountId` and base58 `codeHash`. Source/build provenance requires a 40-character `sourceCommit` and HTTPS `buildEvidence` linking that build to those exact bytes. Only `nft` and `collateral` may use the explicit external-contract exception below. |
 | `nftCustody` | Optional [NFT custody policy](NFT-CUSTODY.md). Omitted or `{ "mode": "keyless" }` requires zero collection keys. `platform-managed` pins the collection, stored owner, exact full-access public keys, custodian, code hash and review record. Its code hash must equal `contracts.nft.codeHash`. |
 | `controls` | Approved `owner`, `operator`, `treasury` NEAR accounts. Pending ownership, changed links, pauses and upgrades in flight stop signing. |
 | `governance` | Approved owner DAO `codeHash`, `sourceCommit`, HTTPS `buildEvidence`, canonical `policySha256` and integer `minApprovals` (2-100). Code may be inline WASM or an immutable global contract hash; mutable global account references are refused. |
@@ -21,6 +21,17 @@ The JSON shape is enforced by `backend/src/keeper-approval.ts`:
 | `keeper.publicKeys` | Distinct ed25519 public keys named `market`, `oracle`, `council`, plus `rounds` exactly when Rounds is configured. The supplied secrets must derive these keys. |
 | `keeper.minBalanceYocto`, `keeper.maxKeyAllowanceYocto` | Positive decimal strings. The first is required balance after storage reserve; the second caps each key's remaining gas allowance. Choose and fund these deliberately. |
 | `keeper.maxActionsPerRun`, `keeper.maxGasPerRunTgas` | Integers in 1-10 and 1-3000 respectively. A batch exceeding either is refused, not partially submitted. Include global fee/day actions when choosing the budget. |
+
+An external NFT or collateral deployment may have no reproducible source/build record available to the team.
+For these two roles only, a reviewer may explicitly accept the deployed account and code hash with
+`provenance: "external-code-hash"` and an `externalReview` object containing `sourceUnverified: true`,
+a nonempty `reason` (at most 2,000 characters), and an HTTPS `reviewEvidence` record of that decision.
+Omit `sourceCommit` and `buildEvidence` in this mode; invented source/build evidence is refused.
+This accepts unverified external code, not source equivalence or a code review. Without this explicit mode,
+the original source/build requirements apply (`provenance: "source-build"` is optional).
+The exception never applies to market, Oracle, Council, Rounds, Intents, or the owner DAO.
+It does not relax account matching, either provider's code-hash check, NFT custody, governance,
+approval expiry, financial-contract controls, keeper limits or funded acceptance. Code drift still stops signing.
 
 Contract code hashes, links, owner/operator/treasury and gas reserve are read from both providers at the same recent finalized block before each call. All configured contracts and the NFT/verifier/token dependencies must match. The providers must have different hostnames; operators must separately confirm provider independence. An allowed upgrade invalidates the approval until reviewed. Matching hashes proves the configured build identity, not that the build itself is safe.
 

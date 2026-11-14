@@ -6,6 +6,41 @@ import { keeperSettings } from '../src/keeper-runner.js';
 import { keeperFixture } from './keeper-fixture.js';
 import { assertDaoPolicy, daoPolicyHash } from '../src/dao-policy.js';
 
+function pinExternal(approval: KeeperApproval, role: keyof KeeperApproval['contracts']) {
+  const { accountId, codeHash } = approval.contracts[role]!;
+  approval.contracts[role] = { accountId, codeHash, provenance: 'external-code-hash',
+    externalReview: { sourceUnverified: true, reason: 'Third-party deployment; source/build record unavailable.',
+      reviewEvidence: 'https://review.invalid/external-contracts' } };
+}
+
+test('external provenance is an explicit reviewed exception only for NFT and collateral', () => {
+  const { config, approval, encode } = keeperFixture();
+  const parse = (a: unknown) => { const e = encode(a); return parseKeeperApproval(e.KEEPER_APPROVAL_JSON, e.KEEPER_APPROVAL_SHA256, config); };
+  for (const role of ['nft', 'collateral'] as const) pinExternal(approval, role);
+  assert.deepEqual(parse(approval), approval);
+  for (const role of ['market', 'oracle', 'council', 'rounds', 'verifier'] as const) {
+    const rejected = structuredClone(approval);
+    pinExternal(rejected, role);
+    assert.throws(() => parse(rejected), /invalid_external_contract_approval/, role);
+  }
+  const external = approval.contracts.collateral!;
+  const mutations = [
+    { provenance: undefined }, { provenance: 'unchecked' }, { sourceCommit: 'a'.repeat(40) },
+    { buildEvidence: 'https://build.invalid/not-built' }, { externalReview: undefined },
+    ...[{ sourceUnverified: false }, { sourceUnverified: undefined }, { reason: ' ' },
+      { reason: 'x'.repeat(2001) }, { reviewEvidence: 'file:///tmp/approval' },
+      { reviewEvidence: 'https://user:password@review.invalid' }].map(change =>
+      ({ externalReview: { ...external.externalReview, ...change } })),
+    { codeHash: '1'.repeat(32) }, { accountId: 'wrong.near' },
+  ];
+  for (const change of mutations) assert.throws(() => parse({ ...approval,
+    contracts: { ...approval.contracts, collateral: { ...external, ...change } } }));
+  assert.throws(() => parse({ ...approval, approvedBy: '' }));
+  assert.throws(() => parse({ ...approval, expiresAt: new Date(Date.now() - 1).toISOString() }));
+  assert.throws(() => parse({ ...approval, governance: { ...approval.governance,
+    sourceCommit: undefined, buildEvidence: undefined, provenance: 'external-code-hash' } }), /governance/);
+});
+
 test('signing approval binds the exact deployment, artifacts, keys, budget and expiring review', () => {
   const { config, approval, encode } = keeperFixture();
   const parse = (a: unknown) => { const e = encode(a); return parseKeeperApproval(e.KEEPER_APPROVAL_JSON, e.KEEPER_APPROVAL_SHA256, config); };
@@ -62,7 +97,8 @@ test('both providers must prove approved code and controls at the same recent fi
         ...(failure === 'mutable-dao' ? { global_contract_account_id: 'mutable.near' } : {}) };
       if (p.account_id === approval.keeper.accountId) return { block_hash: header.hash,
         amount: failure === 'balance' ? '0' : '1000000000000000000000000', storage_usage: 10 };
-      return { block_hash: header.hash, code_hash: secondary && failure === 'code' && role === 'nft' ? 'wrong'
+      return { block_hash: header.hash, code_hash: secondary && (failure === `code:${role}`
+        || failure === 'code' && role === 'nft') ? 'wrong'
         : approval.contracts[role as keyof KeeperApproval['contracts']]!.codeHash };
     }
     const decoded: Record<string, string> = JSON.parse(Buffer.from(p.args_base64!, 'base64').toString());
@@ -102,6 +138,11 @@ test('both providers must prove approved code and controls at the same recent fi
     return { block_hash: header.hash, result: [...Buffer.from(JSON.stringify(settings))] };
   } });
   await verifyKeeperApproval(approval, config, provider(false), provider(true));
+  for (const role of ['nft', 'collateral'] as const) pinExternal(approval, role);
+  const externalEncoded = encode();
+  assert.deepEqual(parseKeeperApproval(externalEncoded.KEEPER_APPROVAL_JSON,
+    externalEncoded.KEEPER_APPROVAL_SHA256, config), approval);
+  await verifyKeeperApproval(approval, config, provider(false), provider(true));
   const financial = ['market', 'oracle', 'council', 'rounds'].filter(role => role in approval.contracts);
   const custodyMethods = ['public_keys_of', 'is_auth_by_predecessor_id_enabled', 'is_account_locked'];
   for (const secondary of [false, true]) {
@@ -109,7 +150,7 @@ test('both providers must prove approved code and controls at the same recent fi
     for (const role of financial) for (const method of custodyMethods)
       assert.ok(checkedCustody.has(`${secondary}:${role}:${method}`));
   }
-  for (failure of ['network', 'head', 'stale', 'code', 'balance', 'controls', 'pause', 'pending', 'upgrade', 'sells-paused', 'missing-control',
+  for (failure of ['network', 'head', 'stale', 'code', 'code:collateral', 'balance', 'controls', 'pause', 'pending', 'upgrade', 'sells-paused', 'missing-control',
     'unproven', 'missing-proof', 'malformed-keys', 'key-block', 'custody-block', 'verifier-paused',
     'dao-code', 'dao-policy', 'mutable-dao', 'key:dao', 'oracle-recipient',
     ...[...financial, 'nft'].map(role => `key:${role}`),

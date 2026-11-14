@@ -54,7 +54,7 @@ async fn world_with_publishers() -> anyhow::Result<(World, Vec<SigningKey>)> {
     Ok((w, keys))
 }
 
-// A price market that closes in 120s, is observed the moment it closes, and is Yes if the price is at or above STRIKE.
+// A price market that closes in 120s, is observed the moment it closes, and is Yes if the price is strictly above STRIKE.
 // Returns the market id and its observation time.
 async fn price_market(w: &World) -> anyhow::Result<(u64, u64)> {
     let t = now(&w.worker).await;
@@ -64,7 +64,7 @@ async fn price_market(w: &World) -> anyhow::Result<(u64, u64)> {
         .call(w.market.id(), "create_market")
         .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
-            "title": "Will bitcoin close at or above 100.00 USD?", "rule_text": "Yes if the median of three exchanges' 1 minute closes is at or above 100.00.",
+            "title": "Will bitcoin close above 100.00 USD?", "rule_text": "Yes if the median of three exchanges' 1 minute closes is strictly above 100.00. Otherwise No.",
             "resolution_source": "Median of the 1 minute closing prices on three major exchanges", "void_policy": "Fewer than two exchanges publish a price.",
             "category": "crypto", "subcategory": "bitcoin", "close_at": close_at.to_string(),
             "resolve_by": (close_at + MARKET_GAP_SECS * 1_000_000_000).to_string(),
@@ -99,7 +99,7 @@ async fn a_signed_price_resolves_the_market_after_the_challenge_window() -> anyh
     buy(&w, &w.bob, id, "no", 10 * USD).await?;
     skip_secs(&w.worker, 130).await;
 
-    // 105.00, signed by two of the three publishers: at or above the strike, so Yes.
+    // 105.00, signed by two of the three publishers: above the strike, so Yes.
     let price = 10_500;
     let m = message(&w, NETWORK, id, obs, price);
     let before = holdings(&w, w.carol.id()).await;
@@ -136,6 +136,24 @@ async fn the_price_below_the_strike_answers_no() -> anyhow::Result<()> {
     let m = message(&w, NETWORK, id, obs, STRIKE - 1);
     answer_price(&w, id, STRIKE - 1, &[entry(&k[1], &m), entry(&k[2], &m)]).await?;
     assert_eq!(case_json(&w, id).await["proposed"], "no");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_price_equal_to_the_strike_settles_no() -> anyhow::Result<()> {
+    let (w, keys) = world_with_publishers().await?;
+    let (id, observed_at) = price_market(&w).await?;
+    buy(&w, &w.alice, id, "yes", 10 * USD).await?;
+    buy(&w, &w.bob, id, "no", 10 * USD).await?;
+    skip_secs(&w.worker, 130).await;
+    let signed = message(&w, NETWORK, id, observed_at, STRIKE);
+    answer_price(&w, id, STRIKE, &[entry(&keys[0], &signed), entry(&keys[1], &signed)]).await?;
+    assert_eq!(case_json(&w, id).await["proposed"], "no");
+    skip_secs(&w.worker, PAST_WINDOW_SECS).await;
+    finalize(&w, id).await?;
+    assert_eq!(market_json(&w, id).await["outcome"], "no");
+    assert_eq!(claimable(&w, w.carol.id()).await, BOND);
+    assert!(invariant(&w, id).await);
     Ok(())
 }
 

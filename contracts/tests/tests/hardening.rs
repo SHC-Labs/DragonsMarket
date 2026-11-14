@@ -798,7 +798,7 @@ fn signed_entry(key: &SigningKey, message: &str) -> String {
 }
 
 #[tokio::test]
-async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it() -> anyhow::Result<()> {
+async fn a_signed_price_at_the_strike_proposes_no_and_names_its_publishers() -> anyhow::Result<()> {
     let w = setup().await?;
     let keys: Vec<SigningKey> = (1..=3).map(signing_key).collect();
     for k in &keys {
@@ -815,7 +815,7 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
         .call(w.market.id(), "create_market")
         .deposit(near_workspaces::types::NearToken::from_millinear(60))
         .args_json(json!({
-            "title": "Will bitcoin close at or above 100.00 USD?", "rule_text": "Yes if the median close is at or above 100.00.",
+            "title": "Will bitcoin close above 100.00 USD?", "rule_text": "Yes if the median close is strictly above 100.00. Otherwise No.",
             "resolution_source": "Three exchanges", "void_policy": "Fewer than two publish a price.",
             "category": "crypto", "subcategory": "bitcoin", "close_at": close_at.to_string(),
             "resolve_by": (close_at + MARKET_GAP_SECS * 1_000_000_000).to_string(),
@@ -829,7 +829,7 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
     skip_secs(&w.worker, 130).await;
 
     let message = format!(
-        "price:v2:{}:{NETWORK}:{}:{id}:{close_at}:10500:2",
+        "price:v2:{}:{NETWORK}:{}:{id}:{close_at}:10000:2",
         w.oracle.id(),
         w.market.id()
     );
@@ -840,7 +840,7 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
         &w.carol,
         w.oracle.id(),
         BOND,
-        &format!("price:{}:{id}:10500:{}", w.market.id(), entries.join(",")),
+        &format!("price:{}:{id}:10000:{}", w.market.id(), entries.join(",")),
     )
     .await?
     .into_result()?;
@@ -851,6 +851,7 @@ async fn the_proposed_event_of_a_signed_price_names_the_publishers_who_signed_it
         json!([public_key(&keys[2]), public_key(&keys[0])]),
         "named in the order they were submitted"
     );
-    assert_eq!(proposed["evidence"], "signed price 10500 by 2 publishers");
+    assert_eq!(proposed["evidence"], "signed price 10000 by 2 publishers");
+    assert_eq!(proposed["outcome"], "no");
     Ok(())
 }

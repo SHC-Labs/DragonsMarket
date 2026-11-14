@@ -420,8 +420,9 @@ and locked into the market's rule hash. Here is how its answer is produced.
    submission fail and the bond come back.
 4. At least `price_threshold` different publishers must have signed. One leaked key alone cannot set
    a price.
-5. The answer is Yes if the price is at or above the strike (when the rule's direction is "above")
-   and No otherwise, or the reverse for "below".
+5. The answer is Yes if the price is strictly above the strike when the rule's direction is "above",
+   or strictly below the strike when it is "below". A price exactly equal to the strike answers No
+   in either direction.
 6. The case then opens exactly as for any proposal, with evidence reading
    `signed price <price> by <n> publishers`, and the `proposed` event carries `signers`, the public
    keys of the publishers whose signatures counted, in the order they were submitted, so the record

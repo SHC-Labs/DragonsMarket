@@ -1,0 +1,22 @@
+{
+  "accountId": "dragonsmarket.sputnik-dao.near",
+  "sourceRepository": "https://github.com/near-daos/sputnik-dao-contract",
+  "sourceCommit": "2b0f34a3860460f285307ec2ccf36345acbe05a2",
+  "sourceChanges": false,
+  "compilerImage": "sourcescan/cargo-near:0.19.0-rust-1.86.0@sha256:772638e343baeeea24e49062c7d424274f3441452cc06ce97fc4e5695b19fecc",
+  "command": ["cargo", "near", "build", "non-reproducible-wasm", "--locked"],
+  "contractPath": "sputnikdao2",
+  "buildEnvironment": {
+    "RUSTUP_TOOLCHAIN": "1.86.0",
+    "NEP330_BUILD_INFO_BUILD_ENVIRONMENT": "sourcescan/cargo-near:0.19.0-rust-1.86.0@sha256:772638e343baeeea24e49062c7d424274f3441452cc06ce97fc4e5695b19fecc",
+    "NEP330_BUILD_INFO_CONTRACT_PATH": "sputnikdao2",
+    "NEP330_BUILD_INFO_SOURCE_CODE_SNAPSHOT": "git+https://github.com/near-daos/sputnik-dao-contract?rev=2b0f34a3860460f285307ec2ccf36345acbe05a2",
+    "NEP330_LINK": "https://github.com/near-daos/sputnik-dao-contract/tree/2b0f34a3860460f285307ec2ccf36345acbe05a2"
+  },
+  "execution": "Verified OCI image layers unpacked into a root filesystem; bubblewrap user namespace; source mounted at /home/near/code; command run from /home/near/code/sputnikdao2.",
+  "output": "/home/near/code/target/near/sputnikdao2/sputnikdao2.wasm",
+  "exitCode": 0,
+  "sha256": "bf6f951ee5e45968e3367fa857bebf8bc80badec183998c2239c487237e0d7f6",
+  "codeHash": "DtHZA1mUmGYeScEaUoUZYQGGFHSMpnjMCvkr5U9hJXuF",
+  "verification": "Retained compiled WASM independently hashed with sha256sum on 2026-11-14. It matches the immutable global contract hash returned for the owner DAO by Mnesis and dRPC. This establishes build equivalence, not a code review or approval of governance changes."
+}

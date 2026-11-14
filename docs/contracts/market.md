@@ -744,7 +744,7 @@ page. The rule is:
 | `observation_time` | The moment whose price decides the market. Must be at or after `close_at` (so traders cannot know the answer while trading) and before `resolve_by`. |
 | `strike`           | The threshold price, an integer scaled by 10 to the power `decimals`. Must be above zero.                                                            |
 | `decimals`         | How many decimal places the price and strike carry. At most 18.                                                                                      |
-| `above`            | If true, Yes when the price is at or above the strike. If false, Yes when the price is below it.                                                     |
+| `above`            | If true, Yes when the price is strictly above the strike. If false, Yes when the price is strictly below it. Equality answers No in either case.       |
 
 The rule is part of the rule hash, so it cannot change. market passes it to oracle at registration,
 and the oracle checks signed prices against it. How prices are signed and checked is described in

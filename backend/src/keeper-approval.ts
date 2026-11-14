@@ -17,6 +17,12 @@ const HEX = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 const MAX_APPROVAL_AGE = 30 * 24 * 3600_000;
 
+type ApprovedContract = { accountId: string; codeHash: string } & (
+  { provenance?: 'source-build'; sourceCommit: string; buildEvidence: string; externalReview?: never }
+  | { provenance: 'external-code-hash'; sourceCommit?: never; buildEvidence?: never;
+    externalReview: { sourceUnverified: true; reason: string; reviewEvidence: string } }
+);
+
 export interface KeeperApproval {
   version: 1;
   network: 'mainnet';
@@ -26,7 +32,7 @@ export interface KeeperApproval {
   expiresAt: string;
   reviewEvidence: string;
   marketIds: string[];
-  contracts: Partial<Record<Role, { accountId: string; codeHash: string; sourceCommit: string; buildEvidence: string }>>;
+  contracts: Partial<Record<Role, ApprovedContract>>;
   nftCustody?: NftCustody;
   controls: { owner: string; operator: string; treasury: string };
   governance: { codeHash: string; policySha256: string; minApprovals: number;
@@ -50,6 +56,21 @@ function https(value: unknown): value is string {
 function publicKey(value: unknown) {
   if (typeof value !== 'string' || !/^ed25519:[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value)) return false;
   return base58Decode(value.slice(8)).length === 32;
+}
+
+function assertContractProvenance(role: string, contract: Record<string, unknown>) {
+  if (contract.provenance === 'external-code-hash') {
+    const review = contract.externalReview;
+    if (!['nft', 'collateral'].includes(role) || contract.sourceCommit !== undefined
+      || contract.buildEvidence !== undefined || !object(review) || review.sourceUnverified !== true
+      || typeof review.reason !== 'string' || !review.reason.trim() || review.reason.length > 2000
+      || !https(review.reviewEvidence)) throw new Error('invalid_external_contract_approval');
+    return;
+  }
+  if ((contract.provenance !== undefined && contract.provenance !== 'source-build')
+    || contract.externalReview !== undefined || typeof contract.sourceCommit !== 'string'
+    || !COMMIT.test(contract.sourceCommit) || /^0+$/.test(contract.sourceCommit)
+    || !https(contract.buildEvidence)) throw new Error('invalid_approved_contract');
 }
 
 export function assertApprovalCurrent(approval: KeeperApproval, now = Date.now()) {
@@ -82,9 +103,8 @@ export function parseKeeperApproval(raw: string | undefined, digest: string | un
     const c = a.contracts[role];
     if (!object(c) || c.accountId !== account || !isAccount(account) || account.endsWith('.testnet')
       || typeof c.codeHash !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(c.codeHash)
-      || base58Decode(c.codeHash).length !== 32 || /^1+$/.test(c.codeHash)
-      || typeof c.sourceCommit !== 'string' || !COMMIT.test(c.sourceCommit) || /^0+$/.test(c.sourceCommit)
-      || !https(c.buildEvidence)) throw new Error('invalid_approved_contract');
+      || base58Decode(c.codeHash).length !== 32 || /^1+$/.test(c.codeHash)) throw new Error('invalid_approved_contract');
+    assertContractProvenance(role, c);
   }
   const controls = a.controls;
   if (!['owner', 'operator', 'treasury'].every(k => isAccount(controls[k]) && !(controls[k] as string).endsWith('.testnet')))

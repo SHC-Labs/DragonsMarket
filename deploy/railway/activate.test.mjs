@@ -176,6 +176,25 @@ test('activation pins exact reviewed bytes, commit, identity and public destinat
   }
 });
 
+test('prepare carries the explicit external-contract decision into both approval consumers', () => {
+  const { raw, inventory } = fixture('prepare');
+  const value = JSON.parse(raw);
+  for (const role of ['nft', 'collateral']) {
+    const { accountId, codeHash } = value.keeperApproval.contracts[role];
+    value.keeperApproval.contracts[role] = { accountId, codeHash, provenance: 'external-code-hash',
+      externalReview: { sourceUnverified: true, reason: 'External deployment without a build record.',
+        reviewEvidence: 'https://review.invalid/external-contracts' } };
+  }
+  const reviewed = JSON.stringify(value);
+  const plan = parseActivation(reviewed, digest(reviewed));
+  for (const name of ['database-release', 'keeper']) Object.assign(inventory[name], {
+    KEEPER_APPROVAL_JSON: plan.approvalJson, KEEPER_APPROVAL_SHA256: plan.approvalDigest,
+  });
+  assert.doesNotThrow(() => verifyActivationVariables(plan, 'prepare', inventory));
+  inventory.keeper.KEEPER_APPROVAL_SHA256 = '0'.repeat(64);
+  assert.throws(() => verifyActivationVariables(plan, 'prepare', inventory), /approval digest/);
+});
+
 test('agent activation pins sponsored and unsponsored policy storage explicitly', () => {
   const { raw, plan, inventory } = fixture('launch', 'agents');
   for (const policySponsor of [undefined, '', 'not an account', 'sponsor.testnet']) {

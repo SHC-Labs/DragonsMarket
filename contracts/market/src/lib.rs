@@ -160,7 +160,7 @@ pub enum Outcome {
 }
 
 // How a price market is answered, fixed when it is created and locked into the rule hash. Publishers sign the price at
-// observation_time; the oracle compares it with strike. Yes if the price is at or above strike when `above` is
+// observation_time; the oracle compares it with strike. Yes if the price is strictly above strike when `above` is
 // true, Yes if it is below strike otherwise. strike and the signed price are integers scaled by 10^decimals.
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

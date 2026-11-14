@@ -283,7 +283,7 @@ impl Outcome {
 }
 
 // Set by market when it creates a price market, so the oracle knows what to check a signed price against.
-// Yes if the price is at or above strike when `above` is true, Yes if it is below strike otherwise. strike and the
+// Yes if the price is strictly above strike when `above` is true, Yes if it is below strike otherwise. strike and the
 // signed price are integers scaled by 10^decimals.
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1797,11 +1797,12 @@ impl OracleContract {
             signers.len() >= self.price_threshold as usize,
             "not enough valid publisher signatures"
         );
-        let outcome = if (price >= rule.strike.0) == rule.above {
-            Outcome::Yes
+        let matches_direction = if rule.above {
+            price > rule.strike.0
         } else {
-            Outcome::No
+            price < rule.strike.0
         };
+        let outcome = if matches_direction { Outcome::Yes } else { Outcome::No };
         self.propose(
             proposer,
             market,
@@ -3936,7 +3937,7 @@ mod tests {
     #[test]
     fn the_price_decides_yes_or_no_against_the_strike_in_the_markets_direction() {
         for (above, price, expected) in [
-            (true, STRIKE, Outcome::Yes),
+            (true, STRIKE, Outcome::No),
             (true, STRIKE - 1, Outcome::No),
             (true, STRIKE + 1, Outcome::Yes),
             (false, STRIKE, Outcome::No),
@@ -3960,6 +3961,21 @@ mod tests {
         let sigs = signed_by(&[&k[0], &k[1]], 0, &rule(true), 900);
         submit(&mut o, OBS + 5_000_000_000, 900, &sigs);
         assert_eq!(o.case(&acct(MARKET), 0).proposed, Outcome::No);
+    }
+
+    #[test]
+    fn an_existing_price_market_uses_the_strict_boundary_after_upgrade() {
+        let (mut o, keys) = price_oracle(true);
+        o.upgrade_in_flight = true;
+        env::state_write(&o);
+        drop(o);
+        act_unpaid(SELF, 0);
+        let mut migrated = OracleContract::migrate();
+        let signatures = signed_by(&[&keys[0], &keys[1]], 0, &rule(true), STRIKE);
+        submit(&mut migrated, OBS, STRIKE, &signatures);
+        assert_eq!(migrated.case(&acct(MARKET), 0).proposed, Outcome::No);
+        assert!(migrated.upgrade_proven);
+        assert!(!migrated.upgrade_in_flight);
     }
 
     #[test]

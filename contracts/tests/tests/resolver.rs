@@ -126,7 +126,7 @@ async fn btc_price_market(w: &World) -> anyhow::Result<u64> {
         .call(w.market.id(), "create_market")
         .deposit(NearToken::from_millinear(60))
         .args_json(json!({
-            "title": "Will bitcoin close at or above 100.00 USD?", "rule_text": "Yes if the price is at or above 100.00.",
+            "title": "Will bitcoin close above 100.00 USD?", "rule_text": "Yes if the price is strictly above 100.00. Otherwise No.",
             "resolution_source": "Median of BTC-USD one minute closes on Coinbase, Kraken and Bitstamp",
             "void_policy": "Fewer than two exchanges publish a price.",
             "category": "crypto", "subcategory": "bitcoin", "close_at": close_at.to_string(),
