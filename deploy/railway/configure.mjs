@@ -20,7 +20,8 @@ for (const [name, fields] of Object.entries(settings)) {
 execFileSync('railway', args, { stdio: 'inherit' });
 const actual = JSON.parse(execFileSync('railway', ['environment', 'config', '--environment', environmentId, '--json'], { encoding: 'utf8' }));
 // Railway omits these default values from the environment config response.
-const defaults = { 'deploy.restartPolicyType': 'ON_FAILURE', 'deploy.sleepApplication': false };
+const defaults = { 'deploy.restartPolicyType': 'ON_FAILURE', 'deploy.restartPolicyMaxRetries': 10,
+  'deploy.sleepApplication': false };
 for (const [name, fields] of Object.entries(settings)) {
   for (const [path, expected] of Object.entries(fields)) {
     const value = path.split('.').reduce((object, key) => object?.[key], actual.services[services.get(name)]) ?? defaults[path] ?? (expected === null ? null : undefined);

@@ -50,7 +50,8 @@ export function verifyTarget(data, selected = services) {
        Object.keys(staged.patch).length))) {
     throw new Error('Apply or discard staged Railway changes before releasing');
   }
-  const defaults = { 'deploy.restartPolicyType': 'ON_FAILURE', 'deploy.sleepApplication': false };
+  const defaults = { 'deploy.restartPolicyType': 'ON_FAILURE', 'deploy.restartPolicyMaxRetries': 10,
+    'deploy.sleepApplication': false };
   for (const service of selected) {
     const actual = data.environment.config.services[service.id];
     if (actual?.source?.repo || actual?.source?.image ||

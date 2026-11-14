@@ -8,9 +8,9 @@ const env = { GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: 'SHC-Labs/DragonsMarket
 const id = '11111111-1111-4111-8111-111111111111';
 const settings = JSON.parse(readFileSync(new URL('./services.json', import.meta.url), 'utf8'));
 
-function target() {
+function target(selected = services) {
   const config = { services: {} };
-  for (const service of services) {
+  for (const service of selected) {
     const value = config.services[service.id] = {};
     for (const [path, expected] of Object.entries(settings[service.name])) {
       const keys = path.split('.');
@@ -75,6 +75,27 @@ test('omitted Railway defaults retain their documented meaning', () => {
   delete data.environment.config.services[services[1].id].deploy.restartPolicyType;
   delete data.environment.config.services[services[1].id].deploy.sleepApplication;
   verifyTarget(data);
+});
+
+test('publishers accept Railway omitted retry defaults but still reject changed limits', () => {
+  const publisher = { name: 'publishers', id };
+  const selected = [...services, publisher];
+  const data = target(selected);
+  const deploy = data.environment.config.services[id].deploy;
+  delete deploy.restartPolicyType;
+  delete deploy.restartPolicyMaxRetries;
+  delete deploy.sleepApplication;
+  verifyTarget(data, selected);
+  for (const count of [0, 3, 9, 11]) {
+    deploy.restartPolicyMaxRetries = count;
+    assert.throws(() => verifyTarget(data, selected), /publishers.deploy.restartPolicyMaxRetries/);
+  }
+});
+
+test('an omitted retry count cannot satisfy a service configured below the Railway default', () => {
+  const data = target();
+  delete data.environment.config.services[services[1].id].deploy.restartPolicyMaxRetries;
+  assert.throws(() => verifyTarget(data), /server.deploy.restartPolicyMaxRetries/);
 });
 
 test('query transport uses a project token and refuses redirects without exposing API error contents', async () => {
