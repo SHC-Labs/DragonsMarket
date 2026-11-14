@@ -178,6 +178,12 @@ jobs:
         # Partition every Cargo integration target, including newly added ones. Keep
         # two sandbox processes per runner; increasing threads breaks timed disputes.
         run: node run-sandbox-shard.mjs ${{ matrix.shard }} 8
+      - name: Fetch the pinned wNEAR fixture for relay top-up integration
+        if: matrix.shard == 0
+        run: |
+          mkdir -p target/intents
+          curl --fail --location --retry 3 https://raw.githubusercontent.com/near/intents/16d04f6ec4401263f8914638710260da50bb46b0/releases/wnear.wasm --output target/intents/wnear.wasm
+          echo "b72c26d390b23f4517d091a8aab06b0369d465356ec5fb337d5fda076da38ac0  target/intents/wnear.wasm" | sha256sum --check
       - name: Agent, keeper and DAO integration with the compiled contracts
         if: matrix.shard == 0
         working-directory: .

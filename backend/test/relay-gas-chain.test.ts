@@ -123,8 +123,8 @@ test('every relayed action, including the refund paths and the oracle actions, b
     await measure('register', buyer, transfer(market.accountId, registrationFee, { msg: 'register' }));
     await measure('register again (market refunds)', buyer, transfer(market.accountId, registrationFee, { msg: 'register' }));
     await measure('buy', buyer, transfer(market.accountId, 10n * USD, { msg: `buy:${openMarket}:yes:1` }));
-    await measure('buy with an impossible min_out (market refunds)', buyer, transfer(market.accountId, 10n * USD, { msg: `buy:${openMarket}:yes:${'9'.repeat(39)}` }));
-    await measure('a third refunded action in an hour (market refunds, signer paused)', buyer, transfer(market.accountId, 10n * USD, { msg: `buy:${openMarket}:yes:${'9'.repeat(39)}` }));
+    await measure('buy with an impossible min_out (market refunds)', buyer, transfer(market.accountId, 10n * USD, { msg: `buy:${openMarket}:yes:${'9'.repeat(38)}` }));
+    await measure('a third refunded action in an hour (market refunds, signer paused)', buyer, transfer(market.accountId, 10n * USD, { msg: `buy:${openMarket}:yes:${'9'.repeat(38)}` }));
     await assert.rejects(relay.submit({ signed: [payload(buyer, [transfer(market.accountId, 10n * USD, { msg: `buy:${openMarket}:yes:1` }), transfer(relayer.accountId, RELAY_FEE)])] }, allow),
       (error: unknown) => error instanceof RelayError && error.code === 'signer_suspended', 'three refunded actions in an hour pause the signer');
     await measure('propose on an open market with 512-byte evidence (oracle refunds)', proposer,

@@ -194,12 +194,22 @@ test('what a signed payload can make the relayer pay for', { timeout: 600000 }, 
         await new Promise(resolve => setTimeout(resolve, Math.max(0, deadline - Date.now() - 1500)));
       });
       const relay = await relayWith({ primary, second: null });
+      const keyNonces = async () => {
+        const result = await rpc.reads.call('query', { request_type: 'view_access_key_list', finality: 'final', account_id: relayer.accountId }) as {
+          keys: { public_key: string; access_key: { nonce: number } }[];
+        };
+        return result.keys.map(key => [key.public_key, key.access_key.nonce] as const).sort(([a], [b]) => a.localeCompare(b));
+      };
+      const noncesBefore = await keyNonces();
       const before = await nearOf(relayer.accountId);
-      const outcome = await relay({ signed: [item] }, allow).then(() => 'ok', (error: unknown) => error instanceof RelayError ? `${error.code}${error.hash ? ' (sent)' : ''}` : String(error));
+      await assert.rejects(relay({ signed: [item] }, allow),
+        (error: unknown) => error instanceof RelayError && error.code === 'invalid_deadline');
       const spent = before - await nearOf(relayer.accountId);
-      t.diagnostic(`deadline race: ${outcome}, relayer spent ${spent} yocto`);
-      assert.ok(!outcome.endsWith('(sent)'), `the relay sent a transaction that could not land before its deadline: ${outcome}`);
-      assert.equal(spent, 0n, 'and spent gas on it');
+      t.diagnostic(`deadline race: invalid_deadline, relayer spent ${spent} yocto`);
+      assert.ok(held, 'simulation reached the deadline race');
+      // The journal records a signed transaction hash before simulation; it does not prove a broadcast.
+      assert.deepEqual(await keyNonces(), noncesBefore, 'no relayer access-key nonce was consumed');
+      assert.equal(spent, 0n, 'no relayer gas was spent');
     });
 
     const agree = async (name: string, item: Record<string, string>) => {
