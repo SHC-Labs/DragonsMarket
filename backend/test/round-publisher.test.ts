@@ -75,12 +75,48 @@ test('each asset can carry its own spread, falling back to the shared one', () =
   assert.throws(() => policyFrom({ PRICE_MAX_DEVIATION_BPS: '50' }), /must be "approved"/);
 });
 
+const recorderConfig = {
+  deployment: { contracts: { rounds: 'rounds.near' } },
+  rpc: { primaryUrl: 'https://rpc.example/', primaryBearerToken: 'primary-test-token',
+    secondUrl: 'https://second.example/', secondBearerToken: 'secondary-test-token', intervalMs: 0 },
+} as unknown as Config;
+
 test('recording prices is off without its key and refuses an incomplete setup', () => {
-  const config = { deployment: { contracts: { rounds: 'rounds.near' } } } as unknown as Config;
+  const config = recorderConfig;
   assert.equal(recorderFrom({}, config), null);
   const full = { ROUND_PRICES_KEY: 'k', ROUND_PRICES_ACCOUNT: 'ops.near', ROUND_PRICES_RPC: 'https://rpc.example', PRICE_SIGNATURES_URL: 'http://server.internal:3500' };
   assert.equal(typeof recorderFrom(full, config), 'function');
   assert.throws(() => recorderFrom({ ...full, ROUND_PRICES_RPC: 'http://rpc.example' }, config), /https ROUND_PRICES_RPC/);
   assert.throws(() => recorderFrom({ ...full, ROUND_PRICES_ACCOUNT: '' }, config), /ROUND_PRICES_ACCOUNT/);
   assert.throws(() => recorderFrom(full, { deployment: { contracts: {} } } as unknown as Config), /rounds contract/);
+});
+
+test('the recorder authenticates only the configured RPC endpoint and clears stale credentials', async t => {
+  let expected: string | undefined;
+  let requests = 0;
+  t.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    assert.equal((init.headers as Record<string, string>).Authorization, expected);
+    const request = JSON.parse(String(init.body));
+    requests++;
+    const result = request.method === 'block'
+      ? { header: { timestamp_nanosec: '1000000000000' } }
+      : { result: [...Buffer.from(JSON.stringify({ series: 0 }))] };
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: 'keeper', result }));
+  });
+  const env = { ROUND_PRICES_KEY: secretFor().secret, ROUND_PRICES_ACCOUNT: 'ops.near',
+    PRICE_SIGNATURES_URL: 'http://server.internal:3500' };
+  for (const [url, bearer] of [
+    ['https://rpc.example', 'Bearer primary-test-token'],
+    ['https://second.example', 'Bearer secondary-test-token'],
+    ['https://unrelated.example', undefined],
+  ] as const) {
+    expected = bearer;
+    const run = recorderFrom({ ...env, ROUND_PRICES_RPC: url }, recorderConfig);
+    assert.equal(await run!(), 0);
+  }
+  expected = undefined;
+  const withoutToken = { ...recorderConfig, rpc: { ...recorderConfig.rpc,
+    primaryBearerToken: null, secondBearerToken: null } };
+  assert.equal(await recorderFrom({ ...env, ROUND_PRICES_RPC: 'https://rpc.example' }, withoutToken)!(), 0);
+  assert.equal(requests, 8);
 });

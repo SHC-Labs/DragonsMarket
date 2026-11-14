@@ -13,6 +13,7 @@ import { object } from './ingestion/block.js';
 import { candidate, recordEvidence, usdBoundary, type Asset, type Exchange, type Observation } from './prices.js';
 import { isUint } from './validate.js';
 import { run as recordRoundPrices } from '@dragons-market/keeper/round-prices';
+import { setRpcCredentials, setRpcPace } from '@dragons-market/keeper';
 
 const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
@@ -238,6 +239,11 @@ export function recorderFrom(env: NodeJS.ProcessEnv, config: Config): (() => Pro
   const { ROUND_PRICES_ACCOUNT: account, ROUND_PRICES_RPC: rpc, PRICE_SIGNATURES_URL: publishers } = env;
   if (!rounds || !account || !rpc?.startsWith('https://') || !publishers?.startsWith('http'))
     throw new Error('recording prices needs the rounds contract, ROUND_PRICES_ACCOUNT, an https ROUND_PRICES_RPC and PRICE_SIGNATURES_URL');
+  const credentials: [string, string][] = [];
+  if (config.rpc.primaryBearerToken) credentials.push([config.rpc.primaryUrl, config.rpc.primaryBearerToken]);
+  if (config.rpc.secondUrl && config.rpc.secondBearerToken) credentials.push([config.rpc.secondUrl, config.rpc.secondBearerToken]);
+  setRpcCredentials(credentials);
+  setRpcPace(config.rpc.intervalMs);
   return () => recordRoundPrices({ rpc, rounds, account, publishers }, env);
 }
 
