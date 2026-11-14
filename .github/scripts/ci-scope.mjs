@@ -29,6 +29,7 @@ export function ciScope(files, full = false) {
     for (const key of selected) scope[key] = true;
   }
   if (scope.backup) scope.database = true;
+  if (scope.deploy) scope.backend = true;
   scope.install = scope.backend || scope.mcp || scope.web || scope.database || scope.browser;
   return scope;
 }

@@ -24,6 +24,14 @@ test('backend changes exercise API contracts and real database tests without Rus
   for (const key of ['web', 'backup', 'browser', 'contracts', 'chain']) assert.equal(scope[key], false, key);
 });
 
+test('deployment checks build the backend modules and fixtures they import', () => {
+  for (const file of ['deploy/railway/release.mjs', 'deploy/railway/activate.test.mjs', '.dockerignore']) {
+    const scope = ciScope([file]);
+    for (const key of ['deploy', 'backend', 'install']) assert.equal(scope[key], true, `${file}: ${key}`);
+    for (const key of ['web', 'database', 'contracts', 'chain']) assert.equal(scope[key], false, `${file}: ${key}`);
+  }
+});
+
 test('backup and browser boundary changes retain their targeted integration checks', () => {
   assert.equal(ciScope(['backend/scripts/backup.sh']).backup, true);
   assert.equal(ciScope(['backend/ops/restore.sh']).database, true);
