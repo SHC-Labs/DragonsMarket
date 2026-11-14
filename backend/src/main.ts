@@ -10,6 +10,7 @@ import { ingestionStatus } from './ingestion/store.js';
 import { agentGateway } from './agent-gateway.js';
 import { createRelay } from './relay.js';
 import { relayJournal } from './relay-journal.js';
+import { createBrowserRpc } from './browser-rpc.js';
 
 const READ_POOL_SIZE = 4;
 const STATUS_POOL_SIZE = 2;
@@ -46,6 +47,7 @@ try {
       return backendStatus(statusPool, config);
     },
     createRelay(config, undefined, undefined, relayJournal(pool)),
+    createBrowserRpc(config),
   );
   server.on('error', () => {
     console.error('API failed to listen');

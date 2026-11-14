@@ -1,10 +1,10 @@
 "use client";
 
-import { useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { config } from "./config";
 import type { FunctionCall } from "./market";
 import { finalTransaction } from "./rpc";
-import { readWalletCall, recordWalletSend, transactionHash, walletCallConfirmed, walletJournalKey } from "./wallet-journal";
+import { readWalletCall, recordWalletSend, recoverWalletCall, transactionHash, walletCallConfirmed, walletJournalKey } from "./wallet-journal";
 
 export type TxState =
   | { phase: "idle" | "waiting" }
@@ -19,7 +19,7 @@ const subscribe = (notify: () => void) => {
   };
 };
 const empty = () => null;
-const uncertain = "This request is unconfirmed. Check it before sending another transaction.";
+const uncertain = "Confirmation pending. Check status before trying again.";
 
 export function useTx(send: (call: FunctionCall) => Promise<string>, account: string | null) {
   const key = walletJournalKey(config.network, account ?? "disconnected");
@@ -34,6 +34,28 @@ export function useTx(send: (call: FunctionCall) => Promise<string>, account: st
     : raw === "unavailable" ? { phase: "failed", message: "Site storage is unavailable. Enable storage for this site before submitting wallet transactions." }
     : raw !== null ? { phase: "unknown", message: uncertain }
       : status.key === key ? status.state : { phase: "idle" };
+
+  const waiting = status.key === key && status.state.phase === "waiting";
+  useEffect(() => {
+    if (!account || !readWalletCall(raw, account)?.hash || waiting || !navigator.locks) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    let attempts = 0;
+    const recover = async () => {
+      try {
+        await navigator.locks.request(key, { ifAvailable: true }, async lock => {
+          if (!lock || locked.current || controller.signal.aborted) return;
+          if (await recoverWalletCall(localStorage, key, account, finalTransaction, controller.signal)) {
+            setStatus({ key, state: { phase: "done", message: "Transaction confirmed. You can continue." } });
+            changed();
+          }
+        });
+      } catch { /* Keep the saved request when the network cannot confirm it. */ }
+      if (!controller.signal.aborted && ++attempts < 3) timer = setTimeout(recover, 3000);
+    };
+    void recover();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [account, key, raw, waiting]);
 
   const exclusive = async (work: () => Promise<boolean>) => {
     if (!account || locked.current) return false;
@@ -84,12 +106,11 @@ export function useTx(send: (call: FunctionCall) => Promise<string>, account: st
       update({ phase: "unknown", message: uncertain }); return false;
     }
     localStorage.removeItem(key);
-    update({ phase: "done", message: "The saved transaction finalized successfully. Review your balances before continuing." });
+    update({ phase: "done", message: "Transaction confirmed. You can continue." });
     return true;
   });
 
   const clear = () => exclusive(async () => {
-    if (!window.confirm("Have you checked the full transaction and wallet history and confirmed that it finished or was never submitted? Clearing this record does not cancel a transaction. Sending again may execute twice.")) return false;
     localStorage.removeItem(key); update({ phase: "idle" }); return true;
   });
   const reset = () => { if (raw === null) update({ phase: "idle" }); };

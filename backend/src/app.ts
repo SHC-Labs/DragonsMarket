@@ -8,6 +8,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Config } from './config.js';
 import { publicConfig } from './config.js';
 import { isReadRoute, ReadError, type ReadHandler } from './read-api.js';
+import type { BrowserRpc } from './browser-rpc.js';
 
 const WINDOW_MS = 60000;
 const REQUESTS_PER_WINDOW = 120;
@@ -135,8 +136,10 @@ export function createApp(
   privateRead?: PrivateHandler,
   serviceStatus?: ServiceStatusReader,
   relay?: Relay | null,
+  browserRpc?: BrowserRpc,
 ) {
   const limits: Counters = new Map(),
+    browserLimits: Counters = new Map(),
     challengeLimits: Counters = new Map(),
     tokenLimits: Counters = new Map(),
     relayClientLimits: Counters = new Map(),
@@ -194,9 +197,10 @@ export function createApp(
       return;
     }
     const access = privatePath !== null && isAgentAccessRoute(privatePath);
+    const browserRead = privatePath === '/v1/rpc';
     const token = access ? createHash('sha256').update(String(req.headers.authorization)).digest('hex') : '';
     if (
-      !withinLimit(limits, client, access ? ACCESS_REQUESTS_PER_WINDOW : REQUESTS_PER_WINDOW, now) ||
+      !withinLimit(browserRead ? browserLimits : limits, client, browserRead ? 600 : access ? ACCESS_REQUESTS_PER_WINDOW : REQUESTS_PER_WINDOW, now) ||
       (access && !withinLimit(tokenLimits, token, REQUESTS_PER_ACCESS_TOKEN, now))
     ) {
       res.setHeader('Retry-After', '60');
@@ -205,6 +209,24 @@ export function createApp(
     }
     if (privatePath === null) {
       reply(400, { error: { code: 'invalid_url', requestId } });
+      return;
+    }
+    if (browserRead) {
+      if (req.headers.origin !== config.webOrigin) { reply(403, { error: { code: 'origin_required', requestId } }); return; }
+      if (req.method === 'OPTIONS') {
+        res.setHeader('Access-Control-Allow-Methods', 'POST');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        res.setHeader('Access-Control-Max-Age', '600');
+        reply(204, null); return;
+      }
+      if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); reply(405, { error: { code: 'method_not_allowed', requestId } }); return; }
+      try {
+        if (!browserRpc) throw new ReadError(503, 'rpc_not_configured');
+        reply(200, await browserRpc(await body(req, 20000)));
+      } catch (error) {
+        reply(error instanceof ReadError ? error.status : 503,
+          { error: { code: error instanceof ReadError ? error.code : 'rpc_temporarily_unavailable', requestId } });
+      }
       return;
     }
     if (isAuthChallenge(privatePath) && req.method === 'POST' && req.headers.origin === config.webOrigin &&

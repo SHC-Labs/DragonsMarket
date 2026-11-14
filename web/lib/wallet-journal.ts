@@ -44,3 +44,14 @@ export async function recordWalletSend(store: Pick<Storage, "getItem" | "setItem
 export function walletCallConfirmed(pending: PendingWalletCall, result: unknown) {
   return pending.hash !== null && successfulCall(result, pending.hash, pending.account, pending.call);
 }
+
+export async function recoverWalletCall(store: Pick<Storage, "getItem" | "removeItem">, key: string,
+  account: string, read: (hash: string, account: string) => Promise<unknown>, signal: AbortSignal) {
+  const raw = store.getItem(key);
+  const pending = readWalletCall(raw, account);
+  if (!pending?.hash || signal.aborted) return false;
+  const result = await read(pending.hash, pending.account);
+  if (signal.aborted || store.getItem(key) !== raw || !walletCallConfirmed(pending, result)) return false;
+  store.removeItem(key);
+  return true;
+}

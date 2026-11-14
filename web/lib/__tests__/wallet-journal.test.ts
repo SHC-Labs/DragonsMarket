@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { readWalletCall, recordWalletSend, walletCallConfirmed, walletJournalKey } from "../wallet-journal";
+import { readWalletCall, recordWalletSend, recoverWalletCall, walletCallConfirmed, walletJournalKey } from "../wallet-journal";
 import type { FunctionCall } from "../market";
 
 const call: FunctionCall = { receiverId: "market.near", methodName: "sell", args: { market_id: "7", shares: "1000000" }, gas: "100000000000000", deposit: "1" };
 const hash = "B".repeat(44);
 function storage() {
   const entries = new Map<string, string>();
-  return { getItem: (key: string) => entries.get(key) ?? null, setItem: (key: string, value: string) => { entries.set(key, value); } };
+  return { getItem: (key: string) => entries.get(key) ?? null, setItem: (key: string, value: string) => { entries.set(key, value); },
+    removeItem: (key: string) => { entries.delete(key); } };
 }
 describe("durable wallet request journal", () => {
   it("records before sending and retains the full hash and immutable request", async () => {
@@ -59,4 +60,48 @@ describe("durable wallet request journal", () => {
     expect(walletCallConfirmed(sent, { status: { SuccessValue: "" } })).toBe(false);
     expect(walletCallConfirmed({ ...sent, hash: null }, {})).toBe(false);
   });
+});
+
+function receipt() {
+  return { final_execution_status: "FINAL", status: { SuccessValue: "" },
+    transaction: { hash, signer_id: "alice.near", receiver_id: call.receiverId, actions: [{ FunctionCall: {
+      method_name: call.methodName, args: Buffer.from(JSON.stringify(call.args)).toString("base64"), deposit: call.deposit,
+    } }] },
+    transaction_outcome: { id: hash, outcome: { executor_id: "alice.near", receipt_ids: ["call"], status: { SuccessReceiptId: "call" } } },
+    receipts_outcome: [{ id: "call", outcome: { executor_id: call.receiverId, receipt_ids: [], status: { SuccessValue: "" } } }],
+  };
+}
+it("recovers a finalized saved request without another wallet send", async () => {
+  const store = storage(), controller = new AbortController();
+  await recordWalletSend(store, "key", "alice.near", call, async () => hash);
+  const read = vi.fn(async () => receipt());
+  expect(await recoverWalletCall(store, "key", "alice.near", read, controller.signal)).toBe(true);
+  expect(read).toHaveBeenCalledWith(hash, "alice.near");
+  expect(store.getItem("key")).toBeNull();
+});
+it("retains pending requests on read failures, incomplete receipts and changed account", async () => {
+  const store = storage(), controller = new AbortController();
+  await recordWalletSend(store, "key", "alice.near", call, async () => hash);
+  const raw = store.getItem("key");
+  await expect(recoverWalletCall(store, "key", "alice.near", async () => { throw new Error("429"); }, controller.signal)).rejects.toThrow("429");
+  for (const result of [{ ...receipt(), final_execution_status: "EXECUTED" }, { ...receipt(), receipts_outcome: [] }]) {
+    expect(await recoverWalletCall(store, "key", "alice.near", async () => result, controller.signal)).toBe(false);
+  }
+  const read = vi.fn(async () => receipt());
+  expect(await recoverWalletCall(store, "key", "bob.near", read, controller.signal)).toBe(false);
+  expect(read).not.toHaveBeenCalled();
+  expect(store.getItem("key")).toBe(raw);
+});
+it("cannot clear a replacement request or update an unmounted account", async () => {
+  for (const abort of [false, true]) {
+    const store = storage(), controller = new AbortController();
+    await recordWalletSend(store, "key", "alice.near", call, async () => hash);
+    const read = async () => {
+      if (abort) controller.abort();
+      else store.setItem("key", "replacement");
+      return receipt();
+    };
+    expect(await recoverWalletCall(store, "key", "alice.near", read, controller.signal)).toBe(false);
+    expect(store.getItem("key")).not.toBeNull();
+  }
 });

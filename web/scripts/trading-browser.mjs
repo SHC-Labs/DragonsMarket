@@ -79,7 +79,7 @@ export async function checkTradingBrowser(page, base) {
     await ticket.getByRole("button", { name: "Sell Yes", exact: true }).click();
     await expect.poll(() => sent.length).toBe(1);
     assert.equal(sent[0].actions[0].params.methodName, "sell");
-    await expect(ticket.getByText("This request is unconfirmed.", { exact: false })).toBeVisible({ timeout: 40000 });
+    await expect(ticket.getByText("Confirmation pending.", { exact: false })).toBeVisible({ timeout: 40000 });
     await page.reload({ waitUntil: "networkidle" });
     await expect(ticket.getByText("Transaction: " + "E".repeat(44))).toBeVisible();
     await ticket.getByRole("button", { name: "Sell", exact: true }).click();
@@ -89,9 +89,15 @@ export async function checkTradingBrowser(page, base) {
     await expect(other.getByRole("complementary", { name: "Trade ticket" }).getByLabel("Amount", { exact: true })).toBeDisabled();
     await other.close();
     assert.equal(sent.length, 1, "timeout, form changes, reload and another tab cannot duplicate the request");
+    await ticket.getByRole("button", { name: "Reset request", exact: true }).click();
+    const reset = page.getByRole("dialog", { name: "Reset this request?" });
+    await expect(reset).toBeVisible();
+    await reset.getByRole("button", { name: "Keep request", exact: true }).click();
+    await expect(ticket.getByLabel("Shares to sell")).toBeDisabled();
     final = true;
-    await ticket.getByRole("button", { name: "Check saved transaction" }).click();
-    await expect(ticket.getByText("The saved transaction finalized successfully.", { exact: false })).toBeVisible();
+    await page.reload({ waitUntil: "networkidle" });
+    await expect(ticket.getByText("Transaction confirmed. You can continue.")).toBeVisible();
+    assert.equal(sent.length, 1, "refresh recovers the existing receipt without resending");
 
     market.status = "closed"; market.close_at = ns(Date.now() - 1000);
     await page.reload({ waitUntil: "networkidle" });

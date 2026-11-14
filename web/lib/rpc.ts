@@ -12,6 +12,7 @@ function toBase64(text: string): string {
 async function rpc<T>(method: string, params: unknown): Promise<T> {
   const res = await fetch(config.rpcUrl, {
     method: "POST",
+    signal: AbortSignal.timeout(20000),
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: "pm", method, params }),
   });
