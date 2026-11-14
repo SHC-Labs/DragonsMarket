@@ -8,6 +8,8 @@ import { createPrivateApi } from './private-api.js';
 import { accessKeyChecker } from './access-key.js';
 import { ingestionStatus } from './ingestion/store.js';
 import { agentGateway } from './agent-gateway.js';
+import { createRelay } from './relay.js';
+import { relayJournal } from './relay-journal.js';
 
 const READ_POOL_SIZE = 4;
 const STATUS_POOL_SIZE = 2;
@@ -43,6 +45,7 @@ try {
       await verifyDatabase(statusPool, config);
       return backendStatus(statusPool, config);
     },
+    createRelay(config, undefined, undefined, relayJournal(pool)),
   );
   server.on('error', () => {
     console.error('API failed to listen');

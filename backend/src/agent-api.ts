@@ -2,8 +2,13 @@ import {
   AgentApiError, createAgentApi, type AgentApi, type GenerateIntentRequest, type IntentType, type SignedData,
   type Status,
 } from '@near-intents-agent-api/sdk';
-import { object } from './ingestion/block.js';
+import { canonical, object } from './ingestion/block.js';
 import { isAccount as account } from './validate.js';
+import type { Owner } from './agent-paths.js';
+import { isEvmOwner, type EvmOwner } from './agent-evm-consent.js';
+import { evmPolicyRequest } from './agent-evm-policy.js';
+import { nearPolicyRequest } from './agent-near-policy.js';
+import type { PolicyApproval, PolicyExpectation } from './agent-policy-approval.js';
 
 export { AgentApiError };
 
@@ -49,6 +54,17 @@ export interface AccountPolicy {
   synced: boolean;
   policy: Record<string, unknown> | null;
 }
+export interface PolicyRevision {
+  revision: number;
+  status: AccountPolicy['status'];
+  policy: Record<string, unknown> | null;
+}
+
+export function appliedFreeze(policy: AccountPolicy): boolean | null {
+  if (policy.status !== 'APPLIED' || !policy.synced || policy.revision === null
+    || policy.revision < 1 || typeof policy.policy?.frozen !== 'boolean') return null;
+  return policy.policy.frozen;
+}
 
 export interface OwnerIntent {
   correlation_id: string;
@@ -56,8 +72,10 @@ export interface OwnerIntent {
   agent_id: string;
   status: string;
   expires_at: string;
+  signer: { type: 'near'; account_id: string; public_key: string } | EvmOwner;
   intent: { standard: string; payload: Record<string, unknown> };
   preview: Record<string, unknown> & { summary: string };
+  policy_approval?: PolicyApproval;
 }
 
 export interface Expected {
@@ -140,19 +158,23 @@ export function expectedOf(send: Send, agentId: string, agent: string): Expected
   } };
 }
 
-function intentOf(value: unknown, type: IntentType, owner: string, agentId?: string): OwnerIntent {
+function intentOf(value: unknown, type: IntentType, owner: Owner | EvmOwner, agentId?: string): OwnerIntent {
   const signer = object(value) && object(value.signer) ? value.signer : null;
+  const expected: OwnerIntent['signer'] = 'type' in owner ? owner
+    : { type: 'near', account_id: owner.account, public_key: owner.publicKey };
   if (!object(value) || typeof value.correlation_id !== 'string' || !value.correlation_id.startsWith('intent_')
     || !CORRELATION.test(value.correlation_id) || value.type !== type || typeof value.agent_id !== 'string'
     || !AGENT_ID.test(value.agent_id) || (agentId !== undefined && value.agent_id !== agentId)
     || value.status !== 'PENDING_SIGNATURE' || typeof value.expires_at !== 'string'
-    || Number.isNaN(Date.parse(value.expires_at)) || signer?.type !== 'near' || signer.account_id !== owner
+    || Number.isNaN(Date.parse(value.expires_at)) || canonical(signer) !== canonical(expected)
+    || (expected.type === 'evm' && !isEvmOwner(signer))
     || !object(value.intent) || typeof value.intent.standard !== 'string' || !object(value.intent.payload)
     || !object(value.preview) || typeof value.preview.summary !== 'string') {
     return untrusted('intent');
   }
   return { correlation_id: value.correlation_id, type, agent_id: value.agent_id, status: value.status,
     expires_at: value.expires_at, intent: { standard: value.intent.standard, payload: value.intent.payload },
+    signer: { ...expected },
     preview: { ...value.preview, summary: value.preview.summary } };
 }
 
@@ -170,6 +192,28 @@ export function readAgentApiSettings(env: NodeJS.ProcessEnv): AgentApiSettings |
   return settings;
 }
 
+function policyExpectationError(request: GenerateIntentRequest, expected?: PolicyExpectation) {
+  const policy = ['agent_create', 'agent_freeze', 'agent_unfreeze'].includes(request.type);
+  if (policy && !expected) return 'policy_approval_required';
+  if (request.type === 'agent_create' && expected && canonical(request.policy) !== canonical(expected.policy)) {
+    return 'policy_approval_mismatch';
+  }
+  return null;
+}
+
+function policyReadOwner(owner: unknown, generated: OwnerIntent) {
+  return (generated.type === 'agent_create' && owner === null) || canonical(owner) === canonical(generated.signer);
+}
+
+function policyWalletAccount(agent: unknown, generated: OwnerIntent) {
+  if (!object(agent) || agent.id !== generated.agent_id || !object(agent.wallet)
+    || typeof agent.wallet.near_account_id !== 'string' || !AGENT_ID.test(agent.wallet.near_account_id)) {
+    return untrusted('policy');
+  }
+  if (!policyReadOwner(agent.owner, generated)) return untrusted('policy');
+  return agent.wallet.near_account_id;
+}
+
 export class AgentApiClient {
   private readonly api: AgentApi;
 
@@ -180,6 +224,23 @@ export class AgentApiClient {
 
   private deadline(waitMs = 0) {
     return AbortSignal.timeout(this.settings.timeoutMs + waitMs);
+  }
+
+  async verifyService(expected: { network: string; walletContract: string }): Promise<void> {
+    const options = { signal: AbortSignal.timeout(Math.min(this.settings.timeoutMs, 2500)) };
+    const [network, identity] = await Promise.all([
+      answer(this.api.getNetwork(options)), answer(this.api.whoami(options)),
+    ]);
+    if (!object(network) || network.network !== 'mainnet' || network.network !== expected.network
+      || network.contract_id !== expected.walletContract || !account(network.contract_id)
+      || !Array.isArray(network.supported_owner_types) || !network.supported_owner_types.includes('near')) {
+      throw new AgentApiUnavailable('agent_api_incompatible');
+    }
+    const identifier = (value: unknown) => typeof value === 'string' && value.trim().length > 0 && value.length <= 256;
+    if (!object(identity) || !identifier(identity.tenant_id) || !identifier(identity.api_key_id)) {
+      throw new AgentApiUnavailable('invalid_agent_api_identity');
+    }
+    // Dependency status is advisory, not evidence of a wallet's policy or an execution outcome.
   }
 
   forGrant(grant: AgentGrant): GrantCalls {
@@ -203,10 +264,9 @@ export class AgentApiClient {
   }
 
   frozen(agentId: string): Promise<boolean> {
-    if (!AGENT_ID.test(agentId)) return Promise.reject(new Error('invalid_agent_id'));
-    return answer(this.api.getPolicy(agentId, { signal: this.deadline() })).then(v => {
-      if (!object(v) || !object(v.policy) || typeof v.policy.frozen !== 'boolean') return untrusted('policy');
-      return v.policy.frozen;
+    return this.policy(agentId).then(policy => {
+      const frozen = appliedFreeze(policy);
+      return frozen === null ? untrusted('policy') : frozen;
     });
   }
 
@@ -224,6 +284,27 @@ export class AgentApiClient {
     });
   }
 
+  policyHistory(agentId: string): Promise<PolicyRevision[]> {
+    if (!AGENT_ID.test(agentId)) return Promise.reject(new Error('invalid_agent_id'));
+    return answer(this.api.getPolicyHistory(agentId, { limit: 100 }, { signal: this.deadline() })).then(v => {
+      if (!object(v) || !Array.isArray(v.data) || v.data.length === 0 || v.data.length > 100) {
+        return untrusted('policy');
+      }
+      let previous = Infinity;
+      return v.data.map(entry => {
+        if (!object(entry) || !Number.isSafeInteger(entry.revision) || (entry.revision as number) < 1
+          || (entry.revision as number) >= previous || typeof entry.status !== 'string'
+          || !['SIGNED', 'APPLIED', 'FAILED'].includes(entry.status)
+          || !(entry.policy === null || (object(entry.policy) && typeof entry.policy.frozen === 'boolean'))) {
+          return untrusted('policy');
+        }
+        previous = entry.revision as number;
+        return { revision: previous, status: entry.status as PolicyRevision['status'],
+          policy: entry.policy as PolicyRevision['policy'] };
+      });
+    });
+  }
+
   wallet(agentId: string): Promise<{ near_account_id: string }> {
     if (!AGENT_ID.test(agentId)) return Promise.reject(new Error('invalid_agent_id'));
     return answer(this.api.getWallet(agentId, { signal: this.deadline() })).then(v => {
@@ -232,10 +313,36 @@ export class AgentApiClient {
     });
   }
 
-  generateIntent(request: GenerateIntentRequest, owner: string, idempotencyKey: string): Promise<OwnerIntent> {
+  generateIntent(request: GenerateIntentRequest, owner: Owner | EvmOwner, idempotencyKey: string,
+    expectation?: PolicyExpectation): Promise<OwnerIntent> {
+    request = structuredClone(request);
+    owner = { ...owner };
+    expectation = expectation ? structuredClone(expectation) : undefined;
+    const error = policyExpectationError(request, expectation);
+    if (error) return Promise.reject(new AgentApiUnavailable(error));
     const agentId = 'agent_id' in request ? request.agent_id : undefined;
     return answer(this.api.generateIntent(request, { idempotencyKey, signal: this.deadline() }))
-      .then(v => intentOf(v, request.type, owner, agentId));
+      .then(v => {
+        const generated = intentOf(v, request.type, owner, agentId);
+        return expectation ? this.policyIntent(generated, expectation) : generated;
+      });
+  }
+
+  private async policyIntent(generated: OwnerIntent, expectation: PolicyExpectation): Promise<OwnerIntent> {
+    const [agent, identity] = await Promise.all([
+      answer(this.api.getAgent(generated.agent_id, { signal: this.deadline() })),
+      answer(this.api.whoami({ signal: this.deadline() }))]);
+    const walletAccount = policyWalletAccount(agent, generated);
+    if (!object(identity) || typeof identity.tenant_id !== 'string') return untrusted('policy');
+    if (expectation.walletAccount !== undefined && expectation.walletAccount !== walletAccount) return untrusted('policy');
+    const approval: PolicyApproval = { tenantId: identity.tenant_id, walletAccount,
+      walletContract: expectation.walletContract, revision: expectation.revision,
+      policy: expectation.policy, storageRefundTo: expectation.storageRefundTo };
+    const valid = generated.signer.type === 'near'
+      ? nearPolicyRequest(generated, approval.walletContract, approval)
+      : evmPolicyRequest(generated, approval.walletContract, approval);
+    if (!valid) return untrusted('policy');
+    return { ...generated, policy_approval: approval };
   }
 
   submitIntent(intent: Pick<OwnerIntent, 'type' | 'correlation_id' | 'agent_id'>, signed: Record<string, unknown>) {

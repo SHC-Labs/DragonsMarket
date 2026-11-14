@@ -1,6 +1,6 @@
 import type { AgentWorkerLink } from './config.js';
 import { ReadError } from './read-api.js';
-import type { AgentRoutes, Body, Owner } from './agent-paths.js';
+import type { AgentRoutes, Body, AgentOwner } from './agent-paths.js';
 
 const WORKER_TIMEOUT_MS = 60000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -9,7 +9,7 @@ const CODE = /^[a-z0-9_]{1,64}$/;
 export interface Forwarded {
   method: string;
   path: string;
-  owner?: Owner;
+  owner?: AgentOwner;
   authorization?: string;
   body: Record<string, unknown> | null;
 }

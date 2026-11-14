@@ -6,12 +6,15 @@ import { dirname, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { agentGateway } from '../src/agent-gateway.js';
 import { createAgentWorkerServer } from '../src/agent-worker-server.js';
+import { agentReadiness } from '../src/agent-readiness.js';
 import type { AgentRoutes, Body } from '../src/agent-paths.js';
 import { ReadError } from '../src/read-api.js';
+import { policyOwner } from './evm-policy-fixture.js';
+import { sessionAgentOwner } from '../src/agent-owner.js';
 
 const TOKEN = 'w'.repeat(32);
 const LINK = { url: 'http://agent-worker.test', token: TOKEN };
-const OWNER = { account: 'alice.near', publicKey: 'ed25519:key' };
+const OWNER = { account: 'alice.near', publicKey: 'ed25519:' + '1'.repeat(32) };
 const OWNER_PATH = `/v1/agents/${'a'.repeat(64)}/actions`;
 const noBody: Body = () => Promise.reject(new ReadError(400, 'invalid_json'));
 
@@ -53,6 +56,28 @@ test('worker readiness follows database availability and exposes no failure deta
   await withWorker(recording().routes, async url => {
     assert.equal((await fetch(`${url}/health/ready`)).status, 503);
   });
+});
+
+test('provider outages make readiness fail without stopping authenticated reconciliation routes', async () => {
+  let time = 0, available = true;
+  const ready = agentReadiness(async () => {}, async () => {
+    if (!available) throw new Error('naa_private_provider_detail');
+  }, () => time);
+  await withWorker(recording().routes, async url => {
+    assert.equal((await fetch(`${url}/health/ready`)).status, 200);
+    time = 30000;
+    available = false;
+    const down = await fetch(`${url}/health/ready`);
+    assert.equal(down.status, 503);
+    assert.deepEqual(await down.json(), { status: 'not_ready' });
+    assert.equal((await fetch(`${url}/health`)).status, 200);
+    const request = { method: 'GET', path: '/v1/agent-access/operations', authorization: 'Bearer dmk_fixture' };
+    assert.equal((await post(url, `Bearer ${TOKEN}`, request)).status, 200);
+    assert.equal((await post(url, 'Bearer wrong', request)).status, 401);
+    available = true;
+    time = 60000;
+    assert.equal((await fetch(`${url}/health/ready`)).status, 200);
+  }, ready);
 });
 
 test('the worker acts only for the holder of its token', () => withWorker(recording().routes, async url => {
@@ -106,6 +131,64 @@ test('the gateway carries the owner, the token and the body through to the same 
   assert.deepEqual(seen.calls, [['owner', 'POST', OWNER_PATH, OWNER],
     ['access', 'GET', '/v1/agent-access/markets', 'Bearer dmk_x'],
     ['access', 'POST', '/v1/agent-access/actions', undefined]]);
+});
+
+test('the private worker refuses ambiguous wallet identities and mismatched principals or keys', async () => {
+  const seen = recording();
+  const evm = { type: 'evm', account: `eip155:8453:${policyOwner.address}`, signer: policyOwner };
+  await withWorker(seen.routes, async url => {
+    for (const owner of [
+      { ...OWNER, account: 'eip155:1:0x' + 'ab'.repeat(20) },
+      { ...OWNER, publicKey: '0x' + 'ab'.repeat(64) },
+      { ...OWNER, publicKey: 'ed25519:invalid' },
+      { ...OWNER, account: 'alice.near\n' },
+      { ...evm, publicKey: OWNER.publicKey },
+      { ...evm, account: `eip155:1:${policyOwner.address}` },
+      { ...evm, account: policyOwner.address },
+      { ...evm, signer: { ...policyOwner, public_key: OWNER.publicKey } },
+      { ...evm, signer: { ...policyOwner, chain_id: '8453' } },
+      { ...evm, signer: { ...policyOwner, address: '0x' + 'ab'.repeat(20) } },
+      { ...OWNER, type: 'solana' },
+    ]) {
+      const response = await post(url, `Bearer ${TOKEN}`, { method: 'GET', path: '/v1/agents', owner });
+      assert.equal(response.status, 400);
+    }
+  });
+  assert.equal(seen.calls.length, 0);
+});
+
+test('the worker admits EVM inspection and revocation but rejects new spending authority', async () => {
+  const seen = recording();
+  const owner = { type: 'evm' as const, account: `eip155:8453:${policyOwner.address}`, signer: policyOwner };
+  const path = `/v1/agents/${'a'.repeat(64)}`;
+  await withWorker(seen.routes, async url => {
+    const gateway = agentGateway({ url, token: TOKEN });
+    assert.deepEqual(await gateway.owner('GET', '/v1/agents', owner, noBody), { ok: true });
+    assert.deepEqual(await gateway.owner('POST', `${path}/revoke`, owner, noBody), { ok: true });
+    for (const suffix of ['', '/grant', '/actions', '/freeze', '/unfreeze', '/access']) {
+      const response = await post(url, `Bearer ${TOKEN}`, {
+        method: 'POST', path: suffix ? path + suffix : '/v1/agents', owner, body: {},
+      });
+      assert.equal(response.status, 409, suffix);
+      assert.equal((await response.json()).error.code, 'agent_owner_wallet_not_supported');
+    }
+  });
+  assert.deepEqual(seen.calls, [['owner', 'GET', '/v1/agents', owner], ['owner', 'POST', `${path}/revoke`, owner]]);
+});
+
+test('session forwarding binds the persisted wallet type, chain and recovered key without coercing identity', () => {
+  const identity = { wallet_type: 'evm', account_id: `eip155:8453:${policyOwner.address}`,
+    public_key: policyOwner.public_key, evm_chain_id: '8453' };
+  const expected = { type: 'evm', account: identity.account_id, signer: policyOwner };
+  assert.deepEqual(sessionAgentOwner(identity), expected);
+  for (const patch of [
+    { wallet_type: 'near' }, { wallet_type: 'solana' }, { evm_chain_id: null },
+    { evm_chain_id: '08453' }, { evm_chain_id: '1' }, { evm_chain_id: '9007199254740993' },
+    { account_id: policyOwner.address }, { public_key: OWNER.publicKey },
+    { account_id: `eip155:8453:0x${'ab'.repeat(20)}` },
+  ]) assert.throws(() => sessionAgentOwner({ ...identity, ...patch }), /invalid_(owner|session_identity)/);
+  assert.deepEqual(sessionAgentOwner({ wallet_type: 'near', evm_chain_id: null,
+    account_id: OWNER.account, public_key: OWNER.publicKey }), OWNER);
 });
 
 test('a route that takes no body still works, and a body too large stops at the API', async () => {

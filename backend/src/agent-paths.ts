@@ -1,7 +1,11 @@
+import type { EvmOwner } from './agent-evm-consent.js';
+
 export type Body = () => Promise<Record<string, unknown>>;
 export interface Owner { account: string; publicKey: string }
+export interface EvmAgentOwner { type: 'evm'; account: string; signer: EvmOwner }
+export type AgentOwner = Owner | EvmAgentOwner;
 export interface AgentRoutes {
-  owner(method: string, path: string, owner: Owner, body: Body): Promise<unknown>;
+  owner(method: string, path: string, owner: AgentOwner, body: Body): Promise<unknown>;
   access(method: string, path: string, authorization: string | undefined, body: Body): Promise<unknown>;
 }
 

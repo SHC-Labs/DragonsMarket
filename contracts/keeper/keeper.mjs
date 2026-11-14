@@ -14,6 +14,7 @@
 //                         [--prepare-feed] [--require-live-feed] [--require-scoped-keys]
 //   node keeper.mjs check --rpc URL --market ID --oracle ID --council ID --rounds ID [--treasury ID] [--min-margin NEAR] [--release FILE|-]
 //                         [--expect-sealed] [--watch-dao] [--runway-config PATH] [--operator ID] [--collection-code-hash HASH]
+//                         [--nft-custody FILE]
 //                         [--expect-fee-rate-bps N] [--expect-max-fee-rate-bps N] [--expect-revenue-share-bps N]
 //
 // --rpc takes one endpoint or several separated by commas. A call that an endpoint refuses (HTTP 429 or 5xx, a timeout) is retried
@@ -26,7 +27,8 @@
 // least what they owe, both read at one finalized block and read again a few blocks later before a shortfall is reported
 // (more than they owe is reported and never credited); whether the verifier has a key registered for any of the three, lets
 // them pay by their own calls, has locked them or has paused transfers; how many NEAR access keys each has (--expect-sealed
-// makes any key a problem, for use after seal); and how much NEAR each contract account has left after paying for the
+// makes financial keys a problem, for use after seal); --nft-custody pins an approved platform-managed collection,
+// otherwise the collection must also be keyless when --expect-sealed is set; and how much NEAR each account has left for
 // storage it uses. --watch-dao lists the open proposals of the --treasury DAO that name these contracts and flags any that is
 // not on the treasury helper's allow-list. It never votes. The three --expect-*-bps options compare the market's fee rate, its fee
 // rate ceiling and its revenue share with what the DAO announced, so a change of any of them shows up as a problem on the next run. `check` exits 1 if anything is wrong.
@@ -66,6 +68,7 @@ import { b58decode, b58encode, rpc, setRpcPace, view, viewer } from "./chain.mjs
 export { setRpcPace, setRpcCredentials, rpc as keeperRpc } from './chain.mjs';
 import { compareCodeHashes, describeRelease, liveCodeHashes, parseReleaseHashes, upgradeProposalProblems } from "./release-check.mjs";
 import { reviewKind, storageRunway } from "./treasury.mjs";
+import { verifyNftCustody } from "./nft-custody.mjs";
 import { readQueue, writeQueue, withQueueLock, touch, finish, retry, selectJobs, bounded, serializeByKey, ingestFile, feedIsCurrent } from "./due-queue.mjs";
 
 const TGAS = 10n ** 12n;
@@ -608,11 +611,9 @@ export function verifierProblems({ name, id, keys, predecessorAuth, locked }) {
   return problems;
 }
 
-export function tokenProblems({ token, market, marketRegistered, rounds, roundsRegistered, verifier, verifierRegistered }) {
+export function tokenProblems({ token, verifier, verifierRegistered }) {
   const problems = [];
-  if (!marketRegistered) problems.push(`market ${market} is not registered with the token ${token}: the token refuses every deposit and buy by ft_transfer_call, so register it with storage_deposit on the token`);
-  if (rounds && !roundsRegistered) problems.push(`rounds ${rounds} is not registered with the token ${token}: the token refuses every deposit and stake by ft_transfer_call, so register it with storage_deposit on the token`);
-  if (!verifierRegistered) problems.push(`the verifier ${verifier} is not registered with the token ${token}: the market cannot move a token deposit into Intents, so every one goes back to its sender`);
+  if (!verifierRegistered) problems.push(`the verifier ${verifier} is not registered with the token ${token}: users cannot fund their own Intents accounts`);
   return problems;
 }
 
@@ -830,6 +831,39 @@ export async function releaseReport(opts, expected) {
 
 const listed = (names) => (names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0]);
 
+function readCollectionCustody(file) {
+  const raw = fs.readFileSync(file, "utf8");
+  if (Buffer.byteLength(raw) > 8192) throw new Error("NFT custody policy exceeds 8192 bytes");
+  return JSON.parse(raw);
+}
+
+export async function collectionCustodyReport(opts, collection, at) {
+  if (!collection) {
+    return { line: null, problems: opts["nft-custody"] ? ["approved NFT collection is not configured"] : [] };
+  }
+  const query = (request_type) => rpc(opts.rpc, "query", { request_type, block_id: at, account_id: collection });
+  try {
+    let report;
+    if (opts["nft-custody"]) {
+      const line = await verifyNftCustody(readCollectionCustody(opts["nft-custody"]), collection, {
+        keys: () => query("view_access_key_list").then((result) => result.keys),
+        account: () => query("view_account"),
+        view: viewer(opts.rpc, at),
+      });
+      report = { line, problems: [] };
+    } else {
+      const { keys } = await query("view_access_key_list");
+      if (!Array.isArray(keys)) throw new Error("invalid_nft_access_keys");
+      report = accessKeyReport([{ name: "collection", id: collection, count: keys.length }], opts["expect-sealed"] === true);
+    }
+    if (opts["collection-code-hash"] && (await query("view_account")).code_hash !== opts["collection-code-hash"])
+      report.problems.push("NFT collection code differs from --collection-code-hash");
+    return report;
+  } catch (error) {
+    return { line: null, problems: [`NFT collection custody check failed: ${error.message}`] };
+  }
+}
+
 async function check(opts) {
   const minMargin = nearToYocto(opts["min-margin"] ?? DEFAULT_MIN_MARGIN_NEAR);
   if (opts["watch-dao"] && !opts.treasury) throw new Error("--watch-dao needs --treasury, the DAO whose proposals to list");
@@ -895,9 +929,9 @@ async function check(opts) {
   const token = configs.market.collateral_token_id.slice(NEP141_PREFIX.length);
   const registered = async (id) => (await view(opts.rpc, token, "storage_balance_of", { account_id: id }, at)) !== null;
   const tokenTrouble = tokenProblems({
-    token, market: opts.market, marketRegistered: await registered(opts.market), rounds: opts.rounds, roundsRegistered: opts.rounds ? await registered(opts.rounds) : false, verifier: configs.market.verifier, verifierRegistered: await registered(configs.market.verifier),
+    token, verifier: configs.market.verifier, verifierRegistered: await registered(configs.market.verifier),
   });
-  if (!tokenTrouble.length) console.log(`token ${token}: the ${opts.rounds ? "market, rounds and the verifier are" : "market and the verifier are"} registered, so deposits by ft_transfer_call can arrive`);
+  if (!tokenTrouble.length) console.log(`token ${token}: the verifier is registered for deposits into user Intents accounts`);
   problems.push(...tokenTrouble);
 
   const keyCounts = [];
@@ -907,18 +941,7 @@ async function check(opts) {
   }
   // The NFT collection decides who holds a seat, so its keys and its code matter as much as ours. A key on it can seat anyone.
   const collection = configs.council.nft_contract;
-  let collectionReport = { line: null, problems: [] };
-  if (collection) {
-    const { keys } = await rpc(opts.rpc, "query", { request_type: "view_access_key_list", block_id: at, account_id: collection });
-    const report = accessKeyReport([{ name: "collection", id: collection, count: keys.length }], opts["expect-sealed"] === true);
-    collectionReport = report;
-    if (opts["collection-code-hash"]) {
-      const account = await rpc(opts.rpc, "query", { request_type: "view_account", block_id: at, account_id: collection });
-      if (account.code_hash !== opts["collection-code-hash"]) {
-        problems.push(`the NFT collection ${collection} runs code ${account.code_hash}, not the pinned ${opts["collection-code-hash"]}`);
-      }
-    }
-  }
+  const collectionReport = await collectionCustodyReport(opts, collection, at);
   const keys = accessKeyReport(keyCounts, opts["expect-sealed"] === true);
   console.log(keys.line);
   problems.push(...keys.problems);

@@ -159,6 +159,8 @@ export interface MarketConfig {
   collateral_token_id: string;
   paused: boolean;
   storage_deposit: string;
+  // Collateral an account without NEAR sends with the message "register" to open its market account.
+  registration_fee: string;
   max_positions: number;
   fee_rate_bps: number;
   revenue_pool: string | null;
@@ -365,6 +367,8 @@ export const storageDepositCall = (): FunctionCall => ({
 });
 
 export const depositCall = (amount: bigint) => verifierTransfer(market(), amount, "deposit");
+export const depositForCall = (contract: string, beneficiary: string, amount: bigint) =>
+  verifierTransfer(contract, amount, `deposit_for:${beneficiary}`);
 
 // Moves the token from the wallet into the signer's own Intents account, where every buy draws from. The verifier reads
 // the message as the account to credit and returns the whole amount if it cannot.
@@ -377,8 +381,9 @@ export const fundCall = (account: string, amount: bigint): FunctionCall => ({
 });
 
 // Buy with funds still in the Intents account.
+export const buyMessage = (id: string, side: Side, minShares: bigint) => `buy:${id}:${side}:${minShares}`;
 export const buyCall = (id: string, side: Side, amount: bigint, minShares: bigint) =>
-  verifierTransfer(market(), amount, `buy:${id}:${side}:${minShares}`);
+  verifierTransfer(market(), amount, buyMessage(id, side, minShares));
 
 // Buy with funds already deposited in the market.
 export const buyFromBalanceCall = (id: string, side: Side, amount: bigint, minShares: bigint): FunctionCall => ({
@@ -413,12 +418,14 @@ export const withdrawCall = (amount: bigint): FunctionCall => ({
   deposit: ONE_YOCTO,
 });
 
+export const proposeMessage = (id: string, outcome: Outcome, evidence: string) => `propose:${market()}:${id}:${outcome}:${evidence}`;
 export const proposeCall = (id: string, outcome: Outcome, evidence: string, bond: bigint) =>
-  verifierTransfer(oracle(), bond, `propose:${market()}:${id}:${outcome}:${evidence}`);
+  verifierTransfer(oracle(), bond, proposeMessage(id, outcome, evidence));
 
 // The challenger names the answer they say is right; jurors vote for it or for the proposal.
+export const challengeMessage = (id: string, answer: Outcome) => `challenge:${market()}:${id}:${answer}`;
 export const challengeCall = (id: string, answer: Outcome, bond: bigint) =>
-  verifierTransfer(oracle(), bond, `challenge:${market()}:${id}:${answer}`);
+  verifierTransfer(oracle(), bond, challengeMessage(id, answer));
 
 export const commitVoteCall = (id: string, commitment: string): FunctionCall => ({
   receiverId: oracle(),

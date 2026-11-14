@@ -31,11 +31,14 @@ export function messageHash(message: string, nonce: string, recipient: string, c
     .update(Buffer.concat([tag, str(message), n, str(recipient), callbackUrl ? Buffer.concat([Buffer.from([1]), str(callbackUrl)]) : Buffer.from([0])]))
     .digest();
 }
+export async function checkChallengeCapacity(pool: pg.Pool) {
+  const pending = await pool.query('SELECT count(*)::int AS n FROM wallet_challenges WHERE expires_at>now() AND consumed_at IS NULL');
+  if (pending.rows[0].n >= MAX_PENDING_CHALLENGES) throw new Error('challenge_capacity');
+}
 export async function challenge(pool: pg.Pool, config: Config, accountId: string) {
   if (!account(accountId) || (config.network === 'mainnet' && accountId.endsWith('.testnet')) || (config.network === 'testnet' && accountId.endsWith('.near')))
     throw new Error('invalid_account');
-  const pending = await pool.query('SELECT count(*)::int AS n FROM wallet_challenges WHERE expires_at>now() AND consumed_at IS NULL');
-  if (pending.rows[0].n >= MAX_PENDING_CHALLENGES) throw new Error('challenge_capacity');
+  await checkChallengeCapacity(pool);
   const id = randomUUID(),
     nonce = randomBytes(32).toString('base64'),
     browser = randomBytes(32).toString('base64url');
@@ -63,7 +66,7 @@ export function signedBy(publicKey: string, signature: string, proof: { message:
 }
 export async function login(pool: pg.Pool, config: Config, id: string, publicKey: string, signature: string, browser: string, checkKey: CheckAccessKey) {
   if (!UUID.test(id) || !browser || !/^([A-Za-z0-9+/]{86}==)$/.test(signature)) throw new Error('invalid_login');
-  const row = (await pool.query('SELECT * FROM wallet_challenges WHERE id=$1 AND consumed_at IS NULL AND expires_at>now()', [id])).rows[0];
+  const row = (await pool.query("SELECT * FROM wallet_challenges WHERE id=$1 AND wallet_type='near' AND consumed_at IS NULL AND expires_at>now()", [id])).rows[0];
   if (!row || row.origin !== config.webOrigin || row.network !== config.network || row.browser_hash !== tokenHash(browser)) throw new Error('invalid_login');
   // A definitive rejection spends the challenge, so one challenge cannot be replayed against the RPC. A failing RPC is not a rejection and leaves it usable.
   const signed = signedBy(publicKey, signature, { message: row.message, nonce: row.nonce, recipient: row.origin });
@@ -71,18 +74,37 @@ export async function login(pool: pg.Pool, config: Config, id: string, publicKey
     await pool.query('UPDATE wallet_challenges SET consumed_at=now() WHERE id=$1 AND consumed_at IS NULL', [id]);
     throw new Error('invalid_login');
   }
+  return completeLogin(pool, config, { id, publicKey, walletType: 'near' });
+}
+
+export async function completeLogin(
+  pool: pg.Pool,
+  config: Config,
+  proof: { id: string; publicKey: string; walletType: 'near' | 'evm' },
+) {
   const c = await pool.connect(),
     token = randomBytes(32).toString('base64url');
   try {
     await c.query('BEGIN');
-    const consumed = await c.query('UPDATE wallet_challenges SET consumed_at=now() WHERE id=$1 AND consumed_at IS NULL AND expires_at>now()', [id]);
+    const consumed = await c.query(
+      `UPDATE wallet_challenges SET consumed_at=now()
+       WHERE id=$1 AND wallet_type=$2 AND network=$3 AND origin=$4
+         AND consumed_at IS NULL AND expires_at>now()
+       RETURNING account_id, wallet_type, evm_chain_id`,
+      [proof.id, proof.walletType, config.network, config.webOrigin],
+    );
     if (consumed.rowCount !== 1) throw new Error('challenge_used_or_expired');
-    await c.query("INSERT INTO wallet_sessions(token_hash,account_id,network,public_key,expires_at) VALUES($1,$2,$3,$4,now()+make_interval(secs=>$5))", [
+    const row = consumed.rows[0];
+    await c.query(`INSERT INTO wallet_sessions
+      (token_hash,account_id,network,public_key,expires_at,wallet_type,evm_chain_id)
+      VALUES($1,$2,$3,$4,now()+make_interval(secs=>$5),$6,$7)`, [
       tokenHash(token),
       row.account_id,
       config.network,
-      publicKey,
+      proof.publicKey,
       config.sessionAbsoluteSeconds,
+      row.wallet_type,
+      row.evm_chain_id,
     ]);
     await c.query('COMMIT');
     return token;
@@ -97,7 +119,8 @@ export async function session(pool: pg.Pool, config: Config, token: string) {
   if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
   const found = (
     await pool.query(
-      `SELECT account_id,network,public_key,expires_at,last_seen_at<now()-make_interval(secs=>$4) AS stale FROM wallet_sessions
+      `SELECT account_id,network,public_key,wallet_type,evm_chain_id,expires_at,
+        last_seen_at<now()-make_interval(secs=>$4) AS stale FROM wallet_sessions
        WHERE token_hash=$1 AND network=$2 AND expires_at>now() AND last_seen_at>now()-make_interval(secs=>$3)`,
       [tokenHash(token), config.network, config.sessionIdleSeconds, IDLE_TOUCH_SECONDS],
     )

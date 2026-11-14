@@ -1,11 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type pg from 'pg';
 import type { Config } from './config.js';
-import { challenge, isUuid, login, revokeAllSessions, session, tokenHash, type CheckAccessKey } from './auth.js';
-import { isAccount as account } from './validate.js';
+import { isUuid, revokeAllSessions, session, tokenHash, type CheckAccessKey } from './auth.js';
+import { challengeFor, isAuthChallenge, isAuthVerify, verifyLogin } from './auth-http.js';
 import { ReadError } from './read-api.js';
 import { LOCK } from './locks.js';
 import { isAgentAccessRoute, isAgentRoute, type AgentRoutes } from './agent-paths.js';
+import { allowOwnerRoute, sessionAgentOwner } from './agent-owner.js';
 export const isPrivateRoute = (p: string) =>
   p.startsWith('/v1/auth/') || p === '/v1/watchlist' || p === '/v1/policies/acknowledge' || /^\/v1\/operations\/[^/]+$/.test(p) ||
   isAgentRoute(p) || isAgentAccessRoute(p);
@@ -19,8 +20,7 @@ function cookie(req: IncomingMessage, name: string) {
       .filter(s => s.startsWith(name + '=')) ?? [];
   return found.length === 1 ? found[0]!.slice(name.length + 1) : '';
 }
-const LOGIN_REJECTIONS = ['invalid_login', 'challenge_used_or_expired', 'invalid_public_key', 'invalid_nonce'];
-async function body(req: IncomingMessage, limit = 16384) {
+export async function body(req: IncomingMessage, limit = 16384) {
   if (!req.headers['content-type']?.startsWith('application/json')) throw new ReadError(415, 'json_required');
   let length = 0;
   const parts: Buffer[] = [];
@@ -59,28 +59,15 @@ export function createPrivateApi(
       return agents.access(method, path, req.headers.authorization, () => body(req));
     }
     if (!['GET', 'HEAD'].includes(method) && req.headers.origin !== config.webOrigin) throw new ReadError(403, 'origin_required');
-    if (path === '/v1/auth/challenge' && method === 'POST') {
-      const b = await body(req);
-      if (!account(b.accountId)) throw new ReadError(400, 'account_required');
-      const c = await challenge(pool, config, b.accountId).catch(e => {
-        throw e instanceof Error && e.message === 'invalid_account'
-          ? new ReadError(400, 'invalid_account')
-          : e instanceof Error && e.message === 'challenge_capacity'
-            ? new ReadError(503, 'challenge_capacity')
-            : e;
-      });
+    if (isAuthChallenge(path) && method === 'POST') {
+      const c = await challengeFor(pool, config, path, await body(req));
       res.setHeader('Set-Cookie', `${challengeCookie}=${c.browser}; Max-Age=300${attrs}`);
       return c.request;
     }
-    if (path === '/v1/auth/verify' && method === 'POST') {
-      const b = await body(req);
-      if (!['id', 'publicKey', 'signature'].every(k => typeof b[k] === 'string')) throw new ReadError(400, 'invalid_login');
-      let token: string;
-      try {
-        token = await login(pool, config, b.id as string, b.publicKey as string, b.signature as string, cookie(req, challengeCookie), checkKey);
-      } catch (e) {
-        throw e instanceof Error && LOGIN_REJECTIONS.includes(e.message) ? new ReadError(401, 'login_rejected') : new ReadError(503, 'login_unavailable');
-      }
+    if (isAuthVerify(path) && method === 'POST') {
+      const token = await verifyLogin(pool, config, {
+        path, body: await body(req), browser: cookie(req, challengeCookie),
+      }, checkKey);
       res.setHeader('Set-Cookie', [`${sessionCookie}=${token}; Max-Age=${config.sessionAbsoluteSeconds}${attrs}`, `${challengeCookie}=; Max-Age=0${attrs}`]);
       return { authenticated: true };
     }
@@ -111,8 +98,10 @@ export function createPrivateApi(
     const deployment = config.deployment?.id;
     if (!deployment) throw new ReadError(503, 'deployment_not_configured');
     if (isAgentRoute(path)) {
+      const owner = sessionAgentOwner(identity);
+      allowOwnerRoute(owner, method, path);
       if (!agents) throw new ReadError(503, 'agents_not_configured');
-      return agents.owner(method, path, { account: identity.account_id, publicKey: identity.public_key }, () => body(req, 65536));
+      return agents.owner(method, path, owner, () => body(req, 65536));
     }
     if (path === '/v1/watchlist') {
       if (['GET', 'HEAD'].includes(method))

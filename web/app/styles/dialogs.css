@@ -1,14 +1,14 @@
 /* Shared modal surface */
-.guide-dialog, .terms-dialog {
+.guide-dialog, .terms-dialog, .wallet-dialog {
   margin: auto; max-height: calc(100dvh - 2rem); overflow-y: auto; overscroll-behavior: contain;
   border: 1px solid var(--line-strong); border-radius: var(--r-lg);
   background: radial-gradient(36rem 18rem at 0% 0%, var(--brand-tint), transparent 70%), var(--surface);
   color: var(--text); box-shadow: var(--elev-3);
 }
-.guide-dialog::backdrop, .terms-dialog::backdrop { background: color-mix(in oklab, var(--scrim) 75%, transparent); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.guide-dialog::backdrop, .terms-dialog::backdrop, .wallet-dialog::backdrop { background: color-mix(in oklab, var(--scrim) 75%, transparent); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
 @media (prefers-reduced-motion: no-preference) {
-  .guide-dialog[open], .terms-dialog[open] { animation: dialog-in var(--dur-3) var(--ease-out); }
-  .guide-dialog[open]::backdrop, .terms-dialog[open]::backdrop { animation: enter-fade var(--dur-3) var(--ease-out); }
+  .guide-dialog[open], .terms-dialog[open], .wallet-dialog[open] { animation: dialog-in var(--dur-3) var(--ease-out); }
+  .guide-dialog[open]::backdrop, .terms-dialog[open]::backdrop, .wallet-dialog[open]::backdrop { animation: enter-fade var(--dur-3) var(--ease-out); }
 }
 @keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } }
 
@@ -66,3 +66,38 @@
   .terms-dialog-actions { flex-direction: column-reverse; }
   .terms-dialog-actions button { width: 100%; }
 }
+
+/* Connect and deposit */
+.wallet-dialog { width: min(32rem, calc(100% - 2rem)); padding: var(--s-7); }
+.wallet-dialog:not([open]) { display: none; }
+.wallet-dialog h2 { margin: 0 0 var(--s-3); font-size: var(--fs-2xl); font-weight: 500; line-height: 1.2; }
+.wallet-dialog p { margin: 0 0 var(--s-4); color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.65; }
+.wallet-dialog .notice { margin: 0 0 var(--s-4); }
+.wallet-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--s-3); margin-top: var(--s-5); }
+.connect-group { display: grid; gap: var(--s-2); margin-bottom: var(--s-5); }
+.connect-group h3 { margin: 0; font-size: var(--fs-xs); font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
+.connect-group .connect-empty { margin: 0; }
+.connect-option { display: flex; align-items: center; gap: var(--s-3); min-height: var(--control-md); padding: 0 var(--s-4); border: 1px solid var(--border-input); border-radius: var(--r-sm); background: var(--surface); color: var(--text); font-size: var(--fs-sm); font-weight: 500; text-align: left; cursor: pointer; transition: background var(--dur-2), border-color var(--dur-2); }
+.connect-option:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--brand); }
+.connect-option:disabled { opacity: 0.6; cursor: not-allowed; }
+.connect-option img { border-radius: var(--r-xs); }
+.connect-links { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-bottom: var(--s-4); }
+.connect-links .btn { flex: 1 1 10rem; }
+.connect-copy { padding: 0; border: 0; background: none; color: var(--brand); font: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; min-height: var(--control-md); }
+@media (max-width: 479px) {
+  .wallet-dialog { padding: var(--s-5); }
+  .wallet-dialog-actions { flex-direction: column-reverse; }
+  .wallet-dialog-actions button { width: 100%; }
+}
+.deposit-chains { margin-bottom: var(--s-4); }
+.deposit-note { margin: var(--s-2) 0 0; font-size: var(--fs-xs); }
+.deposit-details { display: grid; gap: var(--s-3); margin: 0 0 var(--s-4); }
+.deposit-details > div { display: grid; gap: var(--s-1); padding-bottom: var(--s-3); border-bottom: 1px solid var(--line); }
+.deposit-details dt { color: var(--text-muted); font-size: var(--fs-xs); }
+.deposit-details dd { margin: 0; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.deposit-address { padding: var(--s-2) var(--s-3); border-radius: var(--r-sm); background: var(--raised); }
+.deposit-status { margin: 0; color: var(--text); }
+.deposit-status[data-status="SUCCESS"] { color: var(--success); }
+.deposit-status[data-status="REFUNDED"], .deposit-status[data-status="FAILED"], .deposit-status[data-status="INCOMPLETE_DEPOSIT"] { color: var(--warning); }
+.wallet-dialog .segmented { display: flex; width: fit-content; max-width: 100%; }
+.wallet-dialog .ticket-label { display: block; margin: var(--s-4) 0 var(--s-2); }

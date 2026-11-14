@@ -11,6 +11,7 @@ export function GET() {
     oracleId: config.oracleId,
     councilId: config.councilId,
     verifierId: config.verifierId,
+    relayerId: config.relayerId,
     nftId: config.nftId,
     collateralTokenId: config.collateralTokenId,
     tokenId: config.tokenId,

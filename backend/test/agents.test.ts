@@ -10,6 +10,7 @@ import { InvalidAction, parseAgentAction, planAgentAction, spendOf, type AgentAc
 import { finalTransaction, nearBalance, type ContractEvent, type FinalTransaction } from '../src/agent-chain.js';
 import { followOperation, runAgentAction, type AgentRunner } from '../src/agents.js';
 import { TransactionClaimed } from '../src/operations.js';
+import { AgentAuthorizationRefused } from '../src/agent-authorization.js';
 import { RpcError } from '../src/providers.js';
 
 const AGENT_ID = 'a'.repeat(64);
@@ -182,7 +183,7 @@ test('a status is the one asked about, and a long poll waits at most 25 seconds'
 test('a status read can ask the API to look again, and frozen is read from the policy in force', async () => {
   const seen: Seen = [];
   const policy = (value: unknown) => ({ status: 200, body: { wallet_id: 'w', revision: 1, status: 'APPLIED',
-    policy: value } });
+    provider_policy_synced: true, policy: value } });
   const api = new AgentApiClient(settings, transport([
     { status: 200, body: answered('SUCCESS', { tx_hash: 'tx1' }) },
     policy({ frozen: true }), policy({ frozen: false }), policy(null), policy({ frozen: 'yes' }),
@@ -196,6 +197,15 @@ test('a status read can ask the API to look again, and frozen is read from the p
     await assert.rejects(api.frozen(AGENT_ID), AgentApiUnavailable, why);
   }
   await assert.rejects(api.frozen('A'.repeat(64)), /invalid_agent_id/);
+});
+
+test('frozen does not mistake draft, failed or unsynchronized policy for applied custody state', async () => {
+  const current = { revision: 2, status: 'APPLIED', provider_policy_synced: true, policy: { frozen: false } };
+  const responses = [{ ...current, status: 'SIGNED' }, { ...current, status: 'FAILED' },
+    { ...current, provider_policy_synced: false }, { ...current, revision: 0 },
+    { ...current, revision: null }];
+  const api = new AgentApiClient(settings, transport(responses.map(body => ({ status: 200, body })), []));
+  for (const _ of responses) await assert.rejects(api.frozen(AGENT_ID), AgentApiUnavailable);
 });
 
 test('policy inspection preserves unsynced and missing states and rejects malformed readbacks', async () => {
@@ -227,6 +237,8 @@ test('owner intents go out with the partner key alone and must be for this owner
   const api = new AgentApiClient(settings, transport([
     { status: 201, body: generated },
     { status: 201, body: { ...generated, signer: { ...generated.signer, account_id: 'mallory.near' } } },
+    { status: 201, body: { ...generated, signer: { ...generated.signer, public_key: 'ed25519:other' } } },
+    { status: 201, body: { ...generated, signer: { ...generated.signer, chain_id: 1 } } },
     { status: 201, body: { ...generated, agent_id: 'c'.repeat(64) } },
     { status: 201, body: { ...generated, type: 'agent_create' } },
     { status: 201, body: { ...generated, correlation_id: 'op_1' } },
@@ -236,18 +248,21 @@ test('owner intents go out with the partner key alone and must be for this owner
   ], seen));
   const request = { type: 'grant_issue', agent_id: AGENT_ID, label: 'Dragons Market', credential: 'c'.repeat(64),
     expires_at: '2030-01-01T00:00:00.000Z' } as const;
-  const intent = await api.generateIntent(request, 'alice.near', 'dm-grant-1');
+  const owner = { account: 'alice.near', publicKey: generated.signer.public_key };
+  const intent = await api.generateIntent(request, owner, 'dm-grant-1');
+  assert.deepEqual(intent.signer, generated.signer);
   assert.deepEqual([intent.correlation_id, intent.intent.standard, intent.preview.summary],
     ['intent_1', 'nep413', 'Authorize']);
   const headers = seen[0]!.init.headers as Record<string, string>;
   assert.deepEqual([seen[0]!.url, headers['x-api-key'], headers['x-grant-token'], headers['idempotency-key']],
     ['https://agents.example.com/v1/generate-intent', KEY, undefined, 'dm-grant-1']);
-  for (const why of ['another signer', 'another agent', 'another kind', 'an execution id', 'no payload']) {
-    await assert.rejects(api.generateIntent(request, 'alice.near', 'dm-grant-1'), AgentApiUnavailable, why);
+  for (const why of ['another signer', 'another key', 'ambiguous signer', 'another agent', 'another kind',
+    'an execution id', 'no payload']) {
+    await assert.rejects(api.generateIntent(request, owner, 'dm-grant-1'), AgentApiUnavailable, why);
   }
   const signed = { standard: 'nep413', payload: generated.intent.payload, public_key: 'ed25519:key', signature: 's' };
   assert.equal((await api.submitIntent(intent, signed)).status, 'PROCESSING');
-  assert.deepEqual(JSON.parse(String(seen[6]!.init.body)),
+  assert.deepEqual(JSON.parse(String(seen[8]!.init.body)),
     { type: 'grant_issue', correlation_id: 'intent_1', signed_data: signed });
 });
 
@@ -304,6 +319,7 @@ interface FakeOptions {
   sendError?: unknown;
   held?: boolean;
   claimed?: boolean;
+  authorizationError?: Error;
 }
 function fake(opts: FakeOptions): Fake {
   const sent: Fake['sent'] = [], transitions: string[] = [], order: string[] = [], requests: unknown[] = [];
@@ -312,6 +328,7 @@ function fake(opts: FakeOptions): Fake {
   const reply = () => { const r = replies.shift(); assert.ok(r, 'an unexpected status read'); return r; };
   const runner: AgentRunner = {
     deployment, waitMs: 0,
+    authorize: async () => { if (opts.authorizationError) throw opts.authorizationError; },
     api: {
       forGrant: g => {
         assert.deepEqual(g, grant);
@@ -332,7 +349,7 @@ function fake(opts: FakeOptions): Fake {
       const call = sent[0] && 'native' in sent[0].send ? sent[0].send.native : STAKE_CALL;
       return { signer: AGENT, receiver: call.receiver_id,
         calls: [{ method: call.method_name, args: call.args, deposit: call.deposit }], events: opts.events ?? [],
-        failed: [], ...opts.tx };
+        failed: [], succeeded: [], ...opts.tx };
     },
     operations: {
       seen: async () => opts.existing !== undefined,
@@ -583,8 +600,48 @@ test('a rerun after a crash polls the submitted operation and never sends it aga
 
 const COMMITMENT = createHash('sha256').update(grant.token).digest('hex');
 const stranded = (action: AgentAction = STAKE) => ({ id: 'op-1', agent: AGENT,
-  request: { agent_id: AGENT_ID, grant: COMMITMENT, action } });
+  request: { agent_id: AGENT_ID, grant: COMMITMENT, action, send: planAgentAction(deployment, AGENT, action).send } });
 const noGrant = async () => null;
+
+test('dispatch authorization stops new sends and uncertain resends without inventing a failed transaction', async () => {
+  for (const sent of [false, true]) {
+    const f = fake({ replies: [], existing: { state: 'prepared', sent },
+      authorizationError: new AgentAuthorizationRefused('access_token_invalid') });
+    const result = await run(f);
+    assert.equal(result.state, sent ? 'reconcile' : 'failed');
+    assert.deepEqual(f.sent, []);
+    assert.deepEqual(f.order, [], 'refusal happens before the send journal');
+    assert.deepEqual(f.released, ['lease-1']);
+  }
+  const f = fake({ replies: [], existing: { state: 'prepared', sent: true },
+    authorizationError: new AgentAuthorizationRefused('provider_policy_mismatch') });
+  await followOperation(f.runner, { ...stranded(), request: { ...stranded().request, via: 'revoked-connection' } },
+    async () => grant);
+  assert.deepEqual([f.transitions, f.sent], [['prepared>reconcile'], []]);
+});
+
+test('policy outage leaves unknown sends reserved, and revocation never blocks receipt reconciliation', async () => {
+  const outage = new Error('policy service unavailable');
+  const f = fake({ replies: [], existing: { state: 'prepared', sent: true }, authorizationError: outage });
+  await assert.rejects(run(f), error => error === outage);
+  assert.deepEqual([f.sent, f.transitions, f.released], [[], [], ['lease-1']]);
+  const pending = fake({ replies: [status('SUCCESS', { tx_hash: 'tx1' })], events: [staked],
+    existing: { state: 'unknown', correlation: 'op_1' },
+    authorizationError: new AgentAuthorizationRefused('access_token_invalid') });
+  await followOperation(pending.runner, stranded(), noGrant);
+  assert.deepEqual([pending.sent, pending.transitions], [[], ['unknown>confirmed']]);
+});
+
+test('recovery never regenerates a different transaction after an application change', async () => {
+  for (const state of ['prepared', 'submitted', 'unknown', 'reconcile']) {
+    const f = fake({ replies: [], existing: { state, sent: true, correlation: 'op_1' } });
+    const job = stranded();
+    await followOperation(f.runner, { ...job, request: { ...job.request,
+      send: { native: { ...STAKE_CALL, deposit: '2' } } } }, async () => grant);
+    assert.deepEqual([f.sent, f.transitions], [[], state === 'reconcile' ? [] : [`${state}>reconcile`]]);
+    assert.deepEqual(f.released, ['lease-1']);
+  }
+});
 
 test('the sweep finishes an operation nobody is waiting on, with no grant and no second send', async () => {
   const f = fake({ replies: [status('SUCCESS', { tx_hash: 'tx1' })], events: [staked],

@@ -30,7 +30,7 @@ Before releasing this revision's foundation, update the `server` and `database-r
 
 `database-release` is a one-time maintenance job for each release, not a permanently running server. `verify-chain` uses `0 */6 * * *` and exits after each check rather than retaining an idle Node process. The other workers run loops because their work needs continuous ingestion or more precise timing than Railway cron provides. An undeployed worker consumes no runtime compute.
 
-`prices` collects evidence; it does not publish signed prices or run the contract keeper. A signed price publisher and keeper need their own reviewed configuration, scoped credentials and persistent feed storage before enabling the full rounds lifecycle. The database release provisions the separate publisher role for that purpose.
+`prices` collects evidence; it does not publish signed prices or run the contract keeper. Round prices are signed by the separate `publishers` service with the publisher database role, configured through the [activation workflow](ACTIVATED-RELEASE.md#price-publishers).
 
 ## Toolchain and service settings
 

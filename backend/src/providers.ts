@@ -69,7 +69,7 @@ export class RpcError extends Error {
 }
 
 // Only read operations are allowed in this provider diagnostic. No wallet or signing keys.
-type ReadMethod = 'status' | 'block' | 'EXPERIMENTAL_indexer_block' | 'query' | 'EXPERIMENTAL_tx_status';
+type ReadMethod = 'status' | 'block' | 'EXPERIMENTAL_indexer_block' | 'query' | 'EXPERIMENTAL_tx_status' | 'gas_price';
 export class ReadRpcClient {
   private tail: Promise<unknown> = Promise.resolve();
   private nextAt = 0;

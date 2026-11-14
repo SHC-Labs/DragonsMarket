@@ -20,3 +20,14 @@ test("template collisions and pre-existing nonces stop the build", () => {
     assert.throws(() => prepareHtml(input));
   }
 });
+
+test("the policy lets EVM and Solana wallets work without loosening scripts", () => {
+  const directive = name => policy.split(";").map(d => d.trim()).find(d => d.startsWith(`${name} `)) ?? "";
+  // 1Click quotes and status, and the backend relay, are fetched over HTTPS.
+  assert.match(directive("connect-src"), /(^| )https:( |$)/);
+  // Wallet icons arrive as data: images and are shown in <img>, never run.
+  assert.match(directive("img-src"), /(^| )data:( |$)/);
+  // EIP-6963 and Wallet Standard are window events between already-running scripts; nothing new may be loaded or inlined for them.
+  assert.doesNotMatch(directive("script-src"), /data:|blob:|https:|unsafe/);
+  assert.match(policy, /object-src 'none'/);
+});

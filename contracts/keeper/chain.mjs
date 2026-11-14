@@ -75,8 +75,9 @@ export async function rpc(urls, method, params) {
     const body = await responseBody(res);
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error(`${method}: malformed RPC response`);
     if (body.error) {
+      const reported = body.error.cause?.name ?? body.error.name;
       const name = ['UNKNOWN_BLOCK', 'UNKNOWN_ACCOUNT', 'UNKNOWN_ACCESS_KEY', 'TIMEOUT_ERROR', 'HANDLER_ERROR']
-        .includes(body.error.name) ? body.error.name : 'RPC_ERROR';
+        .includes(reported) ? reported : 'RPC_ERROR';
       throw new Error(`${method}: ${name}`);
     }
     if (!Object.hasOwn(body, 'result')) throw new Error(`${method}: missing RPC result`);

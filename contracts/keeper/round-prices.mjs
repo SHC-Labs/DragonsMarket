@@ -113,7 +113,7 @@ async function wanting(opts) {
   return { config, open };
 }
 
-async function run(opts, env) {
+export async function run(opts, env) {
   const key = opts["dry-run"] ? null : signerKey(opts, env);
   if (!opts.account) throw new Error(`--account is required\n${USAGE}`);
   const urls = (opts.publishers ?? "").split(",").filter(Boolean);

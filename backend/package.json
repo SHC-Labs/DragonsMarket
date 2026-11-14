@@ -14,8 +14,8 @@
     "dev": "npm run build && node --watch --env-file-if-exists=.env dist/src/main.js",
     "agent-worker": "node --env-file-if-exists=.env --env-file-if-exists=.env.agent-worker dist/src/agent-worker.js",
     "migrate": "node --env-file-if-exists=.env dist/src/migrate.js",
-    "test": "npm run build && node --test dist/test/foundation.test.js dist/test/providers.test.js dist/test/ingestion.test.js dist/test/local-source.test.js dist/test/neardata.test.js dist/test/prices.test.js dist/test/api-security.test.js dist/test/reconcile.test.js dist/test/round-publisher.test.js dist/test/health.test.js dist/test/nep413.test.js dist/test/price-vectors.test.js dist/test/agents.test.js dist/test/agent-accounts.test.js dist/test/agent-worker.test.js dist/test/preflight.test.js dist/test/agent-finality.test.js dist/test/keeper-runner.test.js dist/test/keeper-approval.test.js dist/test/keeper-signer.test.js",
-    "test:database": "npm run build && node --env-file-if-exists=.env --test dist/test/database.test.js dist/test/ingestion-database.test.js dist/test/read-api.test.js dist/test/capture-database.test.js dist/test/live-indexer.test.js dist/test/feed.test.js dist/test/auth.test.js dist/test/roles.test.js dist/test/sessions.test.js dist/test/agent-accounts-database.test.js dist/test/keeper-runner-database.test.js",
+    "test": "npm run build && node --test dist/test/foundation.test.js dist/test/providers.test.js dist/test/ingestion.test.js dist/test/local-source.test.js dist/test/neardata.test.js dist/test/prices.test.js dist/test/api-security.test.js dist/test/reconcile.test.js dist/test/round-publisher.test.js dist/test/health.test.js dist/test/nep413.test.js dist/test/price-vectors.test.js dist/test/agents.test.js dist/test/agent-accounts.test.js dist/test/agent-consent.test.js dist/test/agent-evm-consent.test.js dist/test/agent-evm-policy.test.js dist/test/agent-near-policy.test.js dist/test/agent-worker.test.js dist/test/agent-readiness.test.js dist/test/agent-sweep.test.js dist/test/preflight.test.js dist/test/agent-finality.test.js dist/test/keeper-runner.test.js dist/test/keeper-approval.test.js dist/test/keeper-signer.test.js dist/test/relay.test.js dist/test/relay-gates.test.js dist/test/relay-payload-edges.test.js dist/test/relay-resilience.test.js dist/test/relay-topup.test.js dist/test/topup-held.test.js dist/test/topup-journal.test.js dist/test/topup-keys.test.js dist/test/topup-oneclick.test.js dist/test/topup-refund.test.js dist/test/topup-replay.test.js",
+    "test:database": "npm run build && node --env-file-if-exists=.env --test dist/test/database.test.js dist/test/ingestion-database.test.js dist/test/read-api.test.js dist/test/capture-database.test.js dist/test/live-indexer.test.js dist/test/feed.test.js dist/test/auth.test.js dist/test/evm-auth.test.js dist/test/evm-agent-owner-database.test.js dist/test/roles.test.js dist/test/sessions.test.js dist/test/agent-accounts-database.test.js dist/test/agent-authorization-database.test.js dist/test/agent-intents-database.test.js dist/test/keeper-runner-database.test.js dist/test/relay-journal-database.test.js",
     "up": "docker compose up --build -d --wait",
     "down": "docker compose down",
     "logs": "docker compose logs -f api",
@@ -26,11 +26,12 @@
     "verify:chain": "npm run build && node --env-file-if-exists=.env dist/src/verify-chain.js",
     "preflight": "npm run build && node --env-file-if-exists=.env dist/src/preflight.js",
     "reconcile": "npm run build && node --env-file-if-exists=.env dist/src/reconcile.js",
-    "test:agent-chain": "npm run build && node --test --test-concurrency=1 dist/test/agent-chain.test.js dist/test/keeper-signing-chain.test.js dist/test/dao-chain.test.js dist/test/deploy-production.test.js",
+    "test:agent-chain": "npm run build && node --test --test-concurrency=1 dist/test/agent-chain.test.js dist/test/keeper-signing-chain.test.js dist/test/dao-chain.test.js dist/test/deploy-production.test.js dist/test/relay-chain.test.js dist/test/relay-gas-chain.test.js dist/test/relay-payload-chain.test.js dist/test/relay-topup-chain.test.js",
     "prices:collect": "npm run build && node --env-file-if-exists=.env dist/src/prices.js",
     "indexer:follow": "npm run build && node --env-file-if-exists=.env dist/src/ingestion/follow.js",
     "keeper:feed": "npm run build && node --env-file-if-exists=.env dist/src/ingestion/feed.js",
     "keeper:prepare": "node --env-file-if-exists=.env dist/src/keeper-runner.js",
+    "relay:topup": "node --env-file-if-exists=.env.relay-topup dist/src/relay-topup.js",
     "keeper:verify-approval": "node --env-file-if-exists=.env dist/src/check-keeper-approval.js",
     "indexer": "npm run build && node --env-file-if-exists=.env dist/src/ingestion/cli.js",
     "build:local-contract": "node scripts/build-local-contract.mjs",
@@ -40,7 +41,10 @@
   "dependencies": {
     "@dragons-market/keeper": "workspace:*",
     "@near-intents-agent-api/sdk": "0.7.3",
-    "pg": "8.23.1"
+    "@noble/curves": "2.2.0",
+    "@noble/hashes": "2.2.0",
+    "pg": "8.23.1",
+    "viem": "2.57.17"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

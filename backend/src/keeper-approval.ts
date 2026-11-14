@@ -7,6 +7,7 @@ import { object } from './ingestion/block.js';
 import type { ReadRpcClient } from './providers.js';
 import { isAccount, isUint, isUnits } from './validate.js';
 import { assertDaoPolicy, daoPolicyHash } from './dao-policy.js';
+import { assertNftCustody, parseNftCustody, type NftCustody } from '@dragons-market/keeper/nft-custody';
 
 type Rpc = Pick<ReadRpcClient, 'call'>;
 const ROLES = ['market', 'oracle', 'council', 'rounds', 'verifier', 'nft', 'collateral'] as const;
@@ -26,6 +27,7 @@ export interface KeeperApproval {
   reviewEvidence: string;
   marketIds: string[];
   contracts: Partial<Record<Role, { accountId: string; codeHash: string; sourceCommit: string; buildEvidence: string }>>;
+  nftCustody?: NftCustody;
   controls: { owner: string; operator: string; treasury: string };
   governance: { codeHash: string; policySha256: string; minApprovals: number;
     sourceCommit: string; buildEvidence: string };
@@ -72,6 +74,9 @@ export function parseKeeperApproval(raw: string | undefined, digest: string | un
   if (!expected.market || !expected.oracle || !expected.council || !expected.verifier
     || !object(a.contracts.nft) || !isAccount(a.contracts.nft.accountId)) throw new Error('incomplete_keeper_approval');
   expected.nft = a.contracts.nft.accountId;
+  const nftCustody = parseNftCustody(a.nftCustody, expected.nft);
+  if (nftCustody.mode === 'platform-managed' && nftCustody.codeHash !== a.contracts.nft.codeHash)
+    throw new Error('nft_custody_code_approval_mismatch');
   if (Object.keys(a.contracts).length !== Object.keys(expected).length) throw new Error('unexpected_approved_contract');
   for (const [role, account] of Object.entries(expected)) {
     const c = a.contracts[role];
@@ -114,6 +119,20 @@ function recent(head: Awaited<ReturnType<typeof finalizedHead>>) {
   if (age > 60_000_000_000n || age < -5_000_000_000n) throw new Error('stale_approval_head');
 }
 
+async function verifyAccessKeys(approval: KeeperApproval, role: Role, rpc: Rpc, block: string, account: unknown) {
+  const accountId = approval.contracts[role]!.accountId;
+  const access = await rpc.call('query', { request_type: 'view_access_key_list', block_id: block, account_id: accountId });
+  if (!object(access) || access.block_hash !== block || !Array.isArray(access.keys))
+    throw new Error('approved_contract_not_keyless');
+  if (role !== 'nft') {
+    if (access.keys.length) throw new Error('approved_contract_not_keyless');
+    return;
+  }
+  const custody = parseNftCustody(approval.nftCustody, accountId);
+  const ownerId = custody.mode === 'platform-managed' ? await viewAt(rpc, block)(accountId, 'get_owner', {}) : undefined;
+  assertNftCustody(custody, { accountId, keys: access.keys, account, ownerId });
+}
+
 export async function verifyKeeperApproval(approval: KeeperApproval, config: Config, primary: Rpc, secondary: Rpc) {
   assertApprovalCurrent(approval);
   const d = config.deployment!.contracts;
@@ -134,11 +153,8 @@ export async function verifyKeeperApproval(approval: KeeperApproval, config: Con
       const account = await rpc.call('query', { request_type: 'view_account', block_id: head.hash, account_id: expected.accountId });
       if (!object(account) || account.block_hash !== head.hash || account.code_hash !== expected.codeHash)
         throw new Error('approved_code_mismatch');
-      if (role === 'nft' || FINANCIAL.some(financial => financial === role)) {
-        const access = await rpc.call('query', { request_type: 'view_access_key_list', block_id: head.hash, account_id: expected.accountId });
-        if (!object(access) || access.block_hash !== head.hash || !Array.isArray(access.keys) || access.keys.length !== 0)
-          throw new Error('approved_contract_not_keyless');
-      }
+      if (role === 'nft' || FINANCIAL.some(financial => financial === role))
+        await verifyAccessKeys(approval, role, rpc, head.hash, account);
     }
     const view = viewAt(rpc, head.hash);
     const dao = approval.controls.owner;

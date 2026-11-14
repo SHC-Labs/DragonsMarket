@@ -45,8 +45,10 @@ function nonceBytes(base64: string): Uint8Array {
 /** The account the backend session belongs to, or null when there is none (or no backend). */
 export async function currentSession(): Promise<string | null> {
   if (!backendEnabled()) return null;
-  const { body } = await call<{ session: { account_id: string } | null }>("/v1/auth/session");
-  return body.session?.account_id ?? null;
+  const { body } = await call<{ session: { account_id: string; wallet_type?: string } | null }>("/v1/auth/session");
+  const session = body.session;
+  if (!session || (session.wallet_type !== undefined && session.wallet_type !== "near")) return null;
+  return /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(session.account_id) ? session.account_id : null;
 }
 
 /** Proves ownership of `account` by signing the backend's challenge with the wallet (NEP-413), which creates a session. */

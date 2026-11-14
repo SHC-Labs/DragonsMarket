@@ -14,16 +14,22 @@ import {
 } from './agent-api.js';
 import { parseAgentAction, spendOf, type ActionKind, type AgentAction } from './agent-actions.js';
 import { dragonsPolicy, fitsOwnerFlow, grantsNoMore, type OwnerSigning } from './agent-policy.js';
+import { consentMatches, consentText } from './agent-consent.js';
+import { evmConsent, verifyEvmSignature } from './agent-evm-consent.js';
+import { evmPolicyRequest } from './agent-evm-policy.js';
+import type { PolicyExpectation } from './agent-policy-approval.js';
 import { runAgentAction, type AgentRunner } from './agents.js';
 import { openGrant, sealNewGrant } from './agent-grants.js';
-import type { Owner } from './agent-paths.js';
+import type { AgentOwner, Owner } from './agent-paths.js';
+import { providerOwner } from './agent-owner.js';
+import { observePolicyFreeze, policyForTransition, savePolicyFreeze } from './agent-policy-state.js';
 
 type Deployment = NonNullable<Config['deployment']>;
 type Queryable = Pick<pg.Pool, 'query'>;
 export interface AgentAccounts {
   db: pg.Pool;
   deployment: Deployment;
-  api: Pick<AgentApiClient, 'generateIntent' | 'submitIntent' | 'status' | 'wallet' | 'frozen' | 'policy'>;
+  api: Pick<AgentApiClient, 'generateIntent' | 'submitIntent' | 'status' | 'wallet' | 'policy' | 'policyHistory'>;
   runner: AgentRunner;
   chain: { view: View; nearBalance(account: string): Promise<string> };
   grantKey: Buffer;
@@ -94,7 +100,8 @@ export async function createAgent(s: AgentAccounts, owner: Owner, name: unknown)
   return reserved(s, release, id, async () => {
     const generated = signable(s, await s.api.generateIntent({ type: 'agent_create', name,
       external_user_id: owner.account, owner: { type: 'near', account_id: owner.account, public_key: owner.publicKey },
-      policy }, owner.account, `dm-agent-${id}`), 'agent_create');
+      policy }, owner, `dm-agent-${id}`, { walletContract: s.signing.walletContract, revision: 1,
+      policy, storageRefundTo: s.signing.policySponsor ?? null }), 'agent_create');
     if (!grantsNoMore(generated.preview.policy, policy)) refused('a policy');
     await transaction(s.db, async c => {
       const opened = await c.query(`UPDATE agent_accounts SET agent_id=$2,state='pending',updated_at=now()
@@ -146,11 +153,13 @@ export function grantByCommitment(s: AgentAccounts, agentId: string, commitment:
   });
 }
 
-function ownerRequest(s: AgentAccounts, owner: Owner, agent: AgentRow, request: GenerateIntentRequest,
-  agentGrant: string | null) {
-  return s.api.generateIntent(request, owner.account, `dm-${request.type}-${randomUUID()}`).then(async generated => {
+function ownerRequest(s: AgentAccounts, owner: AgentOwner, agent: AgentRow, request: GenerateIntentRequest,
+  approval: { agentGrant: string | null; policy?: PolicyExpectation }) {
+  const signer = providerOwner(owner);
+  return s.api.generateIntent(request, signer, `dm-${request.type}-${randomUUID()}`, approval.policy).then(async generated => {
     signable(s, generated, request.type, agent.agent_id);
-    await recordIntent(s.db, agent.id, generated, agentGrant);
+    if (!consentMatches(s.signing, generated, request, signer)) refused('an owner consent');
+    await recordIntent(s.db, agent.id, generated, approval.agentGrant);
     return generated;
   });
 }
@@ -170,10 +179,10 @@ export async function issueGrant(s: AgentAccounts, owner: Owner, agentId: string
   });
   return reserved(s, "UPDATE agent_grants SET state='failed' WHERE id=$1 AND state='pending'", id, () =>
     ownerRequest(s, owner, agent, { type: 'grant_issue', agent_id: agentId, label: GRANT.label, credential: commitment,
-      expires_at: expiresAt }, id));
+      expires_at: expiresAt }, { agentGrant: id }));
 }
 
-export async function revokeGrants(s: AgentAccounts, owner: Owner, agentId: string) {
+export async function revokeGrants(s: AgentAccounts, owner: AgentOwner, agentId: string) {
   const agent = await ownedAgent(s, owner, agentId);
   const live = await transaction(s.db, async c => {
     await agentLock(c, `grants:${agent.id}`);
@@ -191,20 +200,22 @@ export async function revokeGrants(s: AgentAccounts, owner: Owner, agentId: stri
   const data: OwnerIntent[] = [];
   for (const grant of live) {
     data.push(await ownerRequest(s, owner, agent, { type: 'grant_revoke', agent_id: agentId,
-      grant_id: grant.api_grant_id }, grant.id));
+      grant_id: grant.api_grant_id }, { agentGrant: grant.id }));
   }
   return { data };
 }
 
-const recordFrozen = (q: Queryable, agentAccount: string, frozen: boolean) =>
-  q.query('UPDATE agent_accounts SET frozen=$2,updated_at=now() WHERE id=$1', [agentAccount, frozen]);
-
 export async function freezeAgent(s: AgentAccounts, owner: Owner, agentId: string, frozen: boolean) {
   const agent = await activeAgent(s, owner, agentId);
-  const actual = await s.api.frozen(agentId);
-  if (actual !== agent.frozen) await recordFrozen(s.db, agent.id, actual);
-  if (actual === frozen) throw new ReadError(409, frozen ? 'agent_frozen' : 'agent_not_frozen');
-  return ownerRequest(s, owner, agent, { type: frozen ? 'agent_freeze' : 'agent_unfreeze', agent_id: agentId }, null);
+  const observation = await observePolicyFreeze(s.db, s.api, agent);
+  await savePolicyFreeze(s.db, observation);
+  const current = await policyForTransition(s.api, agentId, observation.policy);
+  if (observation.confirmed && observation.frozen === frozen) {
+    throw new ReadError(409, frozen ? 'agent_frozen' : 'agent_not_frozen');
+  }
+  return ownerRequest(s, owner, agent, { type: frozen ? 'agent_freeze' : 'agent_unfreeze', agent_id: agentId },
+    { agentGrant: null, policy: { walletContract: s.signing.walletContract, walletAccount: agent.near_account_id,
+      revision: current.revision + 1, policy: { ...current.policy, frozen }, storageRefundTo: null } });
 }
 
 type OwnerIntentType = 'agent_create' | 'grant_issue' | 'grant_revoke' | 'agent_freeze' | 'agent_unfreeze';
@@ -217,7 +228,9 @@ const INTENT_ROW = `SELECT i.correlation_id,i.agent_account,a.agent_id,i.type,i.
   i.status AS recorded FROM agent_intents i JOIN agent_accounts a ON a.id=i.agent_account
   LEFT JOIN agent_grants g ON g.id=i.agent_grant`;
 
-async function ownedIntent(s: AgentAccounts, owner: Owner, correlationId: string): Promise<IntentRow> {
+type IntentOwnerServices = { db: pg.Pool; deployment: Pick<Deployment, 'id'> };
+
+async function ownedIntent(s: IntentOwnerServices, owner: OwnerAccount, correlationId: string): Promise<IntentRow> {
   const { rows } = await s.db.query(`${INTENT_ROW} WHERE i.correlation_id=$1 AND a.owner_account_id=$2
     AND a.deployment_id=$3`, [correlationId, owner.account, s.deployment.id]);
   if (!rows[0]) throw new ReadError(404, 'intent_not_found');
@@ -230,9 +243,11 @@ const failGrant = (q: Queryable, row: IntentRow) =>
 
 function grantLive(q: Queryable, row: IntentRow, status: AgentStatus) {
   const grant = object(status.details.grant) ? status.details.grant : null;
+  const recipient = grant && object(grant.owner_message) ? grant.owner_message.recipient : null;
   const ours = grant && typeof grant.grant_id === 'string' && GRANT_ID.test(grant.grant_id)
     && grant.agent_id === row.agent_id && grant.revoked_at === null && object(grant.owner_message)
-    && grant.owner_message.credential === row.commitment;
+    && grant.owner_message.credential === row.commitment
+    && typeof recipient === 'string' && canonical(grant.owner_message) === consentText(row.intent, recipient);
   if (ours) {
     return q.query("UPDATE agent_grants SET state='live',api_grant_id=$2 WHERE id=$1 AND state='pending'",
       [row.agent_grant, grant.grant_id]);
@@ -255,44 +270,90 @@ const EFFECTS: Record<OwnerIntentType, Effect> = {
     if (FAILED.has(status.status)) return failGrant(q, row);
     return status.status === 'SUCCESS' ? grantLive(q, row, status) : null;
   },
-  agent_freeze(q, row, status) {
-    if (FAILED.has(status.status)) return recordFrozen(q, row.agent_account, false);
-    return status.status === 'PENDING_SIGNATURE' ? null : recordFrozen(q, row.agent_account, true);
-  },
-  agent_unfreeze: (q, row, status) => (status.status === 'SUCCESS' ? recordFrozen(q, row.agent_account, false) : null),
+  agent_freeze: () => null,
+  agent_unfreeze: () => null,
   grant_revoke: () => null,
 };
 
-async function applyIntentStatus(s: AgentAccounts, row: IntentRow, status: AgentStatus) {
-  if (status.status !== row.recorded) {
-    const created = row.type === 'agent_create' && status.status === 'SUCCESS';
-    const near = created ? (await s.api.wallet(row.agent_id)).near_account_id : null;
-    await transaction(s.db, async c => {
-      await c.query('UPDATE agent_intents SET status=$2,updated_at=now() WHERE correlation_id=$1',
-        [row.correlation_id, status.status]);
-      await EFFECTS[row.type](c, row, status, near);
-    });
-  }
+type IntentServices = Pick<AgentAccounts, 'db'> & { api: Pick<AgentApiClient, 'status' | 'wallet' | 'policy'> };
+
+async function intentFreeze(s: Pick<AgentAccounts, 'db'> & { api: Pick<AgentApiClient, 'policy'> },
+  row: IntentRow, status: AgentStatus) {
+  if (!['agent_freeze', 'agent_unfreeze'].includes(row.type)
+    || status.status === 'PENDING_SIGNATURE' || row.recorded === status.status) return null;
+  const observation = await observePolicyFreeze(s.db, s.api, { id: row.agent_account, agent_id: row.agent_id });
+  if (status.status === 'SUCCESS' && !observation.confirmed) throw new AgentApiUnavailable('policy_not_ready');
+  return observation;
+}
+
+async function applyIntentStatus(s: Pick<IntentServices, 'db'> & { api: Pick<AgentApiClient, 'wallet' | 'policy'> },
+  row: IntentRow, status: AgentStatus) {
+  const created = row.type === 'agent_create' && status.status === 'SUCCESS' && row.recorded !== status.status;
+  const near = created ? (await s.api.wallet(row.agent_id)).near_account_id : null;
+  const observation = await intentFreeze(s, row, status);
+  await transaction(s.db, async c => {
+    const { rows: [current] } = await c.query('SELECT status FROM agent_intents WHERE correlation_id=$1 FOR UPDATE',
+      [row.correlation_id]);
+    if (!current) throw new ReadError(404, 'intent_not_found');
+    if (current.status === status.status) return;
+    // A response read before another caller's commit cannot replay effects or replace its outcome.
+    // Retry observation of the same intent; never turn a final outcome back into pending work.
+    if (current.status !== row.recorded || current.status === 'SUCCESS' || FAILED.has(current.status)) {
+      throw new AgentApiUnavailable('owner_intent_observation_stale');
+    }
+    if (observation) await savePolicyFreeze(c, observation);
+    await c.query('UPDATE agent_intents SET status=$2,updated_at=now() WHERE correlation_id=$1',
+      [row.correlation_id, status.status]);
+    await EFFECTS[row.type](c, row, status, near);
+  });
   return { correlation_id: row.correlation_id, type: row.type, agent_id: row.agent_id, status: status.status,
     failure_code: status.failure_code };
 }
 
 const expected = (row: IntentRow) => ({ type: row.type, agentId: row.agent_id });
 
-export async function submitOwnerIntent(s: AgentAccounts, owner: Owner, correlationId: string, signed: unknown) {
+type IntentSubmissionServices = IntentOwnerServices & Pick<AgentAccounts, 'signing'>
+  & { api: Pick<AgentApiClient, 'submitIntent' | 'wallet' | 'policy'> };
+
+function validEvmOwnerProof(signing: OwnerSigning, row: IntentRow, signature: unknown) {
+  if (row.intent.signer?.type !== 'evm') return Promise.resolve(false);
+  if (!fitsOwnerFlow(signing, row.intent, row.type, row.agent_id)) return Promise.resolve(false);
+  const typed = evmConsent(row.intent.intent.payload, signing.messageRecipient)
+    ?? evmPolicyRequest(row.intent, signing.walletContract, row.intent.policy_approval);
+  return typed ? verifyEvmSignature(row.intent.signer, typed, signature) : Promise.resolve(false);
+}
+
+function supportedSubmission(owner: AgentOwner, row: IntentRow) {
+  if (!('signer' in owner)) return;
+  if (row.type !== 'grant_revoke') throw new ReadError(409, 'agent_owner_wallet_not_supported');
+  if (canonical(row.intent.signer) !== canonical(owner.signer)) throw new ReadError(403, 'intent_owner_mismatch');
+  if (!(Date.parse(row.intent.expires_at) > Date.now())) throw new ReadError(409, 'owner_intent_expired');
+}
+
+export async function submitOwnerIntent(s: IntentSubmissionServices, owner: AgentOwner,
+  correlationId: string, signed: unknown) {
   const row = await ownedIntent(s, owner, correlationId);
+  supportedSubmission(owner, row);
   const { standard, payload } = row.intent.intent;
   if (!object(signed) || signed.standard !== standard || !object(signed.payload)
     || canonical(signed.payload) !== canonical(payload)) {
     throw new ReadError(400, 'invalid_signed_data');
   }
+  if (standard === 'nep366' && ('signer' in owner || row.intent.signer?.type !== 'near'
+    || row.intent.signer.account_id !== owner.account || row.intent.signer.public_key !== owner.publicKey
+    || !fitsOwnerFlow(s.signing, row.intent, row.type, row.agent_id))) {
+    throw new ReadError(400, 'invalid_signed_data');
+  }
+  if (('signer' in owner || standard === 'eip712') && !await validEvmOwnerProof(s.signing, row, signed.signature)) {
+    throw new ReadError(400, 'invalid_signature');
+  }
   return applyIntentStatus(s, row, await s.api.submitIntent(row.intent, signed));
 }
 
-export const followOwnerIntent = (s: AgentAccounts, row: IntentRow) =>
+export const followOwnerIntent = (s: IntentServices, row: IntentRow) =>
   s.api.status(row.correlation_id, 0, expected(row)).then(status => applyIntentStatus(s, row, status));
 
-export async function ownerIntentStatus(s: AgentAccounts, owner: Owner, correlationId: string) {
+export async function ownerIntentStatus(s: AgentAccounts, owner: OwnerAccount, correlationId: string) {
   return followOwnerIntent(s, await ownedIntent(s, owner, correlationId));
 }
 
@@ -308,7 +369,7 @@ export async function strandedIntents(s: AgentAccounts): Promise<IntentRow[]> {
   return ids.length ? (await s.db.query(`${INTENT_ROW} WHERE i.correlation_id=ANY($1)`, [ids])).rows : [];
 }
 
-export async function listAgents(s: AgentAccounts, owner: Owner) {
+export async function listAgents(s: AgentAccounts, owner: OwnerAccount) {
   const { rows } = await s.db.query(`SELECT a.id,a.agent_id,a.name,a.state,a.frozen,a.near_account_id,a.created_at,
     COALESCE((SELECT jsonb_agg(jsonb_build_object('status',i.status,'generated',i.intent) ORDER BY i.created_at)
       FROM agent_intents i WHERE i.agent_account=a.id AND i.status NOT IN ('SUCCESS','FAILED','REFUNDED')

@@ -142,7 +142,9 @@ one such key and must also be verified. A retained verifier key can bypass an ot
 keyless account's collateral custody. Never retain keeper keys on contract accounts.
 
 The backend activation approval now checks both RPC providers at the same recent finalized
-block. Market, Oracle, Council, optional Rounds and the NFT must have no NEAR access keys.
+block. Market, Oracle, Council and optional Rounds must have no NEAR access keys.
+The NFT follows its [explicit custody policy](NFT-CUSTODY.md); the accepted Cookon platform
+key is pinned with its collection, stored owner and reviewed code instead of requiring removal.
 Every financial contract must have proven its upgrade path, have no registered Intents keys,
 have predecessor authentication enabled and be unlocked. The verifier must permit `mt_transfer`.
 Missing, malformed or disagreeing responses fail closed. The approval also pins the owner's
@@ -158,7 +160,8 @@ secp256k1 key. Use named contract accounts for the planned deployment. The sandb
 the distinction using read-only calls to the pinned verifier.
 
 Correction to the original review: the standalone keeper's `check --expect-sealed` already
-includes Rounds when `--rounds` is supplied. It also checks the Council's NFT collection.
+includes Rounds when `--rounds` is supplied. It also checks the Council's NFT collection;
+pass `--nft-custody FILE` with the same reviewed policy used by the backend approval.
 `verify-chain` verifies indexed database history, not access-key removal. Keep the reviewed
 DAO policy, removal receipts and actual upgrade/recovery evidence alongside activation results.
 

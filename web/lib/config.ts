@@ -5,6 +5,7 @@
 //   NEXT_PUBLIC_VERIFIER_ID          the NEAR Intents verifier that holds all collateral (intents.near on mainnet)
 //   NEXT_PUBLIC_COLLATERAL_TOKEN_ID  the collateral's id in the verifier, "nep141:<token contract>"
 //   NEXT_PUBLIC_BACKEND_URL          the backend's public origin; leave empty to run without it
+//   NEXT_PUBLIC_RELAYER_ID           the account that pays gas for signed actions from EVM and Solana wallets
 //   NEXT_PUBLIC_NFT_ID               the Council seat NFT collection
 //   NEXT_PUBLIC_TOKEN_ID             the NEP-141 contract itself; only the test faucet calls it
 //   NEXT_PUBLIC_AGENT_WALLET_CONTRACT  the only contract an owner signs an agent request for
@@ -29,6 +30,7 @@ export const config = {
   councilId: process.env.NEXT_PUBLIC_COUNCIL_ID ?? "",
   verifierId: process.env.NEXT_PUBLIC_VERIFIER_ID ?? "",
   collateralTokenId: process.env.NEXT_PUBLIC_COLLATERAL_TOKEN_ID ?? "",
+  relayerId: process.env.NEXT_PUBLIC_RELAYER_ID ?? "",
   nftId: process.env.NEXT_PUBLIC_NFT_ID ?? "",
   tokenId: process.env.NEXT_PUBLIC_TOKEN_ID ?? "",
   agentWalletContract: process.env.NEXT_PUBLIC_AGENT_WALLET_CONTRACT ?? "",
@@ -41,6 +43,9 @@ export const config = {
 };
 
 export const isConfigured = Boolean(config.marketId && config.oracleId && config.verifierId && config.collateralTokenId);
+// EVM and Solana wallets sign Intents payloads and the backend relays them. Without a relayer and a backend there is no way to
+// send one, so the connect options stay hidden. The sandbox has no wallets at all. The backend prices the relay fee.
+export const relayEnabled = network !== "sandbox" && isConfigured && config.backendUrl !== "" && config.relayerId !== "";
 export const isTestMoney = network !== "mainnet";
 
 // Shown before funding. Plain text for the interface to display.

@@ -49,7 +49,7 @@ interval. Both limits are checked in `add_series`, the only place a series is ma
 | Owner (the DAO) | Everything below, plus the upgrade, `seal`, `remove_verifier_key`, ownership handover, the operator, `set_fee_bps`, `set_registration_fee`, `set_treasury`, `add_publisher`, `set_price_threshold`, `reconcile_withdrawal` |
 | Operator | `add_series`, `set_paused`, `remove_publisher` (cutting off a leaked key needs no vote) |
 | The verifier | `mt_on_transfer` (money in) and `on_auth` (signed actions) |
-| The collateral token | `ft_on_transfer` (money in by `ft_transfer_call`) |
+| Direct token transfers | `ft_on_transfer` refuses; fund user Intents first |
 | Anyone | `record_price` with valid signatures, `settle_round`, `claim` for any account, `storage_deposit` for any account, `sweep_fees`, the views |
 
 The owner may also call `set_publishers(publishers: Vec<PublicKey>, threshold: u32)` with zero
@@ -76,26 +76,20 @@ sent with its money cannot be read as a stake with a different minimum.
 | --- | --- |
 | `register` | Registers the sender. The registration fee (0.25 to start) goes to fees and the rest to the balance |
 | `deposit` | Credits the balance of a registered account |
+| `deposit_for:<account>` | Credits a registered beneficiary in the same receipt, at least the minimum stake; refused while paused |
 | `stake:<series>:<round>:<up\|down>:<min shares>` | Stakes the whole amount, refused if it buys fewer than `min shares` |
 
-## Money in by token: `ft_on_transfer`
+## Funding from a token wallet
 
-For an account that holds the collateral token itself and nothing in Intents. It registers in NEAR first (below), then
-calls `ft_transfer_call(receiver_id: <this contract>, amount, msg)` on the token with 1 yocto and 300 TGas. The token
-goes whole into this contract's own Intents account, and the callback credits what the verifier took and hands back the
-rest. Every refusal comes before the forward, so a refused transfer comes back whole. At least 75 TGas must reach the
-hook (`attach at least 75 TGas`): 50 for the forward, 20 for the callback, which may start a stake, and 5 for its own
-work. Measured in the sandbox, 84 TGas on the token call is the least that clears it, and a stake by token burns about
-7.4 TGas in this contract. That holds for a token that passes all its unused gas on; one built on an older
-`near-contract-standards` keeps a fixed 30 TGas for itself, so 100 TGas leaves it short.
+Direct token transfers to rounds are refused. First deposit the token into the sender's own
+Intents account, then sign a separate `mt_transfer_call` to rounds. Use `deposit`,
+`deposit_for:<beneficiary>`, or the stake message above. A gift requires a registered
+beneficiary and at least the minimum stake; its event also names the sender.
 
-| Message | Does |
-| --- | --- |
-| `deposit` | Credits the balance |
-| `deposit_for:<account>` | Credits the balance of another registered account, at least the minimum stake. The deposit event names the sender as `from`, and a refusal before the forward still refunds the sender |
-| `stake:<series>:<round>:<up\|down>:<min shares>` | Credits the balance, then stakes the whole amount through `stake_credited`, a private method, in its own receipt with 10 TGas. A stake the round refuses by then, or one that would buy fewer than `min shares`, stays in the balance |
-
-`register` is not a message here: an account that pays by token registers in NEAR.
+The credit is recorded in the receiver receipt. A refused transfer refunds to the sender's
+Intents balance. A failed token resolver during the first step leaves an accepted deposit
+in user custody, not under rounds with no user credit. Verify receipts before retrying.
+Legacy private `on_forwarded` and `stake_credited` callbacks remain for in-flight old receipts.
 
 ## Registering in NEAR: NEP-145
 

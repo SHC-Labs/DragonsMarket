@@ -11,18 +11,22 @@ import { InvalidAction } from '../src/agent-actions.js';
 import { refusal } from '../src/agent-routes.js';
 import { OperationRefused } from '../src/operations.js';
 import { ReadError } from '../src/read-api.js';
+import { nearPolicyFixture } from './near-policy-fixture.js';
 
 const deployment = {
   id: 'agents', startBlock: '1', collateralTokenId: 'nep141:usdc.fixture.near', collateralDecimals: 6,
   contracts: { rounds: 'rounds.fixture.near', market: 'market.fixture.near', verifier: 'intents.fixture.near' },
 };
 const AGENT_ID = 'a'.repeat(64);
-const signing = { walletContract: 'wallets.example.near', messageRecipient: 'agents.example.com' };
+const signing = { walletContract: 'wallets.example.near', messageRecipient: 'agents.example.com', network: 'mainnet' as const };
 const intent = (type: IntentType, standard: string, payload: Record<string, unknown>, agentId = AGENT_ID):
-  OwnerIntent => ({ correlation_id: 'intent_1', type, agent_id: agentId, status: 'PENDING_SIGNATURE',
-  expires_at: '2030-01-01T00:00:00.000Z', intent: { standard, payload }, preview: { summary: 'Sign' } });
+  OwnerIntent => ({ ...(standard === 'nep366' ? nearPolicyFixture().generated : {}),
+  correlation_id: 'intent_1', type, agent_id: agentId, status: 'PENDING_SIGNATURE',
+  signer: { type: 'near', account_id: 'alice.near', public_key: 'ed25519:key' },
+  expires_at: new Date(Date.now() + 550000).toISOString(), intent: { standard, payload },
+  preview: standard === 'nep366' ? nearPolicyFixture().generated.preview : { summary: 'Sign' } });
 const functionCall = (deposit: string) => ({ type: 'FunctionCall', params: { methodName: 'store_wallet_policy',
-  args: {}, gas: '100000000000000', deposit } });
+  args: nearPolicyFixture().args, gas: '100000000000000', deposit } });
 const delegate = (overrides: Record<string, unknown> = {}) =>
   ({ receiverId: 'wallets.example.near', actions: [functionCall('0')], ...overrides });
 const message = (overrides: Record<string, unknown> = {}) => ({ message: '{"grant":1}',
@@ -120,11 +124,12 @@ test('an owner is shown only what the Agent API\'s owner flow makes, never a req
   () => {
     assert.ok(fitsOwnerFlow(signing, intent('agent_create', 'nep366', delegate()), 'agent_create'));
     assert.ok(fitsOwnerFlow(signing, intent('grant_issue', 'nep413', message()), 'grant_issue', AGENT_ID));
-    for (const type of ['agent_freeze', 'agent_unfreeze', 'grant_revoke'] as const) {
-      assert.ok(fitsOwnerFlow(signing, intent(type, 'nep366', delegate()), type, AGENT_ID), type);
+    assert.ok(fitsOwnerFlow(signing, intent('grant_revoke', 'nep413', message()), 'grant_revoke', AGENT_ID));
+    for (const type of ['agent_freeze', 'agent_unfreeze'] as const) {
+      assert.ok(fitsOwnerFlow(signing, nearPolicyFixture(type).generated, type, AGENT_ID), type);
     }
     const oneNear = delegate({
-      actions: [functionCall('600000000000000000000000'), functionCall('400000000000000000000000')] });
+      actions: [functionCall('1000000000000000000000000')] });
     assert.ok(fitsOwnerFlow(signing, intent('agent_create', 'nep366', oneNear), 'agent_create'), 'up to 1 NEAR');
     const refused: [OwnerIntent, IntentType, string | undefined, string][] = [
       [intent('agent_create', 'nep366', delegate({ receiverId: 'usdc.fixture.near' })), 'agent_create', undefined,
@@ -211,6 +216,11 @@ test('the agent worker needs its partner key, its grant key and the custody cont
   const all = { ...SHARED, AGENT_API_URL: 'https://agents.example.com', AGENT_API_KEY: `naa_${'k'.repeat(43)}`,
     AGENT_GRANT_KEY: key, AGENT_API_WALLET_CONTRACT: 'wallets.example.near', AGENT_WORKER_TOKEN: TOKEN };
   const config = readAgentWorkerConfig(all);
+  assert.equal(config.policySponsor, null);
+  assert.equal(readAgentWorkerConfig({ ...all, AGENT_API_POLICY_SPONSOR: 'sponsor.near' }).policySponsor,
+    'sponsor.near');
+  assert.throws(() => readAgentWorkerConfig({ ...all, AGENT_API_POLICY_SPONSOR: 'not an account' }),
+    /AGENT_API_POLICY_SPONSOR/);
   assert.deepEqual([config.grantKey, config.walletContract, config.token, config.host, config.port],
     [Buffer.from(key, 'base64'), 'wallets.example.near', TOKEN, '127.0.0.1', 3510]);
   assert.equal(config.shared.agentWorker, null, 'the worker does not call itself');

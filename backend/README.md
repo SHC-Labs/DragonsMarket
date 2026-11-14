@@ -2,7 +2,7 @@
 
 The backend foundation provides PostgreSQL, versioned SQL migrations and a small HTTP API. Everything for this service lives here. The website and contracts keep their own build processes.
 
-A finalized-event ingestion engine supports sandbox fixture replay, bounded actual sandbox receipt capture, immutable deployment registration, atomic checkpoints and status reporting. Mainnet follower code and supervised worker profiles are available, but no Dragons Market deployment is configured. Trading, funding and price submission remain disabled pending final contracts and source policy. Trading projections will follow the team's contract decisions. The root checklist tracks remaining work; the [delivery plan](../docs/hackathon-plan.md) contains the specifications.
+A finalized-event ingestion engine supports sandbox fixture replay, bounded actual sandbox receipt capture, immutable deployment registration, atomic checkpoints and status reporting. Mainnet follower code and supervised worker profiles are available, but no Dragons Market deployment is configured. Trading, funding and price submission remain disabled pending final contracts and source policy. Trading projections will follow the team's contract decisions. The root checklist tracks remaining work; the delivery plan contains the specifications.
 
 ## Run locally
 

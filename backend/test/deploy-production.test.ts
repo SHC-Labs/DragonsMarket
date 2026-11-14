@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { ChildProcess } from 'node:child_process';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -89,7 +90,9 @@ before(async () => {
     return { acc: new Account(`${name}.${DEFAULT_ACCOUNT_ID}`, provider, key.toString()), key };
   };
   const parentKey = KeyPair.fromRandom('ed25519');
-  const parent = await account('dragonsmarket', '400', parentKey);
+  // After the first child is funded there is no longer enough for the original
+  // full plan. Resuming must budget only the children that do not exist yet.
+  const parent = await account('dragonsmarket', '165', parentKey);
   parentKeyFile = join(dir, 'parent.key');
   await writeFile(parentKeyFile, `${parentKey.toString()}\n`, { mode: 0o600 });
   const dao = (await account('dao', '30')).acc;
@@ -113,7 +116,7 @@ before(async () => {
   const common = { owner_id: daoId, verifier_id: verifierId, collateral_token_id: collateral };
   const contract = (role: typeof ROLES[number], init: object) => ({ account: children[role], wasm: resolve(`../contracts/target/near/${role}/${role}.wasm`),
     codeHash: baseEncode(createHash('sha256').update(bytes[role]).digest()), fundingNear: '40', init });
-  const manifest = { network: 'sandbox', parent: parent.acc.accountId, dao: daoId, nft: nft.accountId, verifier: verifierId, collateral,
+  const manifest = { network: 'sandbox', parent: parent.acc.accountId, dao: daoId, daoMinApprovals: 2, nft: nft.accountId, verifier: verifierId, collateral,
     operator: operator.accountId, decide: ['contracts.oracle.init.bond'], contracts: {
       market: contract('market', { ...common, operator_id: operator.accountId, oracle_id: children.oracle }),
       oracle: contract('oracle', { ...common, market_contract: children.market, bond: '5000000', window_ms: '3600000',
@@ -170,9 +173,47 @@ test('deploy --send needs a key directory outside the repository', async () => {
 });
 
 test('deploy --send creates each child, initializes it as itself and reads config back', { timeout: 300000 }, async () => {
+  // Lose the response after a real finalized create transaction. This exercises
+  // the persisted pending hash, not a fabricated successful transaction record.
+  const proxy = createServer(async (request, response) => {
+    try {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const body = Buffer.concat(chunks).toString('utf8');
+      const upstream = await fetch(sandbox!.rpcUrl, { method: 'POST', body,
+        headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(30000) });
+      const text = await upstream.text();
+      if (JSON.parse(body).method === 'send_tx') {
+        const result = JSON.parse(text).result;
+        assert.equal(result.final_execution_status, 'FINAL');
+        response.writeHead(400).end('injected lost send response');
+      } else response.writeHead(upstream.status, { 'content-type': 'application/json' }).end(text);
+    } catch { response.writeHead(500).end('test proxy failed'); }
+  });
+  await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  const address = proxy.address();
+  assert.ok(address && typeof address !== 'string');
+  let interrupted: Run;
+  try {
+    interrupted = await node(['deploy', '--send', '--manifest', manifestFile, '--rpc', `http://127.0.0.1:${address.port}`,
+      '--parent-key-file', parentKeyFile, '--key-dir', keyDir]);
+  } finally {
+    await new Promise<void>((resolve, reject) => proxy.close(error => error ? reject(error) : resolve()));
+  }
+  assert.equal(interrupted.code, 1, interrupted.stdout + interrupted.stderr);
+  assert.match(interrupted.stderr, /send_tx: HTTP 400/);
+  const pendingRecord = JSON.parse(await readFile(join(keyDir, 'deployment-sandbox.json'), 'utf8'));
+  assert.equal(pendingRecord.pending.step, 'market.create');
+  const createHash = pendingRecord.pending.hash;
+  assert.equal(await exists(children.market), true);
+  assert.equal(await exists(children.oracle), false);
+
   const run = await node(['deploy', '--send', ...rpcArgs(), '--parent-key-file', parentKeyFile, '--key-dir', keyDir]);
   assert.equal(run.code, 0, run.stderr + run.stdout);
+  assert.doesNotMatch(run.stdout, /sent market\.create/, 'resume must not create or fund the first child again');
   const record = JSON.parse(await readFile(join(keyDir, 'deployment-sandbox.json'), 'utf8'));
+  assert.equal(record.pending, null);
+  assert.equal(record.market.transactions['market.create'], createHash);
   for (const role of ROLES) {
     assert.match(run.stdout, new RegExp(`${role}: config matches the manifest`));
     const file = join(keyDir, `${children[role]}.key`);
@@ -187,6 +228,7 @@ test('deploy --send creates each child, initializes it as itself and reads confi
   const again = await node(['deploy', '--send', ...rpcArgs(), '--parent-key-file', parentKeyFile, '--key-dir', keyDir]);
   assert.equal(again.code, 0, again.stderr);
   assert.doesNotMatch(again.stdout, /sent /, 'a finished deployment sends nothing more');
+  assert.deepEqual(JSON.parse(await readFile(join(keyDir, 'deployment-sandbox.json'), 'utf8')), record, 'a restart retains every original transaction hash');
 });
 
 test('verify fails while the upgrade is unproven and keys remain', async () => {
@@ -202,13 +244,15 @@ test('verify fails while the upgrade is unproven and keys remain', async () => {
 
 test('DAO upgrade and seal proposals leave every contract keyless and verify passes', { timeout: 300000 }, async () => {
   const first = await proposals();
-  assert.equal(first.length, 5, 'four upgrades and the NFT collection; no seal until the upgrade has run');
-  assert.ok(first.every(({ description }) => !/token range|allow/i.test(description)));
+  assert.equal(first.length, 8, 'four upgrades, the NFT collection, Council market permission and both fee destinations');
+  assert.ok(first.every(({ description }) => !/token range|council seats/i.test(description)));
   await executeProposals(first);
   for (const role of ROLES) assert.equal((await view(children[role], 'config')).upgrade_proven, true);
   const seals = await proposals();
   assert.deepEqual(seals.map(({ description }) => description.split(' ')[1]), ['market:', 'oracle:', 'council:', 'rounds:']);
   await executeProposals(seals.slice(0, 3));
+  const remaining = await proposals();
+  assert.equal(remaining.length, 1, 'proposal generation can resume after three seals');
   const partial = await node([...rpcArgs(), 'verify']);
   assert.equal(partial.code, 1, 'one remaining key is enough to fail');
   assert.match(partial.stdout, /FAIL rounds no access keys: got 1, want 0/);
@@ -217,7 +261,7 @@ test('DAO upgrade and seal proposals leave every contract keyless and verify pas
   for (const role of ROLES) assert.equal(await keyCount(children[role]), 0);
   const done = await node([...rpcArgs(), 'verify']);
   assert.equal(done.code, 0, done.stdout);
-  assert.equal(done.stdout.match(/^PASS /gm)?.length, 17);
+  assert.equal(done.stdout.match(/^PASS /gm)?.length, 25);
   assert.doesNotMatch(done.stdout, /FAIL/);
 });
 

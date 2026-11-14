@@ -12,7 +12,9 @@ test.beforeEach(async ({ page }) => {
     let value:unknown=null;
     if(name==="list_markets") value=markets.slice(Number(args.from_index),Number(args.from_index)+Number(args.limit));
     if(name==="get_market") value=markets.find(m=>m.id===args.market_id)??null;
-    if(name==="get_balance"||name==="ft_balance_of") value="10000000";
+    if(name==="get_balance"||name==="ft_balance_of"||name==="mt_balance_of") value="10000000";
+    if(name==="config") value={markets:"53",paused:false,sells_paused:false};
+    if(name==="is_registered") value=true;
     if(name==="get_shares") value=["1000000","0"];
     if(name==="get_history") value=[{at:ns(Date.now()-60000),price_yes:500000},{at:ns(Date.now()),price_yes:600000}];
     await route.fulfill({json:{jsonrpc:"2.0",id:request.id,result:{result:[...Buffer.from(JSON.stringify(value))]}}});
@@ -29,13 +31,12 @@ test("all markets load, with at most five history reads per refresh",async({page
   expect(histories).toBeLessThanOrEqual(5);
 });
 
-test("placeholder ticket makes no quote or transaction request",async({page})=>{
+test("a disconnected ticket asks for a wallet and sends nothing",async({page})=>{
   const calls:string[]=[];
   page.on("request",r=>{if(r.url().endsWith("/local-rpc"))calls.push(r.postDataJSON()?.params?.method_name);});
   await page.goto("/market?id=0");
   await page.getByLabel("Amount",{exact:true}).fill("10");
-  await expect(page.getByRole("button",{name:"Trading coming soon"})).toBeDisabled();
-  await expect(page.getByText("Not available yet",{exact:true})).toBeVisible();
+  await expect(page.getByRole("complementary",{name:"Trade ticket"}).getByRole("button",{name:"Connect wallet"})).toBeVisible();
   expect(calls.some(c=>/quote_buy|quote_sell|broadcast/.test(c))).toBe(false);
 });
 
@@ -74,9 +75,9 @@ test("Council shares the purple venue palette, shared fonts and responsive Drago
 });
 
 
-test("portfolio writes remain disabled until the final withdrawal flow is wired",async({page})=>{
+test("portfolio exposes the market withdrawal and actual positions",async({page})=>{
   await page.goto("/portfolio?as=review-account.test.near");
-  await expect(page.getByRole("button",{name:"Withdrawals coming soon"})).toBeDisabled();
+  await expect(page.getByRole("button",{name:"Withdraw",exact:true})).toBeEnabled();
   await expect(page.getByText("53 positions",{exact:true})).toBeVisible();
 });
 

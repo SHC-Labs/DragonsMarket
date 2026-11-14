@@ -12,6 +12,7 @@ import { chromium } from "@playwright/test";
 import { cashOutWalletMethod, installCashOutFixture, checkCashOutBrowser, checkMarketWithdrawalBrowser } from "./cash-out-browser.mjs";
 import { checkStakeBrowser } from "./stake-browser.mjs";
 import { checkMarketListBrowser } from "./market-list-browser.mjs";
+import { checkTradingBrowser } from "./trading-browser.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const port = process.env.CSP_TEST_PORT ?? "3397", base = `http://127.0.0.1:${port}`;
@@ -41,7 +42,7 @@ try {
     councilId: "council.csp-fixture.testnet", verifierId: "verifier.csp-fixture.testnet",
     nftId: "nft.csp-fixture.testnet", collateralTokenId: "nep141:usdc.csp-fixture.testnet",
     tokenId: "usdc.csp-fixture.testnet", tokenDecimals: 6, backendUrl: "", mcpUrl: "",
-    agentWalletContract: "", agentApiHost: "",
+    agentWalletContract: "", agentApiHost: "", relayerId: "",
   }, "the served build record matches the browser fixture configuration");
   const nonces = new Set();
   const pages = (await readdir(resolve(root, "web/out-caddy"), { recursive: true })).filter(name => name.endsWith(".html"));
@@ -103,6 +104,7 @@ try {
   await checkMarketWithdrawalBrowser(page, base);
   await checkStakeBrowser(page, base);
   await checkMarketListBrowser(page, base);
+  await checkTradingBrowser(page, base);
   for (const path of ["/agents", "/docs", "/api", "/council", "/privacy"]) {
     await page.goto(base + path, { waitUntil: "networkidle" });
     assert.equal(await page.locator("h1").count() > 0, true, path);

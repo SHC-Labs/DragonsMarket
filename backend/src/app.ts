@@ -1,4 +1,6 @@
-import { isPrivateRoute, type PrivateHandler } from './private-api.js';
+import { body, isPrivateRoute, type PrivateHandler } from './private-api.js';
+import { isAuthChallenge } from './auth-http.js';
+import { RelayError, type Relay } from './relay.js';
 import { isAgentAccessRoute } from './agent-paths.js';
 import { createServer, type IncomingMessage } from 'node:http';
 import { BlockList, isIP } from 'node:net';
@@ -12,6 +14,15 @@ const REQUESTS_PER_WINDOW = 120;
 const ACCESS_REQUESTS_PER_WINDOW = 6000;
 const REQUESTS_PER_ACCESS_TOKEN = 120;
 const CHALLENGES_PER_WINDOW = 5;
+const RELAYS_PER_CLIENT = 10;
+const RELAYS_PER_SIGNER = 5;
+// An unfunded signer costs a paced balance read and nothing else, and fresh keys are free. So every relay request is charged to its
+// client network up front, and refunded unless it ended unfunded or was turned away busy.
+const UNFUNDED_PER_CLIENT = 2;
+const KEEPS_CHARGE = new Set(['insufficient_balance', 'relay_busy']);
+// Relay requests one client network may have open at once, so a few addresses cannot hold every balance-read or queue slot.
+const RELAYS_IN_FLIGHT_PER_CLIENT = 2;
+const RELAY_BODY_LIMIT = 8192;
 const MAX_TRACKED_CLIENTS = 10000;
 
 const digest = (value: string) => createHash('sha256').update(value).digest();
@@ -39,6 +50,16 @@ function withinLimit(counters: Counters, client: string, max: number, now: numbe
   return ++entry.count <= max;
 }
 
+function exhausted(counters: Counters, client: string, max: number, now: number): boolean {
+  const entry = counters.get(client);
+  return entry !== undefined && now - entry.start < WINDOW_MS && entry.count >= max;
+}
+
+function refund(counters: Counters, client: string) {
+  const entry = counters.get(client);
+  if (entry && entry.count > 0) entry.count--;
+}
+
 function pathOf(url: string | undefined) {
   if ((url?.length ?? 0) > 8192) return null;
   try {
@@ -49,7 +70,7 @@ function pathOf(url: string | undefined) {
 }
 
 // An IPv6 client usually holds a whole /64, so each address in it would otherwise get a fresh budget.
-// Challenges are limited per /48 as well, because a single IPv6 allocation holds thousands of /64s to rotate through.
+// Challenges and the relay are limited per /48 as well, because a single IPv6 allocation holds thousands of /64s to rotate through.
 export function challengeKey(key: string): string {
   return key.endsWith('::/64') ? key.split(':').slice(0, 3).join(':') + '::/48' : key;
 }
@@ -113,10 +134,16 @@ export function createApp(
   read?: ReadHandler,
   privateRead?: PrivateHandler,
   serviceStatus?: ServiceStatusReader,
+  relay?: Relay | null,
 ) {
   const limits: Counters = new Map(),
     challengeLimits: Counters = new Map(),
-    tokenLimits: Counters = new Map();
+    tokenLimits: Counters = new Map(),
+    relayClientLimits: Counters = new Map(),
+    feeClientLimits: Counters = new Map(),
+    unfundedLimits: Counters = new Map(),
+    relaySignerLimits: Counters = new Map();
+  const relaysInFlight = new Map<string, number>();
   const proxies = trustedProxyList(config.trustedProxyAddresses);
   let readiness: { expires: number; result: Promise<boolean> } | undefined;
   const server = createServer(async (req, res) => {
@@ -159,6 +186,7 @@ export function createApp(
           status: 'ready', checks: { database: 'ok', schema: 'current' },
           deploymentConfigured: config.deployment !== null, scope: 'foundation',
           indexing: config.deployment ? 'see_indexer_status' : 'deployment_not_configured',
+          ...(relay ? { relay: { keyAllowanceLow: relay.status().keyAllowanceLow } } : {}),
         });
       } else {
         reply(503, { status: 'not_ready', error: { code: 'database_or_configuration_unavailable', requestId } });
@@ -179,10 +207,77 @@ export function createApp(
       reply(400, { error: { code: 'invalid_url', requestId } });
       return;
     }
-    if (privatePath === '/v1/auth/challenge' && req.method === 'POST' && req.headers.origin === config.webOrigin &&
+    if (isAuthChallenge(privatePath) && req.method === 'POST' && req.headers.origin === config.webOrigin &&
         !withinLimit(challengeLimits, challengeKey(client), CHALLENGES_PER_WINDOW, now)) {
       res.setHeader('Retry-After', '60');
       reply(429, { error: { code: 'challenge_rate_limited', requestId } });
+      return;
+    }
+    if (privatePath === '/intents/relay' || privatePath === '/intents/fee' || privatePath === '/intents/status') {
+      const method = privatePath === '/intents/fee' ? 'GET' : 'POST';
+      if (!relay) {
+        reply(404, { error: { code: 'not_found', requestId } });
+        return;
+      }
+      if (req.method === 'OPTIONS') {
+        if (req.headers.origin !== config.webOrigin) {
+          reply(403, { error: { code: 'origin_required', requestId } });
+          return;
+        }
+        res.setHeader('Access-Control-Allow-Methods', method);
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        reply(204, null);
+        return;
+      }
+      if (req.method !== method) {
+        res.setHeader('Allow', method);
+        reply(405, { error: { code: 'method_not_allowed', requestId } });
+        return;
+      }
+      const network = challengeKey(client);
+      try {
+        if (method === 'GET') {
+          if (!withinLimit(feeClientLimits, network, RELAYS_PER_CLIENT, now)) throw new RelayError(429, 'rate_limited');
+          const { fee, validUntil } = await relay.quote();
+          reply(200, { fee: fee.toString(), validUntil: new Date(validUntil).toISOString() });
+          return;
+        }
+        if (!withinLimit(relayClientLimits, network, RELAYS_PER_CLIENT, now)) throw new RelayError(429, 'rate_limited');
+        const open = relaysInFlight.get(network) ?? 0;
+        if (open >= RELAYS_IN_FLIGHT_PER_CLIENT) throw new RelayError(503, 'relay_busy');
+        if (exhausted(unfundedLimits, network, UNFUNDED_PER_CLIENT, now)) throw new RelayError(429, 'rate_limited');
+        withinLimit(unfundedLimits, network, UNFUNDED_PER_CLIENT, now);
+        relaysInFlight.set(network, open + 1);
+        let outcome = 'ok';
+        try {
+          const input = await body(req, RELAY_BODY_LIMIT);
+          if (privatePath === '/intents/status') {
+            if (!relay.recover) throw new ReadError(503, 'relay_unavailable');
+            reply(200, await relay.recover(input));
+          } else {
+            reply(200, await relay.submit(input, signer => withinLimit(relaySignerLimits, signer, RELAYS_PER_SIGNER, Date.now())));
+          }
+        } catch (error) {
+          outcome = error instanceof ReadError ? error.code : 'error';
+          throw error;
+        } finally {
+          if (!KEEPS_CHARGE.has(outcome)) refund(unfundedLimits, network);
+          const left = relaysInFlight.get(network)! - 1;
+          if (left) relaysInFlight.set(network, left);
+          else relaysInFlight.delete(network);
+        }
+      } catch (e) {
+        if (!(e instanceof ReadError) || e.status >= 500) logFailure(requestId, 'relay', e);
+        const status = e instanceof ReadError ? e.status : 503;
+        if (status === 429) res.setHeader('Retry-After', '60');
+        reply(status, { error: {
+          code: e instanceof ReadError ? e.code : 'relay_unavailable', requestId,
+          ...(e instanceof RelayError && e.index !== undefined ? { index: e.index } : {}),
+          ...(e instanceof RelayError && e.reason ? { reason: e.reason } : {}),
+          ...(e instanceof RelayError && e.completed ? { completed: e.completed } : {}),
+          ...(e instanceof RelayError && e.hash ? { hash: e.hash } : {}),
+        } });
+      }
       return;
     }
     if (req.method === 'OPTIONS' && isPrivateRoute(privatePath)) {
@@ -260,7 +355,7 @@ export function createApp(
       try {
         if (!serviceStatus) throw new Error('service_status_not_configured');
         const status = await serviceStatus();
-        reply(200, detailed ? status : { status: status.alerts.length ? 'degraded' : 'ok' });
+        reply(200, detailed ? { ...status, ...(relay ? { relay: relay.status() } : {}) } : { status: status.alerts.length ? 'degraded' : 'ok' });
       } catch (error) {
         logFailure(requestId, 'services', error);
         reply(503, { error: { code: 'health_unavailable', requestId } });

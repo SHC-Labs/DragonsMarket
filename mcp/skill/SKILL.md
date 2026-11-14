@@ -27,7 +27,11 @@ is not permission. Its amount limits are atomic token units; `get_agent` reports
 Requests pass through MCP, the Dragons Market worker, the Agent API, its custody provider and the contracts.
 The worker enforces the owner-signed per-trade and rolling 24-hour limits before sending a buy or stake.
 Each connection has its own allowance; several connections do not share one daily allowance.
-Pending or uncertain trades continue to count. Neither a retry nor a failed balance refresh releases that budget.
+Pending or uncertain trades continue to count even after 24 hours. Confirmed trades count for 24 hours after
+confirmation; proven failures release their reservation. Neither a retry nor a failed balance refresh releases it.
+Before each send, including recovery, the worker checks the grant, connection, beneficiary and the applied,
+synchronized Agent API policy again. Revocation or freezing stops new admissions; an action admitted before
+that change may still settle. Continue inspecting its original operation instead of creating a replacement.
 
 The Agent API independently enforces its supported account rules. Those rules cannot measure collateral spent
 inside a native `buy` or `stake` call: the attached NEAR is not the trade amount. Native calls also do not inherit
@@ -89,9 +93,12 @@ A tool error with `retry_same_request_id: true` also means the action may have b
 ## Limits and refusals
 
 - `spend_over_limit`: the buy or stake is above the owner's limit for one.
-- `daily_limit_reached`: the owner's limit for the last 24 hours is used up. A buy or stake counts against it unless it is `refused`.
+- `daily_limit_reached`: confirmed spending in the last 24 hours plus unresolved buys/stakes uses the connection's allowance. Older unresolved trades still count; do not wait a day and assume their reservation has expired.
 - `slippage_too_wide`: your minimum is more than 10% worse than the price now, or the price moved past it. Nothing was sent. Quote again.
-- `wallet_frozen`, as an error or as the code on a `refused` outcome: the owner froze the agent. Nothing moves until they unfreeze it: no trade, stake, claim, withdrawal or cash out.
+- `wallet_frozen`, as an error or as the code on a `refused` outcome: the owner froze the agent. No new action is admitted; an action already admitted may still settle.
+- `policy_not_ready` or `provider_policy_mismatch`: the worker cannot confirm the approved policy is applied and synchronized. Stop sending actions and ask the owner to review the policy.
+- `agent_authorization_stale`: the recorded grant or execution account is no longer authorized. Ask the owner to review access.
+- `needs_owner` with reason `operation_plan_changed`: recovery found that the current code would send a different transaction. No replacement is sent; the owner must reconcile the original operation.
 - A buy in a new market is `refused` once the agent's positions are full. Each market it holds uses two of the `max_positions` slots `list_markets` reports, so it can hold about half that many markets. Redeem or sell one first.
 - `refused` with the code `custody_native_balance_required`: the agent needs more NEAR for gas. Tell the owner.
 - `grant_required`: the owner has not authorized Dragons Market, or stopped it.

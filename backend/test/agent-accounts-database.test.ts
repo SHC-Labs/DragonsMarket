@@ -23,6 +23,11 @@ import {
 } from '../src/agent-accounts.js';
 import { operationStore } from '../src/operations.js';
 import type { AgentRunner } from '../src/agents.js';
+import { agentAuthorizer } from '../src/agent-authorization.js';
+import { consentFixture } from './owner-intent-fixture.js';
+import { nearPolicyFixture } from './near-policy-fixture.js';
+import { signAccess as signConnection } from '../src/agent-access.js';
+import { ReadError } from '../src/read-api.js';
 
 type Body = Record<string, unknown>;
 const WALLET_CONTRACT = 'wallets.example.near';
@@ -33,21 +38,15 @@ const at = '2030-01-01T00:00:00.000Z';
 
 function fakeAgentApi() {
   const requests: { path: string; headers: Headers; body: Body | null }[] = [];
-  const intents = new Map<string, { type: string; agentId: string; credential?: unknown; submitted: boolean }>();
+  const intents = new Map<string, { type: string; agentId: string; message: Body | undefined; submitted: boolean }>();
   const operations = new Map<string, { type: string; agentId: string; details: Body; call: Body }>();
   const owners = new Map<string, unknown>();
   const policies = new Map<string, Body>();
+  const revisions = new Map<string, number>();
   const frozen = new Set<string>();
   const state = { created: 0, forge: false, widen: false, foreignGrant: false, reuseHash: false, slowSend: false,
-    busy: false, settling: false, refuse: null as string | null, event: 'staked' };
-  const payload = (type: string) => {
-    if (type === 'grant_issue') {
-      return { message: '{"grant":1}', recipient: 'agents.example.com', nonce: randomBytes(32).toString('base64') };
-    }
-    const call = { methodName: state.forge ? 'ft_transfer' : 'store_wallet_policy', args: {}, gas: '1', deposit: '0' };
-    const receiverId = state.forge ? 'usdc.test.near' : WALLET_CONTRACT;
-    return { receiverId, actions: [{ type: 'FunctionCall', params: call }] };
-  };
+    busy: false, settling: false, refuse: null as string | null, event: 'staked', policyView: null as Body | null,
+    policyHistory: [] as Body[] };
   const status = (id: string, type: string, agentId: string, s: string, details: Body) => ({ correlation_id: id,
     agent_id: agentId, type, status: s, failure_code: null, created_at: at, updated_at: at,
     dispatch_committed_at: null, grant: null, details });
@@ -57,24 +56,40 @@ function fakeAgentApi() {
     if (type === 'agent_create') {
       owners.set(agentId, body.owner);
       policies.set(agentId, body.policy as Body);
+      revisions.set(agentId, 0);
     }
-    intents.set(id, { type, agentId, credential: body.credential, submitted: false });
-    const policy = state.widen && body.policy ? { ...body.policy as Body, actions: ['withdraw', 'swap'] } : body.policy;
+    const policyType = type as 'agent_create' | 'agent_freeze' | 'agent_unfreeze';
+    const policy = { ...policies.get(agentId), frozen: type === 'agent_freeze' };
+    const prepared = nearPolicyFixture(policyType, { agentId, approval: { tenantId: 'tenant-fixture',
+      walletAccount: nearAccountOf(agentId), revision: (revisions.get(agentId) ?? 0) + 1,
+      policy, storageRefundTo: null } });
+    if (state.forge) prepared.generated.intent.payload.receiverId = 'usdc.test.near';
+    const intent = ['grant_issue', 'grant_revoke'].includes(type)
+      ? consentFixture(body, owners.get(agentId), 'sandbox') : prepared.generated.intent;
+    const message = 'message' in intent.payload ? JSON.parse(String(intent.payload.message)) as Body : undefined;
+    intents.set(id, { type, agentId, message, submitted: false });
+    const preview = state.widen ? { ...prepared.generated.preview, policy: { ...policy, actions: ['withdraw', 'swap'] } }
+      : prepared.generated.preview;
     return { correlation_id: id, type, agent_id: agentId, status: 'PENDING_SIGNATURE',
-      expires_at: new Date(Date.now() + 600000).toISOString(), signer: owners.get(agentId),
-      intent: { standard: type === 'grant_issue' ? 'nep413' : 'nep366', payload: payload(type) },
-      preview: { summary: `Sign ${type}`, ...(policy ? { policy } : {}) } };
+      expires_at: new Date(Date.now() + 590000).toISOString(), signer: owners.get(agentId),
+      intent,
+      preview: { ...preview, summary: `Sign ${type}` } };
   };
   const intentStatus = (id: string) => {
     const intent = intents.get(id)!;
-    const credential = state.foreignGrant ? 'f'.repeat(64) : intent.credential;
-    const details = intent.type === 'grant_issue' ? { grant: { grant_id: `grant-${id}`, agent_id: intent.agentId,
-      revoked_at: null, owner_message: { credential } } } : {};
+    const ownerMessage = state.foreignGrant ? { ...intent.message, credential: 'f'.repeat(64) } : intent.message;
+    const details = intent.type === 'grant_issue' ? { grant: {
+      grant_id: createHash('sha256').update(id).digest('hex'), agent_id: intent.agentId,
+      revoked_at: null, owner_message: ownerMessage } } : {};
     return status(id, intent.type, intent.agentId, intent.submitted ? 'SUCCESS' : 'PENDING_SIGNATURE', details);
   };
   const land = (id: string) => {
     const intent = intents.get(id)!;
+    if (intent.submitted) return intent;
     intent.submitted = true;
+    if (['agent_create', 'agent_freeze', 'agent_unfreeze'].includes(intent.type)) {
+      revisions.set(intent.agentId, (revisions.get(intent.agentId) ?? 0) + 1);
+    }
     if (intent.type === 'agent_freeze') frozen.add(intent.agentId);
     if (intent.type === 'agent_unfreeze') frozen.delete(intent.agentId);
     return intent;
@@ -100,7 +115,7 @@ function fakeAgentApi() {
         storage_unregister: ['unregistered', {}],
       };
       const [event, data] = logged[String(call.method_name)]!;
-      return { signer: sender, receiver: MARKET, calls, failed: state.event === 'nothing' ? [MARKET] : [],
+      return { signer: sender, receiver: MARKET, calls, failed: state.event === 'nothing' ? [MARKET] : [], succeeded: [],
         events: state.event === 'nothing' ? []
           : [{ executor: MARKET, standard: 'market', event, data: { account: sender, ...data } }] };
     }
@@ -109,7 +124,7 @@ function fakeAgentApi() {
         amount: typeof args.amount === 'string' ? args.amount : '5000000' };
     const event = call.method_name === 'claim' ? 'claimed' : state.event;
     return { signer: sender, receiver: String(call.receiver_id), calls,
-      failed: state.event === 'nothing' ? ['rounds.test.near'] : [],
+      failed: state.event === 'nothing' ? ['rounds.test.near'] : [], succeeded: [],
       events: [{ executor: 'rounds.test.near', standard: 'rounds', event, data }] };
   };
   const transport: typeof fetch = async (input, init) => {
@@ -120,7 +135,9 @@ function fakeAgentApi() {
     const refused = (code: number, name: string, retryable = false) => reply(code, { errors: [{ status: String(code),
       code: name, layer: 'request', title: name, meta: { retryable } }], meta: {} });
     const wallet = /^\/v1\/agents\/([0-9a-f]{64})\/wallet$/.exec(url.pathname);
+    const agent = /^\/v1\/agents\/([0-9a-f]{64})$/.exec(url.pathname);
     const policy = /^\/v1\/agents\/([0-9a-f]{64})\/policy$/.exec(url.pathname);
+    const history = /^\/v1\/agents\/([0-9a-f]{64})\/policy\/history$/.exec(url.pathname);
     const write = /^\/v1\/agents\/([0-9a-f]{64})\/(native\/near\/call|withdraw)$/.exec(url.pathname);
     if (url.pathname === '/v1/generate-intent' && body) return reply(201, generated(body));
     if (url.pathname === '/v1/submit-intent' && body) {
@@ -135,8 +152,13 @@ function fakeAgentApi() {
       return reply(200, status(id, op.type, op.agentId, s, { ...op.details, tx_hash: txHash }));
     }
     if (wallet) return reply(200, { wallet_id: 'w1', near_account_id: nearAccountOf(wallet[1]!) });
-    if (policy) return reply(200, { wallet_id: 'w1', revision: 1, status: 'APPLIED', provider_policy_synced: true,
-      policy: { ...policies.get(policy[1]!), frozen: frozen.has(policy[1]!) } });
+    if (agent) return reply(200, { id: agent[1], owner: owners.get(agent[1]!),
+      wallet: { near_account_id: nearAccountOf(agent[1]!) } });
+    if (url.pathname === '/v1/whoami') return reply(200, { tenant_id: 'tenant-fixture' });
+    if (policy) return reply(200, { wallet_id: 'w1', revision: revisions.get(policy[1]!),
+      status: 'APPLIED', provider_policy_synced: true,
+      policy: { ...policies.get(policy[1]!), frozen: frozen.has(policy[1]!) }, ...state.policyView });
+    if (history) return reply(200, { data: state.policyHistory, next_cursor: null });
     if (write && frozen.has(write[1]!)) return refused(409, 'wallet_frozen');
     if (write && state.refuse) return refused(409, state.refuse);
     if (write && state.busy) return refused(409, 'operation_in_flight', true);
@@ -144,7 +166,7 @@ function fakeAgentApi() {
     if (write && body) return reply(202, send(write[1]!, write[2]!, body));
     return refused(404, 'not_found');
   };
-  return { transport, requests, state, transaction, land, frozen, policies };
+  return { transport, requests, state, transaction, land, frozen, policies, revisions };
 }
 
 interface Wallet { token: string; publicKey: string; account: string; signer: KeyPairSigner }
@@ -179,6 +201,7 @@ async function withAgents(run: (h: Harness) => Promise<void>) {
   const api = new AgentApiClient(worker.agentApi, fake.transport);
   const runner: AgentRunner = {
     deployment, api, waitMs: 0,
+    authorize: agentAuthorizer(pool, deployment, api),
     transaction: async (hash, sender) => fake.transaction(hash, sender),
     operations: operationStore(pool, deployment.id),
   };
@@ -214,7 +237,7 @@ async function withAgents(run: (h: Harness) => Promise<void>) {
   const checkKey = async (account: string, publicKey: string) => keys.has(`${account}:${publicKey}`);
   const services = (grantKey = worker.grantKey): AgentAccounts => ({ db: pool, deployment, api, runner,
     chain, grantKey, checkKey, webOrigin: config.webOrigin,
-    signing: { walletContract: WALLET_CONTRACT, messageRecipient: 'agents.example.com' } });
+    signing: { walletContract: WALLET_CONTRACT, messageRecipient: 'agents.example.com', network: config.network } });
   const agentServer = createAgentWorkerServer(createAgentRoutes(services()), WORKER_TOKEN);
   agentServer.listen(0, '127.0.0.1');
   await once(agentServer, 'listening');
@@ -607,7 +630,7 @@ test('the owner can stop Dragons Market at once, and a frozen agent moves nothin
     assert.deepEqual(asked.map(i => i.type), ['grant_revoke']);
     const request = sentTo('/v1/generate-intent').at(-1)!.body!;
     assert.deepEqual([request.type, request.agent_id], ['grant_revoke', agentId]);
-    assert.match(String(request.grant_id), /^grant-intent_/);
+    assert.match(String(request.grant_id), /^[0-9a-f]{64}$/);
     const { rows } = await h.pool.query('SELECT state,sealed_token FROM agent_grants');
     assert.deepEqual(rows, [{ state: 'revoked', sealed_token: null }], 'the token is destroyed, not just set aside');
     assert.equal((await act('stake-0003', STAKE)).body.error?.code, 'grant_required');
@@ -634,6 +657,104 @@ test('freezing reads the API, so a freeze that landed unseen cannot leave the ow
     assert.equal(row[0]!.frozen, true, 'the page learns the truth, so it offers Unfreeze');
     const thawed = await h.call(alice.token, 'POST', `/v1/agents/${agentId}/unfreeze`);
     assert.equal(thawed.body.type, 'agent_unfreeze');
+  }));
+
+test('policy generation requires a synchronized snapshot and refuses revision or permission changes',
+  { timeout: 60000 }, () => withAgents(async h => {
+    const alice = await h.signIn('alice.near'), agentId = await openAgent(h, alice.token);
+    const generateCount = () => h.fake.requests.filter(r => r.path === '/v1/generate-intent').length;
+    const before = generateCount();
+    h.fake.state.policyView = { status: 'SIGNED', provider_policy_synced: false };
+    const path = `/v1/agents/${agentId}/freeze`;
+    assert.equal((await h.call(alice.token, 'POST', path)).body.error?.code, 'policy_not_ready');
+    assert.equal(generateCount(), before, 'unresolved policy never generates another signature request');
+    h.fake.state.policyView = { revision: 9 };
+    assert.equal((await h.call(alice.token, 'POST', path)).body.error?.code, 'agent_api_unavailable');
+    h.fake.state.policyView = null;
+    h.fake.state.widen = true;
+    assert.equal((await h.call(alice.token, 'POST', path)).body.error?.code, 'agent_api_unavailable');
+    const { rows } = await h.pool.query("SELECT correlation_id FROM agent_intents WHERE type='agent_freeze'");
+    assert.equal(rows.length, 0, 'unapproved requests are not persisted or returned for signing');
+    h.fake.state.widen = false;
+    const accepted = await h.call(alice.token, 'POST', path);
+    assert.equal(await sign(h, alice.token, accepted.body), 'SUCCESS');
+  }));
+
+test('legacy and corrupted stored NEAR requests cannot submit, while prior transaction observation continues',
+  { timeout: 60000 }, () => withAgents(async h => {
+    const alice = await h.signIn('alice.near'), agentId = await openAgent(h, alice.token);
+    const generated = await h.call(alice.token, 'POST', `/v1/agents/${agentId}/freeze`);
+    const id = String(generated.body.correlation_id);
+    const original = structuredClone(generated.body) as unknown as OwnerIntent;
+    const submissions = () => h.fake.requests.filter(r => r.path === '/v1/submit-intent').length;
+    const before = submissions();
+    const legacy = structuredClone(original);
+    delete legacy.policy_approval;
+    const substituted = structuredClone(original);
+    const calls = substituted.intent.payload.actions as { params: { args: Body } }[];
+    calls[0]!.params.args.wallet_pubkey = `ed25519:${'f'.repeat(64)}`;
+    for (const saved of [legacy, substituted]) {
+      await h.pool.query('UPDATE agent_intents SET intent=$2 WHERE correlation_id=$1', [id, saved]);
+      assert.equal((await h.call(alice.token, 'POST', `/v1/agent-intents/${id}`, signedData({ ...saved }))).body.error?.code,
+        'invalid_signed_data');
+    }
+    assert.equal(submissions(), before);
+    await h.pool.query('UPDATE agent_intents SET intent=$2 WHERE correlation_id=$1', [id, legacy]);
+    h.fake.land(id);
+    assert.equal((await refresh(h, alice.token, id)).body.status, 'SUCCESS');
+    assert.equal((await h.pool.query('SELECT frozen FROM agent_accounts WHERE agent_id=$1', [agentId])).rows[0].frozen,
+      true, 'a previously submitted policy remains observable without requesting another signature');
+  }));
+
+test('freeze recovers after a failed policy revision and holds execution until the new policy applies',
+  { timeout: 60000 }, () => withAgents(async h => {
+    const alice = await h.signIn('alice.near'), agentId = await openAgent(h, alice.token);
+    const policy = h.fake.policies.get(agentId)!;
+    const failed = { revision: 2, status: 'FAILED', policy: { ...policy, actions: ['swap'], frozen: true } };
+    h.fake.revisions.set(agentId, 2);
+    h.fake.state.policyView = { ...failed, provider_policy_synced: false };
+    h.fake.state.policyHistory = [failed, { revision: 1, status: 'APPLIED', policy }];
+    const generated = await h.call(alice.token, 'POST', `/v1/agents/${agentId}/freeze`);
+    assert.equal(generated.status, 200, JSON.stringify(generated.body));
+    const approval = generated.body.policy_approval as Body;
+    assert.equal(approval.revision, 3);
+    assert.deepEqual(approval.policy, { ...policy, frozen: true }, 'failed rules must not be inherited');
+    const frozen = async () => (await h.pool.query('SELECT frozen FROM agent_accounts WHERE agent_id=$1',
+      [agentId])).rows[0].frozen;
+    assert.equal(await frozen(), true);
+    h.fake.state.policyView = null;
+    assert.equal(await sign(h, alice.token, generated.body), 'SUCCESS');
+    assert.equal(await frozen(), true);
+    const thaw = await h.call(alice.token, 'POST', `/v1/agents/${agentId}/unfreeze`);
+    assert.equal(await sign(h, alice.token, thaw.body), 'SUCCESS');
+    assert.equal(await frozen(), false);
+  }));
+
+test('unfreeze waits for applied policy through API and worker, then reconciliation restores execution',
+  { timeout: 60000 }, () => withAgents(async h => {
+    const alice = await h.signIn('alice.near'), agentId = await openAgent(h, alice.token);
+    h.fake.frozen.add(agentId);
+    const thaw = await h.call(alice.token, 'POST', `/v1/agents/${agentId}/unfreeze`);
+    assert.equal(thaw.body.type, 'agent_unfreeze');
+    h.fake.state.policyView = { status: 'SIGNED', provider_policy_synced: false };
+    const submitted = await h.call(alice.token, 'POST', `/v1/agent-intents/${thaw.body.correlation_id}`,
+      signedData(thaw.body));
+    assert.equal(submitted.body.status, 'PROCESSING');
+    assert.equal((await refresh(h, alice.token, thaw.body.correlation_id)).body.error?.code, 'agent_api_unavailable');
+    const account = () => h.pool.query('SELECT frozen FROM agent_accounts WHERE agent_id=$1', [agentId]);
+    assert.equal((await account()).rows[0].frozen, true);
+    const calls = () => h.fake.requests.filter(request => request.path.endsWith('/native/near/call')).length;
+    const before = calls();
+    const blocked = await h.call(alice.token, 'POST', `/v1/agents/${agentId}/actions`,
+      { key: 'thaw-wait-001', action: STAKE });
+    assert.equal(blocked.body.error?.code, 'wallet_frozen');
+    assert.equal(calls(), before);
+    h.fake.state.policyView = null;
+    await sweepAgents(h.services());
+    assert.equal((await account()).rows[0].frozen, false);
+    assert.equal((await refresh(h, alice.token, thaw.body.correlation_id)).body.status, 'SUCCESS');
+    assert.equal((await h.call(alice.token, 'POST', `/v1/agents/${agentId}/actions`,
+      { key: 'thaw-ready-001', action: STAKE })).body.state, 'confirmed');
   }));
 
 test('after the grant key is replaced, an old grant neither acts nor stops the owner authorizing again',
@@ -675,9 +796,10 @@ test('access takes the owner\'s wallet signature over its exact limits, and a se
     const asked = await ask();
     assert.ok(!('token' in asked.body), 'a stolen session gets no token, only a request a wallet must sign');
     assert.equal(asked.body.recipient, h.config.webOrigin);
-    assert.match(String(asked.body.message), /Name: Claude\nMost for one stake or buy: 5 nep141:usdc\.test\.near\n/);
-    assert.match(String(asked.body.message), /Most in 24 hours: 12 nep141:usdc\.test\.near/);
-    assert.match(String(asked.body.message), /cover stakes and buys\. It can also sell what the agent holds/);
+    assert.match(String(asked.body.message), /Name: Claude\nCollateral: nep141:usdc\.test\.near\n/);
+    assert.match(String(asked.body.message), /Maximum per buy or stake \(atomic units\): 5000000/);
+    assert.match(String(asked.body.message), /Maximum per rolling 24 hours \(atomic units\): 12000000/);
+    assert.match(String(asked.body.message), /Cash-out pays only the owner/);
     assert.deepEqual((await h.call(alice.token, 'GET', `/v1/agents/${agentId}/access`)).body.data, [],
       'a request not yet signed is no connection');
 
@@ -695,12 +817,57 @@ test('access takes the owner\'s wallet signature over its exact limits, and a se
 
     const issued = await h.call(alice.token, 'POST', signPath(asked.body.id), good);
     assert.match(String(issued.body.token), /^dmk_[A-Za-z0-9_-]{43}$/);
+    assert.equal(issued.body.expires_at, asked.body.expires_at, 'the signed expiry is not extended at submission');
     await refused(good, 'access_request_not_found', 404);
     const late = await ask();
     await h.pool.query("UPDATE agent_access_tokens SET expires_at=now()-interval '1 second' WHERE id=$1",
       [late.body.id]);
     const expired = await h.call(alice.token, 'POST', signPath(late.body.id), await signedRequest(alice, late.body));
     assert.deepEqual([expired.status, expired.body.error?.code], [404, 'access_request_not_found']);
+  }));
+
+test('MCP consent cannot be replayed into another request or consumed twice', { timeout: 60000 },
+  () => withAgents(async h => {
+    const alice = await h.signIn('alice.near'), agentId = await openAgent(h, alice.token);
+    const ask = () => h.call(alice.token, 'POST', `/v1/agents/${agentId}/access`,
+      { label: 'Bound consent', max_spend: '5000000', daily_limit: '12000000' });
+    const first = await ask(), second = await ask();
+    const signed = await signedRequest(alice, first.body);
+    const submit = (id: unknown) => h.call(alice.token, 'POST', `/v1/agents/${agentId}/access/${id}/sign`, signed);
+    assert.equal((await submit(second.body.id)).body.error?.code, 'invalid_signature');
+    const results = await Promise.all(Array.from({ length: 8 }, () => submit(first.body.id)));
+    const issued = results.filter(r => r.status === 200);
+    assert.equal(issued.length, 1);
+    assert.equal(issued[0]!.body.expires_at, first.body.expires_at);
+    assert.ok(results.filter(r => r.status !== 200).every(r => r.body.error?.code === 'access_request_not_found'));
+    const { rows: [count] } = await h.pool.query('SELECT count(*)::int AS n FROM agent_access_tokens WHERE token_hash IS NOT NULL');
+    assert.equal(count.n, 1);
+  }));
+
+test('changed permissions and changes during full-access-key verification cannot issue a connection',
+  { timeout: 60000 }, () => withAgents(async h => {
+    const alice = await h.signIn('alice.near'), agentId = await openAgent(h, alice.token);
+    const ask = () => h.call(alice.token, 'POST', `/v1/agents/${agentId}/access`,
+      { label: 'Bound consent', max_spend: '5000000', daily_limit: '12000000' });
+    const first = await ask(), signed = await signedRequest(alice, first.body);
+    await h.pool.query('UPDATE agent_access_tokens SET max_spend=6000000 WHERE id=$1', [first.body.id]);
+    const changed = await h.call(alice.token, 'POST', `/v1/agents/${agentId}/access/${first.body.id}/sign`, signed);
+    assert.deepEqual([changed.status, changed.body.error?.code], [409, 'access_request_changed']);
+    await h.pool.query('UPDATE agent_access_tokens SET revoked_at=now() WHERE id=$1', [first.body.id]);
+    for (const change of ["daily_limit=13000000", "revoked_at=now()", "expires_at=now()-interval '1 second'",
+      "nonce='replaced'"]) {
+      const asked = await ask(), proof = await signedRequest(alice, asked.body), services = h.services();
+      const checkKey = async (account: string, publicKey: string) => {
+        const verified = await services.checkKey(account, publicKey);
+        await h.pool.query(`UPDATE agent_access_tokens SET ${change} WHERE id=$1`, [asked.body.id]);
+        return verified;
+      };
+      await assert.rejects(signConnection({ ...services, checkKey }, alice, agentId, String(asked.body.id), proof),
+        (e: unknown) => e instanceof ReadError && e.code === 'access_request_not_found', change);
+      await h.pool.query('UPDATE agent_access_tokens SET revoked_at=now() WHERE id=$1', [asked.body.id]);
+    }
+    const { rows: [count] } = await h.pool.query('SELECT count(*)::int AS n FROM agent_access_tokens WHERE token_hash IS NOT NULL');
+    assert.equal(count.n, 0);
   }));
 
 test('an access token acts for its one agent within the owner\'s stake limits, and stops when the owner says',
@@ -710,6 +877,8 @@ test('an access token acts for its one agent within the owner\'s stake limits, a
     const ask = (limits: Body, who = alice) => h.call(who.token, 'POST', `/v1/agents/${agentId}/access`, limits);
     const limits = { label: 'Claude', max_spend: '5000000', daily_limit: '12000000' };
     for (const [asked, code] of [[{ ...limits, max_spend: '0' }, 'invalid_max_spend'],
+      [{ ...limits, max_spend: '000' }, 'invalid_max_spend'],
+      [{ ...limits, daily_limit: '000' }, 'invalid_daily_limit'],
       [{ ...limits, daily_limit: '1' }, 'daily_limit_below_max_spend'], [{ ...limits, label: '' }, 'invalid_label']]) {
       assert.equal((await ask(asked as Body)).body.error?.code, code);
     }

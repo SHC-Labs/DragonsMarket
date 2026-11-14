@@ -15,7 +15,7 @@ vi.mock("../config", () => ({
 
 import { friendlyError, requiredGasTgas } from "../errors";
 import {
-  buyCall, buyFromBalanceCall, challengeCall, commitVoteCall, commitmentFor, depositCall, finalizeCall, newSalt, proposeCall, retryApplyCall,
+  buyCall, buyFromBalanceCall, challengeCall, commitVoteCall, commitmentFor, depositCall, depositForCall, fundCall, finalizeCall, newSalt, proposeCall, retryApplyCall,
   redeemCall, resolveDrawCall, revealVoteCall, sellCall, storageDepositCall, withdrawCall,
 } from "../market";
 import { claimCall, requestUnstakeCall, stakeCall, unstakeCall } from "../council";
@@ -23,6 +23,15 @@ import { claimCall, requestUnstakeCall, stakeCall, unstakeCall } from "../counci
 const VERIFIER_FIELDS = { receiverId: "intents.near", methodName: "mt_transfer_call", deposit: "1", gas: "100000000000000" };
 
 describe("money moves through the verifier", () => {
+  it("funds the owner's custody before a separate gift to the registered agent", () => {
+    expect(fundCall("owner.near", 500_000n)).toMatchObject({
+      receiverId: "usdc.near", methodName: "ft_transfer_call",
+      args: { receiver_id: "intents.near", amount: "500000", msg: "owner.near" },
+    });
+    expect(depositForCall("rounds.near", "agent.near", 500_000n)).toEqual({
+      ...VERIFIER_FIELDS, args: { receiver_id: "rounds.near", token_id: "nep141:usdc.near", amount: "500000", msg: "deposit_for:agent.near" },
+    });
+  });
   it("deposits to the market", () => {
     expect(depositCall(5_000_000n)).toEqual({
       ...VERIFIER_FIELDS,

@@ -6,12 +6,13 @@ import { promisify } from 'node:util';
 import pg from 'pg';
 import { readConfig } from '../src/config.js';
 import { registerDeployment } from '../src/ingestion/store.js';
+import { postgresJournal, withTopupLock } from '../src/relay-topup.js';
 import { keeperFixture } from './keeper-fixture.js';
 
 const run = promisify(execFile);
 const services = ['api', 'indexer', 'worker', 'publisher', 'agent'];
-const roles = [...[...services, 'keeper', 'backup'].map(name => `dm_${name}_login`),
-  ...[...services, 'keeper', 'backup'].map(name => `dm_${name}`)];
+const optional = ['keeper', 'backup', 'relay_topup'];
+const roles = [...[...services, ...optional].map(name => `dm_${name}_login`), ...[...services, ...optional].map(name => `dm_${name}`)];
 
 test('database release is repeatable and runtime checks reject owner credentials and schema drift', async () => {
   assert.ok(process.env.TEST_DATABASE_URL, 'Use a disposable PostgreSQL cluster for release tests');
@@ -30,10 +31,28 @@ test('database release is repeatable and runtime checks reject owner credentials
     const release = () => run(process.execPath, ['dist/src/release.js'], { env });
     assert.match((await release()).stdout, /service database roles are ready/);
     assert.match((await release()).stdout, /Applied 0 migration/);
-    assert.equal((await admin.query("SELECT 1 FROM pg_roles WHERE rolname IN ('dm_keeper_login','dm_backup_login')")).rowCount, 0);
+    assert.equal((await admin.query("SELECT 1 FROM pg_roles WHERE rolname IN ('dm_keeper_login','dm_backup_login','dm_relay_topup_login')")).rowCount, 0);
     env.KEEPER_DB_PASSWORD = randomBytes(32).toString('hex');
     env.BACKUP_DB_PASSWORD = randomBytes(32).toString('hex');
+    env.RELAY_TOPUP_DB_PASSWORD = randomBytes(32).toString('hex');
     assert.match((await release()).stdout, /Applied 0 migration/);
+    const topupUrl = new URL(url);
+    topupUrl.username = 'dm_relay_topup_login';
+    topupUrl.password = env.RELAY_TOPUP_DB_PASSWORD;
+    const topup = new pg.Pool({ connectionString: topupUrl.href });
+    try {
+      const pending = { step: 'swap' as const, depositAddress: 'd'.repeat(64), amountIn: '5', minAmountOut: '1', collateralBefore: '5', depositHash: '1'.repeat(32) };
+      const stored = await withTopupLock(topup, 'relayer.near', async client => {
+        const journal = postgresJournal(client, 'relayer.near');
+        await journal.write('intents.near', null);
+        await journal.write('intents.near', pending, 5n);
+        return { row: await journal.read(), today: await journal.depositedToday() };
+      });
+      assert.deepEqual(stored, { row: { verifier: 'intents.near', pending }, today: 5n }, 'the relay top-up login keeps its journal and deposit record');
+      for (const sql of ['DELETE FROM relay_topup_journal', 'DELETE FROM relay_topup_deposits', 'SELECT version FROM schema_migrations', 'SELECT * FROM wallet_sessions']) {
+        await assert.rejects(topup.query(sql), (error: unknown) => (error as { code: string }).code === '42501', sql);
+      }
+    } finally { await topup.end(); }
     const check = (databaseUrl: string, args: string[] = [], settings: NodeJS.ProcessEnv = {}) =>
       run(process.execPath, ['dist/src/check-database.js', ...args], {
       env: { ...settings, DATABASE_URL: databaseUrl },
@@ -89,14 +108,18 @@ test('database release is repeatable and runtime checks reject owner credentials
       const workerSettings = { ...manifest, AGENT_API_URL: 'https://agents.example.com',
         AGENT_API_KEY: `naa_${'t'.repeat(43)}`, AGENT_API_WALLET_CONTRACT: 'wallets.near',
         AGENT_GRANT_KEY: Buffer.alloc(32, 1).toString('base64'), AGENT_WORKER_TOKEN: 'w'.repeat(32) };
-      const agentCheck = (databaseUrl: string) => run(process.execPath, ['dist/src/check-agent-worker.js'], {
-        env: { ...workerSettings, DATABASE_URL: databaseUrl },
+      const agentCheck = (databaseUrl: string, settings: NodeJS.ProcessEnv = {}) => run(process.execPath,
+        ['--import', './dist/test/readiness-provider-fixture.js', 'dist/src/check-agent-worker.js'], {
+        env: { ...workerSettings, DATABASE_URL: databaseUrl, ...settings },
       });
       for (const databaseUrl of [url.href, runtime.href]) await assert.rejects(agentCheck(databaseUrl), /Agent worker readiness failed/);
       const agentUrl = new URL(url);
       agentUrl.username = 'dm_agent_login';
       agentUrl.password = env.AGENT_DB_PASSWORD!;
-      assert.match((await agentCheck(agentUrl.href)).stdout, /restricted login and deployment verified/);
+      assert.match((await agentCheck(agentUrl.href)).stdout, /database, deployment, API credential and provider configuration verified/);
+      for (const settings of [{ READINESS_FIXTURE_STATUS: '401' }, { AGENT_API_WALLET_CONTRACT: 'other.near' }]) {
+        await assert.rejects(agentCheck(agentUrl.href, settings), /Agent worker readiness failed/);
+      }
       for (const service of ['indexer', 'worker', 'keeper', 'backup']) {
         const worker = new URL(url);
         worker.username = `dm_${service}_login`;

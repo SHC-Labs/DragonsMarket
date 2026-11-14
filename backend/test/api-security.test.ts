@@ -30,6 +30,26 @@ test('the challenge limit also holds for dot-segment paths',async()=>{
  }finally{app.closeAllConnections();await new Promise<void>((resolve,reject)=>app.close(e=>e?reject(e):resolve()));}
 });
 
+test('NEAR and EVM challenges share a single allowance, including normalized paths', async () => {
+ const app = createApp(readConfig({ DATABASE_URL: 'postgresql://localhost/test' }),
+  async () => {}, undefined, undefined, async () => ({}));
+ app.listen(0, '127.0.0.1');
+ await once(app, 'listening');
+ const address = app.address();
+ assert.ok(address && typeof address !== 'string');
+ try {
+  for (const path of ['/v1/auth/challenge', '/v1/auth/evm/challenge', '/v1/auth/evm/x/../challenge',
+   '/v1/auth/challenge', '/v1/auth/evm/challenge']) {
+   assert.equal(await rawPost(address.port, path), 200);
+  }
+  assert.equal(await rawPost(address.port, '/v1/auth/evm/challenge'), 429);
+  assert.equal(await rawPost(address.port, '/v1/auth/challenge'), 429);
+ } finally {
+  app.closeAllConnections();
+  await new Promise<void>(resolve => app.close(() => resolve()));
+ }
+});
+
 test('a peer that is not a configured proxy cannot choose its own limit key',async()=>{
  const app=createApp(readConfig({DATABASE_URL:'postgresql://localhost/test',TRUSTED_PROXY_HOPS:'1',TRUSTED_PROXY_ADDRESSES:'10.255.255.1'}),async()=>{});app.listen(0,'127.0.0.1');await once(app,'listening');const address=app.address();assert.ok(address&&typeof address!=='string');const root=`http://127.0.0.1:${address.port}`;
  try{for(let i=0;i<120;i++)assert.equal((await fetch(root+'/v1/config',{headers:{'X-Forwarded-For':`198.51.100.${i}`}})).status,200);

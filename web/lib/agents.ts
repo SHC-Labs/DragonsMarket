@@ -1,7 +1,15 @@
+import { nearPolicyRequest } from "./agent-near-policy";
 import { BackendError, backendEnabled, call } from "./backend";
 import { config } from "./config";
 import { formatMoney } from "./format";
 import { txEvents, view } from "./rpc";
+import { accessConsentMatches, type AccessRequest } from "./agent-access-consent";
+import { ownerConsentMatches } from "./agent-owner-consent";
+import { evmConsent, signEvmConsent, type EvmOwner, type EvmOwnerSigner } from "./agent-evm-consent";
+import { evmPolicyRequest } from "./agent-evm-policy";
+import type { PolicyApproval } from "./agent-policy-approval";
+
+export type { AccessRequest } from "./agent-access-consent";
 
 export type Venue = "rounds" | "market";
 export type AgentAction =
@@ -20,8 +28,10 @@ export interface OwnerIntent {
   agent_id: string;
   status: string;
   expires_at: string;
+  signer: { type: "near"; account_id: string; public_key: string } | EvmOwner;
   intent: { standard: string; payload: Record<string, unknown> };
-  preview: { summary: string };
+  preview: Record<string, unknown> & { summary: string };
+  policy_approval?: PolicyApproval;
 }
 export interface AgentView {
   agent_id: string;
@@ -70,10 +80,10 @@ export interface AccessToken {
   last_used_at: string | null;
 }
 export interface IssuedAccess extends Omit<AccessToken, "last_used_at"> { token: string }
-export interface AccessRequest { id: string; message: string; nonce: string; recipient: string }
 
 interface DelegatePayload { receiverId: string; actions: unknown[] }
 export interface OwnerSigner {
+  accountId: string;
   signMessage(params: { message: string; recipient: string; nonce: Uint8Array }):
     Promise<{ accountId?: string; publicKey: string; signature: string }>;
   signDelegateActions(params: { delegateActions: DelegatePayload[] }): Promise<{ signedDelegateActions: string[] }>;
@@ -84,12 +94,7 @@ const backend = <T>(path: string, body?: unknown) =>
 
 const bytes = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const NONCE = /^[A-Za-z0-9+/]{43}=$/;
-const NEAR = 10n ** 24n;
-const MOVES_ASSETS = new Set(["ft_transfer", "ft_transfer_call", "mt_transfer", "mt_transfer_call", "mt_batch_transfer",
-  "mt_batch_transfer_call", "nft_transfer", "nft_transfer_call", "ft_withdraw", "mt_withdraw", "storage_withdraw",
-  "storage_unregister", "withdraw", "transfer"]);
 
 const guardedContracts = () => new Set(["intents.near", "intents.far", config.verifierId,
   config.collateralTokenId.slice("nep141:".length), config.tokenId, config.marketId, config.oracleId, config.councilId,
@@ -98,24 +103,22 @@ const guardedContracts = () => new Set(["intents.near", "intents.far", config.ve
 const pinned = (value: unknown, expected: string): value is string => expected !== "" && value === expected;
 
 function messageIsSafe(payload: Record<string, unknown>) {
-  return typeof payload.message === "string" && pinned(payload.recipient, config.agentApiHost)
+  return Object.keys(payload).every(key => ["message", "recipient", "nonce"].includes(key))
+    && typeof payload.message === "string" && pinned(payload.recipient, config.agentApiHost)
     && !guardedContracts().has(payload.recipient) && typeof payload.nonce === "string" && NONCE.test(payload.nonce);
 }
 
-function delegateIsSafe(payload: Record<string, unknown>) {
-  const actions = Array.isArray(payload.actions) ? payload.actions : [];
-  const deposits = actions.map((a) => {
-    const params = isRecord(a) && a.type === "FunctionCall" && isRecord(a.params) ? a.params : null;
-    const fine = params && typeof params.methodName === "string" && !MOVES_ASSETS.has(params.methodName)
-      && typeof params.deposit === "string" && /^\d{1,39}$/.test(params.deposit);
-    return fine ? BigInt(params.deposit as string) : null;
-  });
-  return pinned(payload.receiverId, config.agentWalletContract) && !guardedContracts().has(payload.receiverId)
-    && deposits.length > 0 && !deposits.includes(null) && deposits.reduce<bigint>((sum, d) => sum + d!, 0n) <= NEAR;
-}
-
-export function safeToSign(standard: string, payload: Record<string, unknown>) {
-  return standard === "nep413" ? messageIsSafe(payload) : standard === "nep366" && delegateIsSafe(payload);
+export function safeToSign(generated: OwnerIntent) {
+  if (generated.status !== "PENDING_SIGNATURE" || !/^intent_[A-Za-z0-9_-]{1,128}$/.test(generated.correlation_id)
+    || !/^[0-9a-f]{64}$/.test(generated.agent_id)) return false;
+  const { standard, payload } = generated.intent;
+  if (standard === "eip712") return config.network === "mainnet" && (ownerConsentMatches(generated)
+    || (!guardedContracts().has(config.agentWalletContract)
+      && evmPolicyRequest(generated, config.agentWalletContract, generated.policy_approval) !== null));
+  return standard === "nep413" ? generated.signer?.type === "near"
+    && messageIsSafe(payload) && ownerConsentMatches(generated)
+    : standard === "nep366" && generated.signer?.type === "near" && !guardedContracts().has(config.agentWalletContract)
+      && nearPolicyRequest(generated, config.agentWalletContract, generated.policy_approval);
 }
 
 export interface RoundRules { minStake: bigint; maxOpen: number; paused: boolean }
@@ -194,19 +197,40 @@ export function agentsSetup(): Promise<AgentsSetup | null> {
     : null));
 }
 
-export async function signIntent(generated: OwnerIntent, signer: OwnerSigner): Promise<Record<string, unknown>> {
+export async function signIntent(
+  generated: OwnerIntent, signer: OwnerSigner | EvmOwnerSigner,
+): Promise<Record<string, unknown>> {
+  generated = structuredClone(generated);
+  if (!safeToSign(generated)) {
+    throw new Error("Dragons Market stopped this request before your wallet, because it could move your funds.");
+  }
+  if ("type" in signer) {
+    const payload = evmConsent(generated.intent.payload, config.agentApiHost)
+      ?? evmPolicyRequest(generated, config.agentWalletContract, generated.policy_approval);
+    if (generated.signer.type !== "evm" || !payload) throw new Error("This request needs a different owner wallet.");
+    return signEvmConsent({ owner: generated.signer, payload, expiresAt: generated.expires_at }, signer);
+  }
   const { standard, payload } = generated.intent;
-  if (!safeToSign(standard, payload)) {
+  if (generated.signer?.type !== "near"
+    || generated.signer.account_id !== signer.accountId || !(Date.parse(generated.expires_at) > Date.now())) {
     throw new Error("Dragons Market stopped this request before your wallet, because it could move your funds.");
   }
   if (standard === "nep366") {
     const delegateActions = [payload as unknown as DelegatePayload];
     const { signedDelegateActions } = await signer.signDelegateActions({ delegateActions });
-    if (!signedDelegateActions[0]) throw new Error("Your wallet returned no signature.");
+    if (signedDelegateActions.length !== 1 || !signedDelegateActions[0]) {
+      throw new Error("Your wallet did not return exactly one signature.");
+    }
+    if (!(Date.parse(generated.expires_at) > Date.now())) throw new Error("That request expired while signing.");
     return { standard, payload, signed_delegate: signedDelegateActions[0] };
   }
   const message = payload as { message: string; recipient: string; nonce: string };
-  const signed = await signer.signMessage({ ...message, nonce: bytes(message.nonce) });
+  const signed = await signer.signMessage({ message: message.message, recipient: message.recipient,
+    nonce: bytes(message.nonce) });
+  if (signed.accountId !== signer.accountId || signed.publicKey !== generated.signer.public_key) {
+    throw new Error("Your wallet signed with a different account or key. Sign in again with the agent's owner wallet.");
+  }
+  if (!(Date.parse(generated.expires_at) > Date.now())) throw new Error("That request expired while signing.");
   return { standard, payload, public_key: signed.publicKey, signature: signed.signature };
 }
 
@@ -223,7 +247,8 @@ export async function followIntent(correlationId: string, first?: IntentStatus) 
   return status;
 }
 
-export async function signAndFollow(generated: OwnerIntent, signer: OwnerSigner) {
+export async function signAndFollow(generated: OwnerIntent, signer: OwnerSigner | EvmOwnerSigner) {
+  generated = structuredClone(generated);
   const signed = await signIntent(generated, signer);
   const path = intentPath(generated.correlation_id);
   return followIntent(generated.correlation_id, await backend<IntentStatus>(path, { signed_data: signed }));
@@ -251,15 +276,21 @@ export const agentClaimable = (agentId: string) =>
 export const accessTokens = (agentId: string) =>
   backend<{ data: AccessToken[] }>(`/v1/agents/${agentId}/access`).then((r) => r.data);
 export const requestAccess = (agentId: string, label: string, maxSpend: string, dailyLimit: string) =>
-  backend<AccessRequest>(`/v1/agents/${agentId}/access`, { label, max_spend: maxSpend, daily_limit: dailyLimit });
+  backend<Omit<AccessRequest, "terms">>(`/v1/agents/${agentId}/access`,
+    { label, max_spend: maxSpend, daily_limit: dailyLimit }).then(request => ({ ...request,
+    terms: { agentId, label, maxSpend, dailyLimit } }));
 
 export async function signAccess(agentId: string, asked: AccessRequest, signer: OwnerSigner,
   origin = globalThis.location?.origin) {
-  if (asked.recipient !== origin || !asked.message.startsWith("Give an AI agent access to a Dragons Market agent")) {
+  if (!accessConsentMatches(asked, agentId, signer.accountId, origin)) {
     throw new Error("Dragons Market stopped this request before your wallet, because it did not match this site.");
   }
   const signed = await signer.signMessage({ message: asked.message, recipient: asked.recipient,
     nonce: bytes(asked.nonce) });
+  if (signed.accountId !== signer.accountId) throw new Error("Your wallet signed for a different account.");
+  if (!accessConsentMatches(asked, agentId, signer.accountId, origin)) {
+    throw new Error("That connection request changed or expired while your wallet was open. Start again.");
+  }
   return backend<IssuedAccess>(`/v1/agents/${agentId}/access/${asked.id}/sign`,
     { public_key: signed.publicKey, signature: signed.signature });
 }
@@ -294,10 +325,15 @@ const MESSAGES: Record<string, string> = {
   grant_required: "Authorize Dragons Market for this agent first.",
   agent_frozen: "The agent is already frozen.",
   agent_not_frozen: "The agent is not frozen.",
-  wallet_frozen: "The agent is frozen, so nothing moves until you unfreeze it.",
+  wallet_frozen: "The agent is frozen. New actions are blocked; actions already sent may still settle.",
+  policy_not_ready: "The agent's policy is not applied and synchronized yet. Check its status before retrying.",
+  provider_policy_mismatch: "The agent's current policy differs from the approved trading policy. Ask the owner to review it.",
+  agent_authorization_stale: "This agent's authorization is no longer valid. The owner needs to review its access.",
+  access_token_invalid: "This connection has expired or been revoked. Ask the owner for new access.",
   custody_native_balance_required: "The agent needs more NEAR for gas. Send it some and try again.",
   invalid_signature: "That signature did not match this request, so nothing was given. Try again.",
   access_request_not_found: "That request expired before it was signed. Start it again.",
+  access_request_changed: "That connection request no longer matches its permissions. Create a new request.",
   agent_api_unavailable: "The agent service is not answering. Try again in a minute.",
   agent_api_rate_limited: "The agent service is busy. Try again in a minute.",
   intent_expired: "That request expired before it was signed. Start it again.",
@@ -309,7 +345,7 @@ const MESSAGES: Record<string, string> = {
   access_token_limit_reached: "This agent already has five connections. Revoke one first.",
   daily_limit_below_max_spend: "The limit for 24 hours must be at least the limit for one stake or buy.",
   spend_over_limit: "That is more than this agent may spend at once. Try a smaller amount.",
-  daily_limit_reached: "That would pass this agent's spending limit for 24 hours. Try a smaller amount, or wait.",
+  daily_limit_reached: "That would exceed this spending allowance. Unsettled trades stay reserved until their outcome is known.",
   slippage_too_wide: "The price moved too far from that quote, so nothing was sent. Try again.",
 };
 

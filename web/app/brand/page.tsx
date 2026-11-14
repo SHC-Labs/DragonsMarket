@@ -10,6 +10,7 @@ import { Sigil } from "@/components/Sigil";
 import { CATEGORIES, OTHER } from "@/lib/categories";
 import type { MarketView } from "@/lib/market";
 import { color, tokens, type ColorRole } from "@/lib/tokens";
+import { AnswerFormSample, WalletDialogSamples } from "./wallet-samples";
 
 export const metadata: Metadata = {
   title: "Brand | Dragons Market",
@@ -324,6 +325,12 @@ export default function BrandPage() {
           <Sigil hash={SAMPLE_HASH} className="brand-sigil" />
         </div>
         <p className="brand-type-meta mono brand-hash">{SAMPLE_HASH}</p>
+      </Specimen>
+      <Specimen title="Wallet dialogs" guidance="ConnectDialog and DepositDialog sit on ModalDialog: a native modal that takes focus, keeps Tab inside, closes on Escape and returns focus. Use them for a step that needs the wallet or a deposit address; not for information. These samples reach no wallet and no deposit service.">
+        <WalletDialogSamples />
+      </Specimen>
+      <Specimen title="Answer form" guidance="Proposing or challenging a result with an EVM or Solana wallet, under Resolution. Amounts to sign are shown to the last unit. Shown here proposing, and challenging while short of the bond.">
+        <AnswerFormSample />
       </Specimen>
       <Specimen title="Market card" guidance="Use in market lists and grids. Not on a market's own page. This sample market is not on chain, so its links lead nowhere.">
         <div className="brand-card-sample"><MarketCard market={SAMPLE_MARKET} stage={null} index={0} /></div>

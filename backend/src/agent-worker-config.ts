@@ -8,6 +8,7 @@ export interface AgentWorkerConfig {
   agentApi: AgentApiSettings;
   grantKey: Buffer;
   walletContract: string;
+  policySponsor: string | null;
   host: string;
   port: number;
   token: string;
@@ -36,7 +37,10 @@ export function readAgentWorkerConfig(env: NodeJS.ProcessEnv): AgentWorkerConfig
   if (!isAccount(walletContract) || ['intents.near', 'intents.far'].includes(walletContract)) {
     throw new Error('Invalid AGENT_API_WALLET_CONTRACT');
   }
+  const policySponsor = env.AGENT_API_POLICY_SPONSOR || null;
+  if (policySponsor !== null && !isAccount(policySponsor)) throw new Error('Invalid AGENT_API_POLICY_SPONSOR');
   return { shared, deployment, agentApi, grantKey: readGrantKey(AGENT_GRANT_KEY), walletContract,
+    policySponsor,
     host: env.AGENT_WORKER_HOST || '127.0.0.1', port: readPort(env.AGENT_WORKER_PORT || '3510'),
     token: agentWorkerToken(AGENT_WORKER_TOKEN) };
 }

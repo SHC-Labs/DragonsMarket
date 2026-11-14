@@ -6,10 +6,12 @@ import { Button, Notice } from "@/components/ui";
 import { Lock } from "@/components/icons";
 import { UnstakeCutDialog } from "@/components/UnstakeCutDialog";
 import { RevenueClaim } from "@/components/RevenueClaim";
+import { TransactionNotice } from "@/components/TransactionNotice";
 import { useWallet } from "@/components/WalletProvider";
 import { config } from "@/lib/config";
 import { formatDateTime, formatDateTimeUtc, formatMoney, timeLeft } from "@/lib/format";
 import { useNow, usePoll, useTx } from "@/lib/hooks";
+import { signsWithRelay } from "@/lib/wallet-account";
 import {
   claimableOf, getCouncilConfig, inProgressOf, isAllowed, nftToken, nftTokensFor, quarterInfo, requestUnstakeCall, seatCount, seatEarnings, seatsOf,
   stakeCall, stakeOf, unstakeCall, type SeatEarnings, type Stake,
@@ -66,18 +68,21 @@ export function StakeView() {
 }
 
 function AccountStakeView() {
-  const { account, openConnect, walletAvailable, send } = useWallet();
+  const { account, identity, openConnect, walletAvailable, send } = useWallet();
   const now = useNow(1000);
-  const { state, run, reset } = useTx(send, account);
+  const tx = useTx(send, account);
+  const { run, busy } = tx;
   const [typed, setTyped] = useState("");
   const [found, setFound] = useState<Record<string, boolean>>({});
   const [leaving, setLeaving] = useState<string | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
   const { data, error, loading, reload } = usePoll(async () => (account ? load(account) : null), [account], 6000);
-  const busy = state.phase === "waiting";
 
   if (!config.councilId || !config.nftId) {
     return <div className="page-content"><PageLandmark title="Stake" /><Notice tone="warning">Staking is not set up for this network yet.</Notice></div>;
+  }
+  if (signsWithRelay(identity)) {
+    return <div className="page-content"><PageLandmark title="Stake" /><Notice>Staking is available with a NEAR wallet for now.</Notice></div>;
   }
   if (!account) {
     return (
@@ -131,9 +136,7 @@ function AccountStakeView() {
               <span><i aria-hidden="true" />Unstake cooldown {span(cooldown)}</span>
             </span>
           </div>
-          {state.phase === "waiting" && <Notice>Waiting for your wallet and the chain.</Notice>}
-          {state.phase === "done" && <Notice>{state.message}</Notice>}
-          {state.phase === "failed" && <Notice tone="danger"><span>{state.message} </span><Button variant="ghost" size="sm" onClick={reset}>Dismiss</Button></Notice>}
+          <TransactionNotice tx={tx} />
 
           {data.claimable !== null && (
             <ul className="position-list">

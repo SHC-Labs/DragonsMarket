@@ -86,7 +86,8 @@ async fn a_token_holder_registers_in_near_deposits_trades_and_exits() -> anyhow:
         .await?
         .into_result()?;
 
-    let r = send(&w, &w.dave, w.market.id(), 15 * USD, "deposit", SEND_TGAS).await?;
+    deposit_to_intents(&w, &w.dave, w.dave.id(), 15 * USD).await?;
+    let r = intents_call(&w, &w.dave, w.market.id(), 15 * USD, "deposit").await?;
     assert_clean(&w, "deposit by token", &r);
     assert_eq!(credited(&w.market, w.dave.id()).await, 15 * USD);
     assert_eq!(ft_balance(&w, w.dave.id()).await, tokens - 15 * USD);
@@ -141,7 +142,8 @@ async fn an_owner_funds_an_agent_that_never_holds_the_token_and_it_trades() -> a
     let tokens = ft_balance(&w, agent.id()).await;
     let before = credited(&w.market, agent.id()).await;
     let gift = format!("deposit_for:{}", agent.id());
-    let r = send(&w, owner, w.market.id(), 15 * USD, &gift, SEND_TGAS).await?;
+    deposit_to_intents(&w, owner, owner.id(), 15 * USD).await?;
+    let r = intents_call(&w, owner, w.market.id(), 15 * USD, &gift).await?;
     assert_clean(&w, "deposit for the agent", &r);
     let from = format!("\"from\":\"{}\"", owner.id());
     assert!(
@@ -180,18 +182,18 @@ async fn a_refused_transfer_comes_back_whole_and_moves_nothing() -> anyhow::Resu
     register_on_token(&w, w.market.id()).await?;
     let held = intents_balance(&w, w.market.id()).await;
     let owed_before = owed(&w.market).await;
-    for (from, msg, tgas, why) in [
-        (&w.dave, "deposit", SEND_TGAS, "do the storage deposit first"),
-        (&w.dave, "register", SEND_TGAS, "unknown action"),
-        (&w.alice, "seed:0", SEND_TGAS, "unknown action"),
-        (&w.alice, "deposit", 80, "attach at least 75 TGas"),
-        (&w.alice, "buy:0:yes:1", SEND_TGAS, "no such market"),
+    for (from, msg, tgas) in [
+        (&w.dave, "deposit", SEND_TGAS),
+        (&w.dave, "register", SEND_TGAS),
+        (&w.alice, "seed:0", SEND_TGAS),
+        (&w.alice, "deposit", 80),
+        (&w.alice, "buy:0:yes:1", SEND_TGAS),
     ] {
         let tokens = ft_balance(&w, from.id()).await;
         let r = send(&w, from, w.market.id(), 4 * USD, msg, tgas).await?;
         assert!(r.is_success(), "{msg}: the token call itself completes");
         assert!(
-            format!("{:?}", r.receipt_failures()).contains(why),
+            format!("{:?}", r.receipt_failures()).contains("deposit into your own Intents account"),
             "{msg} at {tgas} TGas: {:?}",
             r.receipt_failures()
         );
@@ -209,14 +211,15 @@ async fn a_refused_transfer_comes_back_whole_and_moves_nothing() -> anyhow::Resu
 }
 
 #[tokio::test]
-async fn a_token_buy_ends_as_shares_or_as_a_balance() -> anyhow::Result<()> {
+async fn an_intents_buy_ends_as_shares_or_a_refund_to_user_custody() -> anyhow::Result<()> {
     let w = setup().await?;
     let id = new_market(&w, 600).await?;
     register_on_token(&w, w.market.id()).await?;
     let held = intents_balance(&w, w.market.id()).await;
 
     let order = format!("buy:{id}:yes:1");
-    let r = send(&w, &w.alice, w.market.id(), 10 * USD, &order, SEND_TGAS).await?;
+    deposit_to_intents(&w, &w.alice, w.alice.id(), 10 * USD).await?;
+    let r = intents_call(&w, &w.alice, w.market.id(), 10 * USD, &order).await?;
     assert_clean(&w, "buy by token", &r);
     assert!(shares(&w, id, w.alice.id()).await.0 > 0, "the token became shares");
     assert_eq!(credited(&w.market, w.alice.id()).await, 0);
@@ -224,7 +227,9 @@ async fn a_token_buy_ends_as_shares_or_as_a_balance() -> anyhow::Result<()> {
     assert_reconciled(&w).await;
 
     let greedy = format!("buy:{id}:no:{}", 100 * USD);
-    let r = send(&w, &w.alice, w.market.id(), 4 * USD, &greedy, SEND_TGAS).await?;
+    let own = intents_balance(&w, w.alice.id()).await;
+    deposit_to_intents(&w, &w.alice, w.alice.id(), 4 * USD).await?;
+    let r = intents_call(&w, &w.alice, w.market.id(), 4 * USD, &greedy).await?;
     assert!(
         format!("{:?}", r.receipt_failures()).contains("price moved"),
         "{:?}",
@@ -232,31 +237,33 @@ async fn a_token_buy_ends_as_shares_or_as_a_balance() -> anyhow::Result<()> {
     );
     assert_eq!(
         credited(&w.market, w.alice.id()).await,
-        4 * USD,
-        "a buy the price outran stays a balance"
+        0,
+        "a refused Intents buy creates no market credit"
     );
+    assert_eq!(intents_balance(&w, w.alice.id()).await, own + 4 * USD);
     assert_eq!(shares(&w, id, w.alice.id()).await.1, 0);
     assert_reconciled(&w).await;
     Ok(())
 }
 
 #[tokio::test]
-async fn a_token_buy_that_just_clears_the_floor_completes() -> anyhow::Result<()> {
+async fn an_invalid_beneficiary_refunds_to_the_senders_own_intents_account() -> anyhow::Result<()> {
     let w = setup().await?;
-    let id = new_market(&w, 600).await?;
-    register_on_token(&w, w.market.id()).await?;
-    let order = format!("buy:{id}:yes:1");
-    for tgas in 76..100 {
-        let r = send(&w, &w.alice, w.market.id(), USD, &order, tgas).await?;
-        if format!("{:?}", r.receipt_failures()).contains("attach at least") {
-            continue;
-        }
-        assert_clean(&w, &format!("buy by token at {tgas} TGas"), &r);
-        assert!(shares(&w, id, w.alice.id()).await.0 > 0, "the buy filled");
+    deposit_to_intents(&w, &w.dave, w.dave.id(), 5 * USD).await?;
+    let own = intents_balance(&w, w.dave.id()).await;
+    let held = intents_balance(&w, w.market.id()).await;
+    for msg in [
+        "deposit_for:nobody.near",
+        "deposit_for:!",
+        "deposit_for:alice.near:extra",
+    ] {
+        let r = intents_call(&w, &w.dave, w.market.id(), 5 * USD, msg).await?;
+        assert!(!r.receipt_failures().is_empty(), "{msg} must refuse");
+        assert_eq!(intents_balance(&w, w.dave.id()).await, own);
+        assert_eq!(intents_balance(&w, w.market.id()).await, held);
         assert_reconciled(&w).await;
-        return Ok(());
     }
-    panic!("the floor refused every gas amount tried");
+    Ok(())
 }
 
 #[tokio::test]
@@ -304,30 +311,30 @@ async fn a_forward_the_verifier_does_not_take_comes_back_whole() -> anyhow::Resu
 }
 
 #[tokio::test]
-async fn a_failed_token_resolve_leaves_surplus_never_a_debt() -> anyhow::Result<()> {
+async fn a_failed_token_resolve_leaves_the_supported_deposit_in_user_custody() -> anyhow::Result<()> {
     let w = setup().await?;
-    register_on_token(&w, w.market.id()).await?;
     let held = intents_balance(&w, w.market.id()).await;
-    let owed_before = owed(&w.market).await;
+    let own = intents_balance(&w, w.alice.id()).await;
     w.owner
         .call(w.ft.id(), "set_fail_resolve")
         .args_json(json!({ "fail": true }))
         .transact()
         .await?
         .into_result()?;
-    let r = send(&w, &w.alice, w.market.id(), 4 * USD, "deposit", SEND_TGAS).await?;
-    assert!(
-        format!("{:?}", r.receipt_failures()).contains("the resolve step is set to fail"),
-        "{:?}",
-        r.receipt_failures()
-    );
+    let r = send(&w, &w.alice, w.verifier.id(), 4 * USD, w.alice.id().as_str(), 200).await?;
+    assert!(format!("{:?}", r.receipt_failures()).contains("the resolve step is set to fail"));
+    assert_eq!(credited(&w.market, w.alice.id()).await, 0);
+    assert_eq!(intents_balance(&w, w.market.id()).await, held);
     assert_eq!(
-        credited(&w.market, w.alice.id()).await,
-        0,
-        "nothing is credited on a lost report"
+        intents_balance(&w, w.alice.id()).await,
+        own + 4 * USD,
+        "the failed resolver cannot orphan the deposit under the market's identity"
     );
-    assert_eq!(owed(&w.market).await, owed_before);
-    assert_eq!(intents_balance(&w, w.market.id()).await, held + 4 * USD);
-    assert_eq!(ft_balance(&w, w.market.id()).await, 0);
+    // A separate user-authorized transfer consumes those funds, even while the FT resolver is broken.
+    let r = intents_call(&w, &w.alice, w.market.id(), 4 * USD, "deposit").await?;
+    assert_clean(&w, "credit from user custody", &r);
+    assert_eq!(credited(&w.market, w.alice.id()).await, 4 * USD);
+    assert_eq!(intents_balance(&w, w.alice.id()).await, own);
+    assert_reconciled(&w).await;
     Ok(())
 }

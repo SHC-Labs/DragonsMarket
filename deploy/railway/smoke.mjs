@@ -73,6 +73,17 @@ if (server) {
   const config = await configuration.json();
   if (expected) verifyActivated(ready, config, expected);
   else verifyFoundation(ready, config);
+  if (expected?.browser?.relayerId) {
+    assert.equal(ready.relay?.keyAllowanceLow, false, 'Relay key allowance is low');
+    const quote = await request(`${server}/intents/fee`, { headers: { Origin: browserOrigin } });
+    assert.equal(quote.status, 200);
+    const fee = await quote.json();
+    assert.match(fee.fee, /^[1-9]\d{0,5}$/);
+    assert.ok(BigInt(fee.fee) <= 100000n && Date.parse(fee.validUntil) > Date.now(), 'Relay quote is invalid or expired');
+    const invalid = await request(`${server}/intents/relay`, { method: 'POST', headers: { Origin: browserOrigin, 'Content-Type': 'application/json' }, body: '{"signed":[]}' });
+    assert.equal(invalid.status, 400, 'Relay must reject an unsigned request');
+    assert.equal((await invalid.json()).error?.code, 'invalid_request');
+  }
   console.log(expected ? 'Activated deployment configuration verified; funded acceptance is separate' :
     'Hosting foundation ready; chain trading and agent execution are inactive');
   const session = await request(`${server}/v1/auth/session`, { headers: { Origin: browserOrigin } });

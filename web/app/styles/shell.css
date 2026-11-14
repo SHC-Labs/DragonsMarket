@@ -77,7 +77,7 @@
 }
 .wallet-pill:hover { border-color: var(--danger); }
 .wallet-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 22%, transparent); }
-.wallet-account { max-width: 9rem; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-sm); font-weight: 500; }
+.wallet-account { max-width: 9rem; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--fs-sm); font-weight: 500; }
 .wallet-action { font-size: var(--fs-2xs); color: var(--text-muted); }
 .wallet-pill:hover .wallet-action { color: var(--danger); }
 .site-header-actions .btn { min-height: var(--control-md); }

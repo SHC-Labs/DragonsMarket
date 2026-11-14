@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// Integration read checks only. Contract mutation flows remain deliberately unwired.
+// Sandbox reads; signed mutations and recovery are covered by check-csp.mjs.
 const chain = JSON.parse(readFileSync(join(__dirname, "../../contracts/dev-chain.json"), "utf8"));
 
 test("markets paginate and outcomes open their market", async ({ page }) => {
@@ -24,12 +24,11 @@ test("search has a recoverable empty result", async ({ page }) => {
   await expect(page.getByTestId("market-card").first()).toBeVisible();
 });
 
-test("rules and trade placeholders remain accurate before wiring", async ({ page }) => {
+test("rules and disconnected trading controls remain accurate", async ({ page }) => {
   await page.goto(`/market?id=${chain.markets.open}`);
   await expect(page.getByRole("region", {name:"How this market resolves"}).getByText("Cancelled if")).toBeVisible();
   await page.getByLabel("Amount", {exact:true}).fill("5");
-  await expect(page.getByText("Not available yet", {exact:true})).toBeVisible();
-  await expect(page.getByRole("button", {name:"Trading coming soon"})).toBeDisabled();
+  await expect(page.getByRole("complementary", {name:"Trade ticket"}).getByRole("button", {name:"Connect wallet"})).toBeVisible();
   await page.getByLabel("Amount", {exact:true}).fill("abc");
   await expect(page.getByLabel("Amount", {exact:true})).toHaveAttribute("aria-invalid","true");
 });
@@ -42,18 +41,19 @@ test("Visx history has a readable data alternative", async ({ page }) => {
 });
 
 for (const state of ["proposed", "disputed", "verdict", "final_yes"]) {
-  test(`resolution ${state} stays read-only and does not crash`, async ({ page }) => {
+  test(`resolution ${state} requires a wallet before mutations`, async ({ page }) => {
     const errors: string[] = [];
     page.on("pageerror", e=>errors.push(e.message));
     await page.goto(`/market?id=${chain.markets[state]}`);
     await expect(page.locator(".resolution-record")).toBeVisible();
-    await expect(page.getByRole("button", {name:/Vote |Challenge this answer|Make it final/})).toHaveCount(0);
+    await expect(page.getByRole("button", {name:/Submit proposal|Submit challenge|Commit vote|Reveal vote/})).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 }
 
-test("portfolio transactions remain unavailable", async ({ page }) => {
+test("portfolio displays the connected sandbox account", async ({ page }) => {
   await page.goto(`/portfolio?as=${chain.accounts.alice}`);
-  await expect(page.getByRole("button", {name:"Withdrawals coming soon"})).toBeDisabled();
-  for(const button of await page.getByRole("button", {name:"Redemption coming soon"}).all()) await expect(button).toBeDisabled();
+  await expect(page.getByRole("heading", {name:"Portfolio",exact:true})).toBeVisible();
+  await expect(page.getByText("Market balance",{exact:true})).toBeVisible();
+  await expect(page.getByRole("button", {name:"Withdraw",exact:true})).toBeVisible();
 });

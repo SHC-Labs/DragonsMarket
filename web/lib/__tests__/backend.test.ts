@@ -107,6 +107,21 @@ describe("backend client", () => {
     await expect(backend.serverWatchlist()).rejects.toMatchObject({ code: "unreachable" });
   });
 
+  it("never supplies an EVM identity to the NEAR wallet session reader", async () => {
+    const backend = await load();
+    for (const session of [
+      { wallet_type: "evm", account_id: "eip155:1:0x" + "ab".repeat(20) },
+      { wallet_type: "evm", account_id: "alice.near" },
+      { account_id: "eip155:1:0x" + "ab".repeat(20) },
+      { wallet_type: "unknown", account_id: "alice.near" },
+    ]) {
+      vi.mocked(fetch).mockResolvedValueOnce(reply(200, { session }));
+      expect(await backend.currentSession()).toBeNull();
+    }
+    vi.mocked(fetch).mockResolvedValueOnce(reply(200, { session: { wallet_type: "near", account_id: "alice.near" } }));
+    expect(await backend.currentSession()).toBe("alice.near");
+  });
+
   it("lists only the signed-in account's pending settlements, with amounts read exactly", async () => {
     const backend = await load();
     vi.mocked(fetch).mockResolvedValueOnce(reply(200, { data: [

@@ -33,9 +33,10 @@ test('signing approval binds the exact deployment, artifacts, keys, budget and e
 });
 
 test('both providers must prove approved code and controls at the same recent finalized block', async () => {
-  const { config, approval, policy } = keeperFixture();
+  const { config, approval, policy, encode } = keeperFixture();
   const header = { hash: 'h'.repeat(32), height: 200, timestamp_nanosec: String(BigInt(Date.now()) * 1000000n) };
   let failure = '';
+  let platformCustody = false;
   const checkedKeys = new Set<string>();
   const checkedCustody = new Set<string>();
   const provider = (secondary: boolean): Pick<ReadRpcClient, 'call'> => ({ call: async (method, args) => {
@@ -50,6 +51,8 @@ test('both providers must prove approved code and controls at the same recent fi
       checkedKeys.add(`${secondary}:${role}`);
       return { block_hash: secondary && failure === 'key-block' ? 'wrong' : header.hash,
         keys: secondary && failure === `key:${role}` ? [{ access_key: { permission: 'FullAccess' } }]
+          : role === 'nft' && platformCustody
+            ? [{ public_key: approval.keeper.publicKeys.market, access_key: { permission: 'FullAccess', nonce: 100 } }]
           : failure === 'malformed-keys' ? null : [] };
     }
     if (p.request_type === 'view_account') {
@@ -63,6 +66,12 @@ test('both providers must prove approved code and controls at the same recent fi
         : approval.contracts[role as keyof KeeperApproval['contracts']]!.codeHash };
     }
     const decoded: Record<string, string> = JSON.parse(Buffer.from(p.args_base64!, 'base64').toString());
+    if (p.method_name === 'get_owner') {
+      assert.equal(role, 'nft');
+      checkedCustody.add(`${secondary}:nft:owner`);
+      return { block_hash: secondary && failure === 'nft-owner-block' ? 'wrong' : header.hash,
+        result: [...Buffer.from(JSON.stringify(secondary && failure === 'nft-owner' ? 'attacker.near' : 'platform.near'))] };
+    }
     if (p.method_name === 'get_policy') return { block_hash: header.hash,
       result: [...Buffer.from(JSON.stringify(secondary && failure === 'dao-policy' ? {} : policy))] };
     if (p.method_name !== 'config') {
@@ -108,6 +117,31 @@ test('both providers must prove approved code and controls at the same recent fi
     ...[...custodyMethods, 'pa_is_paused'].map(method => `malformed:${method}`)]) {
     await assert.rejects(verifyKeeperApproval(approval, config, provider(false), provider(true)), { name: 'Error' }, failure);
   }
+  failure = '';
+  approval.nftCustody = { mode: 'platform-managed', accountId: approval.contracts.nft!.accountId,
+    codeHash: approval.contracts.nft!.codeHash, ownerId: 'platform.near',
+    publicKeys: [approval.keeper.publicKeys.market], custodian: 'Platform operator',
+    reviewEvidence: 'https://review.invalid/nft-custody' };
+  const encoded = encode();
+  assert.deepEqual(parseKeeperApproval(encoded.KEEPER_APPROVAL_JSON, encoded.KEEPER_APPROVAL_SHA256, config), approval);
+  platformCustody = true;
+  await verifyKeeperApproval(approval, config, provider(false), provider(true));
+  for (const side of [false, true]) assert.ok(checkedCustody.has(`${side}:nft:owner`));
+  for (failure of ['nft-owner', 'nft-owner-block', 'key-block', 'code', 'key:nft', 'key:dao',
+    ...financial.map(role => `key:${role}`)]) {
+    await assert.rejects(verifyKeeperApproval(approval, config, provider(false), provider(true)), { name: 'Error' }, failure);
+  }
+  for (const change of [
+    { accountId: 'market.near' }, { codeHash: approval.contracts.market!.codeHash },
+    { publicKeys: [] }, { ownerId: '' }, { reviewEvidence: 'file:///approval' },
+  ]) {
+    const rejected = encode({ ...approval, nftCustody: { ...approval.nftCustody, ...change } });
+    assert.throws(() => parseKeeperApproval(rejected.KEEPER_APPROVAL_JSON, rejected.KEEPER_APPROVAL_SHA256, config));
+  }
+  failure = '';
+  delete approval.nftCustody;
+  await assert.rejects(verifyKeeperApproval(approval, config, provider(false), provider(true)), /not_keyless/);
+  platformCustody = false;
   failure = '';
   failure = 'global-dao';
   await verifyKeeperApproval(approval, config, provider(false), provider(true));

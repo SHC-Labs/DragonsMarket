@@ -45,7 +45,15 @@ function SignRequest({ agentId, asked, onIssued }: SignProps) {
   const sign = () => step.run(async () => { onIssued(await signAccess(agentId, asked, await signer())); });
   return <div className="agent-panel">
     <h4 className="agent-panel-title">Sign to give access</h4>
-    <p className="agent-summary">{asked.message}</p>
+    <p>
+      {asked.terms.label} may spend {money(asked.terms.maxSpend)} per buy or stake and {money(asked.terms.dailyLimit)}
+      {" "}in a rolling 24 hours. Access expires {new Date(asked.expires_at).toLocaleString()}.
+      It may sell existing positions, claim proceeds and cash out to your owner wallet.
+    </p>
+    <details>
+      <summary>Review the exact signed permissions</summary>
+      <p className="agent-summary">{asked.message}</p>
+    </details>
     <div>
       <Button variant="secondary" onClick={sign} disabled={step.busy}>
         {step.busy ? "Waiting for your wallet" : "Sign with your wallet"}

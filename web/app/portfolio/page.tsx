@@ -5,14 +5,19 @@ import { AccountEmptyState, PageLandmark } from "@/components/PageHeader";
 import { Button, Notice } from "@/components/ui";
 import { CountUp } from "@/components/CountUp";
 import { CashOut } from "@/components/CashOut";
+import { CrossChainCashOut } from "@/components/CrossChainCashOut";
+import { TransactionNotice } from "@/components/TransactionNotice";
+import { RelayNotice } from "@/components/RelayNotice";
 import { MarketIcon } from "@/components/MarketIcon";
 import { Embers } from "@/components/Embers";
 import { Award, Wallet } from "@/components/icons";
 import { useWallet } from "@/components/WalletProvider";
 import { backendEnabled, pendingFor, pendingLabel } from "@/lib/backend";
 import { config } from "@/lib/config";
-import { formatMoney, formatShares } from "@/lib/format";
-import { usePoll, useTx } from "@/lib/hooks";
+import { formatExact, formatMoney, formatShares } from "@/lib/format";
+import { usePoll, useRelayFee, useRelayTx, useTx } from "@/lib/hooks";
+import { relayMarketExit } from "@/lib/relay-market";
+import { signsWithRelay } from "@/lib/wallet-account";
 import {
   getBalance, getPositions, getShares, listMarkets, redeemCall, tokenBalance, withdrawCall,
   type FunctionCall, type MarketView,
@@ -46,8 +51,12 @@ export default function Portfolio() {
 }
 
 function AccountPortfolio() {
-  const { account, openConnect, walletAvailable, send } = useWallet();
-  const { state, run, reset } = useTx(send, account);
+  const { account, identity, openConnect, walletAvailable, send, signRelayed } = useWallet();
+  const tx = useTx(send, account);
+  const relay = signsWithRelay(identity);
+  const relayTx = useRelayTx(account);
+  const { fee } = useRelayFee(relay);
+  const busy = relay ? relayTx.busy : tx.busy;
   const { data, error, loading, reload } = usePoll(
     async () => {
       if (!account) return null;
@@ -68,9 +77,11 @@ function AccountPortfolio() {
     6000,
   );
 
-  const busy = state.phase === "waiting";
   const act = async (call: FunctionCall, done: () => Promise<boolean>, doneMessage: string) => {
-    await run(call, { done, doneMessage });
+    if (relay) {
+      if (fee === null || !data || data.inWallet < fee) return;
+      await relayTx.run({ submit: () => signRelayed([relayMarketExit(call)], fee), done, doneMessage });
+    } else await tx.run(call, { done, doneMessage });
     await reload();
   };
 
@@ -118,14 +129,17 @@ function AccountPortfolio() {
           <dl className="portfolio-balances">
             <Balance label="In your Intents account" value={data.inWallet} tone="wallet" />
             <Balance label="Market balance" value={data.inMarket} tone="market">
-              <Button variant="secondary" size="sm" disabled={busy || data.inMarket === 0n} aria-describedby="portfolio-integration" onClick={() => act(withdrawCall(data.inMarket), async () => BigInt(await getBalance(account)) < data.inMarket, "Withdrawn to your Intents account.")}>Withdraw</Button>
+              <Button variant="secondary" size="sm" disabled={busy || data.inMarket === 0n || (relay && (fee === null || data.inWallet < fee))} aria-describedby="portfolio-integration" onClick={() => act(withdrawCall(data.inMarket), async () => BigInt(await getBalance(account)) < data.inMarket, "Withdrawn to your Intents account.")}>Withdraw</Button>
             </Balance>
           </dl>
           <p id="portfolio-integration" className="portfolio-note">Redeem a resolved position to move its payout into your market balance, then withdraw the balance to your Intents account.</p>
-          <CashOut key={account} account={account} balance={data.inWallet} reload={reload} />
-          {state.phase === "waiting" && <Notice>Waiting for your wallet and the chain.</Notice>}
-          {state.phase === "done" && <Notice>{state.message}</Notice>}
-          {state.phase === "failed" && <Notice tone="danger"><span>{state.message} </span><Button variant="ghost" size="sm" onClick={reset}>Dismiss</Button></Notice>}
+          {!relay && <CashOut key={account} account={account} balance={data.inWallet} reload={reload} />}
+          {relay && config.network === "mainnet" && <CrossChainCashOut key={account}
+            identity={identity} balance={data.inWallet} reload={reload} />}
+          {relay ? <>
+            <p>{fee === null ? "Getting the network fee." : `Each market action requires ${formatExact(fee)} ${config.tokenSymbol} in your Intents balance for gas.`}</p>
+            <RelayNotice state={relayTx.state} recheck={async () => { await relayTx.recheck(); await reload(); }} />
+          </> : <TransactionNotice tx={tx} />}
           {pending.data && pending.data.length > 0 && (
             <Notice>
               <ul aria-label="Payments waiting for confirmation">
@@ -169,8 +183,8 @@ function AccountPortfolio() {
                     </div>
                     <div className="position-action">
                       {resolved ? (
-                        <Button size="sm" disabled={busy} onClick={() => act(redeemCall(p.market.id), async () => { const [y, n] = await getShares(p.market.id, account); return BigInt(y) + BigInt(n) === 0n; }, "Redeemed. Withdraw the balance to your Intents account.")}>Redeem</Button>
-                      ) : p.market.status === "open" ? (
+                        <Button size="sm" disabled={busy || (relay && (fee === null || data.inWallet < fee))} onClick={() => act(redeemCall(p.market.id), async () => { const [y, n] = await getShares(p.market.id, account); return BigInt(y) + BigInt(n) === 0n; }, "Redeemed. Withdraw the balance to your Intents account.")}>Redeem</Button>
+                      ) : ["open", "halted"].includes(p.market.status) ? (
                         <Link href={`/market?id=${p.market.id}`} className="btn btn-secondary btn-sm">Sell</Link>
                       ) : null}
                     </div>

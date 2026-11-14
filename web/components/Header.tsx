@@ -10,9 +10,10 @@ import { useWallet } from "./WalletProvider";
 import { useIndicator } from "./useIndicator";
 import { Button } from "./ui";
 import { shortAccount } from "@/lib/format";
+import { shortAddress } from "@/lib/wallet-account";
 
 export function Header() {
-  const { account, walletAvailable, openConnect, disconnect, backendAccount, signOutOnAllDevices } = useWallet();
+  const { account, identity, walletAvailable, openConnect, disconnect, backendAccount, signOutOnAllDevices } = useWallet();
   const [signOutFailed, setSignOutFailed] = useState(false);
   const pathname = usePathname();
   const desktopNav = useRef<HTMLElement>(null);
@@ -54,7 +55,7 @@ export function Header() {
           {account ? (
             <button type="button" className="wallet-pill" onClick={disconnect} aria-label={`Connected as ${account}. Disconnect`}>
               <span aria-hidden="true" className="wallet-dot" />
-              <span className="wallet-account">{shortAccount(account, 16)}</span><span className="wallet-action">Disconnect</span>
+              <span className="wallet-account">{identity && identity.chain !== "near" ? shortAddress(identity.label) : shortAccount(account, 16)}</span><span className="wallet-action">Disconnect</span>
             </button>
           ) : (
             <Button size="sm" onClick={openConnect} disabled={!walletAvailable} title={walletAvailable ? undefined : "Wallet connection unavailable"}>

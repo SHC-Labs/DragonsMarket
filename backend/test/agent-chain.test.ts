@@ -178,6 +178,10 @@ test('an owner funds an agent, which trades a market and stakes a round under it
     const client = new AgentApiClient({ url: `http://127.0.0.1:${port}`, key: KEY, timeoutMs: 60000 });
     const runner: AgentRunner = {
       deployment, api: client, transaction: (hash, sender) => finalTransaction(rpc, hash, sender),
+      authorize: async (actual, job) => {
+        assert.deepEqual(actual, grant);
+        assert.equal(job.agent, agentId);
+      },
       operations: memoryOperations(), waitMs: 60000,
     };
     const view = finalView(rpc);
@@ -192,10 +196,11 @@ test('an owner funds an agent, which trades a market and stakes a round under it
     await ownerCall(rounds, 'storage_deposit', { account_id: agentId }, nearToYocto('0.05'));
     assert.equal(await view(rounds, 'is_registered', { account_id: agentId }), true);
     await ownerCall(token, 'mint', { account_id: owner.accountId, amount: (20n * USD).toString() });
-    await owner.signAndSendTransaction({ receiverId: token, waitUntil: 'FINAL',
-      actions: [actions.functionCall('ft_transfer_call', { receiver_id: rounds, amount: (9n * USD).toString(),
-        msg: `deposit_for:${agentId}` }, teraToGas('300'), 1n)] });
-    assert.equal(await balance(), (9n * USD).toString(), 'the owner funds the rounds balance straight from the wallet');
+    await ownerCall(token, 'ft_transfer_call', { receiver_id: verifier, amount: (9n * USD).toString(),
+      msg: owner.accountId }, 1n);
+    await ownerCall(verifier, 'mt_transfer_call', { receiver_id: rounds, token_id: collateral,
+      amount: (9n * USD).toString(), msg: `deposit_for:${agentId}` }, 1n);
+    assert.equal(await balance(), (9n * USD).toString(), 'the owner funds the agent from their own Intents custody');
     assert.equal(await view(token, 'ft_balance_of', { account_id: agentId }), '0', 'the agent never holds the token');
 
     const [open] = await view(rounds, 'open_rounds', { from_index: 0, limit: 12 }) as { round: string }[];
@@ -275,10 +280,10 @@ test('an owner funds an agent, which trades a market and stakes a round under it
     const tooEarly = await run('buy-0', { kind: 'buy', market: '0', side: 'yes', amount: USD.toString(), minShares: '1' });
     assert.equal(tooEarly.state, 'failed', 'an agent that is not registered with the market cannot trade it');
     await ownerCall(market, 'storage_deposit', { account_id: agentId }, nearToYocto('0.05'));
-    const paid = await owner.signAndSendTransaction({ receiverId: token, waitUntil: 'FINAL',
-      actions: [actions.functionCall('ft_transfer_call', { receiver_id: market, amount: (6n * USD).toString(),
-        msg: `deposit_for:${agentId}` }, teraToGas('300'), 1n)] });
-    assert.ok(paid, 'the owner funds the market balance straight from the wallet');
+    await ownerCall(token, 'ft_transfer_call', { receiver_id: verifier, amount: (6n * USD).toString(),
+      msg: owner.accountId }, 1n);
+    await ownerCall(verifier, 'mt_transfer_call', { receiver_id: market, token_id: collateral,
+      amount: (6n * USD).toString(), msg: `deposit_for:${agentId}` }, 1n);
     assert.equal(await inMarket(), 6n * USD);
     assert.equal(await view(token, 'ft_balance_of', { account_id: agentId }), '0', 'the agent never holds the token');
 
