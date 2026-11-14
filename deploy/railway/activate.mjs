@@ -8,7 +8,7 @@ import { ReadRpcClient } from '../../backend/dist/src/providers.js';
 import { checkTarget, environmentId, projectId, railwayQuery, services, uploadSource, verifySource, waitForDeployment } from './release.mjs';
 import { checkBackups, postgresId } from './backups.mjs';
 import { smoke, verifyActivated } from './smoke.mjs';
-import { activationServices, agentService, expectedBrowser, origins, parseActivation, pricesService,
+import { activationServices, agentService, expectedBrowser, origins, parseActivation, pricesService, publishersService,
   requireLaunchEvidence, verifyActivationVariables, verifySealedExecutionKeys, workerServices } from './activation-plan.mjs';
 
 const ensure = (condition, message) => { if (!condition) throw new Error(message); };
@@ -68,7 +68,8 @@ function completed(service, plan, stage, message) {
 }
 
 export async function activationSnapshot(query, plan, stage) {
-  const all = [...services, ...workerServices, { name: 'keeper', id: plan.keeperServiceId }, agentService, pricesService];
+  const all = [...services, ...workerServices, { name: 'keeper', id: plan.keeperServiceId }, ...publishersService(plan),
+    agentService, pricesService];
   const target = await checkTarget(query, all);
   const metadata = target.environment.variables?.edges?.map(({ node }) => node);
   verifySealedExecutionKeys(plan, stage, metadata);

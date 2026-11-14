@@ -16,6 +16,7 @@ After the team syncs the reviewed code publicly, prepare a JSON document with th
 | `sourceCommit` | Exact 40-character public application commit to release. A sync commit can differ from the private commit. |
 | `profile` | `human`, or `agents` only after the actual Defuse credentials and complete agent acceptance are available. |
 | `keeperServiceId` | Dedicated Railway keeper service UUID after its approved creation. It must not reuse another service. |
+| `publishersServiceId` | Optional. Dedicated Railway `publishers` service UUID; see [Price publishers](#price-publishers). |
 | `publicRpcUrl` | Plain HTTPS origin usable by the browser, without credentials, query strings or fragments. |
 | `keeperApproval` | The complete [keeper approval packet](KEEPER-APPROVAL.md), including the registered manifest, approved builds, custody, market allowlist and gas limits. |
 | `launchEvidence` | HTTPS review record for funded human acceptance, market disposition, alerts, recovery and operating ownership. Required for `launch`. |
@@ -23,7 +24,23 @@ After the team syncs the reviewed code publicly, prepare a JSON document with th
 
 The keeper packet expires after at most 30 days. Generate `KEEPER_APPROVAL_JSON` with `JSON.stringify(packet.keeperApproval)` and `KEEPER_APPROVAL_SHA256` from those exact serialized bytes. Install the identical pair on `database-release` and `keeper`. Both digests detect configuration mismatch; neither is a reviewer signature. Reviewers must inspect the evidence themselves: these scripts validate link syntax but do not fetch or attest to the linked documents. People able to change protected configuration or deployed code control these gates.
 
-Agent evidence must cover every exposed financial tool, including rounds funding and settlement if the approved manifest includes rounds. The current rehearsal rounds compatibility and publisher findings remain blockers for that profile. This workflow keeps the local `prices` service and price publication disabled; an external publisher or another release needs its own review and operational evidence. It cannot be inferred from a valid Agent API key.
+Agent evidence must cover every exposed financial tool, including rounds funding and settlement if the approved manifest includes rounds. The current rehearsal rounds compatibility and publisher findings remain blockers for that profile. This workflow keeps the local `prices` service disabled. Round prices are signed only by the optional `publishers` service described below. It cannot be inferred from a valid Agent API key.
+
+## Price publishers
+
+Set `publishersServiceId` in the packet to the dedicated Railway `publishers` service to sign round prices. Without it, no service may set `PUBLISH_ROUND_PRICES`. It requires Rounds in the deployment. The service runs `dist/src/round-publisher.js` with the `dm_publisher_login` database role, deploys right after the keeper in both stages, and signs in both, because the funded acceptance needs settled rounds.
+
+| Variable | Value |
+| --- | --- |
+| `PUBLISH_ROUND_PRICES` | `approved`; refused on every other service |
+| `PUBLISHER_KEY` | Sealed. Every publisher secret this service signs with, comma separated. Their public keys must be registered on Rounds with `set_publishers`. |
+| `PRICE_MAX_DEVIATION_BPS` | Largest spread between Coinbase, Kraken and Bitstamp; `PRICE_MAX_DEVIATION_BPS_BTC`, `_ETH` or `_NEAR` overrides it per asset |
+| `ROUND_PRICES_KEY` | Sealed. A function-call key on the operator account limited to Rounds `record_price` |
+| `ROUND_PRICES_ACCOUNT` | The approved operator |
+| `ROUND_PRICES_RPC` | A plain HTTPS RPC origin |
+| `PRICE_SIGNATURES_URL` | `http://server.railway.internal:3500` |
+
+Recording carries no price authority: the contract checks the publishers' signatures itself, and `claim` settles a round. Keys held by one service are one operator's trust, whatever the threshold; move keys to independent holders before relying on the threshold.
 
 ## Before preparation
 
@@ -34,7 +51,7 @@ storage layouts are unchanged by these methods; normal upgrade proof and code-ha
 remain required.
 
 The live approval check now requires empty NEAR access-key lists on all selected financial
-contracts and the NFT, and a proven upgrade path on every financial contract. At the same
+contracts, the NFT's approved code hash, and a proven upgrade path on every financial contract. At the same
 finalized block, both providers must confirm no Intents keys on the financial accounts,
 predecessor authentication enabled, accounts unlocked and verifier `mt_transfer` unpaused.
 Missing or malformed responses stop preparation. This check only reads; it does not seal
@@ -87,6 +104,6 @@ If activation fails before the web deployment, the previous website remains. Sto
 
 After deploying the Council consent fix, a rollback website must retain the one-yocto unstake call. An older zero-deposit client will be refused. Do not remove the contract guard to accommodate that client; recover with a compatible reviewed website build. Publisher rollback requires another reviewed owner replacement with a valid complete quorum, coordinated with the publishers.
 
-Repointing to the owner's replacement contracts requires new build/custody approval and an explicit migration plan for existing positions, sessions, balances, keeper state and indexing history. Do not edit the existing deployment row or discard the original volume to fit a new address.
+Repointing to replacement contracts requires new build/custody approval and an explicit migration plan for existing positions, sessions, balances, keeper state and indexing history. Do not edit the existing deployment row or discard the original volume to fit a new address.
 
 Railway's [cron lifecycle](https://docs.railway.com/cron-jobs) expects jobs to exit; the [pre-deploy command](https://docs.railway.com/deployments/pre-deploy-command) cannot initialize an attached volume. The workflow's completion and volume checks preserve those boundaries. This procedure has local failure-path and database tests, but its first approved production execution and funded acceptance remain outstanding.

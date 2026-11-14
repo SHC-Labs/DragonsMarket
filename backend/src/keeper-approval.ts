@@ -134,7 +134,8 @@ export async function verifyKeeperApproval(approval: KeeperApproval, config: Con
       const account = await rpc.call('query', { request_type: 'view_account', block_id: head.hash, account_id: expected.accountId });
       if (!object(account) || account.block_hash !== head.hash || account.code_hash !== expected.codeHash)
         throw new Error('approved_code_mismatch');
-      if (role === 'nft' || FINANCIAL.some(financial => financial === role)) {
+      // The NFT collection is a third-party contract that keeps its owner's key; its code hash above is the pin.
+      if (FINANCIAL.some(financial => financial === role)) {
         const access = await rpc.call('query', { request_type: 'view_access_key_list', block_id: head.hash, account_id: expected.accountId });
         if (!object(access) || access.block_hash !== head.hash || !Array.isArray(access.keys) || access.keys.length !== 0)
           throw new Error('approved_contract_not_keyless');

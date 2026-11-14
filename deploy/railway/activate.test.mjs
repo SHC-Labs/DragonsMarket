@@ -11,23 +11,26 @@ import { activationServices, agentService, digest, expectedBrowser, manifestVari
 const settings = JSON.parse(readFileSync(new URL('./services.json', import.meta.url), 'utf8'));
 const keeperId = '22222222-2222-4222-8222-222222222222';
 const deploymentId = '11111111-1111-4111-8111-111111111111';
+const publishersId = '33333333-3333-4333-8333-333333333333';
 
-function fixture(stage = 'launch', profile = 'human') {
+function fixture(stage = 'launch', profile = 'human', publishers = false) {
   const keeper = keeperFixture();
   const raw = JSON.stringify({ version: 1, sourceCommit: 'b'.repeat(40), profile, keeperServiceId: keeperId,
     publicRpcUrl: 'https://free.rpc.fastnear.com', keeperApproval: keeper.approval,
-    launchEvidence: 'https://review.invalid/funded-and-operations', ...(profile === 'agents' ? {
+    launchEvidence: 'https://review.invalid/funded-and-operations', ...(publishers ? { publishersServiceId: publishersId } : {}), ...(profile === 'agents' ? {
       agent: { apiUrl: 'https://agents.example.com', walletContract: 'wallets.near',
         acceptanceEvidence: 'https://review.invalid/partner-acceptance' } } : {}) });
   const plan = parseActivation(raw, digest(raw));
-  const all = [...services, ...workerServices, { name: 'keeper', id: keeperId }, agentService, pricesService];
+  const all = [...services, ...workerServices, { name: 'keeper', id: keeperId },
+    ...(publishers ? [{ name: 'publishers', id: publishersId }] : []), agentService, pricesService];
   const inventory = Object.fromEntries(all.map(service => [service.name, {}]));
   const passwords = Object.fromEntries(['api', 'indexer', 'worker', 'publisher', 'agent', 'keeper']
     .map((role, index) => [`dm_${role}_login`, String(index + 1).repeat(64)]));
   const activeAgents = stage === 'launch' && profile === 'agents';
   for (const [name, role] of Object.entries({ 'database-release': 'postgres', server: 'dm_api_login',
     indexer: 'dm_indexer_login', reconcile: 'dm_worker_login', 'verify-chain': 'dm_worker_login',
-    keeper: 'dm_keeper_login', ...(activeAgents ? { 'agent-worker': 'dm_agent_login' } : {}) })) {
+    keeper: 'dm_keeper_login', ...(activeAgents ? { 'agent-worker': 'dm_agent_login' } : {}),
+    ...(publishers ? { publishers: 'dm_publisher_login' } : {}) })) {
     inventory[name] = { ...manifestVariables(plan.approval.deployment),
       DATABASE_URL: `postgresql://${role}:${passwords[role] ?? 'owner-fixture'}@postgres.railway.internal:5432/railway`,
       RPC_URL: 'https://first.invalid', RPC_SECOND_URL: 'https://second.invalid' };
@@ -43,6 +46,9 @@ function fixture(stage = 'launch', profile = 'human') {
   }
   Object.assign(inventory.keeper, keeper.encode(), { KEEPER_MODE: stage === 'prepare' ? 'prepare' : 'sign' },
     stage === 'launch' ? { KEEPER_MARKET_KEY: null, KEEPER_ORACLE_KEY: null, KEEPER_COUNCIL_KEY: null, KEEPER_ROUNDS_KEY: null } : {});
+  if (publishers) Object.assign(inventory.publishers, { PUBLISH_ROUND_PRICES: 'approved', PUBLISHER_KEY: null, ROUND_PRICES_KEY: null,
+    ROUND_PRICES_ACCOUNT: plan.approval.controls.operator, ROUND_PRICES_RPC: 'https://free.rpc.fastnear.com',
+    PRICE_SIGNATURES_URL: 'http://server.railway.internal:3500', PRICE_MAX_DEVIATION_BPS: '50' });
   if (activeAgents) {
     Object.assign(inventory['agent-worker'], { AGENT_API_URL: plan.agent.apiUrl,
       AGENT_API_KEY: null, AGENT_API_WALLET_CONTRACT: 'wallets.near',
@@ -318,4 +324,43 @@ test('operator credential goes only to the exact private health route; HTTP prob
   });
   await assert.rejects(json('https://test.invalid', null, async () => new Response('x'.repeat(65537))), /response limit/);
   await assert.rejects(json('https://test.invalid', token, async () => new Response('secret', { status: 403 })), /probe failed/);
+});
+
+test('price publishers deploy after the keeper with sealed keys, and nowhere else may publish', async () => {
+  for (const stage of ['prepare', 'launch']) {
+    const f = fixture(stage, 'human', true);
+    await activatedRelease(f.options);
+    const uploads = f.events.filter(event => event.startsWith('upload:'));
+    assert.equal(uploads.indexOf('upload:publishers'), uploads.indexOf('upload:keeper') + 1, stage);
+  }
+  for (const mutate of [
+    v => { v.publishers.PUBLISH_ROUND_PRICES = 'true'; }, v => { v.server.PUBLISH_ROUND_PRICES = 'approved'; },
+    v => { v.publishers.PUBLISHER_KEY = 'must-not-be-readable'; }, v => { v.publishers.ROUND_PRICES_KEY = 'private-value'; },
+    v => { v.keeper.PUBLISHER_KEY = 'private-value'; }, v => { v.publishers.ROUND_PRICES_ACCOUNT = 'other.near'; },
+    v => { v.publishers.PRICE_SIGNATURES_URL = 'https://api.dragons.market'; },
+    v => { v.publishers.ROUND_PRICES_RPC = 'https://user:pass@rpc.invalid'; },
+    v => { v.publishers.DATABASE_URL = v.keeper.DATABASE_URL; },
+  ]) {
+    const f = fixture('launch', 'human', true); mutate(f.inventory);
+    assert.throws(() => verifyActivationVariables(f.plan, 'launch', f.inventory),
+      error => !error.message.includes('private-value'));
+  }
+  for (const mutate of [
+    rows => { rows.find(row => row.name === 'PUBLISHER_KEY').isSealed = false; },
+    rows => { rows.find(row => row.name === 'ROUND_PRICES_KEY').serviceId = keeperId; },
+  ]) {
+    const f = fixture('prepare', 'human', true);
+    const rows = f.target.environment.variables.edges.map(({ node }) => node);
+    mutate(rows);
+    f.target.environment.variables.edges = rows.map(node => ({ node }));
+    await assert.rejects(activatedRelease(f.options), /sealed service boundary/);
+  }
+  const f = fixture();
+  f.target.environment.variables.edges.push({ node: { name: 'PUBLISHER_KEY', serviceId: keeperId, isSealed: true } });
+  await assert.rejects(activatedRelease(f.options), /sealed service boundary/, 'no publisher keys without a publishers service');
+  const { raw } = fixture('launch', 'human', true);
+  for (const id of [keeperId, services[0].id, 'not-a-uuid']) {
+    const bad = JSON.stringify({ ...JSON.parse(raw), publishersServiceId: id });
+    assert.throws(() => parseActivation(bad, digest(bad)), /own service/);
+  }
 });

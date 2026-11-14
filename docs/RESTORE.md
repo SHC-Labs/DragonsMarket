@@ -89,7 +89,7 @@ Native snapshots remain inside the Railway account/project. Before substantial d
 
 ## Completed window, 7 November 2026
 
-Skylar approved the window in chat. API and MCP were stopped, all other workers remained inactive, and PostgreSQL reported zero other client connections. Evidence format 2 was captured before the fresh snapshot and matched again before and after the restore, before any migration or regrant. All 23 public-table digests, one sequence's state and definition, and 12 catalog sections matched exactly.
+The owner approved the window in chat. API and MCP were stopped, all other workers remained inactive, and PostgreSQL reported zero other client connections. Evidence format 2 was captured before the fresh snapshot and matched again before and after the restore, before any migration or regrant. All 23 public-table digests, one sequence's state and definition, and 12 catalog sections matched exactly.
 
 The window lasted 272 seconds; the API unavailable interval was at most 223 seconds. PostgreSQL completed WAL recovery and accepted connections. PostgreSQL, API, MCP and web image digests were unchanged. HTTPS routes, API database/schema readiness, MCP liveness, a fresh unauthenticated session and allowed/denied CORS origins passed. A fresh graphical-browser test was unavailable in this session; this drill verified those boundaries over HTTP. The current images still predate this branch's new MCP readiness route and nonce CSP.
 

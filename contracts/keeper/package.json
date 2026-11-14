@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": { "types": "./keeper.d.mts", "import": "./keeper.mjs" },
-    "./treasury": { "types": "./treasury.d.mts", "import": "./treasury.mjs" }
+    "./treasury": { "types": "./treasury.d.mts", "import": "./treasury.mjs" },
+    "./round-prices": { "types": "./round-prices.d.mts", "import": "./round-prices.mjs" }
   },
   "files": ["*.mjs", "*.d.mts", "!*.test.mjs"],
   "scripts": { "test": "node --test *.test.mjs" },

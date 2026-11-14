@@ -96,14 +96,15 @@ test('both providers must prove approved code and controls at the same recent fi
   const financial = ['market', 'oracle', 'council', 'rounds'].filter(role => role in approval.contracts);
   const custodyMethods = ['public_keys_of', 'is_auth_by_predecessor_id_enabled', 'is_account_locked'];
   for (const secondary of [false, true]) {
-    for (const role of [...financial, 'nft']) assert.ok(checkedKeys.has(`${secondary}:${role}`));
+    for (const role of financial) assert.ok(checkedKeys.has(`${secondary}:${role}`));
+    assert.ok(!checkedKeys.has(`${secondary}:nft`), 'the NFT collection keeps its owner key');
     for (const role of financial) for (const method of custodyMethods)
       assert.ok(checkedCustody.has(`${secondary}:${role}:${method}`));
   }
   for (failure of ['network', 'head', 'stale', 'code', 'balance', 'controls', 'pause', 'pending', 'upgrade', 'sells-paused', 'missing-control',
     'unproven', 'missing-proof', 'malformed-keys', 'key-block', 'custody-block', 'verifier-paused',
     'dao-code', 'dao-policy', 'mutable-dao', 'key:dao', 'oracle-recipient',
-    ...[...financial, 'nft'].map(role => `key:${role}`),
+    ...financial.map(role => `key:${role}`),
     ...financial.flatMap(role => custodyMethods.map(method => `${method}:${role}`)),
     ...[...custodyMethods, 'pa_is_paused'].map(method => `malformed:${method}`)]) {
     await assert.rejects(verifyKeeperApproval(approval, config, provider(false), provider(true)), { name: 'Error' }, failure);

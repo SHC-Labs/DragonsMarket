@@ -50,6 +50,13 @@ export function parseActivation(raw, expectedDigest) {
   requireValue(approval.deployment.collateralDecimals === 6, 'The browser currently supports six-decimal collateral');
   requireValue(![...services, ...workerServices, agentService, pricesService].some(s => s.id === plan.keeperServiceId) &&
     plan.keeperServiceId !== postgresId, 'Keeper must have its own service');
+  if (plan.publishersServiceId !== undefined) {
+    requireValue(uuid.test(plan.publishersServiceId) && plan.publishersServiceId !== plan.keeperServiceId &&
+      plan.publishersServiceId !== postgresId &&
+      ![...services, ...workerServices, agentService, pricesService].some(s => s.id === plan.publishersServiceId),
+    'Price publishers must have their own service');
+    requireValue(Boolean(approval.deployment.contracts.rounds), 'Price publishers sign round prices, so Rounds must be configured');
+  }
   if (plan.profile === 'agents') {
     requireValue(object(plan.agent) && https(plan.agent.apiUrl, true) && isAccount(plan.agent.walletContract) &&
       !plan.agent.walletContract.endsWith('.testnet') && !['intents.near', 'intents.far'].includes(plan.agent.walletContract),
@@ -63,11 +70,13 @@ export function requireLaunchEvidence(plan) {
   if (plan.profile === 'agents') requireValue(https(plan.agent.acceptanceEvidence), 'Agent activation requires actual partner acceptance evidence');
 }
 
+export const publishersService = plan => plan.publishersServiceId ? [{ name: 'publishers', id: plan.publishersServiceId }] : [];
+
 export function activationServices(plan, stage) {
   requireValue(['prepare', 'launch'].includes(stage), 'Invalid activation stage');
   const keeper = { name: 'keeper', id: plan.keeperServiceId, job: true };
   const foundation = name => services.find(service => service.name === name);
-  return [foundation('database-release'), ...workerServices, keeper,
+  return [foundation('database-release'), ...workerServices, keeper, ...publishersService(plan),
     ...(stage === 'launch' && plan.profile === 'agents' ? [agentService] : []),
     foundation('server'), foundation('mcp'), ...(stage === 'launch' ? [foundation('web')] : [])];
 }
@@ -90,9 +99,9 @@ const secretOwners = {
   OPERATOR_TOKEN: ['server'], AGENT_WORKER_TOKEN: ['server', 'agent-worker'],
   AGENT_API_KEY: ['agent-worker'], AGENT_GRANT_KEY: ['agent-worker'],
   KEEPER_MARKET_KEY: ['keeper'], KEEPER_ORACLE_KEY: ['keeper'], KEEPER_COUNCIL_KEY: ['keeper'],
-  KEEPER_ROUNDS_KEY: ['keeper'],
-  RPC_PRIMARY_BEARER_TOKEN: ['database-release', 'server', 'indexer', 'reconcile', 'verify-chain', 'keeper', 'agent-worker'],
-  RPC_SECOND_BEARER_TOKEN: ['database-release', 'server', 'indexer', 'reconcile', 'verify-chain', 'keeper', 'agent-worker'],
+  KEEPER_ROUNDS_KEY: ['keeper'], PUBLISHER_KEY: ['publishers'], ROUND_PRICES_KEY: ['publishers'],
+  RPC_PRIMARY_BEARER_TOKEN: ['database-release', 'server', 'indexer', 'reconcile', 'verify-chain', 'keeper', 'agent-worker', 'publishers'],
+  RPC_SECOND_BEARER_TOKEN: ['database-release', 'server', 'indexer', 'reconcile', 'verify-chain', 'keeper', 'agent-worker', 'publishers'],
   NEARDATA_BEARER_TOKEN: ['indexer'],
 };
 
@@ -106,6 +115,13 @@ export function verifySealedExecutionKeys(plan, stage, entries) {
     const active = stage === 'launch' && (serviceId === plan.keeperServiceId || plan.profile === 'agents')
       && (name !== 'KEEPER_ROUNDS_KEY' || Boolean(plan.approval.deployment.contracts.rounds));
     requireValue(active ? rows.length === 1 && rows[0].serviceId === serviceId && rows[0].isSealed === true
+      : rows.length === 0, `Execution credential must match its sealed service boundary: ${name}`);
+  }
+  // Publishers sign in both stages: the funded acceptance before launch needs settled rounds.
+  for (const name of ['PUBLISHER_KEY', 'ROUND_PRICES_KEY']) {
+    const rows = entries.filter(entry => entry.name === name);
+    requireValue(plan.publishersServiceId
+      ? rows.length === 1 && rows[0].serviceId === plan.publishersServiceId && rows[0].isSealed === true
       : rows.length === 0, `Execution credential must match its sealed service boundary: ${name}`);
   }
 }
@@ -131,8 +147,9 @@ function checkCredentials(name, vars) {
       ? ['database-release'] : secretOwners[key] ?? [];
     requireValue(allowed.includes(name), `Credential in the wrong service: ${name}.${key}`);
   }
-  requireValue(!vars.PUBLISH_ROUND_PRICES || vars.PUBLISH_ROUND_PRICES === 'false',
-    'Price publishing requires a separate reviewed release');
+  requireValue(name === 'publishers' ? vars.PUBLISH_ROUND_PRICES === 'approved'
+    : !vars.PUBLISH_ROUND_PRICES || vars.PUBLISH_ROUND_PRICES === 'false',
+  'Price publishing runs only on the publishers service');
   if (['web', 'mcp'].includes(name)) requireValue(!vars.DATABASE_URL, `Database credentials are forbidden on ${name}`);
 }
 
@@ -144,7 +161,7 @@ function chainConfiguration(name, vars, plan, passwords) {
   same(config.network, 'mainnet', `${name} network`);
   const connection = new URL(config.databaseUrl);
   const login = { server: 'api', indexer: 'indexer', reconcile: 'worker', 'verify-chain': 'worker',
-    keeper: 'keeper', 'agent-worker': 'agent' }[name];
+    keeper: 'keeper', 'agent-worker': 'agent', publishers: 'publisher' }[name];
   same(connection.hostname, 'postgres.railway.internal', `${name} database host`);
   same(connection.port, '5432', `${name} database port`);
   same(connection.username, login ? `dm_${login}_login` : 'postgres', `${name} database role`);
@@ -187,6 +204,15 @@ function checkKeeperStage(plan, stage, inventory) {
   }
 }
 
+function checkPublishers(plan, vars) {
+  same(vars.PUBLISHER_KEY, null, 'sealed publisher keys');
+  same(vars.ROUND_PRICES_KEY, null, 'sealed price recording key');
+  same(vars.ROUND_PRICES_ACCOUNT, plan.approval.controls.operator, 'price recording account');
+  same(vars.PRICE_SIGNATURES_URL, 'http://server.railway.internal:3500', 'price signature source');
+  requireValue(typeof vars.ROUND_PRICES_RPC === 'string' && vars.ROUND_PRICES_RPC === new URL(vars.ROUND_PRICES_RPC).origin &&
+    vars.ROUND_PRICES_RPC.startsWith('https://'), 'Price recording needs a plain HTTPS RPC origin');
+}
+
 function checkAgentStage(plan, agents, inventory, server) {
   if (agents) {
     const worker = inventory['agent-worker'];
@@ -224,6 +250,7 @@ export function verifyActivationVariables(plan, stage, inventory) {
   const chainServices = ['database-release', 'server', 'indexer', 'reconcile', 'verify-chain', 'keeper'];
   const agents = stage === 'launch' && plan.profile === 'agents';
   if (agents) chainServices.push('agent-worker');
+  if (plan.publishersServiceId) chainServices.push('publishers');
   for (const name of [...chainServices, 'web', 'mcp', ...(!agents ? ['agent-worker'] : []), 'prices']) {
     checkCredentials(name, inventory[name]);
   }
@@ -237,6 +264,7 @@ export function verifyActivationVariables(plan, stage, inventory) {
   }
   checkHttpServices(server, inventory.mcp);
   checkKeeperStage(plan, stage, inventory);
+  if (plan.publishersServiceId) checkPublishers(plan, inventory.publishers);
   const source = readNeardataSettings(inventory.indexer);
   new NeardataReader(undefined, undefined, source.intervalMs, source);
   checkAgentStage(plan, agents, inventory, server);

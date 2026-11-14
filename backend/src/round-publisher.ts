@@ -12,6 +12,7 @@ import { base58Encode, base58Decode } from './base58.js';
 import { object } from './ingestion/block.js';
 import { candidate, recordEvidence, usdBoundary, type Asset, type Exchange, type Observation } from './prices.js';
 import { isUint } from './validate.js';
+import { run as recordRoundPrices } from '@dragons-market/keeper/round-prices';
 
 const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
@@ -37,6 +38,7 @@ export interface Series {
 export interface PricePolicy {
   minimumSources: number;
   maxDeviationBps: number;
+  assetDeviationBps?: Partial<Record<Asset, number>>;
 }
 
 /** The exact string a publisher signs, as the rounds contract builds it in `price_message`. */
@@ -165,7 +167,8 @@ export async function publishOnce(ctx: PublishContext) {
           quote: 'USD',
           boundaryNs: at,
           decimals: series.decimals,
-          ...policy,
+          minimumSources: policy.minimumSources,
+          maxDeviationBps: policy.assetDeviationBps?.[asset] ?? policy.maxDeviationBps,
         });
         const message = roundPriceMessage(rounds, settings.network as string, series.asset, at, price, series.decimals);
         const decision = await reserveDecision(pool, config.deployment.id, key.publicKey, boundary, message);
@@ -208,14 +211,46 @@ export async function storedSignatures(pool: Pick<pg.Pool, 'query'>, deploymentI
   return { seriesId, round, quotes };
 }
 
-function policyFrom(env: NodeJS.ProcessEnv): PricePolicy {
+export function policyFrom(env: NodeJS.ProcessEnv): PricePolicy {
   // Signing waits for an explicit decision about the price source rules, so there is no default spread to fall back on.
   if (env.PUBLISH_ROUND_PRICES !== 'approved') throw new Error('PUBLISH_ROUND_PRICES must be "approved": the price source policy is a decision for the owner');
   const maxDeviationBps = Number(env.PRICE_MAX_DEVIATION_BPS);
   if (!Number.isInteger(maxDeviationBps)) throw new Error('set PRICE_MAX_DEVIATION_BPS');
+  const assetDeviationBps: Partial<Record<Asset, number>> = {};
+  for (const asset of ['BTC', 'ETH', 'NEAR'] as const) {
+    const raw = env[`PRICE_MAX_DEVIATION_BPS_${asset}`];
+    if (raw === undefined || raw === '') continue;
+    if (!/^[1-9]\d{0,3}$/.test(raw)) throw new Error(`PRICE_MAX_DEVIATION_BPS_${asset} must be a whole number of basis points`);
+    assetDeviationBps[asset] = Number(raw);
+  }
   // A quorum forms only if publishers sign the same price, so every exchange has to answer: a different set of answering
   // exchanges would give a different median.
-  return { minimumSources: EXCHANGES.length, maxDeviationBps };
+  return { minimumSources: EXCHANGES.length, maxDeviationBps, assetDeviationBps };
+}
+
+/**
+ * Records start prices once enough publishers signed them, using a key limited to `record_price`. Off unless `ROUND_PRICES_KEY`
+ * is set. Recording carries no price authority: the contract checks the publishers' signatures itself.
+ */
+export function recorderFrom(env: NodeJS.ProcessEnv, config: Config): (() => Promise<number>) | null {
+  if (!env.ROUND_PRICES_KEY) return null;
+  const rounds = config.deployment?.contracts.rounds;
+  const { ROUND_PRICES_ACCOUNT: account, ROUND_PRICES_RPC: rpc, PRICE_SIGNATURES_URL: publishers } = env;
+  if (!rounds || !account || !rpc?.startsWith('https://') || !publishers?.startsWith('http'))
+    throw new Error('recording prices needs the rounds contract, ROUND_PRICES_ACCOUNT, an https ROUND_PRICES_RPC and PRICE_SIGNATURES_URL');
+  return () => recordRoundPrices({ rpc, rounds, account, publishers }, env);
+}
+
+/** Every key this process signs with: `PUBLISHER_KEY` (one or more, comma separated) or a single `PUBLISHER_KEY_FILE`. */
+export async function loadPublisherKeys(env: NodeJS.ProcessEnv): Promise<PublisherKey[]> {
+  if (env.PUBLISHER_KEY && env.PUBLISHER_KEY_FILE) throw new Error('set PUBLISHER_KEY or PUBLISHER_KEY_FILE, not both');
+  const secrets = env.PUBLISHER_KEY
+    ? env.PUBLISHER_KEY.split(',').map(s => s.trim()).filter(Boolean)
+    : env.PUBLISHER_KEY_FILE ? [await readKeyFile(env.PUBLISHER_KEY_FILE)] : [];
+  if (!secrets.length) throw new Error('set PUBLISHER_KEY or PUBLISHER_KEY_FILE');
+  const keys = secrets.map(loadPublisherKey);
+  if (new Set(keys.map(k => k.publicKey)).size !== keys.length) throw new Error('a publisher key is listed twice');
+  return keys;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
@@ -226,8 +261,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   try {
     const config = readConfig(process.env);
     const policy = policyFrom(process.env);
-    if (!process.env.PUBLISHER_KEY_FILE) throw new Error('set PUBLISHER_KEY_FILE');
-    const key = loadPublisherKey(await readKeyFile(process.env.PUBLISHER_KEY_FILE));
+    const keys = await loadPublisherKeys(process.env);
+    const submitter = recorderFrom(process.env, config);
     pool = createPool(config.databaseUrl);
     await verifyDatabase(pool, config);
     const rpc = new ReadRpcClient(config.rpc.primaryUrl, config.rpc, config.rpc.primaryBearerToken);
@@ -235,7 +270,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     do {
       try {
         const head = await finalizedHead(config, rpc);
-        await publishOnce({ config, pool, view: viewAt(rpc, head.hash), key, policy, nowNs: BigInt(Date.now()) * 1_000_000n, log });
+        const nowNs = BigInt(Date.now()) * 1_000_000n;
+        for (const key of keys) {
+          await publishOnce({ config, pool, view: viewAt(rpc, head.hash), key, policy, nowNs, log: entry => log({ publisher: key.publicKey, ...entry }) });
+        }
+        if (submitter) await submitter();
       } catch (error) {
         log({ error: error instanceof Error ? error.message.slice(0, 160) : 'unknown' });
         process.exitCode = 1;

@@ -301,7 +301,7 @@ The code is right where it disagrees with a document. Each finding names the fix
 
 ## 8. Build order
 
-Done and in flight come first. Estimates are working days for one person and are guesses. They assume the interface in these specs is frozen before work starts. The hackathon plan orders delivery as gates A to F without dates ([hackathon-plan.md](../../hackathon-plan.md#2-delivery-order)). Gate A (account model, interfaces, quarter rules) is what these specs propose. P1 and P3 serve gate B, P2 and P4 serve gate C, P5 serves gate D, and P8 serves gate E.
+Done and in flight come first. Estimates are working days for one person and are guesses. They assume the interface in these specs is frozen before work starts. The hackathon plan orders delivery as gates A to F without dates (hackathon-plan.md). Gate A (account model, interfaces, quarter rules) is what these specs propose. P1 and P3 serve gate B, P2 and P4 serve gate C, P5 serves gate D, and P8 serves gate E.
 
 | Phase | Work | Depends on | Estimate | Closes |
 | --- | --- | --- | --- | --- |
