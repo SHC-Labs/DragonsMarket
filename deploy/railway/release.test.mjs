@@ -133,6 +133,36 @@ test('migration completion requires its success log, while application completio
   await assert.rejects(waitForDeployment(async () => deployment(services[1], { deploymentStopped: true }), services[1], id), /stopped/);
 });
 
+test('structured Railway job logs retain typed completion evidence', async () => {
+  const service = { ...services[0], completed: message => {
+    try {
+      const value = JSON.parse(message);
+      return value.service === 'database-release' && value.registered === 'production-id';
+    } catch { return false; }
+  } };
+  const attributes = [{ key: 'level', value: '"info"' },
+    { key: 'service', value: '"database-release"' }, { key: 'registered', value: '"production-id"' }];
+  let requestedAttributes = false;
+  await waitForDeployment(async query => {
+    if (!query.includes('deploymentLogs')) return deployment(service, { deploymentStopped: true });
+    requestedAttributes = query.includes('attributes { key value }');
+    return { deploymentLogs: [{ message: '', attributes }] };
+  }, service, id, { log() {} });
+  assert.equal(requestedAttributes, true);
+  for (const entry of [
+    { message: '', attributes: [] },
+    { message: '', attributes: [...attributes, { key: 'registered', value: '"wrong"' }] },
+    { message: '', attributes: [{ key: 'service', value: 'invalid JSON' }] },
+    { message: '', attributes: attributes.map(a => a.key === 'registered' ? { ...a, value: '"wrong"' } : a) },
+    { message: '{"service":"database-release","registered":"wrong"}', attributes },
+  ]) {
+    let time = 0;
+    await assert.rejects(waitForDeployment(async query => query.includes('deploymentLogs')
+      ? { deploymentLogs: [entry] } : deployment(service, { deploymentStopped: true }), service, id,
+    { now: () => time, timeout: 10, sleep: async () => { time += 10; }, log() {} }), /Timed out/);
+  }
+});
+
 test('failed, removed, unknown and mismatched deployments fail closed', async () => {
   for (const status of ['FAILED', 'CRASHED', 'REMOVED', 'CANCELED', 'NEW_UNKNOWN_STATUS']) {
     await assert.rejects(waitForDeployment(async () => deployment(services[1], { status }), services[1], id, { log() {} }), /ended with/);

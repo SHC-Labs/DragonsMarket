@@ -120,6 +120,19 @@ export async function checkReleaseVariables(query) {
   }
 }
 
+function completionMessage(entry) {
+  if (typeof entry.message === 'string' && entry.message.trim()) return entry.message;
+  if (!Array.isArray(entry.attributes) || !entry.attributes.length || entry.attributes.length > 100) return '';
+  const fields = new Map();
+  for (const attribute of entry.attributes) {
+    if (typeof attribute?.key !== 'string' || !attribute.key || fields.has(attribute.key)
+      || typeof attribute.value !== 'string' || attribute.value.length > 65536) return '';
+    try { fields.set(attribute.key, JSON.parse(attribute.value)); }
+    catch { return ''; }
+  }
+  return JSON.stringify(Object.fromEntries(fields));
+}
+
 export async function waitForDeployment(query, service, id, { sleep = delay, now = Date.now, timeout = 900000, log = console.log } = {}) {
   const deadline = now() + timeout;
   let previous;
@@ -140,11 +153,13 @@ export async function waitForDeployment(query, service, id, { sleep = delay, now
       }
       if (deployment.deploymentStopped) {
         const { deploymentLogs } = await query(`query($id: String!) {
-          deploymentLogs(deploymentId: $id, limit: 100) { message }
+          deploymentLogs(deploymentId: $id, limit: 100) { message attributes { key value } }
         }`, { id });
-        if (deploymentLogs.some(({ message }) => service.completed
-          ? service.completed(message)
-          : /^Applied \d+ migration\(s\); service database roles are ready$/.test(message))) return;
+        if (deploymentLogs.some(entry => {
+          const message = completionMessage(entry);
+          return service.completed ? service.completed(message)
+            : /^Applied \d+ migration\(s\); service database roles are ready$/.test(message);
+        })) return;
       }
     } else if (!waiting.has(deployment.status)) {
       throw new Error(`${service.name} deployment ended with ${deployment.status}; inspect ${id}`);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { keeperFixture } from '../../backend/dist/test/keeper-fixture.js';
 import { base58Encode } from '../../backend/dist/src/base58.js';
-import { projectId, environmentId, services } from './release.mjs';
+import { projectId, environmentId, services, waitForDeployment } from './release.mjs';
 import { postgresId } from './backups.mjs';
 import { activatedRelease, activationSnapshot, checkOperational, json, verifyOperational, verifyRelayKeys } from './activate.mjs';
 import { activationServices, agentService, digest, expectedBrowser, manifestVariables, origins,
@@ -270,6 +270,13 @@ test('completed jobs must emit their own successful result for the approved depl
       assert.equal(service.completed('null'), false);
       assert.equal(service.completed(JSON.stringify(messages[service.name])), true);
       assert.equal(service.completed(JSON.stringify({ ...messages[service.name], registered: 'wrong', ok: false, mode: 'wrong' })), false);
+      const result = messages[service.name];
+      for (const entry of [{ message: JSON.stringify(result) }, { message: '', attributes:
+        Object.entries(result).map(([key, value]) => ({ key, value: JSON.stringify(value) })) }]) {
+        await waitForDeployment(async query => query.includes('deploymentLogs') ? { deploymentLogs: [entry] }
+          : { deployment: { id: deploymentId, projectId, environmentId, serviceId: service.id,
+            status: 'SUCCESS', deploymentStopped: true } }, service, deploymentId, { log() {} });
+      }
     } });
   }
 });
