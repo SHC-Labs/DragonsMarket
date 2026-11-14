@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { Button } from "./ui";
 import { Lock } from "./icons";
 import { useIndicator } from "./useIndicator";
@@ -15,7 +16,7 @@ import { formatExact, formatMoney, formatShares, minSharesWithSlippage, nsToMs, 
 import { useNow, usePoll, useRelayFee, useRelayTx, useTx } from "@/lib/hooks";
 import { signsWithRelay } from "@/lib/wallet-account";
 import {
-  buyCall, buyMessage, fundCall, getBalance, getMarketConfig, getShares, isRegistered, quoteBuy, quoteSell, redeemCall, sellCall, storageDepositCall,
+  buyCall, buyMessage, getBalance, getMarketConfig, getShares, isRegistered, quoteBuy, quoteSell, redeemCall, sellCall, storageDepositCall,
   tokenBalance, walletTokenBalance, withdrawCall, type BuyQuote, type FunctionCall, type MarketView, type SellQuote, type Side,
 } from "@/lib/market";
 
@@ -86,13 +87,13 @@ function AccountTradeTicket({ market, initialSide }: { market: MarketView; initi
   const priced = buyQuote ? BigInt(buyQuote.shares_out) > 0n : sellQuote ? BigInt(sellQuote.collateral_out) > 0n : false;
 
   const mine = held ? (side === "yes" ? held.yes : held.no) : 0n;
-  const act = async (call: FunctionCall, done: () => Promise<boolean>, doneMessage: string) => {
+  const act = async (call: FunctionCall, done: () => Promise<boolean>, doneMessage: string, keepAmount = false) => {
     if (relay) {
       if (relayFee === null || !held || held.intents < relayFee) return;
       await actRelayed([relayMarketExit(call)], relayFee, done, doneMessage);
       return;
     }
-    if (await run(call, { done, doneMessage })) setInput("");
+    if (await run(call, { done, doneMessage }) && !keepAmount) setInput("");
     await reload();
   };
   const sharesOf = async () => {
@@ -152,14 +153,12 @@ function AccountTradeTicket({ market, initialSide }: { market: MarketView; initi
   } else if (!available) action = { label: nsToMs(market.close_at) <= now ? "Trading closed"
     : mode === "sell" ? "Selling paused" : "Buying paused", disabled: true, locked: true };
   else if (!held.registered) {
-    action = { label: "Set up account", onClick: () => act(storageDepositCall(), () => isRegistered(account), "Account set up. You can trade now."), note: "A one-time storage deposit of 0.05 NEAR lets the market keep your positions." };
+    action = { label: "Set up account", onClick: () => act(storageDepositCall(), () => isRegistered(account), "Account set up. You can trade now.", true), note: "A one-time storage deposit of 0.05 NEAR lets the market keep your positions. This does not buy shares." };
   } else if (mode === "buy") {
     if (!value || value <= 0n) action = { label: "Enter an amount", disabled: true };
     else if (value > held.intents) {
-      const shortfall = value - held.intents;
-      action = held.wallet >= shortfall
-        ? { label: `Add ${money(shortfall)}`, onClick: () => act(fundCall(account, shortfall), async () => BigInt(await tokenBalance(account)) >= value, "Funds added. You can buy now."), note: "This moves the token from your wallet into your Intents account. The buy is a second step." }
-        : { label: `Not enough ${config.tokenSymbol}`, disabled: true };
+      action = { label: `Buy ${sideName(side)}`, disabled: true,
+        note: `Deposit ${money(value - held.intents)} in Portfolio before buying. Your wallet balance is separate from your trading balance.` };
     } else if (!buyQuote || !priced) action = { label: priced ? "Getting a price" : "Amount not available", disabled: true };
     else {
       const minShares = minSharesWithSlippage(BigInt(buyQuote.shares_out), SLIPPAGE_BPS);
@@ -187,7 +186,7 @@ function AccountTradeTicket({ market, initialSide }: { market: MarketView; initi
       <legend>Outcome</legend>
       {(["yes", "no"] as const).map(option => <label key={option} className="ticket-outcome" data-option={option} data-selected={side === option || undefined}>
         <input type="radio" name="outcome" value={option} checked={side === option} onChange={() => { setSide(option); edit(); }} className="sr-only" />
-        <span className="ticket-outcome-name">{sideName(option)}</span><span className="num ticket-outcome-price">{Math.round(Number(option === "yes" ? market.price_yes : market.price_no) / 10_000)}¢</span>
+        <span className="ticket-outcome-name">{sideName(option)}</span>
       </label>)}
     </fieldset>
     <label htmlFor="amount" className="ticket-label">{mode === "buy" ? "Amount" : "Shares to sell"}</label>
@@ -197,11 +196,11 @@ function AccountTradeTicket({ market, initialSide }: { market: MarketView; initi
     </div>
     {invalid && <p id="amount-error" role="alert" className="ticket-error">Enter a positive number with up to six decimal places.</p>}
     <dl className="trade-estimates">
-      <div><dt>{mode === "buy" ? "Amount entered" : "Shares entered"}</dt><dd className="num">{input.trim() ? amount : "Not entered"}</dd></div>
+      <div><dt>{mode === "buy" ? "Total spend" : "Shares entered"}</dt><dd className="num">{input.trim() ? amount : "Not entered"}</dd></div>
       <div><dt>{mode === "buy" ? "Estimated shares" : "Estimated return"}</dt><dd className="num">{buyQuote && priced ? `${formatShares(buyQuote.shares_out)} shares` : sellQuote && priced ? money(sellNet) : "Unavailable"}</dd></div>
-      <div><dt>Fee</dt><dd className="num">{quote && priced ? money(BigInt(buyQuote?.fee ?? sellQuote?.fee ?? "0")) : "Not available yet"}</dd></div>
+      <div><dt>{mode === "buy" ? "Fee (included)" : "Fee"}</dt><dd className="num">{quote && priced ? money(BigInt(buyQuote?.fee ?? sellQuote?.fee ?? "0")) : "Not available yet"}</dd></div>
       {held && <>
-        <div><dt>In your Intents account</dt><dd className="num">{money(held.intents)}</dd></div>
+        <div><dt>Available to trade</dt><dd className="num">{money(held.intents)}</dd></div>
         {!relay && <div><dt>In your wallet</dt><dd className="num">{money(held.wallet)}</dd></div>}
         {relay && <div><dt>Network fee</dt><dd className="num">{relayFee === null ? "Not available yet" : exact(relayFee * (held.registered ? 1n : 2n))}</dd></div>}
         {relay && !held.registered && <div><dt>Opens your market account</dt><dd className="num">{exact(held.registrationFee)}</dd></div>}
@@ -213,11 +212,12 @@ function AccountTradeTicket({ market, initialSide }: { market: MarketView; initi
     {!relay && <TransactionNotice tx={nearTx} />}
     {relay && <RelayNotice state={relayTx.state} recheck={async () => { if (await relayTx.recheck()) setInput(""); await reload(); }} />}
     <Button size="lg" onClick={action.onClick} disabled={action.disabled || busy} aria-describedby="trading-status">{action.locked && <Lock size={17} />}{action.label}</Button>
+    {!relay && account && <Link href="/portfolio#deposit" className="text-link">Deposit funds in Portfolio</Link>}
     {relay && config.network === "mainnet" && <Button variant="secondary" size="sm" disabled={busy} onClick={() => setDepositOpen(true)}>Deposit {config.tokenSymbol}</Button>}
     {held && held.inMarket > 0n && market.status !== "resolved" && <Button variant="secondary" size="sm" disabled={busy || (relay && (relayFee === null || held.intents < relayFee))} onClick={() => withdraw(held.inMarket)}>Withdraw {money(held.inMarket)}</Button>}
     <p id="trading-status" className="ticket-note">{action.note ?? (relay
       ? `Your wallet asks you to sign a message, not a transaction, and we pay the gas for the fee shown. A buy accepts up to ${Number(SLIPPAGE_BPS) / 100}% price movement.`
-      : `Your wallet asks you to confirm each step. A buy or sell accepts up to ${Number(SLIPPAGE_BPS) / 100}% price movement.`)}</p>
+      : `Buy spends your available trading balance. Prices change with order size; review the total spend and estimated shares. A buy or sell accepts up to ${Number(SLIPPAGE_BPS) / 100}% price movement.`)}</p>
     {depositOpen && identity && <DepositDialog identity={identity} onClose={() => { setDepositOpen(false); void reload(); }} />}
   </aside>;
 }

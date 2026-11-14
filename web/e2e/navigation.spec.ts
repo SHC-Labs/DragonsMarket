@@ -7,7 +7,6 @@ test("top navigation has one Council entry for membership and disputes", async (
   const main = page.getByRole("navigation", { name: "Main", exact: true }).filter({ visible: true });
   for (const [label, path, heading] of [
     ["Council", "/council", "Dragon Council"],
-    ["Portfolio", "/portfolio", "Portfolio"],
     ["Markets", "/", "Prediction markets"],
   ]) {
     await main.getByRole("link", { name: label, exact: true }).click();
@@ -18,6 +17,7 @@ test("top navigation has one Council entry for membership and disputes", async (
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);
   }
   await expect(main.getByRole("link", { name: "Membership", exact: true })).toHaveCount(0);
+  await expect(main.getByRole("link", { name: "Portfolio", exact: true })).toHaveCount(0);
   await page.goto("/council");
   await expect(page.getByRole("heading", { name: "Join the Council" })).toBeVisible();
   await expect(page.getByRole("region", { name: "NFT collection" }).getByRole("img")).toHaveCount(10);

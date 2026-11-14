@@ -257,3 +257,6 @@
   .agent-access-fields > .agent-field:first-child { grid-column: 1 / -1; }
   .agent-ticket .agent-amount { flex: 1; width: auto; }
 }
+.portfolio-deposit { margin-top: var(--s-8); padding: var(--s-6); border: 1px solid var(--line); border-radius: var(--r-sm); scroll-margin-top: calc(var(--header-h) + 6rem); }
+.portfolio-deposit form { display: grid; gap: var(--s-3); max-width: 28rem; margin-block: var(--s-4); }
+.portfolio-deposit p { color: var(--text-muted); }

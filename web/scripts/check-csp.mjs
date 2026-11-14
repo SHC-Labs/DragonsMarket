@@ -8,11 +8,12 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import { cashOutWalletMethod, installCashOutFixture, checkCashOutBrowser, checkMarketWithdrawalBrowser } from "./cash-out-browser.mjs";
 import { checkStakeBrowser } from "./stake-browser.mjs";
 import { checkMarketListBrowser } from "./market-list-browser.mjs";
 import { checkTradingBrowser } from "./trading-browser.mjs";
+import { checkPortfolioFundingBrowser } from "./portfolio-funding-browser.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const port = process.env.CSP_TEST_PORT ?? "3397", base = `http://127.0.0.1:${port}`;
@@ -95,16 +96,28 @@ try {
   await page.getByRole("checkbox", { name: "I acknowledge the Privacy Policy." }).check();
   await page.getByRole("button", { name: "Accept and continue" }).click();
   const navigation = page.getByRole("navigation", { name: "Main", exact: true }).filter({ visible: true });
-  for (const [label, path] of [["Agents", "/agents"], ["Council", "/council"], ["Portfolio", "/portfolio"]]) {
+  for (const [label, path] of [["Agents", "/agents"], ["Council", "/council"]]) {
     await navigation.getByRole("link", { name: label, exact: true }).click();
     await page.waitForURL(base + path);
-    await page.getByRole("button", { name: "Connected as csp-test.testnet. Disconnect" }).waitFor();
+    await page.getByRole("button", { name: "Account menu for csp-test.testnet" }).waitFor();
   }
+  const accountMenu = page.getByRole("button", { name: "Account menu for csp-test.testnet" });
+  await accountMenu.click();
+  await expect(accountMenu).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Escape");
+  await expect(accountMenu).toHaveAttribute("aria-expanded", "false");
+  await expect(accountMenu).toBeFocused();
+  await accountMenu.click();
+  await page.getByRole("navigation", { name: "Wallet account" }).getByRole("link", { name: "Portfolio", exact: true }).click();
+  await page.waitForURL(base + "/portfolio");
+  await expect(accountMenu).toHaveAttribute("aria-expanded", "false");
+  await expect(navigation.getByRole("link", { name: "Portfolio", exact: true })).toHaveCount(0);
   await checkCashOutBrowser(page, cashOut, base);
   await checkMarketWithdrawalBrowser(page, base);
   await checkStakeBrowser(page, base);
   await checkMarketListBrowser(page, base);
   await checkTradingBrowser(page, base);
+  await checkPortfolioFundingBrowser(page, base);
   for (const path of ["/agents", "/docs", "/api", "/council", "/privacy"]) {
     await page.goto(base + path, { waitUntil: "networkidle" });
     assert.equal(await page.locator("h1").count() > 0, true, path);

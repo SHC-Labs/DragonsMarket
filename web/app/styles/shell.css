@@ -75,7 +75,11 @@
   border: 1px solid var(--line-strong); border-radius: var(--r-pill); background: var(--glass-strong); cursor: pointer;
   transition: border-color var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out);
 }
-.wallet-pill:hover { border-color: var(--danger); }
+.wallet-pill:hover { border-color: var(--text-muted); }
+.wallet-menu { position: relative; }
+.wallet-dropdown { position: absolute; z-index: 40; right: 0; top: calc(100% + var(--s-2)); min-width: 13rem; padding: var(--s-2); border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--surface); box-shadow: 0 8px 24px color-mix(in oklab, var(--bg) 80%, transparent); }
+.wallet-dropdown a, .wallet-dropdown button { display: flex; align-items: center; width: 100%; min-height: var(--control-md); padding: var(--s-2) var(--s-3); color: var(--text); background: transparent; border: 0; border-radius: var(--r-sm); font: inherit; text-align: left; text-decoration: none; cursor: pointer; }
+.wallet-dropdown a:hover, .wallet-dropdown button:hover { background: var(--surface-hover); }
 .wallet-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 22%, transparent); }
 .wallet-account { max-width: 9rem; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--fs-sm); font-weight: 500; }
 .wallet-action { font-size: var(--fs-2xs); color: var(--text-muted); }

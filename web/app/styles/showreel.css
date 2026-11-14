@@ -243,7 +243,7 @@
 }
 @keyframes emblem-float { from { transform: translateY(0) rotate(-4deg); } to { transform: translateY(-10px) rotate(4deg); } }
 :root[data-theme="light"] .category-emblem-glyph { opacity: 0.2; }
-.category-chip { display: inline-flex; align-items: center; gap: 0.4rem; height: 1.5rem; padding: 0 0.65rem 0 0.5rem; border-radius: var(--r-pill); background: var(--icon-bg); color: var(--icon-ink); border: 1px solid color-mix(in oklab, var(--icon-ink) 30%, transparent); font-size: var(--fs-2xs); font-weight: 600; }
+.category-chip { display: inline-flex; align-items: center; gap: 0.4rem; min-height: 1.5rem; padding: 0; border-radius: 0; background: transparent; color: var(--text-muted); border: 0; font-size: var(--fs-2xs); font-weight: 500; }
 .category-chip svg { width: 15px; height: 15px; }
 @media (max-width: 767px) { .category-emblem { width: 9rem; height: 9rem; top: -1rem; right: -1.5rem; } .category-emblem-glyph svg { width: 96px; height: 96px; } }
 .price-panel-delta { backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }

@@ -45,7 +45,7 @@ export async function installCashOutFixture(context) {
     if (body.method === "EXPERIMENTAL_tx_status") {
       return route.fulfill({ json: { jsonrpc: "2.0", id: body.id, result: result() }, headers });
     }
-    const views = { list_markets: [], get_balance: "0", mt_balance_of: paid ? "9000000" : "10000000",
+    const views = { list_markets: [], get_balance: "0", ft_balance_of: "0", mt_balance_of: paid ? "9000000" : "10000000",
       storage_balance_of: registered ? { total: "1250000000000000000000" } : null,
       storage_balance_bounds: { min: "1250000000000000000000" } };
     const value = views[body.params?.method_name];
@@ -135,7 +135,8 @@ export async function checkMarketWithdrawalBrowser(page, base) {
     settled = true;
     await expect(page.getByText("Withdrawn to your Intents account.", { exact: true })).toBeVisible();
     assert.equal(sent, 1);
-    await page.getByRole("button", { name: `Connected as ${account}. Disconnect` }).click();
+    await page.getByRole("button", { name: `Account menu for ${account}` }).click();
+    await page.getByRole("button", { name: "Disconnect", exact: true }).click();
     await page.getByRole("button", { name: /connect wallet/i }).first().click();
     await page.getByText("CSP Test Wallet", { exact: true }).click();
     await expect(page.getByText("Withdrawn to your Intents account.", { exact: true })).toHaveCount(0);

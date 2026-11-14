@@ -25,7 +25,7 @@ function OutcomeRows({ market: m }: { market: MarketView }) {
     const label = side === "yes" ? "Yes" : "No";
     return <Link key={side} href={`/market?id=${m.id}&side=${side}`} className={`market-outcome-option market-outcome-${side}`} aria-label={`${m.status === "open" ? "Buy" : "View"} ${label}, ${chance}% chance, ${m.title}`}>
       <span className="market-outcome-label">{label}</span>
-      <span className="market-outcome-chance num">{chance}¢</span>
+      <span className="market-outcome-chance num">{chance}%</span>
     </Link>;
   })}</div>;
 }

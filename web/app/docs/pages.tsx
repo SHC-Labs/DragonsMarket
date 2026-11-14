@@ -49,6 +49,7 @@ export const docsPages: DocPage[] = [
     description: "How your balance in NEAR Intents pays for trades, and where withdrawals go.",
     content: <>
       <p>Dragons Market uses {token} held in <strong>NEAR Intents</strong>, NEAR&apos;s shared account for tokens from many chains. You connect a NEAR wallet, and trades are paid from your NEAR Intents balance.</p>
+      <p>Open your wallet menu, choose <Link href="/portfolio#deposit">Portfolio → Deposit funds</Link>, and deposit {token} from your NEAR wallet. This adds to your available trading balance without opening a position. Then choose a market and use Buy Yes or Buy No to purchase shares.</p>
       <ul>
         <li>A buy moves {token} from your NEAR Intents balance into the market.</li>
         <li>Sells and payouts go to your balance in that market, ready for your next trade.</li>

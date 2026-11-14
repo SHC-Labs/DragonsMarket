@@ -25,18 +25,17 @@
 .btn:disabled { cursor: not-allowed; background: var(--surface); color: var(--text-muted); border-color: var(--line-strong); border-style: dashed; box-shadow: none; text-decoration: none; }
 .btn svg { flex-shrink: 0; }
 
-/* Status pill: a dot plus a word, so state never relies on colour alone. */
+/* Plain status labels: the word carries the state. */
 .status-pill {
   --pill: var(--text-muted);
   display: inline-flex; align-items: center; gap: 0.4rem;
-  height: 1.5rem; padding: 0 0.6rem 0 0.5rem;
-  border: 1px solid color-mix(in oklab, var(--pill) 38%, transparent); border-radius: var(--r-pill);
-  background: color-mix(in oklab, var(--pill) 10%, transparent);
+  min-height: 1.5rem; padding: 0;
+  border: 0; border-radius: 0;
+  background: transparent;
   color: var(--pill); font-size: var(--fs-2xs); font-weight: 500; line-height: 1; white-space: nowrap;
 }
-.status-pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.status-pill::before { content: none; }
 .status-pill[data-tone="open"] { --pill: var(--success); }
-.status-pill[data-tone="open"]::before { box-shadow: 0 0 0 0 color-mix(in oklab, var(--success) 60%, transparent); animation: live-ping 2.4s var(--ease-out) 3; }
 .status-pill[data-tone="attention"], .status-pill[data-tone="paused"] { --pill: var(--warning); }
 .status-pill[data-tone="council"] { --pill: var(--council); }
 .status-pill[data-tone="final"] { --pill: var(--text); }

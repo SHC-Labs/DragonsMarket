@@ -5,6 +5,7 @@ import { AccountEmptyState, PageLandmark } from "@/components/PageHeader";
 import { Button, Notice } from "@/components/ui";
 import { CountUp } from "@/components/CountUp";
 import { CashOut } from "@/components/CashOut";
+import { PortfolioDeposit } from "@/components/PortfolioDeposit";
 import { CrossChainCashOut } from "@/components/CrossChainCashOut";
 import { TransactionNotice } from "@/components/TransactionNotice";
 import { RelayNotice } from "@/components/RelayNotice";
@@ -19,7 +20,7 @@ import { usePoll, useRelayFee, useRelayTx, useTx } from "@/lib/hooks";
 import { relayMarketExit } from "@/lib/relay-market";
 import { signsWithRelay } from "@/lib/wallet-account";
 import {
-  getBalance, getPositions, getShares, listMarkets, redeemCall, tokenBalance, withdrawCall,
+  getBalance, getPositions, getShares, listMarkets, redeemCall, tokenBalance, walletTokenBalance, withdrawCall,
   type FunctionCall, type MarketView,
 } from "@/lib/market";
 
@@ -60,7 +61,7 @@ function AccountPortfolio() {
   const { data, error, loading, reload } = usePoll(
     async () => {
       if (!account) return null;
-      const [markets, inMarket, inWallet] = await Promise.all([listMarkets(), getBalance(account), tokenBalance(account)]);
+      const [markets, inMarket, inWallet, inNearWallet] = await Promise.all([listMarkets(), getBalance(account), tokenBalance(account), relay ? "0" : walletTokenBalance(account)]);
       const positions: Position[] = [];
       await Promise.all(
         markets.map(async (market) => {
@@ -71,9 +72,9 @@ function AccountPortfolio() {
         }),
       );
       positions.sort((a, b) => Number(BigInt(a.market.id) - BigInt(b.market.id)));
-      return { positions, inMarket: BigInt(inMarket), inWallet: BigInt(inWallet) };
+      return { positions, inMarket: BigInt(inMarket), inWallet: BigInt(inWallet), inNearWallet: BigInt(inNearWallet) };
     },
-    [account],
+    [account, relay],
     6000,
   );
 
@@ -127,12 +128,13 @@ function AccountPortfolio() {
             </span>
           </div>
           <dl className="portfolio-balances">
-            <Balance label="In your Intents account" value={data.inWallet} tone="wallet" />
+            <Balance label="Available to trade" value={data.inWallet} tone="wallet" />
             <Balance label="Market balance" value={data.inMarket} tone="market">
               <Button variant="secondary" size="sm" disabled={busy || data.inMarket === 0n || (relay && (fee === null || data.inWallet < fee))} aria-describedby="portfolio-integration" onClick={() => act(withdrawCall(data.inMarket), async () => BigInt(await getBalance(account)) < data.inMarket, "Withdrawn to your Intents account.")}>Withdraw</Button>
             </Balance>
           </dl>
           <p id="portfolio-integration" className="portfolio-note">Redeem a resolved position to move its payout into your market balance, then withdraw the balance to your Intents account.</p>
+          {!relay && <PortfolioDeposit key={account} account={account} walletBalance={data.inNearWallet} reload={reload} />}
           {!relay && <CashOut key={account} account={account} balance={data.inWallet} reload={reload} />}
           {relay && config.network === "mainnet" && <CrossChainCashOut key={account}
             identity={identity} balance={data.inWallet} reload={reload} />}

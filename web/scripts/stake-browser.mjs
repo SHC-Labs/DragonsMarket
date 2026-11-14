@@ -121,7 +121,8 @@ export async function checkStakeBrowser(page, base) {
     assert.equal(sent[2].receiverId, "council.csp-fixture.testnet");
     assert.equal(sent[2].actions[0].params.deposit, "1");
     showSeat = false;
-    await page.getByRole("button", { name: "Connected as csp-test.testnet. Disconnect" }).click();
+    await page.getByRole("button", { name: "Account menu for csp-test.testnet" }).click();
+    await page.getByRole("button", { name: "Disconnect", exact: true }).click();
     await page.getByRole("button", { name: /connect wallet/i }).first().click();
     await page.getByText("CSP Test Wallet", { exact: true }).click();
     await expect(page.getByText("0 of 5 seats staked")).toBeVisible();
