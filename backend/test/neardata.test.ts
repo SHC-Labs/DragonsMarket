@@ -120,7 +120,43 @@ test('parallel requests reserve separate rate slots and reject unbounded source 
   assert.throws(() => new NeardataReader(fetch, undefined, 400, { concurrency: 5 }), /invalid_source_concurrency/);
   assert.throws(() => new NeardataReader(fetch, undefined, 400, { bearerToken: 'bad\nheader' }), /invalid_source_token/);
   assert.throws(() => readNeardataSettings({ NEARDATA_INTERVAL_MS: '1e3' }), /invalid_source_settings/);
-  assert.deepEqual(readNeardataSettings({}), { intervalMs: 400, concurrency: 1, bearerToken: undefined });
+  assert.deepEqual(readNeardataSettings({}), { intervalMs: 400, concurrency: 1, bearerToken: undefined, archiveThroughBlock: undefined });
+});
+
+test('an archive boundary avoids historical redirects while head and newer blocks use the canonical host', async () => {
+  const urls: string[] = [];
+  const source = readNeardataSettings({ NEARDATA_ARCHIVE_THROUGH_BLOCK: '100', NEARDATA_BEARER_TOKEN: 'fixture-token' });
+  const reader = new NeardataReader(async (input, init) => {
+    urls.push(String(input));
+    assert.deepEqual(init?.headers, { Authorization: 'Bearer fixture-token' });
+    return new Response('null');
+  }, async () => {}, source.intervalMs, source);
+  for (const path of ['/v0/block/99', '/v0/block/100', '/v0/block/101', '/v0/last_block/final']) await reader.document(path);
+  assert.deepEqual(urls, [
+    'https://a3.mainnet.neardata.xyz/v0/block/99',
+    'https://a3.mainnet.neardata.xyz/v0/block/100',
+    'https://mainnet.neardata.xyz/v0/block/101',
+    'https://mainnet.neardata.xyz/v0/last_block/final',
+  ]);
+  for (const archiveThroughBlock of ['', '-1', '1e3', '01', '18446744073709551616', 'https://other.example']) {
+    assert.throws(() => new NeardataReader(fetch, undefined, 400, { archiveThroughBlock }), /invalid_neardata_integer/);
+  }
+});
+
+test('direct archive requests retain redirect validation, budgets and safe failure handling', async () => {
+  let requests = 0;
+  const reader = new NeardataReader(async () => {
+    requests++;
+    return new Response(null, { status: 302, headers: { location: 'https://other.example/v0/block/100' } });
+  }, async () => {}, 400, { archiveThroughBlock: '100', bearerToken: 'fixture-token' });
+  await assert.rejects(reader.document('/v0/block/100'), /invalid_neardata_redirect/);
+  assert.equal(requests, 1);
+  const limited = new NeardataReader(async () => new Response('provider secret', { status: 429 }),
+    async () => {}, 400, { archiveThroughBlock: '100' });
+  await assert.rejects(limited.document('/v0/block/100'), /neardata_rate_limited/);
+  const budget = new NeardataReader(async () => new Response('null'), async () => {}, 400, { archiveThroughBlock: '100' });
+  for (let i = 0; i < 32; i++) await budget.document(`/v0/block/${i}`);
+  await assert.rejects(budget.document('/v0/block/32'), /neardata_request_budget/);
 });
 
 test('prefetched blocks commit in height order and stop before missing or conflicting evidence', async () => {

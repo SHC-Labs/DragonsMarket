@@ -73,6 +73,7 @@ export function normalizeNeardata(input: unknown): ObservedBlock {
 const MAX_REQUESTS_PER_CYCLE = 32;
 const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
 const MAX_BYTES_PER_CYCLE = 128 * 1024 * 1024;
+const ARCHIVE_ORIGIN = 'https://a3.mainnet.neardata.xyz';
 
 /** Fixed provider hosts, no chain writes, finite requests and bounded memory. */
 export class NeardataReader {
@@ -83,7 +84,7 @@ export class NeardataReader {
   private nextAt = 0;
   constructor(private readonly transport: typeof fetch = fetch,
     private readonly pause: (ms: number) => Promise<unknown> = sleep, private readonly intervalMs = 1000,
-    private readonly options: { bearerToken?: string | undefined; concurrency?: number } = {}) {
+    private readonly options: { bearerToken?: string | undefined; concurrency?: number; archiveThroughBlock?: string | undefined } = {}) {
     if (!Number.isInteger(intervalMs) || intervalMs < 100 || intervalMs > 60000)
       throw new IngestionError('invalid_source_interval');
     if (options.bearerToken !== undefined && !/^[\x21-\x7e]{8,4096}$/.test(options.bearerToken))
@@ -92,6 +93,7 @@ export class NeardataReader {
     this.concurrency = options.concurrency ?? 1;
     if (!Number.isInteger(this.concurrency) || this.concurrency < 1 || this.concurrency > 4)
       throw new IngestionError('invalid_source_concurrency');
+    if (options.archiveThroughBlock !== undefined) integer(options.archiveThroughBlock);
   }
   resetBudget() { this.requests = 0; this.bytes = 0; }
   /** True while a following block still fits in this cycle's request and byte budget. A batch stops here and the next cycle carries on. */
@@ -101,7 +103,10 @@ export class NeardataReader {
   }
   async document(path: string): Promise<unknown> {
     if (!/^\/v0\/(last_block\/final|block\/[0-9]+)$/.test(path)) throw new IngestionError('invalid_neardata_path');
-    let url = new URL(path, this.origin);
+    const height = /^\/v0\/block\/([0-9]+)$/.exec(path)?.[1];
+    const archived = height !== undefined && this.options.archiveThroughBlock !== undefined
+      && BigInt(height) <= BigInt(this.options.archiveThroughBlock);
+    let url = new URL(path, archived ? ARCHIVE_ORIGIN : this.origin);
     for (let redirects = 0; redirects <= 3; redirects++) {
       if (++this.requests > MAX_REQUESTS_PER_CYCLE) throw new IngestionError('neardata_request_budget');
       const reservedAt = Math.max(Date.now(), this.nextAt);
@@ -116,7 +121,7 @@ export class NeardataReader {
           await response.body?.cancel();
           if (!location || redirects === 3) throw new IngestionError('invalid_neardata_redirect');
           const target = new URL(location, url);
-          const trusted = [this.origin, 'https://a3.mainnet.neardata.xyz'].includes(target.origin);
+          const trusted = [this.origin, ARCHIVE_ORIGIN].includes(target.origin);
           if (!trusted || target.search || target.hash || target.username || target.password
             || !/^\/v0\/block\/[0-9]+$/.test(target.pathname)
             || (url.pathname !== '/v0/last_block/final' && target.pathname !== url.pathname))
@@ -164,6 +169,7 @@ export function readNeardataSettings(env: NodeJS.ProcessEnv) {
     intervalMs: number(env.NEARDATA_INTERVAL_MS, 400),
     concurrency: number(env.NEARDATA_CONCURRENCY, 1),
     bearerToken: env.NEARDATA_BEARER_TOKEN,
+    archiveThroughBlock: env.NEARDATA_ARCHIVE_THROUGH_BLOCK,
   };
 }
 export interface CapturedEvent { receiptId: string; logIndex: number; rawLog: string; envelope: unknown; malformed: boolean }
