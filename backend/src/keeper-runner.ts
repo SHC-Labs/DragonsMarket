@@ -74,20 +74,31 @@ export async function prepareKeeper(pool: pg.Pool, config: Config, options: Keep
   });
 }
 
-async function keeperPass(pool: pg.Pool, config: Config, options: KeeperOptions, mode: KeeperMode,
-  run: typeof queuedRun, signing?: () => { keys: KeeperKeys; execution: KeeperExecution }) {
+export async function refreshKeeperFeed(pool: pg.Pool, config: Config, options: KeeperOptions) {
   let exported = 0;
   for (let batch = 0; batch < 50; batch++) {
     const result = await exportFeed(pool, config.deployment!.id, options['events-file'], 100);
     exported += result.exported;
     if (result.exported < 100) break;
   }
+  return exported;
+}
+
+async function keeperPass(pool: pg.Pool, config: Config, options: KeeperOptions, mode: KeeperMode,
+  run: typeof queuedRun, signing?: () => { keys: KeeperKeys; execution: KeeperExecution }) {
+  let exported = await refreshKeeperFeed(pool, config, options);
   const preparation = await run({ ...options, 'prepare-feed': true }, {});
   if (mode === 'sign' && preparation.current) {
     const signer = signing!();
     const result = await run(options, signer.keys, signer.execution);
-    return { mode, exported, current: result.current !== false, height: result.state.cursor?.height ?? null,
-      dueActions: result.actions.length, excludedMarkets: result.excludedMarkets ?? 0, signing: result.current !== false };
+    if (result.current === false) return { mode, exported, current: false, height: result.state.cursor?.height ?? null,
+      dueActions: result.actions.length, excludedMarkets: result.excludedMarkets ?? 0, signing: false };
+    // The active queue has now been saved. Persist events that arrived during
+    // signing and report the final feed state, not the snapshot from run start.
+    exported += await refreshKeeperFeed(pool, config, options);
+    const completed = await run({ ...options, 'prepare-feed': true }, {});
+    return { mode, exported, current: completed.current === true, height: completed.state.cursor?.height ?? null,
+      dueActions: result.actions.length, excludedMarkets: result.excludedMarkets ?? 0, signing: completed.current === true };
   }
   if (mode === 'check' && preparation.current) {
     const checked = await run({ ...options, 'dry-run': true }, {});
@@ -118,6 +129,7 @@ async function main() {
   if (config.rpc.secondUrl && config.rpc.secondBearerToken) credentials.push([config.rpc.secondUrl, config.rpc.secondBearerToken]);
   setRpcCredentials(credentials);
   const pool = createPool(config.databaseUrl, 2);
+  let exportedDuringApproval = 0;
   const timeout = setTimeout(() => { console.error('Keeper exceeded its runtime limit'); process.exit(1); }, mode === 'sign' ? 600000 : 180000);
   timeout.unref();
   try {
@@ -137,13 +149,15 @@ async function main() {
       const verify = async () => {
         await requireKeeperReports(pool, config.deployment!.id);
         const head = await verifyKeeperApproval(approval, config, primary, secondary);
+        exportedDuringApproval += await refreshKeeperFeed(pool, config, options);
         if (!keeperFeedCurrent(options, { height: head.height, hash: head.hash, timestamp_nanosec: head.timestampNs }))
           throw new Error('Keeper feed became stale before signing');
       };
       signing = () => ({ keys, execution: createKeeperSigner({ approval, options, keys, primary, secondary, verify,
         journalFile: `.local/feeds/${config.deployment!.id}.submission.json` }) });
     }
-    console.log(JSON.stringify({ service: 'keeper', ...await prepareKeeper(pool, config, options, mode, queuedRun, signing) }));
+    const report = await prepareKeeper(pool, config, options, mode, queuedRun, signing);
+    console.log(JSON.stringify({ service: 'keeper', ...report, exported: report.exported + exportedDuringApproval }));
   } finally { clearTimeout(timeout); await pool.end(); }
 }
 

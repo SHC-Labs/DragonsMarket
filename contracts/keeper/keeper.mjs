@@ -393,7 +393,12 @@ export async function queuedRun(opts, keys, execution) {
 
 export function keeperFeedCurrent(opts, header) {
   const scope = queueScope(opts);
-  return feedIsCurrent(readQueue(opts['state-file'], scope), header);
+  const state = readQueue(opts['state-file'], scope);
+  // Approval and receipt checks can outlive the original snapshot. Inspect new,
+  // contiguous indexed evidence up to this approved head without overwriting the
+  // queue currently owned by queuedRun. Its next preparation pass persists it.
+  ingestFile(state, opts['events-file'], header.height, 8_388_608, 5000);
+  return feedIsCurrent(state, header);
 }
 
 function queueScope(opts) {

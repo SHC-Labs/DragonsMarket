@@ -81,6 +81,28 @@ test('keeper resumes its database-backed feed and queue after restart, excluding
       await assert.rejects(prepareKeeper(pool, config, options, 'sign', undefined, signing), /Another keeper runner/);
       assert.equal(initialized, 0, 'journal loading and signing remain inside the deployment lock');
     });
+    for (const finalCurrent of [true, false]) {
+      const modes: string[] = [];
+      const completed = await prepareKeeper(pool, config, options, 'sign', async opts => {
+        modes.push(opts['prepare-feed'] ? 'prepare' : 'sign');
+        return { actions: [], state: { cursor: { height: modes.length === 3 ? '105' : '103', hash: '4'.repeat(32) } },
+          ...(opts['prepare-feed'] ? { current: modes.length === 1 || finalCurrent } : {}) };
+      }, signing);
+      assert.deepEqual(modes, ['prepare', 'sign', 'prepare']);
+      assert.equal(completed.height, '105');
+      assert.equal(completed.current, finalCurrent);
+      assert.equal(completed.signing, finalCurrent, 'readiness reflects the feed after the completed signing pass');
+      const status = (await pool.query('SELECT state,height::text FROM keeper_status WHERE deployment_id=$1', [schema])).rows[0];
+      assert.equal(status.state, finalCurrent ? 'ready' : 'catching_up');
+      assert.equal(status.height, '105');
+    }
+    const skippedModes: string[] = [];
+    const skipped = await prepareKeeper(pool, config, options, 'sign', async opts => {
+      skippedModes.push(opts['prepare-feed'] ? 'prepare' : 'sign');
+      return { actions: [], state: { cursor: { height: '103', hash: '4'.repeat(32) } }, current: opts['prepare-feed'] === true };
+    }, signing);
+    assert.deepEqual(skippedModes, ['prepare', 'sign']);
+    assert.equal(skipped.signing, false, 'a signing pass skipped for stale evidence cannot be promoted by a later refresh');
     await assert.rejects(prepareKeeper(pool, config, options, 'check', async () => { throw new Error('test RPC failure'); }), /test RPC failure/);
     assert.equal((await pool.query('SELECT state FROM keeper_status WHERE deployment_id=$1', [schema])).rows[0].state, 'failed');
   } finally {

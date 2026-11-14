@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { feedIsCurrent, readQueue } from './due-queue.mjs';
-import { options, queuedRun, validateActionKeys } from './keeper.mjs';
+import { options, queuedRun, validateActionKeys, keeperFeedCurrent } from './keeper.mjs';
 import { b58encode } from './chain.mjs';
 
 test('guarded keeper catches up in bounded passes and persists without signing stale evidence', async t => {
@@ -50,6 +50,41 @@ test('feed freshness rejects missing, old, future or conflicting evidence', () =
   }
   assert.equal(feedIsCurrent(state, header, wall + 60_001), false);
   assert.equal(feedIsCurrent(state, header, wall - 5_001), false);
+});
+
+test('signing freshness inspects newly exported blocks without overwriting the active queue', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'keeper-refresh-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const scope = { rpc: 'https://rpc.invalid', market: 'market.near', oracle: 'oracle.near', council: 'council.near' };
+  const opts = { ...scope, 'state-file': path.join(dir, 'queue.json'), 'events-file': path.join(dir, 'feed.jsonl'), 'prepare-feed': true };
+  const now = BigInt(Date.now()) * 1_000_000n;
+  const blocks = Array.from({ length: 121 }, (_, i) => ({ finalized: true, receipts: [], header: {
+    height: String(i + 1), hash: `hash-${i + 1}`, prev_hash: `hash-${i}`,
+    timestamp_nanosec: String(now - BigInt(120 - i) * 1_000_000_000n),
+  } }));
+  blocks.at(-1).receipts.push({ receiver_id: scope.market, receipt_id: 'new-market', status: { SuccessValue: '' },
+    logs: ['EVENT_JSON:' + JSON.stringify({ standard: 'market', version: '1.0.0', event: 'market_created', data: { market_id: '7' } })] });
+  fs.writeFileSync(opts['events-file'], JSON.stringify(blocks[0]) + '\n');
+  let observed = blocks[0].header;
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ result: { header: observed } }));
+  await queuedRun(opts, {});
+  const saved = fs.readFileSync(opts['state-file'], 'utf8');
+  const head = blocks.at(-1).header;
+  assert.equal(keeperFeedCurrent(opts, head), false, 'the original feed is stale');
+  fs.appendFileSync(opts['events-file'], blocks.slice(1).map(block => JSON.stringify(block) + '\n').join(''));
+  assert.equal(keeperFeedCurrent(opts, head), true, 'later approval checks can use newly indexed evidence');
+  assert.equal(fs.readFileSync(opts['state-file'], 'utf8'), saved, 'the in-progress runner owns the durable queue');
+  assert.equal(keeperFeedCurrent(opts, { ...head, hash: 'fork' }), false);
+  const broken = structuredClone(blocks);
+  broken[1].header.prev_hash = 'missing-parent';
+  fs.writeFileSync(opts['events-file'], broken.map(block => JSON.stringify(block) + '\n').join(''));
+  assert.throws(() => keeperFeedCurrent(opts, head), /block gap/);
+  fs.writeFileSync(opts['events-file'], blocks.map(block => JSON.stringify(block) + '\n').join(''));
+  observed = head;
+  await queuedRun(opts, {});
+  const persisted = readQueue(opts['state-file'], scope);
+  assert.equal(persisted.cursor.height, '121');
+  assert.equal(persisted.jobs['market:7'].id, '7', 'the inspection did not consume or lose the later queued work');
 });
 
 test('a current feed reaches due work while dry-run never loads or uses a signing key', async t => {

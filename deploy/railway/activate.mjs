@@ -3,6 +3,7 @@ import { appendFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { setTimeout as pause } from 'node:timers/promises';
 import { verifyKeeperApproval } from '../../backend/dist/src/keeper-approval.js';
 import { ReadRpcClient } from '../../backend/dist/src/providers.js';
 import { executeIntentsKeyNonce, keyAllowance } from '../../backend/dist/src/relay.js';
@@ -47,15 +48,25 @@ export function verifyOperational(status, plan, signed = false, now = Date.now()
 
 export const smokeExpectation = plan => ({ deployment: plan.approval.deployment, agents: plan.profile === 'agents', browser: expectedBrowser(plan) });
 
-export async function checkOperational(plan, token, signed, request = fetch) {
-  const [ready, config, status] = await Promise.all([
-    json(`${origins.server}/health/ready`, null, request), json(`${origins.server}/v1/config`, null, request),
-    json(`${origins.server}/v1/operator/services`, token, request),
-  ]);
-  verifyActivated(ready, config, { deployment: plan.approval.deployment,
-    agents: signed ? plan.profile === 'agents' : config.capabilities?.agents });
-  ensure(signed || config.capabilities.agents === false || plan.profile === 'agents', 'Unexpected active agent execution');
-  verifyOperational(status, plan, signed);
+export async function checkOperational(plan, token, signed, request = fetch, wait = pause, attempts = 41) {
+  ensure(Number.isInteger(attempts) && attempts >= 1 && attempts <= 41, 'Invalid operational wait bound');
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const [ready, config, status] = await Promise.all([
+      json(`${origins.server}/health/ready`, null, request), json(`${origins.server}/v1/config`, null, request),
+      json(`${origins.server}/v1/operator/services`, token, request),
+    ]);
+    verifyActivated(ready, config, { deployment: plan.approval.deployment,
+      agents: signed ? plan.profile === 'agents' : config.capabilities?.agents });
+    ensure(signed || config.capabilities.agents === false || plan.profile === 'agents', 'Unexpected active agent execution');
+    try { verifyOperational(status, plan, signed); return; }
+    catch (error) {
+      // A scheduled keeper pass may overlap the release probe. Wait for its
+      // actual result; never treat running as a successful signing pass.
+      if (status.keeper?.state !== 'running' || error.message !== 'Keeper has not completed a current pass'
+        || attempt === attempts - 1) throw error;
+    }
+    await wait(15000);
+  }
 }
 
 function completed(service, plan, stage, message) {

@@ -72,7 +72,7 @@ export function normalizeNeardata(input: unknown): ObservedBlock {
 
 const MAX_REQUESTS_PER_CYCLE = 32;
 const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
-const MAX_BYTES_PER_CYCLE = 128 * 1024 * 1024;
+const MAX_BYTES_PER_CYCLE = 256 * 1024 * 1024;
 const ARCHIVE_ORIGIN = 'https://a3.mainnet.neardata.xyz';
 
 /** Fixed provider hosts, no chain writes, finite requests and bounded memory. */
@@ -81,25 +81,30 @@ export class NeardataReader {
   readonly concurrency: number;
   private requests = 0;
   private bytes = 0;
+  private reservedRequests = 0;
+  private reservedBytes = 0;
   private nextAt = 0;
   constructor(private readonly transport: typeof fetch = fetch,
     private readonly pause: (ms: number) => Promise<unknown> = sleep, private readonly intervalMs = 1000,
     private readonly options: { bearerToken?: string | undefined; concurrency?: number; archiveThroughBlock?: string | undefined } = {}) {
-    if (!Number.isInteger(intervalMs) || intervalMs < 100 || intervalMs > 60000)
+    if (!Number.isInteger(intervalMs) || intervalMs < 25 || intervalMs > 60000)
       throw new IngestionError('invalid_source_interval');
     if (options.bearerToken !== undefined && !/^[\x21-\x7e]{8,4096}$/.test(options.bearerToken))
       throw new IngestionError('invalid_source_token');
     if (intervalMs < 400 && !options.bearerToken) throw new IngestionError('authenticated_source_required');
     this.concurrency = options.concurrency ?? 1;
-    if (!Number.isInteger(this.concurrency) || this.concurrency < 1 || this.concurrency > 4)
+    if (!Number.isInteger(this.concurrency) || this.concurrency < 1 || this.concurrency > 8)
       throw new IngestionError('invalid_source_concurrency');
     if (options.archiveThroughBlock !== undefined) integer(options.archiveThroughBlock);
   }
-  resetBudget() { this.requests = 0; this.bytes = 0; }
+  resetBudget() {
+    if (this.reservedRequests || this.reservedBytes) throw new IngestionError('neardata_requests_active');
+    this.requests = 0; this.bytes = 0;
+  }
   /** True while a following block still fits in this cycle's request and byte budget. A batch stops here and the next cycle carries on. */
   hasBudget(count = 1) {
-    return this.requests <= MAX_REQUESTS_PER_CYCLE - 4 * count
-      && this.bytes <= MAX_BYTES_PER_CYCLE - MAX_DOCUMENT_BYTES * count;
+    return this.requests + this.reservedRequests <= MAX_REQUESTS_PER_CYCLE - 4 * count
+      && this.bytes + this.reservedBytes <= MAX_BYTES_PER_CYCLE - MAX_DOCUMENT_BYTES * count;
   }
   async document(path: string): Promise<unknown> {
     if (!/^\/v0\/(last_block\/final|block\/[0-9]+)$/.test(path)) throw new IngestionError('invalid_neardata_path');
@@ -107,45 +112,59 @@ export class NeardataReader {
     const archived = height !== undefined && this.options.archiveThroughBlock !== undefined
       && BigInt(height) <= BigInt(this.options.archiveThroughBlock);
     let url = new URL(path, archived ? ARCHIVE_ORIGIN : this.origin);
-    for (let redirects = 0; redirects <= 3; redirects++) {
-      if (++this.requests > MAX_REQUESTS_PER_CYCLE) throw new IngestionError('neardata_request_budget');
-      const reservedAt = Math.max(Date.now(), this.nextAt);
-      this.nextAt = reservedAt + this.intervalMs;
-      await this.pause(Math.max(0, reservedAt - Date.now()));
-      try {
-        const response = await this.transport(url, { method: 'GET', redirect: 'manual',
-          headers: this.options.bearerToken ? { Authorization: `Bearer ${this.options.bearerToken}` } : {},
-          signal: AbortSignal.timeout(20000) });
-        if ([301, 302, 307, 308].includes(response.status)) {
-          const location = response.headers.get('location');
-          await response.body?.cancel();
-          if (!location || redirects === 3) throw new IngestionError('invalid_neardata_redirect');
-          const target = new URL(location, url);
-          const trusted = [this.origin, ARCHIVE_ORIGIN].includes(target.origin);
-          if (!trusted || target.search || target.hash || target.username || target.password
-            || !/^\/v0\/block\/[0-9]+$/.test(target.pathname)
-            || (url.pathname !== '/v0/last_block/final' && target.pathname !== url.pathname))
-            throw new IngestionError('invalid_neardata_redirect');
-          url = target; continue;
+    if (!this.hasBudget()) throw new IngestionError('neardata_request_budget');
+    // Reserve the worst case before the first await, including every allowed redirect.
+    // A sliding prefetch window must count requests that have started but not finished.
+    let remainingRequests = 4, remainingBytes = MAX_DOCUMENT_BYTES;
+    this.reservedRequests += remainingRequests;
+    this.reservedBytes += remainingBytes;
+    try {
+      for (let redirects = 0; redirects <= 3; redirects++) {
+        if (++this.requests > MAX_REQUESTS_PER_CYCLE) throw new IngestionError('neardata_request_budget');
+        this.reservedRequests--; remainingRequests--;
+        const reservedAt = Math.max(Date.now(), this.nextAt);
+        this.nextAt = reservedAt + this.intervalMs;
+        await this.pause(Math.max(0, reservedAt - Date.now()));
+        try {
+          const response = await this.transport(url, { method: 'GET', redirect: 'manual',
+            headers: this.options.bearerToken ? { Authorization: `Bearer ${this.options.bearerToken}` } : {},
+            signal: AbortSignal.timeout(20000) });
+          if ([301, 302, 307, 308].includes(response.status)) {
+            const location = response.headers.get('location');
+            await response.body?.cancel();
+            if (!location || redirects === 3) throw new IngestionError('invalid_neardata_redirect');
+            const target = new URL(location, url);
+            const trusted = [this.origin, ARCHIVE_ORIGIN].includes(target.origin);
+            if (!trusted || target.search || target.hash || target.username || target.password
+              || !/^\/v0\/block\/[0-9]+$/.test(target.pathname)
+              || (url.pathname !== '/v0/last_block/final' && target.pathname !== url.pathname))
+              throw new IngestionError('invalid_neardata_redirect');
+            url = target; continue;
+          }
+          if (!response.ok || !response.body) {
+            await response.body?.cancel();
+            throw new IngestionError(response.status === 429 ? 'neardata_rate_limited' : 'neardata_unavailable');
+          }
+          const chunks: Uint8Array[] = [];
+          let length = 0;
+          for await (const chunk of response.body) {
+            length += chunk.length; this.bytes += chunk.length;
+            const consumed = Math.min(remainingBytes, chunk.length);
+            this.reservedBytes -= consumed; remainingBytes -= consumed;
+            if (length > MAX_DOCUMENT_BYTES || this.bytes > MAX_BYTES_PER_CYCLE) throw new IngestionError('neardata_size_limit');
+            chunks.push(chunk);
+          }
+          return parseNeardata(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+        } catch (error) {
+          if (error instanceof IngestionError) throw error;
+          throw new IngestionError('neardata_unavailable');
         }
-        if (!response.ok || !response.body) {
-          await response.body?.cancel();
-          throw new IngestionError(response.status === 429 ? 'neardata_rate_limited' : 'neardata_unavailable');
-        }
-        const chunks: Uint8Array[] = [];
-        let length = 0;
-        for await (const chunk of response.body) {
-          length += chunk.length; this.bytes += chunk.length;
-          if (length > MAX_DOCUMENT_BYTES || this.bytes > MAX_BYTES_PER_CYCLE) throw new IngestionError('neardata_size_limit');
-          chunks.push(chunk);
-        }
-        return parseNeardata(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
-      } catch (error) {
-        if (error instanceof IngestionError) throw error;
-        throw new IngestionError('neardata_unavailable');
       }
+      throw new IngestionError('invalid_neardata_redirect');
+    } finally {
+      this.reservedRequests -= remainingRequests;
+      this.reservedBytes -= remainingBytes;
     }
-    throw new IngestionError('invalid_neardata_redirect');
   }
   async capture(count = 5) {
     if (!Number.isInteger(count) || count < 1 || count > 20) throw new IngestionError('invalid_neardata_count');

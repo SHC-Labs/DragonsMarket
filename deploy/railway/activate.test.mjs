@@ -481,6 +481,33 @@ test('operator credential goes only to the exact private health route; HTTP prob
   await assert.rejects(json('https://test.invalid', token, async () => new Response('secret', { status: 403 })), /probe failed/);
 });
 
+test('launch waits for an overlapping keeper pass but never admits running, failed or stale work', async () => {
+  const { plan } = fixture();
+  let states = ['running', 'ready'], probes = 0, waits = 0;
+  const request = async url => {
+    if (url.endsWith('/health/ready')) return Response.json({ status: 'ready', checks: { database: 'ok', schema: 'current' },
+      deploymentConfigured: true, indexing: 'see_indexer_status' });
+    if (url.endsWith('/v1/config')) return Response.json({ network: 'mainnet', deployment: plan.approval.deployment,
+      capabilities: { indexing: true, walletSessions: true, agents: false, trading: false, funding: false } });
+    const status = operationalStatus(plan);
+    status.keeper.state = states[Math.min(probes++, states.length - 1)];
+    if (status.keeper.state === 'stale-index') { status.keeper.state = 'running'; status.indexing.lagBlocks = '101'; }
+    return Response.json(status);
+  };
+  const wait = async ms => { assert.equal(ms, 15000); waits++; };
+  await checkOperational(plan, 'fixture-token', true, request, wait, 3);
+  assert.equal(probes, 2); assert.equal(waits, 1);
+  for (const [next, pattern, expectedWaits] of [
+    [['running'], /Keeper has not completed/, 2],
+    [['running', 'failed'], /Keeper has not completed/, 1],
+    [['stale-index'], /Indexer is not current/, 0],
+  ]) {
+    states = next; probes = 0; waits = 0;
+    await assert.rejects(checkOperational(plan, 'fixture-token', true, request, wait, 3), pattern);
+    assert.equal(waits, expectedWaits);
+  }
+});
+
 test('price publishers deploy after the keeper with sealed keys, and nowhere else may publish', async () => {
   for (const stage of ['prepare', 'launch']) {
     const f = fixture(stage, 'human', undefined, true);

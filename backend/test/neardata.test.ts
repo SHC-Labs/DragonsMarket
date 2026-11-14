@@ -81,7 +81,8 @@ test('transport enforces redirect origin/path, response bounds and safe rate-lim
 test('a cycle stops asking for blocks before its request budget runs out, so the next cycle carries on', async () => {
   const reader = new NeardataReader(async () => new Response('null'), async () => {}, 400);
   assert.equal(reader.hasBudget(), true);
-  for (let i = 0; i < 31; i++) await reader.document(`/v0/block/${i}`);
+  // Each new read needs capacity for its initial request and three redirects.
+  for (let i = 0; i < 29; i++) await reader.document(`/v0/block/${i}`);
   assert.equal(reader.hasBudget(), false);
   reader.resetBudget();
   assert.equal(reader.hasBudget(), true);
@@ -116,8 +117,9 @@ test('parallel requests reserve separate rate slots and reject unbounded source 
   assert.ok(waits[1]! - waits[0]! >= 350);
   assert.ok(waits[2]! - waits[1]! >= 350);
   assert.throws(() => new NeardataReader(fetch, undefined, 100), /authenticated_source_required/);
-  assert.throws(() => new NeardataReader(fetch, undefined, 99, { bearerToken: 'fixture-token' }), /invalid_source_interval/);
-  assert.throws(() => new NeardataReader(fetch, undefined, 400, { concurrency: 5 }), /invalid_source_concurrency/);
+  assert.throws(() => new NeardataReader(fetch, undefined, 25), /authenticated_source_required/);
+  assert.throws(() => new NeardataReader(fetch, undefined, 24, { bearerToken: 'fixture-token' }), /invalid_source_interval/);
+  assert.throws(() => new NeardataReader(fetch, undefined, 400, { concurrency: 9 }), /invalid_source_concurrency/);
   assert.throws(() => new NeardataReader(fetch, undefined, 400, { bearerToken: 'bad\nheader' }), /invalid_source_token/);
   assert.throws(() => readNeardataSettings({ NEARDATA_INTERVAL_MS: '1e3' }), /invalid_source_settings/);
   assert.deepEqual(readNeardataSettings({}), { intervalMs: 400, concurrency: 1, bearerToken: undefined, archiveThroughBlock: undefined });
@@ -155,8 +157,8 @@ test('direct archive requests retain redirect validation, budgets and safe failu
     async () => {}, 400, { archiveThroughBlock: '100' });
   await assert.rejects(limited.document('/v0/block/100'), /neardata_rate_limited/);
   const budget = new NeardataReader(async () => new Response('null'), async () => {}, 400, { archiveThroughBlock: '100' });
-  for (let i = 0; i < 32; i++) await budget.document(`/v0/block/${i}`);
-  await assert.rejects(budget.document('/v0/block/32'), /neardata_request_budget/);
+  for (let i = 0; i < 29; i++) await budget.document(`/v0/block/${i}`);
+  await assert.rejects(budget.document('/v0/block/29'), /neardata_request_budget/);
 });
 
 test('prefetched blocks commit in height order and stop before missing or conflicting evidence', async () => {
@@ -187,4 +189,63 @@ test('prefetched blocks commit in height order and stop before missing or confli
     }
     assert.deepEqual(completed, [102, 101, 100]);
   }
+});
+
+test('the sliding window replaces a completed read before a slower neighbor and drains on cancellation', async () => {
+  const releases = new Map<number, () => void>();
+  const started: number[] = [];
+  const block = (height: number) => {
+    const data = raw(height, height - 1);
+    data.block.header.hash = String(height - 96).repeat(32);
+    data.block.header.prev_hash = String(height - 97).repeat(32);
+    data.shards.forEach(shard => { shard.receipt_execution_outcomes = []; });
+    return data;
+  };
+  const reader = new NeardataReader(async input => {
+    const height = Number(new URL(String(input)).pathname.split('/').pop());
+    started.push(height);
+    await new Promise<void>(resolve => { releases.set(height, resolve); });
+    return new Response(JSON.stringify(block(height)));
+  }, async () => {}, 25, { concurrency: 4, bearerToken: 'fixture-token' });
+  const source = new LiveNeardataSource(reader, normalizeNeardata(block(105)), '100', null);
+  const iterator = source.blocks();
+  const first = iterator.next();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(started, [100, 101, 102, 103]);
+  releases.get(100)!();
+  assert.equal((await first).value?.header.height, '100');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(started, [100, 101, 102, 103, 104], 'the next read starts while 101-103 remain pending');
+  let closed = false;
+  const closing = iterator.return(undefined).then(() => { closed = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closed, false);
+  assert.throws(() => reader.resetBudget(), /neardata_requests_active/);
+  for (const release of releases.values()) release();
+  await closing;
+  assert.doesNotThrow(() => reader.resetBudget());
+  assert.deepEqual(started, [100, 101, 102, 103, 104], 'cancellation schedules no further reads');
+});
+
+test('concurrent reads reserve redirect budgets before starting and return unused reservations', async () => {
+  const releases: (() => void)[] = [];
+  const reader = new NeardataReader(async () => {
+    await new Promise<void>(resolve => { releases.push(resolve); });
+    return new Response('null');
+  }, async () => {}, 25, { concurrency: 8, bearerToken: 'fixture-token' });
+  const pending = Array.from({ length: 8 }, (_, i) => reader.document(`/v0/block/${i}`));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(releases.length, 8);
+  await assert.rejects(reader.document('/v0/block/8'), /neardata_request_budget/);
+  assert.equal(reader.hasBudget(), false);
+  releases[0]!();
+  await pending[0];
+  assert.equal(reader.hasBudget(), false, 'one completed request releases only three redirect slots');
+  releases[1]!();
+  await pending[1];
+  assert.equal(reader.hasBudget(), true);
+  for (const release of releases) release();
+  await Promise.all(pending);
+  reader.resetBudget();
+  assert.equal(reader.hasBudget(8), true);
 });
