@@ -125,16 +125,14 @@ async function checkCollateral(config: Config, view: View): Promise<Check[]> {
     return [fail('collateral:storage', 'token storage minimum could not be verified')];
   }
   const checks: Check[] = [ok('collateral:decimals', `${deployment.collateralDecimals} decimals`)];
-  for (const role of ['market', 'rounds', 'verifier'] as const) {
-    const account = deployment.contracts[role];
-    if (!account) continue;
-    const balance = await view(token, 'storage_balance_of', { account_id: account });
-    const registered = object(balance) && typeof balance.total === 'string' &&
-      /^(0|[1-9]\d*)$/.test(balance.total) && BigInt(balance.total) >= BigInt(bounds.min);
-    checks.push(registered
-      ? ok(`collateral:${role}`, 'registered with the collateral token')
-      : fail(`collateral:${role}`, 'missing collateral-token storage registration; direct token deposits cannot arrive'));
-  }
+  const verifier = deployment.contracts.verifier;
+  if (!verifier) return [...checks, fail('collateral:verifier', 'no verifier configured for token deposits')];
+  const balance = await view(token, 'storage_balance_of', { account_id: verifier });
+  const registered = object(balance) && typeof balance.total === 'string' &&
+    /^(0|[1-9]\d*)$/.test(balance.total) && BigInt(balance.total) >= BigInt(bounds.min);
+  checks.push(registered
+    ? ok('collateral:verifier', 'registered with the collateral token')
+    : fail('collateral:verifier', 'missing token storage registration; users cannot fund their own Intents accounts'));
   return checks;
 }
 

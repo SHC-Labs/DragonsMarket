@@ -1,10 +1,9 @@
-import { createHash, createPrivateKey, createPublicKey, randomBytes } from 'node:crypto';
-import { closeSync, constants, existsSync, fsyncSync, fstatSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { KEEPER_METHODS, keeperRpc, signedFunctionCall, validateActionKeys, type KeeperAction, type KeeperKeys, type KeeperOptions } from '@dragons-market/keeper';
 import { base58Decode, base58Encode } from './base58.js';
 import { finalTransaction } from './agent-chain.js';
+import { readPrivateJson, writePrivateJson } from './durable-file.js';
 import { object } from './ingestion/block.js';
 import { assertApprovalCurrent, type KeeperApproval } from './keeper-approval.js';
 import type { ReadRpcClient } from './providers.js';
@@ -15,26 +14,9 @@ type Pending = { hash: string; receiver: string; method: string; args: Record<st
 interface Journal { version: 1; deployment: string; account: string; pending: Pending | null; last?: { hash: string; failed: boolean } }
 const METHODS: Readonly<Record<string, readonly string[]>> = KEEPER_METHODS;
 
-function writeJournal(file: string, journal: Journal) {
-  const temporary = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-  const fd = openSync(temporary, 'wx', 0o600);
-  try { writeFileSync(fd, JSON.stringify(journal) + '\n'); fsyncSync(fd); }
-  finally { closeSync(fd); }
-  renameSync(temporary, file);
-  const directory = openSync(dirname(file), 'r');
-  try { fsyncSync(directory); } finally { closeSync(directory); }
-}
-
 function readJournal(file: string, deployment: string, account: string): Journal {
-  if (!existsSync(file)) return { version: 1, deployment, account, pending: null };
-  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-  let raw: unknown;
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > 16_384 || (stat.mode & 0o077) !== 0 || stat.nlink !== 1
-      || (process.getuid && stat.uid !== process.getuid())) throw new Error('unsafe_keeper_journal');
-    raw = JSON.parse(readFileSync(fd, 'utf8'));
-  } finally { closeSync(fd); }
+  const raw = readPrivateJson(file, 16_384, 'unsafe_keeper_journal');
+  if (raw === null) return { version: 1, deployment, account, pending: null };
   if (!object(raw) || raw.version !== 1 || raw.deployment !== deployment || raw.account !== account)
     throw new Error('keeper_journal_scope_changed');
   const p = raw.pending;
@@ -118,7 +100,7 @@ export function createKeeperSigner(input: {
     const failed = proofs[0]!.failed.length > 0;
     journal.pending = null;
     journal.last = { hash: pending.hash, failed };
-    writeJournal(journalFile, journal);
+    writePrivateJson(journalFile, journal);
     console.log(JSON.stringify({ service: 'keeper', transaction: pending.hash, final: true, failed }));
     return failed;
   }
@@ -165,7 +147,7 @@ export function createKeeperSigner(input: {
       const bytes = Buffer.from(signed, 'base64');
       const hash = base58Encode(createHash('sha256').update(bytes.subarray(0, -65)).digest());
       journal.pending = { hash, receiver, method: action.method, args: action.args, gas: String(action.gas) };
-      writeJournal(journalFile, journal);
+      writePrivateJson(journalFile, journal);
       sent++;
       usedGas += action.gas;
       try {

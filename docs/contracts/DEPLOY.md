@@ -41,12 +41,11 @@ example DAO names and sandbox keys are not production configuration.
 ## 2. Settlement and rewards
 
 - [ ] Prove external funding reaches the correct authenticated beneficiary and collateral asset.
-- [ ] Register the market account with the collateral token (`storage_deposit` on the token, once)
-      and send a small token `deposit`. Until then the token refuses `ft_transfer_call` to the market,
-      so only the Intents path can fund it and an agent cannot be funded to trade, and `keeper.mjs check` reports it.
-- [ ] Register the rounds account with the collateral token the same way, and send a small token `deposit`. Until then
-      every `deposit` and `deposit_for` by token is refused, so an agent cannot be funded. `keeper.mjs check --rounds <id>`
-      reports it.
+- [ ] Verify the verifier is registered with the collateral token. Fund the sender's own Intents account,
+      then test a separate `mt_transfer_call` to market and rounds, including `deposit_for:<agent>`.
+      Direct `ft_transfer_call` to market/rounds is retired. Do not use it in acceptance scripts.
+- [ ] Deploy the reviewed market/rounds build before the website uses Intents `deposit_for`.
+      Older builds reject this message; never fall back to the retired direct token path.
 - [ ] Show committed backing remains controlled inside Intents and reconciles with positions.
 - [ ] Verify buy, sell, Yes/No/Void redemption and available-balance withdrawal.
 - [ ] Prove oracle bonds and juror pay end to end through Intents (`mt_on_transfer` with `propose:` and `challenge:`).
@@ -158,33 +157,53 @@ proposal-preparation helper into a production submitter without reviewing the ch
 ### Production deploy tooling
 
 `contracts/deploy-production.mjs` deploys market, oracle, council and rounds as children of the parent account,
-owned by the DAO, and ends with every contract account keyless. It uses no dependencies and never signs for the DAO.
+owned by the DAO. DAO members subsequently approve the upgrades, configuration and sealing. The script never signs for the DAO.
 Copy `contracts/deploy-production.example.json`, fill every `FILL` value and read the paths listed in its `decide`
 array: each holds a default the owner must confirm. The wasm files must be the release build, and `codeHash` is the
-approved hash from the release tag.
+approved hash from the release tag. Production additionally requires `release.sourceCommit`, `release.imageDigest`,
+`daoCodeHash` and `daoMinApprovals`. Build metadata must match those release pins for every artifact. This checks the
+artifact against the approved manifest; metadata alone is not proof of an independent reproducible build.
+
+Every chain command on mainnet or testnet requires `--rpc URL --rpc-second URL` on distinct HTTPS hosts. Queries must agree
+at the same finalized block. Both endpoints must report the manifest network. The DAO must have no access keys, match its
+approved code hash, and meet the minimum approval count in every executable voting policy, including Requestor overrides.
 
 1. `node deploy-production.mjs plan --manifest FILE` validates the manifest against the contracts' own bounds and prints
    every transaction (signer, receiver, actions, deposit, gas). It sends nothing and is the default command.
-2. `node deploy-production.mjs deploy --manifest FILE --send --rpc URL --parent-key-file FILE [--key-dir DIR]` creates each child
+2. `node deploy-production.mjs deploy --manifest FILE --send --rpc URL --rpc-second URL --parent-key-file FILE [--key-dir DIR]` creates each child
    from the parent with a fresh key, then signs as the child to deploy the wasm, call the private `new` in the same
    transaction and stage the same wasm for the upgrade proof. It reads `config()` back, stops on any difference from the
    manifest and records the wasm sha256 and on-chain code hash in `deployment-<network>.json`. Child keys are written
    with mode 0600 to `--key-dir` (default `~/.dragons-market/keys/<network>`); a directory inside the repository is
-   refused. Without `--send` it only prints the plan. Running it again continues where it stopped.
-3. `node deploy-production.mjs proposals --manifest FILE --rpc URL` prints the DAO proposals. The first run holds one
-   `upgrade` per contract to its own approved hash (this proves the upgrade path) and `set_nft_contract`. `seal` is
+   refused, including symlink aliases. Existing directories must be private and owned by the current user. Keys are synced
+   to disk before account creation. The record preserves completed transactions and saves a pending hash before sending.
+   Reruns reconcile that hash first and fund only accounts still missing. Without `--send` it prints the plan.
+3. `node deploy-production.mjs proposals --manifest FILE --rpc URL --rpc-second URL` prints structured wallet requests.
+   The first run holds one `upgrade` per contract to its approved hash, `set_nft_contract`, Council `allow_market`, market
+   `set_fee_recipients` and rounds `set_treasury`. `seal` is
    refused until the upgrade has run, so run `proposals` again after the DAO executes the upgrades to get one `seal` per
-   child key. Members submit them through the DAO interface or the near CLI line printed under each one.
-4. `node deploy-production.mjs verify --manifest FILE --rpc URL` is read-only. For each contract it prints PASS or FAIL for
-   owner equals the DAO, upgrade path proven, no access keys and code hash equals the manifest, plus the council's NFT
-   collection. It exits 1 on any FAIL.
+   child key. Already sealed accounts are skipped so a partial voting round can resume. Members review the exact request
+   and submit it through their DAO interface; no shell commands are generated from NFT data.
+4. `node deploy-production.mjs verify --manifest FILE --rpc URL --rpc-second URL` checks DAO authority, every initialization
+   setting, no pending ownership transfer, upgrade proof, zero contract access keys, approved code, Council permissions,
+   NFT binding and all fee destinations. It exits 1 on any failure. This verifies deployment configuration, not readiness
+   to admit user funds; keeper approval, jury availability, mint closure and funded acceptance remain separate gates.
 
-After the Tech Dragons mint, `node deploy-production.mjs nft-ready --manifest FILE --rpc URL` reads the collection's
-supply and token ids. It reports the collection's access keys (activation refuses a collection that still has any) and
-prints the council allowlist proposal only when the supply is above zero and no key remains: `set_token_range` for a
+After the Tech Dragons mint, `node deploy-production.mjs nft-ready --manifest FILE --rpc URL --rpc-second URL` reads the collection's
+supply and token ids. It checks the manifest's `nftCustody` policy and prints the Council allowlist proposal only when
+the supply is above zero and custody matches: `set_token_range` for a
 contiguous decimal range, otherwise `allow_tokens` in batches of at most 100. It is not part of the first-day proposals.
 
-Every command checks that the RPC endpoint is on the manifest's network.
+The [accepted Cookon policy](../NFT-CUSTODY.md) retains the collection owner's platform key for fixes and upgrades. The example manifest
+includes that key and owner but leaves the approved code hash and review record unfilled. With no `nftCustody` field,
+the tool still requires a keyless collection. Use the identical policy in the backend approval and standalone keeper
+check (`--nft-custody FILE`). Review actual source, approved deployed code, mint closure and seat eligibility before
+accepting tokens as jury seats. Retaining or removing a key alone does not establish those facts.
+
+A running deployer holds `deployment-<network>.lock` in the private key directory. If the process dies, confirm it is stopped,
+back up the record, and reconcile its pending hash before removing the stale lock. Unknown or failed outcomes stop automatic
+progress; inspect the actual finalized state before changing the record. Keep the original key files and manifest for recovery.
+Rolling back a contract requires a separately reviewed DAO upgrade or state migration; do not overwrite a sealed account.
 
 ---
 
@@ -258,7 +277,7 @@ and the condition that must page a person.
 | Ownership and destination drift | `keeper.mjs check --treasury <dao> --operator <id>` | An owner, pending owner, treasury, fee recipient or no-decision recipient that is not the DAO, or an operator that is not the expected one |
 | Fee settings drift | `keeper.mjs check --expect-fee-rate-bps N --expect-max-fee-rate-bps N --expect-revenue-share-bps N` | The market's fee rate, fee rate ceiling or revenue share differs from what the DAO announced. Pin the ceiling to the intended rate, so the owner must raise the ceiling in a separate step before it can raise the fee. Each option is compared only when given |
 | Verifier keys | `keeper.mjs check` reads `public_keys_of` in the verifier for market, oracle, council and rounds | Any registered key for any of the four contracts, predecessor authentication off, account locked, or `mt_transfer` paused |
-| Access keys | `keeper.mjs check --expect-sealed` | Any access key left on a contract after sealing, or any new key on the NFT collection |
+| Access keys | `keeper.mjs check --expect-sealed --nft-custody FILE` | Any access key left on a financial contract after sealing, or any NFT key, owner or code change outside the approved custody policy |
 | Code hash | `keeper.mjs check --release <file> --rounds <id> --treasury <dao>` | A live hash that differs from the release list, or an upgrade proposal whose hash is not in it |
 | Council seat ownership | `keeper.mjs check` (drawable seat holders against jury size) | Fewer drawable holders than jury size + second jury + 2 (why, and what to do: section 5), or the NFT collection's code differs from `--collection-code-hash` |
 | Keeper health | The keeper's state file and events file, and `keeper.mjs check` margins | The keeper's last finished run is older than twice the market's `min_sweep_interval_minutes` (the hard floor is 60 minutes, so 120 minutes at the floor), a job failing repeatedly, or an account below `--min-margin` |

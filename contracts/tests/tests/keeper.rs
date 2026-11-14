@@ -370,19 +370,13 @@ async fn check_showing(w: &World, expected: &str) -> (String, bool) {
 }
 
 #[tokio::test]
-async fn the_deploy_check_reports_whether_the_token_knows_the_market() -> anyhow::Result<()> {
+async fn the_deploy_check_requires_only_verifier_token_registration() -> anyhow::Result<()> {
     let w = setup().await?;
-    let (out, ok) = keeper(&w, &["check"]).await;
+    let (out, _) = keeper(&w, &["check"]).await;
     assert!(
-        !ok && out.contains(&format!(
-            "PROBLEM: market {} is not registered with the token {}",
-            w.market.id(),
-            w.ft.id()
-        )),
+        out.contains("the verifier is registered for deposits into user Intents accounts"),
         "{out}"
     );
-    register_ft(&w, w.market.id()).await?;
-    let (out, _) = check_showing(&w, "the market and the verifier are registered").await;
     assert!(!out.contains("is not registered with the token"), "{out}");
     Ok(())
 }

@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import pg from 'pg';
-import { migrate } from '../src/migrate.js';
+import { migrate, migrationFiles } from '../src/migrate.js';
 import { verifyDatabase } from '../src/database.js';
 import { readConfig } from '../src/config.js';
 
@@ -16,7 +19,7 @@ test('real PostgreSQL migrations, deduplication, atomic rollback and reconnect p
   try {
     await admin.query(`CREATE SCHEMA ${schema}`);
     pool = connect();
-    assert.equal(await migrate(pool), 14);
+    assert.equal(await migrate(pool), (await migrationFiles()).length);
     assert.equal(await migrate(pool), 0);
     const config = readConfig({ DATABASE_URL: databaseUrl });
     await verifyDatabase(pool, config);
@@ -57,5 +60,43 @@ test('real PostgreSQL migrations, deduplication, atomic rollback and reconnect p
     await pool?.end();
     await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     await admin.end();
+  }
+});
+
+test('policy observation migration preserves existing accounts and supports atomic observation updates', async () => {
+  const url = process.env.TEST_DATABASE_URL;
+  assert.ok(url, 'Set TEST_DATABASE_URL explicitly; tests use an isolated schema');
+  const schema = `policy_upgrade_${randomUUID().replaceAll('-', '')}`;
+  const admin = new pg.Pool({ connectionString: url });
+  const pool = new pg.Pool({ connectionString: url, options: `-c search_path=${schema}` });
+  const previous = await mkdtemp(join(tmpdir(), 'dragons-policy-migrations-'));
+  try {
+    for (const file of (await migrationFiles()).filter(file => file.name < '016_')) {
+      await symlink(resolve('migrations', file.name), join(previous, file.name));
+    }
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    assert.equal(await migrate(pool, previous), 15);
+    await pool.query(`INSERT INTO deployments(id,network,start_block,contracts,collateral_token_id,collateral_decimals)
+      VALUES('upgrade','sandbox',0,'{"market":"market.test.near","verifier":"intents.test.near"}',
+        'nep141:usdc.test.near',6)`);
+    const id = randomUUID();
+    await pool.query(`INSERT INTO agent_accounts(id,deployment_id,owner_account_id,name,agent_id,near_account_id,state,frozen)
+      VALUES($1,'upgrade','alice.near','Existing agent',$2,'agent.near','active',true)`, [id, 'a'.repeat(64)]);
+    const before = (await pool.query('SELECT * FROM agent_accounts WHERE id=$1', [id])).rows[0];
+    assert.equal(await migrate(pool), (await migrationFiles()).length - 15);
+    const after = (await pool.query('SELECT * FROM agent_accounts WHERE id=$1', [id])).rows[0];
+    assert.deepEqual(after, { ...before, policy_observation: '0' });
+    await assert.rejects(pool.query('UPDATE agent_accounts SET policy_observation=-1 WHERE id=$1', [id]),
+      (error: unknown) => (error as { code: string }).code === '23514');
+    const advance = () => pool.query(`UPDATE agent_accounts SET policy_observation=policy_observation+1
+      WHERE id=$1 AND policy_observation=0`, [id]);
+    const results = await Promise.all([advance(), advance()]);
+    assert.deepEqual(results.map(result => result.rowCount).sort(), [0, 1]);
+    assert.equal(await migrate(pool), 0);
+  } finally {
+    await pool.end();
+    await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    await admin.end();
+    await rm(previous, { recursive: true, force: true });
   }
 });

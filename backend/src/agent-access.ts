@@ -13,14 +13,13 @@ import {
 import type { Owner } from './agent-paths.js';
 import { spentToday } from './operations.js';
 import { dragonsPolicy, grantsNoMore } from './agent-policy.js';
+import { accessMessage, ACCESS_LIFETIME_MS, ACCESS_SIGNING_MS } from './agent-access-consent.js';
 
 export interface Access {
   tokenId: string; label: string; agentId: string; agentAccount: string; nearAccount: string; owner: string;
   frozen: boolean; maxSpend: bigint; dailyLimit: bigint; expiresAt: Date;
 }
 
-const LIFETIME_MS = 30 * 24 * 3600 * 1000;
-const SIGNING_MS = 5 * 60 * 1000;
 const LIVE_TOKENS = 5;
 const BEARER = /^Bearer (dmk_[A-Za-z0-9_-]{43})$/;
 const LABEL = /^[\x21-\x7e](?:[\x20-\x7e]{0,62}[\x21-\x7e])?$/;
@@ -30,27 +29,12 @@ const MAX_SERIES = 12;
 const MARKET_WINDOW = 50n;
 
 function limit(value: unknown, what: string) {
-  if (!isUnits(value) || value === '0') throw new ReadError(400, `invalid_${what}`);
+  if (!isUnits(value) || BigInt(value) === 0n) throw new ReadError(400, `invalid_${what}`);
   return BigInt(value);
 }
 
-function decimal(units: bigint, decimals: number) {
-  const text = units.toString().padStart(decimals + 1, '0'), cut = text.length - decimals;
-  const fraction = text.slice(cut).replace(/0+$/, '');
-  return fraction ? `${text.slice(0, cut)}.${fraction}` : text.slice(0, cut);
-}
-
-interface AccessTerms { owner: string; agentId: string; label: string; maxSpend: bigint; dailyLimit: bigint }
-
-function accessMessage(s: AgentAccounts, terms: AccessTerms) {
-  const { collateralTokenId: token, collateralDecimals: decimals } = s.deployment;
-  return ['Give an AI agent access to a Dragons Market agent account', `Account: ${terms.owner}`,
-    `Agent: ${terms.agentId}`, `Name: ${terms.label}`,
-    `Most for one stake or buy: ${decimal(terms.maxSpend, decimals)} ${token}`,
-    `Most in 24 hours: ${decimal(terms.dailyLimit, decimals)} ${token}`,
-    'These limits cover stakes and buys. It can also sell what the agent holds, and pay out to this account only.',
-    'This access lasts 30 days.'].join('\n');
-}
+const consentConfig = (s: AgentAccounts) => ({ network: s.signing.network,
+  token: s.deployment.collateralTokenId, origin: s.webOrigin });
 
 export async function requestAccess(s: AgentAccounts, owner: Owner, agentId: string, body: Record<string, unknown>) {
   if (typeof body.label !== 'string' || !LABEL.test(body.label)) throw new ReadError(400, 'invalid_label');
@@ -59,7 +43,10 @@ export async function requestAccess(s: AgentAccounts, owner: Owner, agentId: str
   if (dailyLimit < maxSpend) throw new ReadError(400, 'daily_limit_below_max_spend');
   const agent = await activeAgent(s, owner, agentId);
   const id = randomUUID(), nonce = randomBytes(32).toString('base64');
-  const message = accessMessage(s, { owner: owner.account, agentId, label, maxSpend, dailyLimit });
+  const now = Date.now(), signBefore = new Date(now + ACCESS_SIGNING_MS).toISOString();
+  const expiresAt = new Date(now + ACCESS_LIFETIME_MS).toISOString();
+  const message = accessMessage(consentConfig(s), { id, owner: owner.account, agentId, label,
+    maxSpend: String(maxSpend), dailyLimit: String(dailyLimit), expiresAt, signBefore });
   await transaction(s.db, async c => {
     await agentLock(c, `access:${agent.id}`);
     const { rows: [live] } = await c.query(`SELECT count(*)::int AS n FROM agent_access_tokens
@@ -67,9 +54,9 @@ export async function requestAccess(s: AgentAccounts, owner: Owner, agentId: str
     if (live.n >= LIVE_TOKENS) throw new ReadError(409, 'access_token_limit_reached');
     await c.query(`INSERT INTO agent_access_tokens(id,agent_account,label,max_spend,daily_limit,message,nonce,
       expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [id, agent.id, label, String(maxSpend), String(dailyLimit), message,
-      nonce, new Date(Date.now() + SIGNING_MS)]);
+      nonce, signBefore]);
   });
-  return { id, message, nonce, recipient: s.webOrigin };
+  return { id, message, nonce, recipient: s.webOrigin, expires_at: expiresAt, sign_before: signBefore };
 }
 
 function verified(s: AgentAccounts, signed: { publicKey: unknown; signature: unknown }, asked: {
@@ -85,24 +72,33 @@ function verified(s: AgentAccounts, signed: { publicKey: unknown; signature: unk
 export async function signAccess(s: AgentAccounts, owner: Owner, agentId: string, tokenId: string,
   body: Record<string, unknown>) {
   const agent = await activeAgent(s, owner, agentId);
-  const { rows: [asked] } = await s.db.query(`SELECT label,max_spend,daily_limit,message,nonce FROM agent_access_tokens
+  const { rows: [asked] } = await s.db.query(`SELECT label,max_spend,daily_limit,message,nonce,expires_at
+    FROM agent_access_tokens
     WHERE id=$1 AND agent_account=$2 AND token_hash IS NULL AND revoked_at IS NULL AND expires_at>now()`,
   [tokenId, agent.id]);
   if (!asked) throw new ReadError(404, 'access_request_not_found');
+  const expiresAt = new Date(asked.expires_at.getTime() + ACCESS_LIFETIME_MS - ACCESS_SIGNING_MS);
+  const expected = accessMessage(consentConfig(s), { id: tokenId, owner: owner.account, agentId,
+    label: asked.label, maxSpend: asked.max_spend, dailyLimit: asked.daily_limit,
+    signBefore: asked.expires_at.toISOString(), expiresAt: expiresAt.toISOString() });
+  if (asked.message !== expected) throw new ReadError(409, 'access_request_changed');
   const signed = { publicKey: body.public_key, signature: body.signature };
   if (!verified(s, signed, asked) || !(await s.checkKey(owner.account, signed.publicKey as string))) {
     throw new ReadError(403, 'invalid_signature');
   }
-  const token = `dmk_${randomBytes(32).toString('base64url')}`, expiresAt = new Date(Date.now() + LIFETIME_MS);
+  const token = `dmk_${randomBytes(32).toString('base64url')}`;
   const { rowCount } = await s.db.query(`UPDATE agent_access_tokens SET token_hash=$2,expires_at=$3
-    WHERE id=$1 AND token_hash IS NULL AND revoked_at IS NULL AND expires_at>now()`,
-  [tokenId, tokenHash(token), expiresAt]);
+    WHERE id=$1 AND token_hash IS NULL AND revoked_at IS NULL AND expires_at>now()
+    AND message=$4 AND nonce=$5 AND label=$6 AND max_spend=$7 AND daily_limit=$8 AND expires_at=$9
+    AND agent_account=$10`,
+  [tokenId, tokenHash(token), expiresAt, expected, asked.nonce, asked.label, asked.max_spend,
+    asked.daily_limit, asked.expires_at, agent.id]);
   if (rowCount !== 1) throw new ReadError(404, 'access_request_not_found');
   return { id: tokenId, token, label: asked.label, max_spend: asked.max_spend, daily_limit: asked.daily_limit,
     expires_at: expiresAt.toISOString() };
 }
 
-export async function listAccessTokens(s: AgentAccounts, owner: Owner, agentId: string) {
+export async function listAccessTokens(s: AgentAccounts, owner: Pick<Owner, 'account'>, agentId: string) {
   const agent = await ownedAgent(s, owner, agentId);
   const { rows } = await s.db.query(`SELECT id,label,max_spend,daily_limit,expires_at,last_used_at,created_at
     FROM agent_access_tokens WHERE agent_account=$1 AND token_hash IS NOT NULL AND revoked_at IS NULL
@@ -110,7 +106,7 @@ export async function listAccessTokens(s: AgentAccounts, owner: Owner, agentId: 
   return { data: rows };
 }
 
-export async function revokeAccessToken(s: AgentAccounts, owner: Owner, agentId: string, tokenId: string) {
+export async function revokeAccessToken(s: AgentAccounts, owner: Pick<Owner, 'account'>, agentId: string, tokenId: string) {
   const agent = await ownedAgent(s, owner, agentId);
   const { rowCount } = await s.db.query(`UPDATE agent_access_tokens SET revoked_at=now()
     WHERE id=$1 AND agent_account=$2 AND revoked_at IS NULL`, [tokenId, agent.id]);

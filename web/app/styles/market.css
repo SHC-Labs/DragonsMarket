@@ -171,3 +171,10 @@
   .resolution-ruling { flex-direction: column; align-items: flex-start; gap: var(--s-4); }
   .market-detail-body { gap: var(--s-8); }
 }
+
+/* min-width and the minmax column stop the evidence input's intrinsic width from pushing the panel past a 390px screen. */
+.answer-panel { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: var(--s-3); margin-top: var(--s-6); padding-top: var(--s-5); border-top: 1px solid var(--line); }
+.answer-panel .trade-amount-field input { font-size: var(--fs-md); }
+.answer-panel > * { margin: 0; }
+.answer-options { justify-self: start; }
+.answer-actions { display: flex; flex-wrap: wrap; gap: var(--s-3); }

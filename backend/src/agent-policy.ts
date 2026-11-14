@@ -1,10 +1,15 @@
+import { nearPolicyRequest } from './agent-near-policy.js';
 import type { IntentType, Policy } from '@near-intents-agent-api/sdk';
 import { canonical, object } from './ingestion/block.js';
 import { agentCashOut, type Config } from './config.js';
 import type { OwnerIntent } from './agent-api.js';
+import { evmConsent, isEvmOwner } from './agent-evm-consent.js';
+import { evmPolicyRequest } from './agent-evm-policy.js';
 
 type Deployment = NonNullable<Config['deployment']>;
-export interface OwnerSigning { walletContract: string; messageRecipient: string }
+export interface OwnerSigning {
+  walletContract: string; messageRecipient: string; network: Config['network']; policySponsor?: string | null;
+}
 
 const NEAR = 10n ** 24n;
 const WRAPPED_NEAR = 'nep141:wrap.near';
@@ -45,21 +50,21 @@ function powers(policy: unknown) {
 export const grantsNoMore = (shown: unknown, asked: Policy) =>
   powers(shown) !== null && powers(shown) === powers(asked);
 
-function delegateFits(payload: Record<string, unknown>, walletContract: string) {
-  const actions = Array.isArray(payload.actions) ? payload.actions : [];
-  const deposits = actions.map(a => (object(a) && a.type === 'FunctionCall' && object(a.params)
-    && typeof a.params.deposit === 'string' && /^\d{1,39}$/.test(a.params.deposit) ? BigInt(a.params.deposit) : null));
-  return payload.receiverId === walletContract && deposits.length > 0 && !deposits.includes(null)
-    && deposits.reduce<bigint>((sum, d) => sum + d!, 0n) <= NEAR;
-}
-
 const messageFits = (payload: Record<string, unknown>, recipient: string) => payload.recipient === recipient
+  && Object.keys(payload).every(key => ['message', 'recipient', 'nonce'].includes(key))
   && typeof payload.message === 'string' && typeof payload.nonce === 'string'
   && /^[A-Za-z0-9+/]{43}=$/.test(payload.nonce);
 
 export function fitsOwnerFlow(signing: OwnerSigning, generated: OwnerIntent, type: IntentType, agentId?: string) {
   const { standard, payload } = generated.intent;
-  return generated.type === type && (agentId === undefined || generated.agent_id === agentId)
-    && (standard === 'nep366' ? delegateFits(payload, signing.walletContract)
-      : standard === 'nep413' && messageFits(payload, signing.messageRecipient));
+  if (generated.type !== type || (agentId !== undefined && generated.agent_id !== agentId)) return false;
+  if (generated.signer.type === 'evm') {
+    if (signing.network !== 'mainnet' || !isEvmOwner(generated.signer) || standard !== 'eip712') return false;
+    return ['grant_issue', 'grant_revoke'].includes(type) ? evmConsent(payload, signing.messageRecipient) !== null
+      : evmPolicyRequest(generated, signing.walletContract, generated.policy_approval) !== null;
+  }
+  return generated.signer.type === 'near'
+    && (standard === 'nep366' ? nearPolicyRequest(generated, signing.walletContract, generated.policy_approval)
+      : standard === 'nep413' && ['grant_issue', 'grant_revoke'].includes(type)
+        && messageFits(payload, signing.messageRecipient));
 }

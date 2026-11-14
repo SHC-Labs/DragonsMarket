@@ -2,35 +2,84 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { keeperFixture } from '../../backend/dist/test/keeper-fixture.js';
+import { base58Encode } from '../../backend/dist/src/base58.js';
 import { projectId, environmentId, services } from './release.mjs';
 import { postgresId } from './backups.mjs';
-import { activatedRelease, activationSnapshot, checkOperational, json, verifyOperational } from './activate.mjs';
+import { activatedRelease, activationSnapshot, checkOperational, json, verifyOperational, verifyRelayKeys } from './activate.mjs';
 import { activationServices, agentService, digest, expectedBrowser, manifestVariables, origins,
-  parseActivation, pricesService, verifyActivationVariables, workerServices } from './activation-plan.mjs';
+  parseActivation, pricesService, topupService, topupVariables, verifyActivationVariables, workerServices } from './activation-plan.mjs';
 
 const settings = JSON.parse(readFileSync(new URL('./services.json', import.meta.url), 'utf8'));
 const keeperId = '22222222-2222-4222-8222-222222222222';
 const deploymentId = '11111111-1111-4111-8111-111111111111';
-const publishersId = '33333333-3333-4333-8333-333333333333';
+const publishersId = '44444444-4444-4444-8444-444444444444';
 
-function fixture(stage = 'launch', profile = 'human', publishers = false) {
+const relayPlan = () => ({ accountId: 'relay.near', publicKey: 'ed25519:' + base58Encode(Buffer.alloc(32, 1)), minFee: '1000', maxFee: '100000',
+  acceptanceEvidence: 'https://review.invalid/relay', topup: { serviceId: '33333333-3333-4333-8333-333333333333',
+    treasuryPublicKey: 'ed25519:' + base58Encode(Buffer.alloc(32, 2)), submitPublicKey: 'ed25519:' + base58Encode(Buffer.alloc(32, 3)),
+    belowNear: '2', minUsdc: '5000000', maxUsdc: '20000000', maxUsdcPerDay: '100000000', maxSlippageBps: '200',
+    acceptanceEvidence: 'https://review.invalid/topup' } });
+
+test('activation verifies both relay submission keys at the same block with narrow bounded permissions', async () => {
+  const relay = relayPlan();
+  const plan = { relay, approval: { deployment: { contracts: { verifier: 'intents.near' } } } };
+  const hash = base58Encode(Buffer.alloc(32, 5));
+  const keys = [relay.publicKey, relay.topup.submitPublicKey];
+  const calls = [];
+  const provider = (primary, mutate = () => {}) => ({ call: async (method, params) => {
+    assert.equal(method, 'query');
+    assert.equal(params.request_type, 'view_access_key');
+    assert.equal(params.account_id, relay.accountId);
+    assert.ok(keys.includes(params.public_key));
+    assert.equal(params.finality, primary ? 'final' : undefined);
+    assert.equal(params.block_id, primary ? undefined : hash);
+    calls.push(params.public_key);
+    const result = { block_hash: hash, nonce: 10, permission: { FunctionCall: {
+      receiver_id: 'intents.near', method_names: ['execute_intents'], allowance: '1000000000000000000000000',
+    } } };
+    mutate(result);
+    return result;
+  } });
+  await verifyRelayKeys(plan, [provider(true), provider(false)]);
+  assert.deepEqual(calls, keys.flatMap(key => [key, key]));
+  await assert.rejects(verifyRelayKeys(plan, [provider(true)]), /two RPC/);
+  for (const mutate of [
+    value => { value.permission = 'FullAccess'; },
+    value => { value.permission.FunctionCall.allowance = null; },
+    value => { value.permission.FunctionCall.allowance = '0'; },
+    value => { value.permission.FunctionCall.allowance = '5000000000000000000000001'; },
+    value => { value.permission.FunctionCall.receiver_id = 'another.near'; },
+    value => { value.permission.FunctionCall.method_names = []; },
+    value => { value.permission.FunctionCall.method_names.push('withdraw'); },
+    value => { value.nonce = Number.MAX_SAFE_INTEGER + 1; },
+  ]) await assert.rejects(verifyRelayKeys(plan, [provider(true, mutate), provider(false, mutate)]), /Relay keys require/);
+  for (const mutate of [
+    value => { value.nonce++; },
+    value => { value.permission.FunctionCall.allowance = '1'; },
+    value => { value.block_hash = base58Encode(Buffer.alloc(32, 6)); },
+  ]) await assert.rejects(verifyRelayKeys(plan, [provider(true), provider(false, mutate)]), /Relay keys require/);
+  await assert.rejects(verifyRelayKeys(plan, [provider(true, value => { value.block_hash = 'bad'; }), provider(false)]), /anchored/);
+});
+
+function fixture(stage = 'launch', profile = 'human', relay, publishers = false) {
   const keeper = keeperFixture();
   const raw = JSON.stringify({ version: 1, sourceCommit: 'b'.repeat(40), profile, keeperServiceId: keeperId,
     publicRpcUrl: 'https://free.rpc.fastnear.com', keeperApproval: keeper.approval,
-    launchEvidence: 'https://review.invalid/funded-and-operations', ...(publishers ? { publishersServiceId: publishersId } : {}), ...(profile === 'agents' ? {
-      agent: { apiUrl: 'https://agents.example.com', walletContract: 'wallets.near',
+    launchEvidence: 'https://review.invalid/funded-and-operations', ...(relay ? { relay } : {}), ...(publishers ? { publishersServiceId: publishersId } : {}), ...(profile === 'agents' ? {
+      agent: { apiUrl: 'https://agents.example.com', walletContract: 'wallets.near', policySponsor: 'sponsor.near',
         acceptanceEvidence: 'https://review.invalid/partner-acceptance' } } : {}) });
   const plan = parseActivation(raw, digest(raw));
   const all = [...services, ...workerServices, { name: 'keeper', id: keeperId },
-    ...(publishers ? [{ name: 'publishers', id: publishersId }] : []), agentService, pricesService];
+    ...(publishers ? [{ name: 'publishers', id: publishersId }] : []), agentService, pricesService,
+    ...(topupService(plan) ? [topupService(plan)] : [])];
   const inventory = Object.fromEntries(all.map(service => [service.name, {}]));
-  const passwords = Object.fromEntries(['api', 'indexer', 'worker', 'publisher', 'agent', 'keeper']
+  const passwords = Object.fromEntries(['api', 'indexer', 'worker', 'publisher', 'agent', 'keeper', ...(topupService(plan) ? ['relay_topup'] : [])]
     .map((role, index) => [`dm_${role}_login`, String(index + 1).repeat(64)]));
   const activeAgents = stage === 'launch' && profile === 'agents';
   for (const [name, role] of Object.entries({ 'database-release': 'postgres', server: 'dm_api_login',
     indexer: 'dm_indexer_login', reconcile: 'dm_worker_login', 'verify-chain': 'dm_worker_login',
-    keeper: 'dm_keeper_login', ...(activeAgents ? { 'agent-worker': 'dm_agent_login' } : {}),
-    ...(publishers ? { publishers: 'dm_publisher_login' } : {}) })) {
+    keeper: 'dm_keeper_login', ...(topupService(plan) ? { 'relay-topup': 'dm_relay_topup_login' } : {}),
+    ...(activeAgents ? { 'agent-worker': 'dm_agent_login' } : {}), ...(publishers ? { publishers: 'dm_publisher_login' } : {}) })) {
     inventory[name] = { ...manifestVariables(plan.approval.deployment),
       DATABASE_URL: `postgresql://${role}:${passwords[role] ?? 'owner-fixture'}@postgres.railway.internal:5432/railway`,
       RPC_URL: 'https://first.invalid', RPC_SECOND_URL: 'https://second.invalid' };
@@ -51,7 +100,7 @@ function fixture(stage = 'launch', profile = 'human', publishers = false) {
     PRICE_SIGNATURES_URL: 'http://server.railway.internal:3500', PRICE_MAX_DEVIATION_BPS: '50' });
   if (activeAgents) {
     Object.assign(inventory['agent-worker'], { AGENT_API_URL: plan.agent.apiUrl,
-      AGENT_API_KEY: null, AGENT_API_WALLET_CONTRACT: 'wallets.near',
+      AGENT_API_KEY: null, AGENT_API_WALLET_CONTRACT: 'wallets.near', AGENT_API_POLICY_SPONSOR: 'sponsor.near',
       AGENT_GRANT_KEY: null, AGENT_WORKER_TOKEN: 'w'.repeat(32),
       AGENT_WORKER_HOST: '::' });
     Object.assign(inventory.server, { AGENT_WORKER_URL: 'http://agent-worker.railway.internal:3510', AGENT_WORKER_TOKEN: 'w'.repeat(32) });
@@ -64,6 +113,13 @@ function fixture(stage = 'launch', profile = 'human', publishers = false) {
     NEXT_PUBLIC_RPC_URL: plan.publicRpcUrl, NEXT_PUBLIC_BACKEND_URL: origins.server, NEXT_PUBLIC_MCP_URL: origins.mcp,
     ...(activeAgents ? { NEXT_PUBLIC_AGENT_WALLET_CONTRACT: 'wallets.near', NEXT_PUBLIC_AGENT_API_HOST: 'agents.example.com' } : {}),
   };
+  if (relay && stage === 'launch') {
+    Object.assign(inventory.server, { RELAYER_ACCOUNT_ID: relay.accountId, RELAYER_PUBLIC_KEY: relay.publicKey,
+      RELAYER_KEY: null, RELAY_MIN_FEE: relay.minFee, RELAY_MAX_FEE: relay.maxFee });
+    inventory.web.NEXT_PUBLIC_RELAYER_ID = relay.accountId;
+  }
+  if (relay?.topup) Object.assign(inventory['relay-topup'], topupVariables(plan, stage),
+    stage === 'launch' ? { RELAY_TREASURY_KEY: null, RELAY_TOPUP_SUBMIT_KEY: null } : {});
   const config = { services: {} };
   for (const service of all) {
     const value = config.services[service.id] = {};
@@ -92,7 +148,7 @@ function fixture(stage = 'launch', profile = 'human', publishers = false) {
     backups: async () => { events.push('backups'); }, contracts: async () => { events.push('contracts'); },
     operational: async (_plan, token, signed) => { assert.equal(token, inventory.server.OPERATOR_TOKEN); events.push(`health:${signed}`); },
     probe: async () => ({ version: 1, ...Object.fromEntries(['marketId', 'oracleId', 'councilId', 'verifierId',
-      'nftId', 'collateralTokenId', 'tokenId', 'agentWalletContract', 'agentApiHost'].map(key => [key, ''])) }),
+      'nftId', 'relayerId', 'collateralTokenId', 'tokenId', 'agentWalletContract', 'agentApiHost'].map(key => [key, ''])) }),
     smokeCheck: async (_web, _server, _mcp, _origin, expected) => {
       assert.deepEqual(expected.browser, expectedBrowser(plan)); events.push('smoke');
     }, report() {},
@@ -118,6 +174,26 @@ test('activation pins exact reviewed bytes, commit, identity and public destinat
     const bad = JSON.stringify({ ...JSON.parse(raw), ...changed });
     assert.throws(() => parseActivation(bad, digest(bad)));
   }
+});
+
+test('agent activation pins sponsored and unsponsored policy storage explicitly', () => {
+  const { raw, plan, inventory } = fixture('launch', 'agents');
+  for (const policySponsor of [undefined, '', 'not an account', 'sponsor.testnet']) {
+    const value = JSON.parse(raw);
+    value.agent.policySponsor = policySponsor;
+    const bad = JSON.stringify(value);
+    assert.throws(() => parseActivation(bad, digest(bad)), /policy sponsor/);
+  }
+  for (const value of ['', 'other.near']) {
+    inventory['agent-worker'].AGENT_API_POLICY_SPONSOR = value;
+    assert.throws(() => verifyActivationVariables(plan, 'launch', inventory), /policy sponsor/);
+  }
+  const value = JSON.parse(raw);
+  value.agent.policySponsor = null;
+  const unsponsored = JSON.stringify(value);
+  delete inventory['agent-worker'].AGENT_API_POLICY_SPONSOR;
+  assert.doesNotThrow(() => verifyActivationVariables(parseActivation(unsponsored, digest(unsponsored)),
+    'launch', inventory));
 });
 
 test('preparation and launch checks never upload; launch stages deploy serially with web last', async () => {
@@ -186,6 +262,8 @@ test('configuration and credential boundaries reject partial, leaking or incompa
     v => { v.keeper.DATABASE_URL = v['database-release'].DATABASE_URL; },
     v => { v['database-release'].API_DB_PASSWORD = v['database-release'].WORKER_DB_PASSWORD; },
     v => { v['database-release'].KEEPER_DB_PASSWORD = '9'.repeat(64); },
+    v => { v['database-release'].RELAY_TOPUP_DB_PASSWORD = v['database-release'].API_DB_PASSWORD; },
+    v => { v.keeper.RELAY_TOPUP_DB_PASSWORD = '8'.repeat(64); },
     v => { v.server.AGENT_API_KEY = 'private-value'; }, v => { v.web.DATABASE_URL = 'private-value'; },
     v => { v.web.NEXT_PUBLIC_AGENT_API_KEY = 'private-value'; }, v => { v.mcp.OPERATOR_TOKEN = 'private-value'; },
     v => { v.prices.PUBLISH_ROUND_PRICES = 'true'; }, v => { v.server.TRUSTED_PROXY_HOPS = '0'; },
@@ -199,6 +277,57 @@ test('configuration and credential boundaries reject partial, leaking or incompa
     const f = fixture(); mutate(f.inventory);
     assert.throws(() => verifyActivationVariables(f.plan, 'launch', f.inventory),
       error => !error.message.includes('private-value'));
+  }
+});
+
+test('the database release may carry a distinct relay top-up login password', () => {
+  const f = fixture();
+  f.inventory['database-release'].RELAY_TOPUP_DB_PASSWORD = '8'.repeat(64);
+  verifyActivationVariables(f.plan, 'launch', f.inventory);
+});
+
+test('relay and optional top-up deploy with separate sealed keys, private services and browser wiring', async () => {
+  for (const stage of ['prepare', 'launch']) {
+    const f = fixture(stage, 'human', relayPlan());
+    await activatedRelease({ ...f.options, wait: async (_query, service) => {
+      if (service.name !== 'relay-topup') return;
+      assert.equal(service.completed(JSON.stringify({ service: 'relay-topup', event: 'result',
+        mode: stage === 'prepare' ? 'dry-run' : 'execute', state: stage === 'prepare' ? 'dry_run' : 'topped_up' })), true);
+      assert.equal(service.completed(JSON.stringify({ service: 'relay-topup', event: 'result', mode: 'execute', state: 'waiting' })), false);
+    } });
+    assert.ok(f.events.includes('upload:relay-topup'));
+    assert.equal(expectedBrowser(f.plan).relayerId, 'relay.near');
+  }
+  const relay = relayPlan(); delete relay.topup;
+  const f = fixture('launch', 'human', relay);
+  await activatedRelease(f.options);
+  assert.equal(f.events.includes('upload:relay-topup'), false);
+});
+
+test('relay activation rejects mixed keys, unapproved fees, leaked secrets and unreviewed destinations', async () => {
+  for (const mutate of [
+    f => { f.inventory.server.RELAYER_KEY = 'readable-secret'; },
+    f => { f.inventory.server.RELAYER_ACCOUNT_ID = 'attacker.near'; },
+    f => { f.inventory.server.RELAYER_PUBLIC_KEY = f.plan.relay.topup.submitPublicKey; },
+    f => { f.inventory.server.RELAY_MAX_FEE = '100001'; },
+    f => { f.inventory.web.NEXT_PUBLIC_RELAYER_ID = 'attacker.near'; },
+    f => { f.inventory['relay-topup'].RELAYER_KEY = null; },
+    f => { f.inventory['relay-topup'].DATABASE_URL = f.inventory.server.DATABASE_URL; },
+    f => { f.inventory['relay-topup'].RELAY_TOPUP_MAX_USDC_PER_DAY = '999999999'; },
+    f => { f.inventory['relay-topup'].RELAY_TOPUP_SUBMIT_PUBLIC_KEY = f.plan.relay.publicKey; },
+    f => { f.target.environment.variables.edges.find(({ node }) => node.name === 'RELAY_TREASURY_KEY').node.isSealed = false; },
+    f => { f.target.environment.variables.edges.find(({ node }) => node.name === 'RELAYER_KEY').node.serviceId = keeperId; },
+  ]) {
+    const f = fixture('launch', 'human', relayPlan()); mutate(f);
+    await assert.rejects(activatedRelease(f.options), error => !error.message.includes('readable-secret'));
+    assert.equal(f.events.some(event => event.startsWith('upload:')), false);
+  }
+  for (const mutate of [
+    r => { r.topup.serviceId = keeperId; }, r => { r.topup.submitPublicKey = r.publicKey; },
+    r => { r.accountId = 'market.near'; }, r => { r.maxFee = '100001'; },
+  ]) {
+    const relay = relayPlan(); mutate(relay);
+    assert.throws(() => fixture('launch', 'human', relay));
   }
 });
 
@@ -328,7 +457,7 @@ test('operator credential goes only to the exact private health route; HTTP prob
 
 test('price publishers deploy after the keeper with sealed keys, and nowhere else may publish', async () => {
   for (const stage of ['prepare', 'launch']) {
-    const f = fixture(stage, 'human', true);
+    const f = fixture(stage, 'human', undefined, true);
     await activatedRelease(f.options);
     const uploads = f.events.filter(event => event.startsWith('upload:'));
     assert.equal(uploads.indexOf('upload:publishers'), uploads.indexOf('upload:keeper') + 1, stage);
@@ -341,7 +470,7 @@ test('price publishers deploy after the keeper with sealed keys, and nowhere els
     v => { v.publishers.ROUND_PRICES_RPC = 'https://user:pass@rpc.invalid'; },
     v => { v.publishers.DATABASE_URL = v.keeper.DATABASE_URL; },
   ]) {
-    const f = fixture('launch', 'human', true); mutate(f.inventory);
+    const f = fixture('launch', 'human', undefined, true); mutate(f.inventory);
     assert.throws(() => verifyActivationVariables(f.plan, 'launch', f.inventory),
       error => !error.message.includes('private-value'));
   }
@@ -349,7 +478,7 @@ test('price publishers deploy after the keeper with sealed keys, and nowhere els
     rows => { rows.find(row => row.name === 'PUBLISHER_KEY').isSealed = false; },
     rows => { rows.find(row => row.name === 'ROUND_PRICES_KEY').serviceId = keeperId; },
   ]) {
-    const f = fixture('prepare', 'human', true);
+    const f = fixture('prepare', 'human', undefined, true);
     const rows = f.target.environment.variables.edges.map(({ node }) => node);
     mutate(rows);
     f.target.environment.variables.edges = rows.map(node => ({ node }));
@@ -358,9 +487,16 @@ test('price publishers deploy after the keeper with sealed keys, and nowhere els
   const f = fixture();
   f.target.environment.variables.edges.push({ node: { name: 'PUBLISHER_KEY', serviceId: keeperId, isSealed: true } });
   await assert.rejects(activatedRelease(f.options), /sealed service boundary/, 'no publisher keys without a publishers service');
-  const { raw } = fixture('launch', 'human', true);
+  const { raw } = fixture('launch', 'human', undefined, true);
   for (const id of [keeperId, services[0].id, 'not-a-uuid']) {
     const bad = JSON.stringify({ ...JSON.parse(raw), publishersServiceId: id });
     assert.throws(() => parseActivation(bad, digest(bad)), /own service/);
   }
+  const both = fixture('launch', 'human', relayPlan(), true);
+  assert.deepEqual(activationServices(both.plan, 'launch').map(s => s.name).filter(n => ['keeper', 'publishers', 'relay-topup'].includes(n)),
+    ['keeper', 'publishers', 'relay-topup']);
+  await activatedRelease(both.options);
+  const relay = relayPlan();
+  relay.topup.serviceId = publishersId;
+  assert.throws(() => fixture('launch', 'human', relay, true), /Invalid top-up service/);
 });

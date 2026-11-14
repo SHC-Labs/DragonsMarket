@@ -1,13 +1,29 @@
 {
   "note": "Copy this file, complete every placeholder value, then run plan. The paths in decide are defaults the owner must confirm.",
   "network": "mainnet",
+  "release": {
+    "sourceCommit": "FILL_reviewed_public_release_commit",
+    "imageDigest": "FILL_sha256_build_image_digest"
+  },
   "parent": "dragonsmarket.near",
   "dao": "dragonsmarket.sputnik-dao.near",
+  "daoCodeHash": "FILL_approved_DAO_code_hash",
+  "daoMinApprovals": 3,
   "nft": "techdragons.nft.cookon.near",
+  "nftCustody": {
+    "mode": "platform-managed",
+    "accountId": "techdragons.nft.cookon.near",
+    "ownerId": "cookon.near",
+    "codeHash": "FILL_approved_NFT_code_hash",
+    "publicKeys": ["ed25519:67k6LHXYbFdM5ikxUtAmoZwV7c7HqdYXepcKoDscx3AC"],
+    "custodian": "Cookon",
+    "reviewEvidence": "FILL_https_review_record_including_retained_platform_key"
+  },
   "verifier": "intents.near",
   "collateral": "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
   "operator": "FILL_operator_account",
   "decide": [
+    "daoMinApprovals",
     "operator",
     "contracts.market.fundingNear",
     "contracts.oracle.fundingNear",

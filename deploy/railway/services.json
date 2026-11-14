@@ -193,6 +193,18 @@
     "build.dockerfilePath": "backend/Dockerfile",
     "deploy.cronSchedule": "*/5 * * * *"
   },
+  "relay-topup": {
+    "source.rootDirectory": "/",
+    "build.builder": "DOCKERFILE",
+    "build.buildCommand": "",
+    "build.watchPatterns": ["backend/**", "contracts/keeper/**", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".node-version", "deploy/railway/**", ".dockerignore"],
+    "deploy.startCommand": "node dist/src/relay-topup.js",
+    "deploy.preDeployCommand": [],
+    "deploy.restartPolicyType": "NEVER",
+    "deploy.sleepApplication": false,
+    "build.dockerfilePath": "backend/Dockerfile",
+    "deploy.cronSchedule": "*/10 * * * *"
+  },
   "publishers": {
     "source.rootDirectory": "/",
     "build.builder": "DOCKERFILE",

@@ -20,7 +20,9 @@ After the team syncs the reviewed code publicly, prepare a JSON document with th
 | `publicRpcUrl` | Plain HTTPS origin usable by the browser, without credentials, query strings or fragments. |
 | `keeperApproval` | The complete [keeper approval packet](KEEPER-APPROVAL.md), including the registered manifest, approved builds, custody, market allowlist and gas limits. |
 | `launchEvidence` | HTTPS review record for funded human acceptance, market disposition, alerts, recovery and operating ownership. Required for `launch`. |
-| `agent` | Omit for `human`. For `agents`, include plain HTTPS `apiUrl`, approved `walletContract` and HTTPS `acceptanceEvidence`. |
+| `agent` | Omit for `human`. For `agents`, include plain HTTPS `apiUrl`, approved `walletContract`, `policySponsor` (approved NEAR account, or explicit `null` for unsponsored storage) and HTTPS `acceptanceEvidence`. |
+| `relay` | Optional for either profile. For human EVM/Solana execution, include `accountId`, the approved Ed25519 `publicKey`, decimal-string `minFee` and `maxFee` in collateral units, and HTTPS `acceptanceEvidence`. The ceiling cannot exceed `100000` (0.10 USDC). Without this section, relay execution and the browser relayer setting remain disabled. |
+| `relay.topup` | Optional automated gas replenishment. Include a distinct Railway `serviceId`, `treasuryPublicKey`, `submitPublicKey`, and decimal-string limits `belowNear`, `minUsdc`, `maxUsdc`, `maxUsdcPerDay`, `maxSlippageBps`, plus HTTPS `acceptanceEvidence`. USDC limits are in micro-units; `belowNear` is in NEAR. All three relay keys must differ. |
 
 The keeper packet expires after at most 30 days. Generate `KEEPER_APPROVAL_JSON` with `JSON.stringify(packet.keeperApproval)` and `KEEPER_APPROVAL_SHA256` from those exact serialized bytes. Install the identical pair on `database-release` and `keeper`. Both digests detect configuration mismatch; neither is a reviewer signature. Reviewers must inspect the evidence themselves: these scripts validate link syntax but do not fetch or attest to the linked documents. People able to change protected configuration or deployed code control these gates.
 
@@ -42,6 +44,67 @@ Set `publishersServiceId` in the packet to the dedicated Railway `publishers` se
 
 Recording carries no price authority: the contract checks the publishers' signatures itself, and `claim` settles a round. Keys held by one service are one operator's trust, whatever the threshold; move keys to independent holders before relying on the threshold.
 
+Relay evidence must cover both wallet standards, setup and trading fees, sell/redeem/withdraw outcomes, interrupted submissions,
+browser reloads and cross-tab exclusion. Withdrawing from a market credits Intents; it does not itself prove an onward
+cash-out to an EVM or Solana wallet. The branch implements that separate journey through 1Click, but funded
+acceptance remains mandatory before enabling the relay profile. See the cash-out checks below.
+
+The API keeps `RELAYER_KEY` sealed on `server`, where PostgreSQL coordinates its submission journal and nonce cursor.
+Set `RELAYER_PUBLIC_KEY` to the reviewed key; its on-chain permission must be only `execute_intents` on the configured
+verifier, with a positive allowance no greater than 5 NEAR. Both RPC providers must agree. A gas balance alone does not
+renew a depleted access-key allowance.
+
+If selected, `relay-topup` is a private, single-replica job scheduled every ten minutes. Its dry-run preparation has no
+signing keys. Launch requires sealed treasury and submit keys on that job only, the approved public keys, a separate
+`dm_relay_topup_login` database credential and funded recovery evidence. It never receives the API signing secret.
+Provision `RELAY_TOPUP_DB_PASSWORD` only on `database-release`. The migration/role release runs before the job, API and
+website. See [the top-up runbook](OPERATIONS.md#relay-gas-top-up) for its treasury authority and remaining recovery limits.
+
+## Cross-chain cash-out acceptance
+
+The portfolio sends an explicit USDC amount from the connected user's Intents account to that same user's wallet.
+EVM wallets can choose Base or Arbitrum; Solana wallets use Solana. It does not accept another recipient or arbitrary
+asset. This human flow is independent of the Agent API and uses the 1Click relayer, not the market relayer's gas key.
+
+The pinned official 1Click SDK verifies the quote signature. The browser checks the requested assets, recipient,
+refund account, amount, minimum output, refund fee and deadlines. It then validates the generated message as one
+transfer to the signed quote's deposit address, with no callbacks or additional tokens. ERC191 and Ed25519 signatures
+are verified locally before submission. The 1Click request deadline starts refund processing; the returned quote
+deadline is a longer address/signature lifetime. The UI shows both and requires a fresh review before signing.
+
+The pending record is written before the wallet prompt and the signed bytes are persisted before submission. Its
+reader is the portfolio recovery hook, under the same browser lock as market signing. Reload and status checks
+never resend. Explicit retry submits identical bytes and is refused after the short refund window. A terminal
+record needs the original signed quote, a consumed nonce from finalized Intents state, and matching provider payout
+or refund accounting. Success also requires a destination transaction hash. The completed record is retained
+before the pending record is removed. Failures, missing evidence and partial refunds remain unresolved.
+
+Provider status and destination hashes are not independently verified destination-chain receipts. The UI therefore
+says that 1Click reports completion. Funded acceptance must independently verify USDC delivery and fees in the
+destination wallet, and refunds in Intents. This remains trust in the 1Click swap service, not an atomic exchange
+enforced by Dragons Market. Local browser storage can be cleared or lost, and does not coordinate other devices.
+Download unresolved records securely; they contain a signed spending authorization until it expires. Do not post
+them publicly. If the signature expires without conclusive settlement, preserve the request and investigate its
+intent/receipts with the provider. Expiry or an unused-nonce response alone is not historical payment evidence.
+
+The [signed execution documentation](https://docs.near-intents.org/integration/distribution-channels/1click-api/quickstart/signed-intent-execution)
+requires partner authentication for generate/submit. An unauthenticated quote and unsigned generation succeeded
+during local investigation; funded submission has not been attempted. Do not infer production access from those
+reads. If partner authentication is required, add a reviewed server-side adapter with scoped rate limits; never
+place a partner secret in browser configuration or storage. This dependency must close before publishing cash-out.
+
+Exercise Base, Arbitrum and Solana with the approved test budget. Cover quote expiry, wallet rejection/account
+switch, insufficient funds, lost submission replies, browser reload, cross-tab exclusion, identical retry,
+provider rejection, destination payment, and refund accounting. Keep the funded receipts with `relay.acceptanceEvidence`.
+
+`pnpm --filter web test:cross-chain` runs a local Chromium check against Caddy and a mainnet fixture export. Build
+with `NEXT_PUBLIC_NETWORK=mainnet`, `NEXT_PUBLIC_VERIFIER_ID=intents.near`, the canonical native-USDC
+token/collateral pair, and nonempty fixture market/oracle/backend/relayer settings. These are build-time browser
+variables, not service variables. Every external browser request is intercepted; wallet signatures use the public
+test key 1, quotes are recorded and no transaction is broadcast. The test checks signing, a lost reply, reload,
+identical retry and settlement archiving under production CSP. It adds no automatic Actions job. The regular
+`test:csp` check still uses the existing testnet fixture build.
+
 ## Before preparation
 
 Deploy the approved Council consent update before the corresponding website build: its
@@ -50,8 +113,9 @@ Oracle/Rounds publisher replacement also needs the new approved contract build. 
 storage layouts are unchanged by these methods; normal upgrade proof and code-hash approval
 remain required.
 
-The live approval check now requires empty NEAR access-key lists on all selected financial
-contracts, the NFT's approved code hash, and a proven upgrade path on every financial contract. At the same
+The live approval check requires empty NEAR access-key lists on all selected financial
+contracts and a proven upgrade path on every financial contract. The NFT must match its
+[custody policy](NFT-CUSTODY.md), which can explicitly retain the approved platform key. At the same
 finalized block, both providers must confirm no Intents keys on the financial accounts,
 predecessor authentication enabled, accounts unlocked and verifier `mt_transfer` unpaused.
 Missing or malformed responses stop preparation. This check only reads; it does not seal

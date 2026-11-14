@@ -11,9 +11,10 @@ import {
   accessQuoteSell, accessRounds, accessSession, accessSummary, listAccessTokens, requestAccess, revokeAccessToken,
   runAccessAction, signAccess, type Access,
 } from './agent-access.js';
-import { accessPath, agentPath, intentPath, tokenPath, type AgentRoutes, type Body, type Owner } from './agent-paths.js';
+import { accessPath, agentPath, intentPath, tokenPath, type AgentRoutes, type Body, type AgentOwner } from './agent-paths.js';
+import { agentOwner, allowOwnerRoute, nearOwner } from './agent-owner.js';
 
-type OwnerHandler = (s: AgentAccounts, owner: Owner, ids: string[], body: Body) => Promise<unknown>;
+type OwnerHandler = (s: AgentAccounts, owner: AgentOwner, ids: string[], body: Body) => Promise<unknown>;
 type AccessHandler = (s: AgentAccounts, access: Access, body: Body) => Promise<unknown>;
 
 function unsettled(error: unknown): never {
@@ -26,19 +27,19 @@ function unsettled(error: unknown): never {
 
 const ownerHandlers: Record<string, OwnerHandler> = {
   'GET agents': (s, owner) => listAgents(s, owner),
-  'POST agents': (s, owner, _ids, body) => body().then(b => createAgent(s, owner, b.name)),
-  'POST grant': (s, owner, [id = '']) => issueGrant(s, owner, id),
+  'POST agents': (s, owner, _ids, body) => body().then(b => createAgent(s, nearOwner(owner), b.name)),
+  'POST grant': (s, owner, [id = '']) => issueGrant(s, nearOwner(owner), id),
   'POST revoke': (s, owner, [id = '']) => revokeGrants(s, owner, id),
-  'POST freeze': (s, owner, [id = '']) => freezeAgent(s, owner, id, true),
-  'POST unfreeze': (s, owner, [id = '']) => freezeAgent(s, owner, id, false),
-  'POST actions': (s, owner, [id = ''], body) => body().then(b => runOwnedAction(s, owner, id,
-    { key: b.key, action: parseOwnedAction(b.action, owner.account), limits: sessionLimits(s, owner) }))
+  'POST freeze': (s, owner, [id = '']) => freezeAgent(s, nearOwner(owner), id, true),
+  'POST unfreeze': (s, owner, [id = '']) => freezeAgent(s, nearOwner(owner), id, false),
+  'POST actions': (s, owner, [id = ''], body) => body().then(b => runOwnedAction(s, nearOwner(owner), id,
+    { key: b.key, action: parseOwnedAction(b.action, nearOwner(owner).account), limits: sessionLimits(s, owner) }))
     .catch(unsettled),
   'GET operations': (s, owner, [id = '']) => agentOperations(s, owner, id),
   'GET claimable': (s, owner, [id = '']) => agentClaimable(s, owner, id),
   'GET access': (s, owner, [id = '']) => listAccessTokens(s, owner, id),
-  'POST access': (s, owner, [id = ''], body) => body().then(b => requestAccess(s, owner, id, b)),
-  'POST access-sign': (s, owner, [id = '', token = ''], body) => body().then(b => signAccess(s, owner, id, token, b)),
+  'POST access': (s, owner, [id = ''], body) => body().then(b => requestAccess(s, nearOwner(owner), id, b)),
+  'POST access-sign': (s, owner, [id = '', token = ''], body) => body().then(b => signAccess(s, nearOwner(owner), id, token, b)),
   'POST access-revoke': (s, owner, [id = '', token = '']) => revokeAccessToken(s, owner, id, token),
   'POST intent': (s, owner, [id = ''], body) => body().then(b => submitOwnerIntent(s, owner, id, b.signed_data)),
   'POST status': (s, owner, [id = '']) => ownerIntentStatus(s, owner, id),
@@ -89,8 +90,10 @@ const notAllowed = () => Promise.reject(new ReadError(405, 'method_not_allowed')
 export function createAgentRoutes(s: AgentAccounts): AgentRoutes {
   return {
     owner: (method, path, owner, body) => {
+      const identity = agentOwner(owner);
+      allowOwnerRoute(identity, method, path);
       const found = ownerTarget(path), handler = found && ownerHandlers[`${method} ${found[0]}`];
-      return found && handler ? handler(s, owner, found[1], body).catch(refusal) : notAllowed();
+      return found && handler ? handler(s, identity, found[1], body).catch(refusal) : notAllowed();
     },
     access: (method, path, authorization, body) => {
       const name = accessPath.exec(path)?.[1], handler = name && accessHandlers[`${method} ${name}`];

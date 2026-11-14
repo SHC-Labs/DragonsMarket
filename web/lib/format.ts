@@ -18,6 +18,15 @@ export function formatMicro(value: bigint | string, decimals = 2): string {
 }
 
 export const formatMoney = (v: bigint | string) => formatMicro(v, 2);
+
+// Every unit, never rounded: "0.004", "5.00", "1,234.567891". For amounts a person is about to sign, where a rounded "0.00"
+// would show less than the wallet sends.
+export function formatExact(value: bigint | string): string {
+  const v = typeof value === "string" ? BigInt(value) : value;
+  const whole = v / MICRO;
+  const frac = (v % MICRO).toString().padStart(6, "0").replace(/0+$/, "").padEnd(2, "0");
+  return `${whole.toLocaleString("en-US")}.${frac}`;
+}
 export const formatShares = (v: bigint | string) => formatMicro(v, 1);
 
 // Price in millionths of one unit -> "62¢".

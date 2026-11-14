@@ -104,7 +104,7 @@ const markets = SPECS.map(([title, source, voidPolicy, category, sub, days, targ
 const jurors = ["juror0.test.near", "juror1.test.near", "juror2.test.near"];
 const ago = (s) => String(now() - BigInt(s) * SEC);
 const ahead = (s) => String(now() + BigInt(s) * SEC);
-const base = { proposer: "carol.test.near", panel_deadline: ahead(1800), challenger: null, challenger_answer: null, round: 0, draw_by: "0", votes: [], final_outcome: null, applied: false, juror_share_bps: 5000, no_decision_share_bps: 5000 };
+const base = { proposer: "carol.test.near", bond: "50000000", panel_deadline: ahead(1800), challenger: null, challenger_answer: null, round: 0, draw_by: "0", votes: [], final_outcome: null, applied: false, juror_share_bps: 5000, no_decision_share_bps: 5000 };
 const cases = {
   1: () => ({ ...base, stage: "proposed", proposed: "yes", evidence: "Exchange closes on 4 November: 80,156 / 80,212 / 80,090 USD.", window_ends_at: ahead(540) }),
   2: () => ({ ...base, stage: "disputed", proposed: "yes", evidence: "Final score on uefa.com: Fenerbahçe 3, Liverpool 2.", window_ends_at: ago(30), challenger: "dave.test.near", challenger_answer: "no", draw_by: ahead(3600), challenged_at: ago(60), panel: jurors, commits: [{ juror: jurors[0], commitment: "9f2c…a71e" }], commit_ends_at: ahead(900), draw_after_height: "1200", delinquent: [] }),
@@ -271,7 +271,7 @@ const views = {
       state_version: 2, upgrade_proven: false, upgrade_in_flight: false,
       owner: "owner.test.near", pending_owner: null, operator: "keeper.test.near", oracle: ORACLE,
       verifier: VERIFIER, collateral_token_id: "nep141:ft.test.near",
-      paused: false, sells_paused: false, markets: String(markets.length), storage_deposit: "50000000000000000000000",
+      paused: false, sells_paused: false, markets: String(markets.length), storage_deposit: "50000000000000000000000", registration_fee: "1000000",
       max_positions: 20, fee_rate_bps: 200,
       revenue_pool: "council.test.near", treasury: "treasury.test.near",
       revenue_share_bps: 2500, treasury_share_bps: 7500,

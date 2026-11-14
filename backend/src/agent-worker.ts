@@ -3,6 +3,8 @@ import type { AgentAccounts } from './agent-accounts.js';
 import { AgentApiClient } from './agent-api.js';
 import { finalTransaction, nearBalance } from './agent-chain.js';
 import { createAgentRoutes } from './agent-routes.js';
+import { agentAuthorizer } from './agent-authorization.js';
+import { agentReadiness } from './agent-readiness.js';
 import { startAgentSweep } from './agent-sweep.js';
 import { readAgentWorkerConfig, type AgentWorkerConfig } from './agent-worker-config.js';
 import { createAgentWorkerServer } from './agent-worker-server.js';
@@ -12,12 +14,12 @@ import { createPool, verifyDatabase, verifyRuntimeLogin } from './database.js';
 import { operationStore } from './operations.js';
 import { ReadRpcClient } from './providers.js';
 
-function agentAccounts(config: AgentWorkerConfig, pool: ReturnType<typeof createPool>): AgentAccounts {
+function agentAccounts(config: AgentWorkerConfig, pool: ReturnType<typeof createPool>, api: AgentApiClient): AgentAccounts {
   const { shared, deployment, agentApi, grantKey, walletContract } = config;
-  const api = new AgentApiClient(agentApi);
   const rpc = () => new ReadRpcClient(shared.rpc.primaryUrl, shared.rpc, shared.rpc.primaryBearerToken);
   const runner: AgentRunner = {
     deployment, api, waitMs: 0,
+    authorize: agentAuthorizer(pool, deployment, api),
     transaction: (hash, sender) => finalTransaction(rpc(), hash, sender),
     operations: operationStore(pool, deployment.id),
   };
@@ -27,7 +29,8 @@ function agentAccounts(config: AgentWorkerConfig, pool: ReturnType<typeof create
   };
   return { db: pool, deployment, api, runner, chain, grantKey, checkKey: accessKeyChecker(shared),
     webOrigin: shared.webOrigin,
-    signing: { walletContract, messageRecipient: new URL(agentApi.url).hostname } };
+    signing: { walletContract, policySponsor: config.policySponsor,
+      messageRecipient: new URL(agentApi.url).hostname, network: shared.network } };
 }
 
 let pool: ReturnType<typeof createPool> | undefined;
@@ -36,9 +39,12 @@ try {
   const database = pool = createPool(config.shared.databaseUrl);
   await verifyRuntimeLogin(pool, 'dm_agent_login');
   await verifyDatabase(pool, config.shared);
-  const agents = agentAccounts(config, pool);
+  const api = new AgentApiClient(config.agentApi);
+  const agents = agentAccounts(config, pool, api);
+  const ready = agentReadiness(() => verifyDatabase(database, config.shared),
+    () => api.verifyService({ network: config.shared.network, walletContract: config.walletContract }));
   const server = createAgentWorkerServer(createAgentRoutes(agents), config.token,
-    () => verifyDatabase(database, config.shared));
+    ready);
   let sweep: ReturnType<typeof startAgentSweep> | undefined;
   server.on('error', () => {
     console.error('The agent worker failed to listen');

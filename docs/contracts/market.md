@@ -2,7 +2,7 @@
 
 **Dynamic parimutuel pricing, 2026-10-27.** The constant-product pool and its seed are gone. Every market now prices by a dynamic parimutuel cost function (`dpm/src/lib.rs`, see "How trading works"). A registered market opens empty at even odds and anyone can make the first trade: there is no `seed:` message, no creation fee and no opening price. A winning share is paid its part of the pool, never less than it cost, and a Void, or an answer nobody holds, pays each holder back what they put in (see "Void"). `sell` takes the shares to sell and the least collateral to accept. A version-5 root migrates only while it has created no market, because a constant-product pool cannot be turned into parimutuel shares, so a deployment that has markets is replaced, not upgraded. The largest market record is now 4,775 bytes and a new market's storage deposit 0.04775 NEAR.
 
-**Token deposits, 2026-10-27.** An account that holds the collateral as a NEAR token and nothing in the verifier can now pay the market with the token's `ft_transfer_call` and the message `deposit` or `buy`, after registering with `storage_deposit` in NEAR. The market moves the money into its own Intents account and credits the sender only once it is there (see "Money in by token"). A `buy` is then bought in a receipt of its own, so a buy the price outran stays a balance.
+**Funding update, 2026-11-10.** Direct token forwards are retired. Users fund their own Intents balance, then authorize a separate transfer to the market. See "Funding from a token wallet" below.
 
 **Signed actions and collateral registration, 2026-10-26.** A signed Intents intent can buy, sell, redeem and withdraw for its signer through `on_auth` (see "Signed actions"). An account with no NEAR registers by sending the registration fee in collateral with the message `register` (see "Money in"). A deposit paid by someone else for an account now goes back to that payer when the account leaves.
 
@@ -375,6 +375,7 @@ message decides what to do. The message grammar is the one the NEP-141 hook had.
 | `msg`                              | Who                | What it does                                                                                                                                                       |
 | ---------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `deposit`                          | Registered account | Adds the amount to the sender's balance. Refused if paused or not registered.                                                                                     |
+| `deposit_for:<account>` | Any sender | Credits a registered beneficiary in the same receipt, with a minimum of 0.1 collateral. Refused while paused. |
 | `register`                         | Not yet registered | Registers the sender for the registration fee (`config.registration_fee`), which is due to the treasury whole, and credits the rest to the sender's balance. The market's own NEAR carries the account's storage, inside the storage reserve. Refused if paused, if the sender is registered already (`already registered`) or if the amount is short of the fee (`send at least the registration fee`). |
 | `buy:<market>:<side>:<min shares>` | Registered account | Buys directly with the money sent. `side` is `yes` or `no`. `min shares` is a slippage floor and must be above zero. |
 
@@ -390,50 +391,27 @@ this contract, so nothing is credited to the sender. The old notify form
 (`{"receiver_id":"<market>","msg":"deposit","min_gas":...}`) is no different: the verifier ignores the
 fields it does not know. That money is surplus. It shows up as the verifier holding more than
 `total_owed`, it is never credited automatically, and no method of this contract credits it. Clients
-must fund the market through `mt_transfer_call`, or with the token itself as below.
+must fund the market through `mt_transfer_call`, after funding their own Intents account as below.
 
-### Money in by token: `ft_on_transfer`
+### Funding from a token wallet
 
-An account that holds the collateral as a NEAR token can pay the market directly. It registers
-first with `storage_deposit` and 0.05 NEAR, paid by itself or by anyone for it, then calls
-`ft_transfer_call(receiver_id: <market>, amount, msg)` on the token with 1 yocto and 100 TGas. The
-token moves the amount to the market and calls `ft_on_transfer(sender_id, amount, msg)` here, the
-standard NEP-141 receiver (`FungibleTokenReceiver` from `near-contract-standards`). The market keeps
-none of it as a token: it sends the whole amount on with the token's
-`ft_transfer_call(receiver_id: <verifier>, amount, msg: <this contract>)`, which credits the market's
-own Intents account, and credits the sender only in the callback `on_forwarded`, once the verifier
-has the money. The books therefore never count money the verifier does not hold. The market's
-account must be registered with the token first, a one-time `storage_deposit` on the token; until
-then the token refuses the transfer.
+Direct token transfers to the market are refused. Fund the user's **own** Intents account first:
+`token.ft_transfer_call(receiver_id: verifier, amount, msg: user_account)`.
+After verifying that credit, the user signs a separate
+`verifier.mt_transfer_call(receiver_id: market, token_id, amount, msg)`.
+Use `deposit`, `buy:<market>:<side>:<min_shares>`, or `deposit_for:<beneficiary>`.
+The beneficiary must already be registered; a gift must be at least 0.1 collateral.
+The sender and credited beneficiary are recorded in the deposit event.
 
-The hook checks, in this order: the caller is the collateral token (`only the collateral token can
-deliver money`); the sender is not the verifier (`send from your own account, not out of the
-verifier`), because an Intents withdrawal with a message arrives from the verifier and does not say
-whose money it is; the amount is above zero; and at least 75 TGas reached the hook (`attach at least
-75 TGas`): 50 for the forward, 20 for the callback, which may start a buy, and 5 for its own work.
-Then:
+This removes the market's second token forward and its ambiguous resolver callback.
+If the token resolver fails after Intents accepts the first deposit, the funds belong to the
+user in Intents. Do not automatically repeat that deposit. Verify the receipt graph and both balances.
+If the market rejects the second transfer, the verifier returns it to the sender's Intents balance.
 
-| `msg`                              | Who                | What it does |
-| ---------------------------------- | ------------------ | ------------ |
-| `deposit`                          | Registered account | Credits the amount to the sender's balance once the verifier has it. Refused if paused or not registered. |
-| `deposit_for:<account>`            | Anyone             | Credits the balance of another registered account once the verifier has it, at least 0.1 of the collateral. This is how an owner funds an agent that must never hold the token. The deposit event names the sender as `from`, and a refusal before the forward still refunds the sender. |
-| `buy:<market>:<side>:<min shares>` | Registered account | Credits the amount once the verifier has it, then buys `side` with it as `buy` does from a balance. Refused if paused, not registered, the market is not open, the side is not `yes` or `no`, or the minimum is zero. A buy that fails after the credit, because the price moved or the market closed in between, leaves the money in the balance. |
-
-A message with more parts than its action takes is refused, as above. Any other message is
-refused (`unknown action`), `register` included: an account with no
-NEAR registers through the verifier instead (see "Money in"). Every refusal comes before the
-forward, so the token hands the whole amount back to the sender.
-
-`on_forwarded` reads how much the verifier took from the token's answer. That much is credited and
-the rest goes back to the sender: when the forward failed or the verifier refused it, nothing is
-credited and the token returns everything. An account that unregisters while its money is on its
-way is credited it all the same and takes it out with `withdraw`, which needs no registration; the
-storage deposit it got back on leaving is not paid twice. The callback never refuses, because what
-it is told about is already in the verifier. For a `buy` it credits what the verifier took and
-starts `buy_for`, a private method, with that amount and 10 TGas. A `buy_for` that fails reverts
-only itself, so the money stays credited. The events are the ones the verifier path emits:
-`deposit`, then `buy` after a token buy. A token whose own refund step fails can leave a transfer in
-the verifier with nobody credited; that shows as surplus, never as money owed and missing.
+The private `on_forwarded` and `buy_for` callbacks remain for receipts scheduled by an older
+deployment. They are not new funding entry points. No storage migration is required.
+Existing surplus from legacy forwards is not automatically assigned or credited by this change;
+recovery needs transaction-level evidence and a separately reviewed procedure.
 
 ### Signed actions: `on_auth`
 
@@ -985,8 +963,8 @@ All big numbers in event data are strings.
 | --------------------------------------------- | --------------------------------------------------------------------------------------- |
 | Verifier `mt_transfer` (withdraw, treasury fee) | 15 TGas (the verifier burned 3.8 measured) |
 | Verifier `mt_transfer_call` (revenue to the Council) | 42 TGas: 22 for the verifier's own part, 20 for the Council's `mt_on_transfer` |
-| Token `ft_transfer_call` (a token deposit on to the verifier) | 50 TGas. A whole token deposit burned 17.5 TGas measured, 4.6 of it in the market |
-| `buy_for` (the buy after a token buy)         | 10 TGas, out of the 20 its callback gets. A whole token buy burned 21.1 TGas measured, 8.2 of it in the market |
+| Direct token forward | Retired; no new forward is scheduled |
+| `buy_for` (legacy callback only) | 10 TGas; retained for pre-upgrade receipts |
 | Oracle registration                           | 20 TGas                                                                                 |
 | Verifier `remove_public_key` (`remove_verifier_key`) | 15 TGas                                                                          |
 | Each callback                                 | 10 TGas                                                                                 |

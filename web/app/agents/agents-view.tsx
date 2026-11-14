@@ -6,6 +6,7 @@ import { StepNotice, useStep } from "@/components/AgentStep";
 import { Button, Notice } from "@/components/ui";
 import { useWallet } from "@/components/WalletProvider";
 import { usePoll } from "@/lib/hooks";
+import { signsWithRelay } from "@/lib/wallet-account";
 import { currentSession } from "@/lib/backend";
 import { agentsSetup, refreshAgents, type AgentsSetup } from "@/lib/agents";
 
@@ -68,13 +69,14 @@ function OwnerAgents({ account }: { account: string }) {
 }
 
 export function AgentsView() {
-  const { account, openConnect, walletAvailable } = useWallet();
+  const { account, identity, openConnect, walletAvailable } = useWallet();
   const connect = <Button onClick={openConnect} disabled={!walletAvailable}>Connect wallet</Button>;
   const description = "Connect your wallet to open an agent account. You sign the rules it follows, and Dragons "
     + "Market acts for it only within them.";
   return <div className="page-content agents-page">
     <PageLandmark title="Agents" />
-    {account ? <OwnerAgents account={account} />
+    {signsWithRelay(identity) ? <Notice>Agent accounts are available with a NEAR wallet for now.</Notice>
+      : account ? <OwnerAgents account={account} />
       : <AccountEmptyState title="Trade through an agent" description={description} actions={connect} />}
   </div>;
 }

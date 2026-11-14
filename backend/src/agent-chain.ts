@@ -6,7 +6,7 @@ type Rpc = Pick<ReadRpcClient, 'call'>;
 export interface ContractEvent { executor: string; standard: string; event: string; data: Record<string, unknown> }
 export interface CallAction { method: string; args: unknown; deposit: string }
 export interface FinalTransaction {
-  signer: string; receiver: string; calls: (CallAction | null)[]; events: ContractEvent[]; failed: string[];
+  signer: string; receiver: string; calls: (CallAction | null)[]; events: ContractEvent[]; failed: string[]; succeeded: string[];
 }
 
 function callAction(action: unknown): CallAction | null {
@@ -20,7 +20,7 @@ function callAction(action: unknown): CallAction | null {
 }
 
 function receiptResults(receipts: unknown[]) {
-  const events: ContractEvent[] = [], failed: string[] = [];
+  const events: ContractEvent[] = [], failed: string[] = [], succeeded: string[] = [];
   for (const receipt of receipts) {
     const o = object(receipt) && object(receipt.outcome) ? receipt.outcome : null;
     if (!o || typeof o.executor_id !== 'string' || !Array.isArray(o.logs) || !object(o.status)) {
@@ -28,6 +28,7 @@ function receiptResults(receipts: unknown[]) {
     }
     if (Object.hasOwn(o.status, 'Failure')) failed.push(o.executor_id);
     if (!Object.hasOwn(o.status, 'SuccessValue') && !Object.hasOwn(o.status, 'SuccessReceiptId')) continue;
+    succeeded.push(o.executor_id);
     for (const log of o.logs) {
       if (typeof log !== 'string' || !log.startsWith('EVENT_JSON:')) continue;
       let parsed: unknown;
@@ -38,7 +39,7 @@ function receiptResults(receipts: unknown[]) {
       }
     }
   }
-  return { events, failed };
+  return { events, failed, succeeded };
 }
 
 function completeReceipts(outcome: Record<string, unknown>, hash: string, sender: string): unknown[] {

@@ -1,3 +1,6 @@
+// An error whose message is already a sentence a person can act on, so the interface may show it as written.
+export class UserFacingError extends Error {}
+
 // Contract panic text -> a sentence a person can act on. Matches the failure copy in the design notes.
 const RULES: [RegExp, string][] = [
   [/has not closed/i, "This market is still open. Wait until trading closes."],

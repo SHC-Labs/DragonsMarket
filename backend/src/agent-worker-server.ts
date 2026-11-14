@@ -4,6 +4,7 @@ import { object } from './ingestion/block.js';
 import { ReadError } from './read-api.js';
 import type { Forwarded } from './agent-gateway.js';
 import { accessPath, type AgentRoutes, type Body } from './agent-paths.js';
+import { agentOwner, allowOwnerRoute } from './agent-owner.js';
 
 const MAX_BODY_BYTES = 131072;
 
@@ -32,10 +33,9 @@ async function requestOf(req: IncomingMessage): Promise<Forwarded> {
 function route(routes: AgentRoutes, { method, path, owner, authorization, body }: Forwarded) {
   const read: Body = () => (object(body) ? Promise.resolve(body) : Promise.reject(new ReadError(400, 'invalid_json')));
   if (accessPath.test(path)) return routes.access(method, path, authorization, read);
-  if (!owner || typeof owner.account !== 'string' || typeof owner.publicKey !== 'string') {
-    throw new ReadError(400, 'invalid_request');
-  }
-  return routes.owner(method, path, owner, read);
+  const identity = agentOwner(owner);
+  allowOwnerRoute(identity, method, path);
+  return routes.owner(method, path, identity, read);
 }
 
 export function createAgentWorkerServer(routes: AgentRoutes, token: string, ready?: () => Promise<void>) {

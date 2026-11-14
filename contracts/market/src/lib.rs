@@ -4,7 +4,6 @@
 // The JSON interface takes one argument per field, so a few methods are long on purpose.
 #![allow(clippy::too_many_arguments)]
 
-use near_contract_standards::fungible_token::core::ext_ft_core;
 use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds, StorageManagement};
 use near_sdk::json_types::{Base58CryptoHash, U128, U64};
@@ -90,12 +89,7 @@ const GAS_COUNCIL_RECEIPT: Gas = Gas::from_tgas(20);
 const GAS_MT_TRANSFER_CALL: Gas = Gas::from_gas(GAS_VERIFIER_CALL_OVERHEAD.as_gas() + GAS_COUNCIL_RECEIPT.as_gas());
 const GAS_REGISTER: Gas = Gas::from_tgas(20);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
-const GAS_FT_FORWARD: Gas = Gas::from_tgas(50);
 const GAS_BUY: Gas = Gas::from_tgas(10);
-const GAS_ON_FORWARDED: Gas = Gas::from_gas(GAS_CALLBACK.as_gas() + GAS_BUY.as_gas());
-const GAS_FORWARD_OVERHEAD: Gas = Gas::from_tgas(5);
-const GAS_FORWARD_FLOOR: Gas =
-    Gas::from_gas(GAS_FT_FORWARD.as_gas() + GAS_ON_FORWARDED.as_gas() + GAS_FORWARD_OVERHEAD.as_gas());
 // A sweep sends the Council's part with its callback and the treasury's part with its callback, and burns about 3
 // TGas itself.
 const GAS_SWEEP_OVERHEAD: Gas = Gas::from_tgas(10);
@@ -1775,6 +1769,16 @@ impl MarketContract {
                 self.assert_can_deposit(&sender_id);
                 self.credit_deposit(&sender_id, amount.0, &sender_id);
             }
+            Some("deposit_for") => {
+                let who: AccountId = parse_part(parts.next(), "account");
+                no_more(parts);
+                self.assert_can_deposit(&who);
+                require!(
+                    amount.0 >= MIN_DEPOSIT_FOR,
+                    "a deposit for an account must be at least the minimum"
+                );
+                self.credit_deposit(&who, amount.0, &sender_id);
+            }
             Some("register") => {
                 no_more(parts);
                 self.register_with_collateral(&sender_id, amount.0);
@@ -1791,6 +1795,7 @@ impl MarketContract {
         vec![U128(0)]
     }
 
+    // Retained for callbacks scheduled before direct token forwarding was retired.
     #[private]
     pub fn on_forwarded(
         &mut self,
@@ -2633,67 +2638,8 @@ impl StorageManagement for MarketContract {
 #[near]
 impl FungibleTokenReceiver for MarketContract {
     fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> PromiseOrValue<U128> {
-        let token = env::predecessor_account_id();
-        require!(
-            self.collateral_token_id.strip_prefix(NEP141_PREFIX) == Some(token.as_str()),
-            "only the collateral token can deliver money"
-        );
-        require!(
-            sender_id != self.verifier,
-            "send from your own account, not out of the verifier"
-        );
-        require!(amount.0 > 0, "amount must be positive");
-        upgrade::require_gas(
-            GAS_FORWARD_FLOOR,
-            "the market moves the money into its Intents account before crediting it",
-        );
-        let mut parts = msg.split(':');
-        let arrival = match parts.next() {
-            Some("deposit") => {
-                no_more(parts);
-                self.assert_can_deposit(&sender_id);
-                Arrival::Deposit
-            }
-            Some("deposit_for") => {
-                let who: AccountId = parse_part(parts.next(), "account");
-                no_more(parts);
-                self.assert_can_deposit(&who);
-                require!(
-                    amount.0 >= MIN_DEPOSIT_FOR,
-                    "a deposit for an account must be at least the minimum"
-                );
-                Arrival::DepositFor(who)
-            }
-            Some("buy") => {
-                let id: u64 = parse_part(parts.next(), "market id");
-                let side = side_index(parts.next().unwrap_or(""));
-                let min_out: u128 = parse_part(parts.next(), "min shares");
-                no_more(parts);
-                self.market_to_buy(&sender_id, id, min_out);
-                Arrival::Buy {
-                    market_id: U64(id),
-                    side,
-                    min_shares: U128(min_out),
-                }
-            }
-            _ => env::panic_str("unknown action"),
-        };
-        PromiseOrValue::Promise(
-            ext_ft_core::ext(token)
-                .with_attached_deposit(ONE_YOCTO)
-                .with_static_gas(GAS_FT_FORWARD)
-                .ft_transfer_call(
-                    self.verifier.clone(),
-                    amount,
-                    None,
-                    env::current_account_id().to_string(),
-                )
-                .then(
-                    Self::ext(env::current_account_id())
-                        .with_static_gas(GAS_ON_FORWARDED)
-                        .on_forwarded(sender_id, amount, arrival),
-                ),
-        )
+        let _ = (sender_id, amount, msg);
+        env::panic_str("deposit into your own Intents account, then use mt_transfer_call");
     }
 }
 
@@ -8357,82 +8303,107 @@ mod tests {
     }
 
     #[test]
-    fn a_token_deposit_moves_on_to_intents_before_it_is_credited() {
-        let (mut c, total_in) = world();
-        let before = c.get_balance(acct(USERS[0])).0;
-        token_sends(&mut c, USERS[0], 5_000_000, "deposit", 100);
-        let sent = receipts();
-        assert_eq!(sent.len(), 2);
-        assert_eq!(sent[0].receiver_id, acct(TOKEN));
-        let (method, args, deposit, gas) = call_of(&sent[0]);
-        assert_eq!(method, "ft_transfer_call");
-        assert_eq!((deposit, gas), (1, GAS_FT_FORWARD.as_gas()));
-        assert_eq!(args["receiver_id"], VERIFIER);
-        assert_eq!(args["amount"], "5000000");
-        assert_eq!(args["msg"], SELF, "the verifier credits the market's own account");
-        assert_eq!(sent[1].receiver_id, acct(SELF));
-        let (method, args, _, gas) = call_of(&sent[1]);
-        assert_eq!((method.as_str(), gas), ("on_forwarded", GAS_ON_FORWARDED.as_gas()));
-        assert_eq!(args["sender_id"], USERS[0]);
-        assert_eq!(args["amount"], "5000000");
-        assert_eq!(args["arrival"], "deposit");
-        assert_eq!(c.get_balance(acct(USERS[0])).0, before);
-        assert_eq!(c.total_owed().0, total_in, "nothing is owed for money still on its way");
+    fn direct_token_deposits_never_start_a_forward() {
+        let (mut c, _) = world();
+        for msg in ["deposit", "deposit_for:ben.near", "buy:0:yes:1"] {
+            let reason = refusal(|| token_sends(&mut c, USERS[0], 5_000_000, msg, 100));
+            assert!(reason.contains("own Intents account"));
+            assert!(receipts().is_empty());
+        }
     }
 
     #[test]
-    fn every_token_refusal_comes_before_the_forward() {
-        let (mut c, total_in) = world();
-        let (paid, floor) = (5_000_000, GAS_FORWARD_FLOOR.as_tgas());
-        let not_the_token = "only the collateral token can deliver money";
-        let for_ben = format!("deposit_for:{}", USERS[1]);
-        let cases: [(&str, &str, u128, &str, u64, &str); 18] = [
-            ("evil.near", USERS[0], paid, "deposit", 100, not_the_token),
+    fn a_gift_from_intents_is_credited_in_the_receiver_receipt() {
+        let (mut c, _) = world();
+        let before = c.get_balance(acct(USERS[1])).0;
+        act_as(VERIFIER, 3);
+        let result = c.mt_on_transfer(
+            acct(USERS[0]),
+            vec![acct(USERS[0])],
+            vec![COLLATERAL_ID.into()],
+            vec![U128(5_000_000)],
+            format!("deposit_for:{}", USERS[1]),
+        );
+        assert_eq!(result, vec![U128(0)]);
+        assert_eq!(c.get_balance(acct(USERS[1])).0, before + 5_000_000);
+        assert!(receipts().is_empty());
+    }
+
+    #[test]
+    fn gifts_validate_the_beneficiary_amount_and_custody_before_crediting() {
+        let (mut c, _) = world();
+        let before = c.get_balance(acct(USERS[1])).0;
+        for (who, token, previous, amount, msg) in [
             (
-                TOKEN,
                 USERS[0],
-                paid,
-                "deposit_for:zed.near",
-                100,
-                "storage deposit first",
+                COLLATERAL_ID,
+                USERS[0],
+                5_000_000,
+                format!("deposit_for:{}", USERS[1]),
             ),
             (
-                TOKEN,
+                VERIFIER,
+                "nep141:wrong.near",
                 USERS[0],
-                MIN_DEPOSIT_FOR - 1,
-                &for_ben,
-                100,
-                "at least the minimum",
+                5_000_000,
+                format!("deposit_for:{}", USERS[1]),
             ),
-            (TOKEN, USERS[0], paid, "deposit_for", 100, "bad account"),
-            (TOKEN, USERS[0], paid, "deposit_for:Not An Account", 100, "bad account"),
-            (TOKEN, USERS[0], paid, "deposit_for:ben.near:1", 100, "more parts"),
-            (VERIFIER, USERS[0], paid, "deposit", 100, not_the_token),
-            (TOKEN, VERIFIER, paid, "deposit", 100, "not out of the verifier"),
-            (TOKEN, USERS[0], 0, "deposit", 100, "amount must be positive"),
-            (TOKEN, USERS[0], paid, "deposit", floor - 1, "attach at least"),
-            (TOKEN, USERS[0], paid, "register", 100, "unknown action"),
-            (TOKEN, USERS[0], paid, "seed:0", 100, "unknown action"),
-            (TOKEN, USERS[0], paid, "", 100, "unknown action"),
-            (TOKEN, "zed.near", paid, "deposit", 100, "storage deposit first"),
-            (TOKEN, "zed.near", paid, "buy:0:yes:1", 100, "storage deposit first"),
-            (TOKEN, USERS[0], paid, "buy:7:yes:1", 100, "no such market"),
-            (TOKEN, USERS[0], paid, "buy:0:maybe:1", 100, "side must be yes or no"),
-            (TOKEN, USERS[0], paid, "buy:0:yes:0", 100, "must be above zero"),
-        ];
-        for (caller, from, amount, msg, tgas, expected) in cases {
-            testing_env!(VMContextBuilder::new()
-                .predecessor_account_id(acct(caller))
-                .block_timestamp(3)
-                .prepaid_gas(Gas::from_tgas(tgas))
-                .build());
-            let reason = refusal(|| {
-                let _ = c.ft_on_transfer(acct(from), U128(amount), msg.into());
+            (
+                VERIFIER,
+                COLLATERAL_ID,
+                USERS[1],
+                5_000_000,
+                format!("deposit_for:{}", USERS[1]),
+            ),
+            (
+                VERIFIER,
+                COLLATERAL_ID,
+                USERS[0],
+                1,
+                format!("deposit_for:{}", USERS[1]),
+            ),
+            (
+                VERIFIER,
+                COLLATERAL_ID,
+                USERS[0],
+                5_000_000,
+                "deposit_for:nobody.near".into(),
+            ),
+            (VERIFIER, COLLATERAL_ID, USERS[0], 5_000_000, "deposit_for:!".into()),
+            (
+                VERIFIER,
+                COLLATERAL_ID,
+                USERS[0],
+                5_000_000,
+                format!("deposit_for:{}:extra", USERS[1]),
+            ),
+        ] {
+            act_as(who, 3);
+            refusal(|| {
+                c.mt_on_transfer(
+                    acct(USERS[0]),
+                    vec![acct(previous)],
+                    vec![token.into()],
+                    vec![U128(amount)],
+                    msg,
+                );
             });
-            assert!(reason.contains(expected), "{caller} {from} {msg}: {reason}");
-            assert!(receipts().is_empty(), "{msg}: nothing was sent");
+            assert_eq!(c.get_balance(acct(USERS[1])).0, before);
+            assert!(receipts().is_empty());
         }
-        assert_eq!(c.total_owed().0, total_in);
+        act_as(OWNER, 3);
+        c.set_paused(true);
+        act_as(VERIFIER, 3);
+        refusal(|| {
+            c.mt_on_transfer(
+                acct(USERS[0]),
+                vec![acct(USERS[0])],
+                vec![COLLATERAL_ID.into()],
+                vec![U128(5_000_000)],
+                format!("deposit_for:{}", USERS[1]),
+            );
+        });
+        assert_eq!(c.get_balance(acct(USERS[1])).0, before);
     }
 
     #[test]
@@ -8442,7 +8413,7 @@ mod tests {
         c.set_paused(true);
         for msg in ["deposit", "buy:0:yes:1"] {
             let reason = refusal(|| token_sends(&mut c, USERS[0], 5_000_000, msg, 100));
-            assert!(reason.contains("paused"), "{msg}: {reason}");
+            assert!(reason.contains("own Intents account"), "{msg}: {reason}");
         }
     }
 
@@ -8471,7 +8442,7 @@ mod tests {
         }
         for msg in ["deposit:x", "buy:0:yes:1:9"] {
             let reason = refusal(|| token_sends(&mut c, USERS[0], 5_000_000, msg, 100));
-            assert!(reason.contains(extra), "{msg} by token: {reason}");
+            assert!(reason.contains("own Intents account"), "{msg} by token: {reason}");
         }
         assert_eq!(c.total_owed().0, total_in);
     }
@@ -8496,14 +8467,7 @@ mod tests {
     fn a_deposit_for_another_account_credits_that_account_and_names_who_paid() {
         let (mut c, total_in) = world();
         let before = (c.get_balance(acct(USERS[0])).0, c.get_balance(acct(USERS[1])).0);
-        token_sends(&mut c, USERS[0], 5_000_000, &format!("deposit_for:{}", USERS[1]), 100);
-        let (_, args, _, _) = call_of(&receipts()[1]);
-        assert_eq!(
-            (&args["sender_id"], &args["arrival"]),
-            (&json!(USERS[0]), &json!({ "depositfor": USERS[1] })),
-            "a refusal past this point still refunds the sender, who paid"
-        );
-        let arrival = near_sdk::serde_json::from_value(args["arrival"].clone()).unwrap();
+        let arrival = Arrival::DepositFor(acct(USERS[1]));
         act_as(SELF, 4);
         let back = c.on_forwarded(acct(USERS[0]), U128(5_000_000), arrival, Ok(U128(5_000_000)));
         assert_eq!(back.0, 0);
@@ -8523,7 +8487,6 @@ mod tests {
         let (mut c, total_in) = world();
         act_paying("dan.near", NearToken::from_millinear(50));
         c.storage_deposit(None, None);
-        token_sends(&mut c, USERS[0], 5_000_000, "deposit_for:dan.near", 100);
         act_paying("dan.near", NearToken::from_yoctonear(1));
         assert!(c.storage_unregister(None));
         act_as(SELF, 4);
@@ -8551,15 +8514,10 @@ mod tests {
     }
 
     #[test]
-    fn a_token_buy_carries_its_order_to_the_callback() {
+    fn direct_token_buys_are_refused_without_creating_a_callback() {
         let (mut c, _) = world();
-        token_sends(&mut c, USERS[0], 5_000_000, "buy:1:no:7", 100);
-        let (method, args, _, _) = call_of(&receipts()[1]);
-        assert_eq!(method, "on_forwarded");
-        assert_eq!(
-            args["arrival"],
-            json!({ "buy": { "market_id": "1", "side": 1, "min_shares": "7" } })
-        );
+        assert!(refused(|| token_sends(&mut c, USERS[0], 5_000_000, "buy:1:no:7", 100)));
+        assert!(receipts().is_empty());
     }
 
     #[test]
@@ -8574,7 +8532,7 @@ mod tests {
         testing_env!(VMContextBuilder::new()
             .predecessor_account_id(acct(SELF))
             .block_timestamp(4)
-            .prepaid_gas(GAS_ON_FORWARDED)
+            .prepaid_gas(Gas::from_gas(GAS_CALLBACK.as_gas() + GAS_BUY.as_gas()))
             .build());
         let back = c.on_forwarded(acct(USERS[0]), U128(5_000_000), order, Ok(U128(4_000_000)));
         assert_eq!(back.0, 1_000_000);
@@ -8598,7 +8556,6 @@ mod tests {
         let (mut c, total_in) = world();
         act_paying("zed.near", FIFTY_MILLI);
         c.storage_deposit(None, None);
-        token_sends(&mut c, "zed.near", 5_000_000, "deposit", 100);
         act_as("zed.near", 4);
         assert!(c.storage_unregister(None));
         act_as(SELF, 5);

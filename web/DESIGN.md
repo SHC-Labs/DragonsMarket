@@ -312,6 +312,10 @@ Reuse before building. Import from these files and extend them rather than copyi
 | `CountUp` | `components/CountUp.tsx` | Numbers that change while the user watches | Static numbers |
 | Icons | `components/icons.tsx` | Every icon. Phosphor; `Linear` by default, `Bulk` or `TwoTone` decorative, `Bold` selected; 16, 20 or 24px | Importing `@phosphor-icons/react` directly |
 | Dialogs | `HowItWorksDialog.tsx`, `TermsAcceptanceDialog.tsx` | Native `<dialog>` with `--elev-3` | Custom overlay divs |
+| `ModalDialog` | `components/ModalDialog.tsx` | The shared native modal for wallet steps: takes focus, keeps Tab inside, closes on Escape, returns focus, locks page scroll | Information a person can read without acting: use a page section |
+| `ConnectDialog` | `components/ConnectDialog.tsx` | Choosing a NEAR, Ethereum-compatible or Solana wallet; on a phone with no wallet, "Open in" links to wallet browsers | Any other choice. Shown only when the relay is configured; otherwise NEAR connects directly |
+| `DepositDialog` | `components/DepositDialog.tsx` | Getting a 1Click deposit address for USDC on Base, Arbitrum or Solana into an EVM or Solana account's Intents balance, then its status | NEAR accounts, which fund from their wallet in the trade ticket |
+| `AnswerPanel`, `AnswerForm` | `components/AnswerPanel.tsx` | Proposing or challenging a result with an EVM or Solana wallet, inside `Resolution`. `AnswerForm` is the form without wallet or network | NEAR accounts, and voting: both say a NEAR wallet is needed |
 
 Styles live in `app/styles/<area>.css` with semantic class names. Put a new component's styles in
 its area's file. Use Tailwind utilities only for one-off layout.

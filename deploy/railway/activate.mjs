@@ -5,11 +5,13 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { verifyKeeperApproval } from '../../backend/dist/src/keeper-approval.js';
 import { ReadRpcClient } from '../../backend/dist/src/providers.js';
+import { executeIntentsKeyNonce, keyAllowance } from '../../backend/dist/src/relay.js';
+import { base58Decode } from '../../backend/dist/src/base58.js';
 import { checkTarget, environmentId, projectId, railwayQuery, services, uploadSource, verifySource, waitForDeployment } from './release.mjs';
 import { checkBackups, postgresId } from './backups.mjs';
 import { smoke, verifyActivated } from './smoke.mjs';
 import { activationServices, agentService, expectedBrowser, origins, parseActivation, pricesService, publishersService,
-  requireLaunchEvidence, verifyActivationVariables, verifySealedExecutionKeys, workerServices } from './activation-plan.mjs';
+  requireLaunchEvidence, topupService, verifyActivationVariables, verifySealedExecutionKeys, workerServices } from './activation-plan.mjs';
 
 const ensure = (condition, message) => { if (!condition) throw new Error(message); };
 const recent = (date, age, now) => typeof date === 'string' && Number.isFinite(Date.parse(date)) &&
@@ -64,12 +66,15 @@ function completed(service, plan, stage, message) {
   if (service.name === 'verify-chain') return value.ok === true && Array.isArray(value.problems) && value.problems.length === 0;
   if (service.name === 'keeper') return value.service === 'keeper' && value.mode === (stage === 'prepare' ? 'prepare' : 'sign') &&
     (stage === 'prepare' ? value.signing === false : value.signing === true && value.current === true);
+  if (service.name === 'relay-topup') return value.service === 'relay-topup' && value.event === 'result'
+    && value.mode === (stage === 'prepare' ? 'dry-run' : 'execute')
+    && (stage === 'prepare' ? ['dry_run', 'healthy'].includes(value.state) : ['healthy', 'topped_up', 'withdrawn'].includes(value.state));
   return false;
 }
 
 export async function activationSnapshot(query, plan, stage) {
   const all = [...services, ...workerServices, { name: 'keeper', id: plan.keeperServiceId }, ...publishersService(plan),
-    agentService, pricesService];
+    agentService, pricesService, ...(topupService(plan) ? [topupService(plan)] : [])];
   const target = await checkTarget(query, all);
   const metadata = target.environment.variables?.edges?.map(({ node }) => node);
   verifySealedExecutionKeys(plan, stage, metadata);
@@ -109,10 +114,28 @@ export async function activationSnapshot(query, plan, stage) {
   return { inventory, server, metadata: metadata.toSorted((a, b) => a.id.localeCompare(b.id)) };
 }
 
-function checkContracts(plan, config) {
-  return verifyKeeperApproval(plan.approval, config,
-    new ReadRpcClient(config.rpc.primaryUrl, config.rpc, config.rpc.primaryBearerToken),
-    new ReadRpcClient(config.rpc.secondUrl, config.rpc, config.rpc.secondBearerToken));
+async function checkContracts(plan, config) {
+  const providers = [new ReadRpcClient(config.rpc.primaryUrl, config.rpc, config.rpc.primaryBearerToken),
+    new ReadRpcClient(config.rpc.secondUrl, config.rpc, config.rpc.secondBearerToken)];
+  await verifyKeeperApproval(plan.approval, config, ...providers);
+  await verifyRelayKeys(plan, providers);
+}
+
+export async function verifyRelayKeys(plan, providers) {
+  if (!plan.relay) return;
+  ensure(providers.length === 2 && providers.every(provider => typeof provider?.call === 'function'), 'Relay activation requires two RPC providers');
+  for (const key of [plan.relay.publicKey, ...(plan.relay.topup ? [plan.relay.topup.submitPublicKey] : [])]) {
+    const first = await providers[0].call('query', { request_type: 'view_access_key', account_id: plan.relay.accountId,
+      public_key: key, finality: 'final' });
+    ensure(typeof first?.block_hash === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(first.block_hash)
+      && base58Decode(first.block_hash).length === 32, 'Relay key view is not anchored to a block');
+    const second = await providers[1].call('query', { request_type: 'view_access_key', account_id: plan.relay.accountId,
+      public_key: key, block_id: first.block_hash });
+    const nonce = executeIntentsKeyNonce(first, plan.approval.deployment.contracts.verifier), allowance = keyAllowance(first);
+    ensure(nonce !== null && allowance !== null && allowance > 0n && allowance <= 5n * 10n ** 24n
+      && second?.block_hash === first.block_hash && executeIntentsKeyNonce(second, plan.approval.deployment.contracts.verifier) === nonce
+      && keyAllowance(second) === allowance, 'Relay keys require matching providers, narrow methods and bounded gas allowances');
+  }
 }
 
 export async function activatedRelease({ plan, stage, checkOnly = true, query, upload,
@@ -127,7 +150,7 @@ export async function activatedRelease({ plan, stage, checkOnly = true, query, u
   else {
     const built = await probe(`${origins.web}/deployment.json`);
     ensure(built?.version === 1 && ['marketId', 'oracleId', 'councilId', 'verifierId', 'nftId',
-      'collateralTokenId', 'tokenId', 'agentWalletContract', 'agentApiHost'].every(key => built[key] === ''),
+      'collateralTokenId', 'tokenId', 'relayerId', 'agentWalletContract', 'agentApiHost'].every(key => built[key] === ''),
       'Preparation requires the inactive browser release');
   }
   report(`Verified ${stage} configuration and approved contract identity; no deployments started`);

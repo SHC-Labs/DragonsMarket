@@ -14,11 +14,50 @@ The website uses an explicit owner-signed flow: wallet login, agent creation and
 Market, owner funding, then a separate signed MCP connection. Wallet login alone authorizes no spending. The AI gets
 only its `dmk_` connection token. The worker keeps the partner key and sealed `ngt_` grant; neither reaches MCP clients.
 
+MCP approval uses a versioned message binding the request ID, site, network, owner, agent, collateral,
+allowed actions, per-buy/stake limit, rolling allowance, signing deadline and exact access expiry. The browser
+reconstructs it from the user's form values and connected account before opening the wallet, then checks the
+returned account and deadline again. The server reconstructs the same message from its stored permissions,
+verifies the NEP-413 signature and live FullAccess key, and issues the token with one conditional update.
+Changed permissions, revocation, expiry and concurrent consumption during key verification cannot issue a token.
+The signed expiry is fixed at request creation; a delayed signature does not extend access.
+
+Agent provisioning and trading currently accept NEAR owners. The separate [EVM website login](WALLET-IDENTITY.md)
+can inspect owned agents and revoke existing connections/grants through the backend. It does not create an agent
+or grant spending permission. EVM provisioning, policy changes, new grants, MCP approval and execution remain
+refused until their policy, consent and funding/cash-out paths are integrated.
+The local EVM grant/revoke signing adapter is described in [WALLET-IDENTITY.md](WALLET-IDENTITY.md#implemented-evm-grantrevoke-signing-boundary).
+The separate [create/freeze adapter](WALLET-IDENTITY.md#implemented-evm-createfreeze-signing-boundary)
+validates signed wallet calls against the expected policy and custody account. Both are locally tested
+components; EVM wallet UI integration and activation remain unfinished. The implemented
+[inspection/revocation path](WALLET-IDENTITY.md#implemented-session-to-worker-inspection-and-revocation)
+keeps session identity separate from the signer and payout destination.
+
+Before deployment, the worker checks `/v1/network` against the configured mainnet wallet contract and NEAR owner
+support, and authenticates the partner key with `/v1/whoami`. Runtime `/health/ready` repeats those reads with a
+2.5-second provider deadline and a 30-second cache; concurrent probes share one request pair. Database readiness is
+checked every time. These reads establish compatibility and a valid credential, not approval of the returned tenant,
+a funded wallet, a synchronized account policy or support for EVM owners in Dragons. Confirm the tenant in the key
+portal and complete the funded acceptance tests separately. Upstream dependency status is advisory.
+
+Provider failure returns a generic not-ready response without terminating the worker or suspending reconciliation.
+Readiness does not authorize an operation. The dispatch checks below still apply to every new send. The sweep logs
+fixed failure messages without including provider responses, credentials or signed consent.
+
 The skill is served at `/skill.md`, through the `dragons-market://skill` resource and the `trade-dragons-market` prompt.
 `get_policy` reads the account policy from the Agent API, reports whether it is applied and provider-synced, and
 compares it with the application's expected policy. A changed or unrecognized policy is marked for owner review,
-never represented as the expected policy. It also reports the signed connection limits and their enforcement scope.
+never represented as the expected policy. The worker repeats this check before every send, including recovery;
+an unapplied, unsynchronized, frozen or mismatched policy blocks it. It also reports the signed connection limits and their enforcement scope.
 Policy amounts are atomic units. `get_agent` reports connection amounts as decimals and includes remaining allowance.
+
+Freeze/unfreeze reconciliation reads the current applied, synchronized policy; the success or failure of an older
+intent does not establish the account's current state. A per-account observation counter rejects responses that
+overlap a newer local update. Unconfirmed policy keeps the local `frozen` execution hold, so that flag can be more
+restrictive than the last confirmed custody state. If an unfreeze reports success before its policy is confirmed,
+continue observing the same correlation; the background sweep retries too. Do not create a replacement signature
+or report that execution resumed until the applied readback succeeds. See the migration and rollback sequence in
+[OPERATIONS.md](OPERATIONS.md#agent-authorization-and-uncertain-payments).
 
 The MCP only exposes the supported Dragons Market actions. Account administration, policy changes, funding, NFT
 minting and arbitrary native calls are not MCP tools. Its `list_markets` scans 50 ids at a time: pass
@@ -42,7 +81,48 @@ capability that binds method arguments to value, or a reviewed change to the tra
 by adding unsupported fields to an API request. Do not advertise that protection as available.
 
 Concurrent requests reserve their spend under a database lock before dispatch. Pending, uncertain and review-needed
-actions keep their allowance reserved; only proved failures release it. Separate connections have separate limits.
+actions keep their allowance reserved even after 24 hours; only proved failures release it. Confirmed trades count
+for 24 hours after confirmation. Separate connections have separate limits; website actions share the configured
+owner allowance across that owner's agents. Connection expiry/revocation and grant state are checked again after
+the policy read. An operation already admitted may still complete after revocation; reconciliation keeps following
+its recorded correlation without requiring a live grant or permitting a new send.
+
+Owner consent is checked against the requested grant credential, owner, agent, network, expiry and nonce before it
+reaches the wallet. Revocation consent must name the requested grant. Backend and browser both allow only policy
+storage and the requested freeze/unfreeze transition, with bounded gas/deposit and no extra wallet callback or
+sender fields. NEAR delegates and EVM policy messages bind the custody wallet, tenant, agent, policy revision,
+complete declared policy commitment and approved storage refund recipient. The worker builds that approval from
+the owner operation and verified API identity/account reads; it never accepts the provider's approval object.
+Freeze/unfreeze restate applied rules with only the freeze flag changed. A failed proposal can be retried using the
+last applied rules and the next unused revision, after checking the current snapshot against bounded history.
+Pending revisions, changed snapshots and missing applied history refuse a new signature request.
+The policy document is encrypted: its contents and custody enforcement still depend on the Agent API
+and provider, and must be exercised with the production integration before launch.
+
+The provider's signer must match both the authenticated account and public key. Its verified signer descriptor
+is retained in the intent sent to the browser. The browser also checks canonical grant/revoke contents, nonce,
+network, authority, lifetime and selected owner, and refuses a wallet response from another account/key. These
+checks prevent a familiar recipient or message prefix from standing in for the actual permission being signed.
+
+Deploy the matching worker/API and web revision together. Old unsigned MCP requests must be created again;
+they fail with `access_request_changed`. Previously issued tokens keep their existing expiry and permissions.
+Old pending provider intents without a signer descriptor cannot be signed in the new browser; let them expire
+and prepare a new request. Unsigned NEAR policy intents without the new approval context also require regeneration;
+the worker rechecks stored delegates before submission. Status observation/reconciliation of already submitted
+intents remains available, including older requests.
+The NEAR consent change adds no database migration, service or scheduled job. The subsequent EVM
+consent adapter adds the same pinned `viem` version to the browser that the backend already uses.
+For policy storage, set worker `AGENT_API_POLICY_SPONSOR` to the provider's reviewed public refund account, or leave
+it blank for unsponsored storage. The activation packet must explicitly pin the same account or `null`.
+
+Owner-intent observations apply their status and account/grant effects atomically. Concurrent stale responses cannot
+overwrite a completed outcome or replay its effects after a later owner action. Retry observation under the same
+correlation after a race; a conflicting final outcome requires investigation, never a replacement signature.
+
+Recovery compares the journaled transaction with the current plan before doing anything. If they differ, the operation
+stays in review with `operation_plan_changed`; its allowance remains reserved. Reconcile the original request and
+receipt instead of resubmitting a replacement or clearing its reservation. These application checks do not establish
+EVM-owner support or an independently enforced custody-side trade budget.
 
 ## How it fits together
 

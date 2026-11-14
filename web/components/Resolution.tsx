@@ -1,12 +1,16 @@
 "use client";
 
-import { usePoll } from "@/lib/hooks";
+import { useNow, usePoll } from "@/lib/hooks";
 import { getCase, type Case, type MarketView, type Outcome } from "@/lib/market";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, nsToMs } from "@/lib/format";
 import { seedHex } from "@/lib/sigil";
 import { Sigil } from "./Sigil";
+import { AnswerPanel } from "./AnswerPanel";
+import { useWallet } from "./WalletProvider";
+import { signsWithRelay } from "@/lib/wallet-account";
 import { MarketSeal } from "./MarketSeal";
 import { ArrowUpRight } from "./icons";
+import { ResolutionActions } from "./ResolutionActions";
 
 const evidenceUrl = (value: string) => {
   try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) ? url : null; } catch { return null; }
@@ -16,8 +20,7 @@ const WORD: Record<Outcome, string> = { yes: "Yes", no: "No", void: "Void" };
 type StepState = "done" | "current" | "upcoming" | "skipped";
 
 // Where the market is in its resolution, from its status and the case stage alone.
-function steps(market: MarketView, c: Case | null): { label: string; state: StepState }[] {
-  const closed = market.status !== "open";
+function steps(closed: boolean, c: Case | null): { label: string; state: StepState }[] {
   const stage = c?.stage;
   const final = stage === "final";
   return [
@@ -28,25 +31,26 @@ function steps(market: MarketView, c: Case | null): { label: string; state: Step
   ];
 }
 
-function Tracker({ market, record }: { market: MarketView; record: Case | null }) {
+function Tracker({ closed, record }: { closed: boolean; record: Case | null }) {
   return <ol className="resolution-tracker" aria-label="Resolution progress">
-    {steps(market, record).map((step, i) => <li key={step.label} data-state={step.state} style={{ "--i": i } as React.CSSProperties}>
+    {steps(closed, record).map((step, i) => <li key={step.label} data-state={step.state} style={{ "--i": i } as React.CSSProperties}>
       <span className="tracker-node" aria-hidden="true">{step.state === "done" ? "" : i + 1}</span>
       <span className="tracker-label">{step.label}<span className="sr-only">{step.state === "done" ? ", complete" : step.state === "current" ? ", current step" : step.state === "skipped" ? ", not needed" : ", upcoming"}</span></span>
     </li>)}
   </ol>;
 }
 
-// Read-only integration point. Proposal, jury, vote and settlement actions stay
-// in lib/market.ts for later integration once contract interfaces are finalized.
 export function Resolution({ market }: { market: MarketView }) {
-  const record = usePoll(() => market.status === "open" ? Promise.resolve(null) : getCase(market.id), [market.id, market.status], 8000);
+  const now = useNow();
+  const closed = market.outcome !== null || nsToMs(market.close_at) <= now;
+  const record = usePoll(() => getCase(market.id), [market.id], 8000);
   const c = record.data;
+  const relay = signsWithRelay(useWallet().identity);
   const evidence = evidenceUrl(c?.evidence ?? "");
   return <section aria-labelledby="res-h" className="detail-section">
     <h2 id="res-h" className="section-title">Resolution</h2>
-    {(market.status === "open" || !record.loading || c) && <Tracker market={market} record={c ?? null} />}
-    {market.status === "open" ? <p className="resolution-note">Trading closes on {formatDateTime(market.close_at)}. Follow the proposed answer and final result here.</p> : <>
+    {(!closed || !record.loading || c) && <Tracker closed={closed} record={c ?? null} />}
+    {!closed ? <p className="resolution-note">Trading closes on {formatDateTime(market.close_at)}. Follow the proposed answer and final result here.</p> : <>
       {record.loading && !c && <p role="status" className="resolution-note">Loading the result record…</p>}
       {record.error && <p role="alert" className="resolution-note">The result record is unavailable. <button type="button" className="btn btn-ghost btn-sm" onClick={record.reload}>Retry</button></p>}
       {c && <div className="resolution-record" data-stage={c.stage}>
@@ -65,10 +69,10 @@ export function Resolution({ market }: { market: MarketView }) {
           <Sigil hash={seedHex(vote.juror)} className="vote-sigil" />
           <div className="min-w-0"><span className="mono vote-juror">{vote.juror}</span><p><span className="vote-outcome" data-outcome={vote.outcome}>{WORD[vote.outcome]}</span>{vote.reason ? <span className="vote-reason">: {vote.reason}</span> : null}</p></div>
         </li>)}</ul></>}
-        {c.stage === "disputed" && <p className="resolution-note">Jury details and dispute actions are not available here yet.</p>}
       </div>}
       {!record.loading && !record.error && !c && <p className="resolution-note">No result has been published yet.</p>}
+      {relay && !record.loading && !record.error && <AnswerPanel market={market} record={c} onChange={record.reload} />}
     </>}
-    <p className="resolution-footnote">You cannot submit proposals, challenge results or vote on this site yet.</p>
+    {!relay && !record.loading && !record.error && <ResolutionActions key={market.id} id={market.id} record={c ?? null} reload={record.reload} />}
   </section>;
 }

@@ -210,15 +210,15 @@ test("the verifier's view of a contract is a problem when it has a key, refuses 
     assert.match(verifierProblems({ ...view, ...invalid })[0], /malformed verifier custody/);
 });
 
-test("the token must know the market and the verifier, or a deposit or buy by token cannot arrive", () => {
+test("only the verifier needs token registration for the supported funding route", () => {
   const view = { token: "usdc.near", market: "m.near", marketRegistered: true, verifier: "v.near", verifierRegistered: true };
   assert.deepEqual(tokenProblems(view), []);
-  assert.match(tokenProblems({ ...view, marketRegistered: false })[0], /^market m\.near is not registered with the token usdc\.near: the token refuses every deposit and buy/);
-  assert.match(tokenProblems({ ...view, verifierRegistered: false })[0], /^the verifier v\.near is not registered with the token usdc\.near: .*goes back to its sender$/);
-  assert.equal(tokenProblems({ ...view, marketRegistered: false, verifierRegistered: false }).length, 2);
+  assert.deepEqual(tokenProblems({ ...view, marketRegistered: false }), []);
+  assert.match(tokenProblems({ ...view, verifierRegistered: false })[0], /users cannot fund their own Intents accounts/);
+  assert.equal(tokenProblems({ ...view, marketRegistered: false, verifierRegistered: false }).length, 1);
   const withRounds = { ...view, rounds: "r.near", roundsRegistered: true };
   assert.deepEqual(tokenProblems(withRounds), []);
-  assert.match(tokenProblems({ ...withRounds, roundsRegistered: false })[0], /^rounds r\.near is not registered with the token usdc\.near: the token refuses every deposit and stake/);
+  assert.deepEqual(tokenProblems({ ...withRounds, roundsRegistered: false }), []);
 });
 
 test("access keys are counted, and are a problem only when the contracts are expected to be sealed", () => {

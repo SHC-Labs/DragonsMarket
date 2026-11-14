@@ -6,6 +6,8 @@
   "exports": {
     ".": { "types": "./keeper.d.mts", "import": "./keeper.mjs" },
     "./treasury": { "types": "./treasury.d.mts", "import": "./treasury.mjs" },
+    "./dao-policy": { "types": "./dao-policy.d.mts", "import": "./dao-policy.mjs" },
+    "./nft-custody": { "types": "./nft-custody.d.mts", "import": "./nft-custody.mjs" },
     "./round-prices": { "types": "./round-prices.d.mts", "import": "./round-prices.mjs" }
   },
   "files": ["*.mjs", "*.d.mts", "!*.test.mjs"],

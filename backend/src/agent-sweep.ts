@@ -4,10 +4,8 @@ import { followOwnerIntent, grantByCommitment, strandedIntents, type AgentAccoun
 
 const TICK_MS = 15000;
 
-const logged = (what: string) => (error: unknown) => {
-  const reason = error instanceof Error ? error.message.slice(0, 200) : 'unknown';
-  console.error(`Agent sweep could not follow ${what}: ${reason}`);
-};
+// Provider and database exceptions can carry credentials, request bodies or signed consent.
+const logged = (what: string) => () => console.error(`Agent sweep could not follow ${what}`);
 
 export async function sweepAgents(s: AgentAccounts) {
   for (const intent of await strandedIntents(s)) await followOwnerIntent(s, intent).catch(logged('an owner intent'));

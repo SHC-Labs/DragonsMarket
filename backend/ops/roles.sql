@@ -8,6 +8,7 @@ DO $$ BEGIN
  IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='dm_backup') THEN CREATE ROLE dm_backup NOLOGIN; END IF;
  IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='dm_agent') THEN CREATE ROLE dm_agent NOLOGIN; END IF;
  IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='dm_keeper') THEN CREATE ROLE dm_keeper NOLOGIN; END IF;
+ IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='dm_relay_topup') THEN CREATE ROLE dm_relay_topup NOLOGIN; END IF;
 END $$;
 GRANT USAGE ON SCHEMA public TO dm_api,dm_indexer,dm_worker,dm_publisher,dm_backup,dm_agent;
 GRANT USAGE ON SCHEMA public TO dm_keeper;
@@ -39,3 +40,8 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON SEQUENCES TO dm_backup
 GRANT SELECT ON schema_migrations,deployments TO dm_publisher;
 GRANT SELECT,INSERT,UPDATE ON signing_decisions TO dm_publisher;
 GRANT SELECT,INSERT ON price_evidence TO dm_publisher;
+-- The relay top-up job keeps its journal and its daily deposit record here; it never deletes either.
+GRANT USAGE ON SCHEMA public TO dm_relay_topup;
+GRANT SELECT,INSERT,UPDATE ON relay_topup_journal TO dm_relay_topup;
+GRANT SELECT,INSERT ON relay_topup_deposits TO dm_relay_topup;
+GRANT SELECT,INSERT,UPDATE ON relay_keys,relay_submissions TO dm_api;

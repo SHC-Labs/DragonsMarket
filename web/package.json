@@ -12,12 +12,14 @@
     "test": "vitest run && node --test scripts/*.test.mjs",
     "check:brand": "node scripts/check-brand.mjs",
     "test:csp": "node scripts/check-csp.mjs",
+    "test:cross-chain": "node scripts/check-cross-chain.mjs",
     "e2e": "playwright test",
     "serve": "node scripts/serve.mjs",
     "build:dev": "bash scripts/build-dev.sh",
     "dev:mock": "node scripts/dev-mock.mjs"
   },
   "dependencies": {
+    "@defuse-protocol/one-click-sdk-typescript": "0.1.26",
     "@hot-labs/near-connect": "^0.11.4",
     "@phosphor-icons/react": "^2.1.10",
     "@visx/curve": "^4.0.0",
@@ -25,7 +27,8 @@
     "@visx/shape": "^4.0.0",
     "next": "16.4.2",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "viem": "2.57.17"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",

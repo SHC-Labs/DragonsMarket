@@ -25,8 +25,9 @@ const digest = (value: unknown) => createHash('sha256').update(canonical(value))
 
 export const spentToday = (q: Queryable, deployment: string, via: string) =>
   q.query(`SELECT COALESCE(sum((request->'action'->>'amount')::numeric),0)::text AS n FROM user_operations
-    WHERE deployment_id=$1 AND request->>'via'=$2 AND request->'action'->>'kind' IN ('stake','buy')
-    AND state<>'failed' AND created_at>now()-interval '1 day'`, [deployment, via]).then(({ rows: [row] }) =>
+    WHERE deployment_id=$1 AND request ? 'via' AND request->>'via'=$2 AND request->'action'->>'kind' IN ('stake','buy')
+    AND state<>'failed' AND (state<>'confirmed' OR updated_at>now()-interval '1 day')`,
+  [deployment, via]).then(({ rows: [row] }) =>
     BigInt(row.n));
 
 export function operationStore(pool: pg.Pool, deployment: string) {
