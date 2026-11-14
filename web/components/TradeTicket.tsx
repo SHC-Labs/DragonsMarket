@@ -12,7 +12,7 @@ import { DepositDialog } from "./DepositDialog";
 import { TransactionNotice } from "./TransactionNotice";
 import { config } from "@/lib/config";
 import type { Action } from "@/lib/signed-intents";
-import { formatExact, formatMoney, formatShares, minSharesWithSlippage, nsToMs, toMicro } from "@/lib/format";
+import { averageShareCost, formatExact, formatMoney, formatShares, minSharesWithSlippage, nsToMs, toMicro } from "@/lib/format";
 import { useNow, usePoll, useRelayFee, useRelayTx, useTx } from "@/lib/hooks";
 import { signsWithRelay } from "@/lib/wallet-account";
 import {
@@ -198,6 +198,7 @@ function AccountTradeTicket({ market, initialSide }: { market: MarketView; initi
     <dl className="trade-estimates">
       <div><dt>{mode === "buy" ? "Total spend" : "Shares entered"}</dt><dd className="num">{input.trim() ? amount : "Not entered"}</dd></div>
       <div><dt>{mode === "buy" ? "Estimated shares" : "Estimated return"}</dt><dd className="num">{buyQuote && priced ? `${formatShares(buyQuote.shares_out)} shares` : sellQuote && priced ? money(sellNet) : "Unavailable"}</dd></div>
+      {mode === "buy" && <div><dt>Average cost per share</dt><dd className="num">{buyQuote && priced && value !== null ? `${averageShareCost(value, BigInt(buyQuote.shares_out))} ${config.tokenSymbol}` : "Unavailable"}</dd></div>}
       <div><dt>{mode === "buy" ? "Fee (included)" : "Fee"}</dt><dd className="num">{quote && priced ? money(BigInt(buyQuote?.fee ?? sellQuote?.fee ?? "0")) : "Not available yet"}</dd></div>
       {held && <>
         <div><dt>Available to trade</dt><dd className="num">{money(held.intents)}</dd></div>
@@ -209,6 +210,7 @@ function AccountTradeTicket({ market, initialSide }: { market: MarketView; initi
         {held.inMarket > 0n && <div><dt>Ready to withdraw</dt><dd className="num">{money(held.inMarket)}</dd></div>}
       </>}
     </dl>
+    {mode === "buy" && <p className="ticket-note">Average cost includes the trading fee. Winning shares split the final pool; payout per share is not fixed at 1 {config.tokenSymbol}.</p>}
     {!relay && <TransactionNotice tx={nearTx} />}
     {relay && <RelayNotice state={relayTx.state} recheck={async () => { if (await relayTx.recheck()) setInput(""); await reload(); }} />}
     <Button size="lg" onClick={action.onClick} disabled={action.disabled || busy} aria-describedby="trading-status">{action.locked && <Lock size={17} />}{action.label}</Button>

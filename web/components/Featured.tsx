@@ -12,7 +12,7 @@ import { ArrowRight } from "./icons";
 import { labelOf } from "@/lib/categories";
 import { config } from "@/lib/config";
 import { formatDateTime, formatMoney } from "@/lib/format";
-import { pct, resultWord } from "@/lib/probability";
+import { participationLabel, pct, resultWord } from "@/lib/probability";
 import type { MarketView } from "@/lib/market";
 
 export const deltaOf = (points: Pt[], now: number): number => (points.length > 1 ? Math.round(now - points[0].p) : 0);
@@ -28,6 +28,7 @@ export function DeltaChip({ delta, unit = false }: { delta: number; unit?: boole
 
 export function FeaturedMarket({ market: m, stage, points }: { market: MarketView; stage: string | null; points: Pt[] }) {
   const done = m.status === "resolved";
+  const participation = done ? null : participationLabel(m);
   const yes = pct(m.price_yes);
   const category = labelOf(m.category, m.subcategory);
   return <section data-testid="featured-market" className="spotlight-card featured-panel" aria-label="Featured market">
@@ -37,23 +38,24 @@ export function FeaturedMarket({ market: m, stage, points }: { market: MarketVie
       <div className="spotlight-meta"><MarketIcon category={m.category} sub={m.subcategory} small /><span>{category.category} · {category.sub}</span><StateBadge status={m.status} caseStage={stage} /></div>
       <h2 className="spotlight-title"><Link href={`/market?id=${m.id}`}>{m.title}</Link></h2>
       {done ? <p className="spotlight-result">Result: <strong>{resultWord(m)}</strong></p> : <>
-        <div className="spotlight-figure">
+        {participation ? <p className="spotlight-result">{participation}</p> : <><div className="spotlight-figure">
           <span className="display spotlight-number"><CountUp value={yes} /><small>%</small></span>
           <span className="spotlight-figure-label">chance of Yes{points.length > 1 && <DeltaChip delta={deltaOf(points, yes)} unit />}</span>
         </div>
-        <SplitMeter yes={yes} size="lg" />
+        <SplitMeter yes={yes} size="lg" /></>}
         <div className="feature-outcomes">{(["yes", "no"] as const).map(side => <Link key={side} href={`/market?id=${m.id}&side=${side}`} className={`feature-outcome-row feature-outcome-${side}`}>
-          <span className="feature-outcome-side">{side === "yes" ? "Yes" : "No"}</span><strong className="num">{side === "yes" ? yes : 100 - yes}%</strong><small>{m.status === "open" ? "Buy" : "View"}<ArrowRight size={13} /></small>
+          <span className="feature-outcome-side">{side === "yes" ? "Yes" : "No"}</span>{!participation && <strong className="num">{side === "yes" ? yes : 100 - yes}%</strong>}<small>{m.status === "open" ? "Buy" : "View"}<ArrowRight size={13} /></small>
         </Link>)}</div>
       </>}
       <div className="feature-card-footer"><span><span className="num">{formatMoney(m.locked)}</span> {config.tokenSymbol} in play</span><span>Closes <span className="num">{formatDateTime(m.close_at)}</span></span></div>
     </div>
-    <div className="spotlight-chart"><MarketOutcomeChart points={points} compact /></div>
+    <div className="spotlight-chart">{participation ? <p className="text-muted">Odds need holdings on both sides. Open the market for a quote.</p> : <MarketOutcomeChart points={points} compact />}</div>
   </section>;
 }
 
 function Row({ market: m, rank, points, right }: { market: MarketView; rank: number; points: Pt[]; right?: React.ReactNode }) {
   const yes = pct(m.price_yes);
+  const participation = participationLabel(m);
   return (
     <li>
       <Link href={`/market?id=${m.id}`} className="pulse-row">
@@ -61,8 +63,8 @@ function Row({ market: m, rank, points, right }: { market: MarketView; rank: num
         <span className="pulse-title">{m.title}</span>
         {right ?? (
           <span className="pulse-figures">
-            <span className="num pulse-chance">{yes}%</span>
-            <DeltaChip delta={deltaOf(points, yes)} />
+            <span className="num pulse-chance">{participation ?? `${yes}%`}</span>
+            {!participation && <DeltaChip delta={deltaOf(points, yes)} />}
           </span>
         )}
       </Link>

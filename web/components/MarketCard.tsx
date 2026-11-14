@@ -11,7 +11,7 @@ import { MarketIcon } from "./MarketIcon";
 import { labelOf } from "@/lib/categories";
 import { config } from "@/lib/config";
 import { formatDateTime, formatMoney } from "@/lib/format";
-import { pct, resultWord } from "@/lib/probability";
+import { participationLabel, pct, resultWord } from "@/lib/probability";
 import type { MarketView } from "@/lib/market";
 
 export function ProbBar({ yes }: { yes: number }) {
@@ -20,12 +20,13 @@ export function ProbBar({ yes }: { yes: number }) {
 
 // Each outcome opens the market with that side selected.
 function OutcomeRows({ market: m }: { market: MarketView }) {
+  const participation = participationLabel(m);
   return <div className="market-outcome-rows">{(["yes", "no"] as const).map(side => {
     const chance = pct(side === "yes" ? m.price_yes : m.price_no);
     const label = side === "yes" ? "Yes" : "No";
-    return <Link key={side} href={`/market?id=${m.id}&side=${side}`} className={`market-outcome-option market-outcome-${side}`} aria-label={`${m.status === "open" ? "Buy" : "View"} ${label}, ${chance}% chance, ${m.title}`}>
+    return <Link key={side} href={`/market?id=${m.id}&side=${side}`} className={`market-outcome-option market-outcome-${side}`} aria-label={`${m.status === "open" ? "Buy" : "View"} ${label}, ${participation ?? `${chance}% chance`}, ${m.title}`}>
       <span className="market-outcome-label">{label}</span>
-      <span className="market-outcome-chance num">{chance}%</span>
+      <span className="market-outcome-chance num">{participation ? "Quote" : `${chance}%`}</span>
     </Link>;
   })}</div>;
 }
@@ -51,6 +52,7 @@ export function MarketCard({ market: m, stage, index }: { market: MarketView; st
   const done = m.status === "resolved";
   const open = m.status === "open";
   const yes = pct(m.price_yes);
+  const participation = participationLabel(m);
   const labels = labelOf(m.category, m.subcategory);
   return (
     <article data-testid="market-card" data-state={done ? "resolved" : open ? "open" : "closed"} onPointerMove={track} className="market-card enter" style={{ "--i": index } as CSSProperties}>
@@ -69,8 +71,7 @@ export function MarketCard({ market: m, stage, index }: { market: MarketView; st
           </div>
         ) : open ? (
           <>
-            <div className="market-card-odds"><span className="num"><b>{yes}</b>%</span><span>chance of Yes</span></div>
-            <SplitMeter yes={yes} size="sm" />
+            {participation ? <p className="text-muted">{participation}</p> : <><div className="market-card-odds"><span className="num"><b>{yes}</b>%</span><span>chance of Yes</span></div><SplitMeter yes={yes} size="sm" /></>}
             <OutcomeRows market={m} />
           </>
         ) : (

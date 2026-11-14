@@ -21,7 +21,7 @@ import { config } from "@/lib/config";
 import { formatDateTime, formatMoney, nsToMs } from "@/lib/format";
 import { usePoll } from "@/lib/hooks";
 import { getCase, getHistory, getMarket, isMarketListed, listedMarket, listedStage, type MarketView } from "@/lib/market";
-import { pct, resultWord } from "@/lib/probability";
+import { participationLabel, pct, resultWord } from "@/lib/probability";
 import { categoryOf, labelOf } from "@/lib/categories";
 
 export function MarketPageView() {
@@ -53,6 +53,7 @@ export function MarketPageView() {
   const m = view.market;
   if (!isMarketListed(m)) return <PageHeader title="Market unavailable" description="This market is not ready for trading." actions={<Link href="/">Browse available markets</Link>} />;
   const done = m.status === "resolved";
+  const participation = done ? null : participationLabel(m);
   const yes = pct(m.price_yes);
   const first = view.points[0]?.p;
   const delta = first === undefined ? 0 : Math.round(yes - first);
@@ -70,21 +71,21 @@ export function MarketPageView() {
             <div className="price-panel-figure">
               {done ? (
                 <div className="display price-panel-number">{resultWord(m)}</div>
-              ) : (
+              ) : participation ? <div className="section-title">{participation}</div> : (
                 <div className="display price-panel-number" data-scrubbing={scrub ? true : undefined}><CountUp value={scrub ? Math.round(scrub.p) : yes} duration={scrub ? 260 : 900} /><span>%</span></div>
               )}
-              <div className="price-panel-label" aria-live="off">{done ? "final result" : scrub ? <>chance of Yes on <time className="num" dateTime={new Date(scrub.at).toISOString()}>{new Date(scrub.at).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</time></> : "chance of Yes"}</div>
+              {!participation && <div className="price-panel-label" aria-live="off">{done ? "final result" : scrub ? <>chance of Yes on <time className="num" dateTime={new Date(scrub.at).toISOString()}>{new Date(scrub.at).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</time></> : "chance of Yes"}</div>}
             </div>
-            {!done && view.points.length > 1 && (
+            {!done && !participation && view.points.length > 1 && (
               <div className="price-panel-delta num" data-dir={delta > 0 ? "up" : delta < 0 ? "down" : "flat"}>
                 {delta >= 0 ? "+" : ""}
                 {delta} pts over the available history
               </div>
             )}
           </div>
-          {done ? <div className="price-panel-settled" aria-hidden="true" /> : <SplitMeter yes={yes} labels size="lg" />}
+          {done ? <div className="price-panel-settled" aria-hidden="true" /> : participation ? <p>Odds need holdings on both sides. The trade ticket quotes the cost for your order size.</p> : <SplitMeter yes={yes} labels size="lg" />}
           <div className="price-panel-chart">
-            {pending ? <div className="skeleton chart-skeleton" aria-hidden="true" /> : <MarketOutcomeChart points={view.points} onActive={done ? undefined : setScrub} />}
+            {pending ? <div className="skeleton chart-skeleton" aria-hidden="true" /> : !participation && <MarketOutcomeChart points={view.points} onActive={done ? undefined : setScrub} />}
           </div>
         </section>
 

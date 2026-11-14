@@ -29,6 +29,13 @@ export function formatExact(value: bigint | string): string {
 }
 export const formatShares = (v: bigint | string) => formatMicro(v, 1);
 
+export function averageShareCost(amount: bigint, shares: bigint): string | null {
+  if (amount <= 0n || shares <= 0n) return null;
+  const scaled = (amount * 10_000n + shares / 2n) / shares;
+  if (scaled === 0n) return "<0.0001";
+  return `${scaled / 10_000n}.${(scaled % 10_000n).toString().padStart(4, "0")}`;
+}
+
 // Price in millionths of one unit -> "62¢".
 export function cents(priceMicro: string | bigint): string {
   const v = typeof priceMicro === "string" ? BigInt(priceMicro) : priceMicro;
