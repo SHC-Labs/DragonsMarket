@@ -59,7 +59,7 @@ fn public_key(key: &SigningKey) -> String {
     format!("ed25519:{}", bs58::encode(key.verifying_key().as_bytes()).into_string())
 }
 
-// Three publishers, two of whom must sign, and one series of 2-minute rounds whose round 0 starts shortly.
+// Three publishers, two of whom must sign, and one series of 5-minute rounds whose round 0 starts shortly.
 async fn deploy(w: &World) -> anyhow::Result<Rounds> {
     let contract = w.worker.dev_deploy(&wasm("rounds")).await?;
     contract
@@ -198,8 +198,6 @@ async fn assert_books_match(w: &World, r: &Rounds) {
     );
 }
 
-const SEND_TGAS: u64 = 100;
-
 async fn register_on_token(w: &World, who: &AccountId) -> anyhow::Result<()> {
     w.owner
         .call(w.ft.id(), "storage_deposit")
@@ -221,7 +219,7 @@ async fn register_in_near(r: &Rounds, who: &Account) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn send(
+async fn send_direct_token(
     w: &World,
     from: &Account,
     r: &Rounds,
@@ -236,6 +234,11 @@ async fn send(
         .gas(Gas::from_tgas(tgas))
         .transact()
         .await?)
+}
+
+async fn send(w: &World, from: &Account, r: &Rounds, amount: u128, msg: &str) -> anyhow::Result<ExecutionFinalResult> {
+    deposit_to_intents(w, from, from.id(), amount).await?;
+    intents_call(w, from, r.contract.id(), amount, msg).await
 }
 
 async fn round_stake(r: &Rounds, who: &AccountId) -> Value {
@@ -437,18 +440,17 @@ async fn a_token_holder_registers_in_near_stakes_wins_and_leaves() -> anyhow::Re
     let w = setup().await?;
     let r = deploy(&w).await?;
     let id = r.contract.id().clone();
-    register_on_token(&w, &id).await?;
     register_in_near(&r, &w.dave).await?;
-    let result = send(&w, &w.dave, &r, 15 * USD, "deposit", SEND_TGAS).await?;
-    assert_clean(&r, "deposit by token", &result);
+    let result = send(&w, &w.dave, &r, 15 * USD, "deposit").await?;
+    assert_clean(&r, "deposit through Intents", &result);
     assert_eq!(balance(&r, w.dave.id()).await, 15 * USD, "no registration fee is taken");
     assert_eq!(ft_balance(&w, &id).await, 0, "the contract keeps no token itself");
     assert_books_match(&w, &r).await;
 
     ft_call(&w, &w.bob, &id, 5 * USD, "register").await?;
     skip_until(&w, r.start_of(0)).await;
-    let result = send(&w, &w.dave, &r, 5 * USD, "stake:0:0:up:1", SEND_TGAS).await?;
-    assert_clean(&r, "stake by token", &result);
+    let result = send(&w, &w.dave, &r, 5 * USD, "stake:0:0:up:1").await?;
+    assert_clean(&r, "stake through Intents", &result);
     stake_from_balance(&r, &w.dave, "up", 5 * USD).await?.into_result()?;
     ft_call(&w, &w.bob, &id, 10 * USD, "stake:0:0:down:1").await?;
     assert_eq!(round_stake(&r, w.dave.id()).await["amount"], (10 * USD).to_string());
@@ -510,42 +512,41 @@ async fn a_token_holder_registers_in_near_stakes_wins_and_leaves() -> anyhow::Re
 }
 
 #[tokio::test]
-async fn a_refused_token_transfer_comes_back_whole() -> anyhow::Result<()> {
+async fn a_refused_intents_transfer_comes_back_whole() -> anyhow::Result<()> {
     let w = setup().await?;
     let r = deploy(&w).await?;
     let id = r.contract.id().clone();
-    register_on_token(&w, &id).await?;
     register_in_near(&r, &w.alice).await?;
     let held = intents_balance(&w, &id).await;
     let owed = view_u128(&r, "total_owed", json!({})).await;
     let dust = format!("deposit_for:{}", w.alice.id());
-    for (from, msg, amount, tgas, why) in [
-        (&w.dave, "deposit", USD, SEND_TGAS, "register first"),
-        (&w.alice, "deposit_for:nobody.near", USD, SEND_TGAS, "register first"),
-        (&w.dave, dust.as_str(), 50_000, SEND_TGAS, "at least the minimum stake"),
-        (&w.alice, "register", USD, SEND_TGAS, "unknown action"),
-        (&w.alice, "deposit", USD, 80, "attach at least 75 TGas"),
-        (
-            &w.alice,
-            "stake:0:0:up:1",
-            50_000,
-            SEND_TGAS,
-            "the stake is below the minimum",
-        ),
-        (&w.alice, "stake:0:0:up:1", USD, SEND_TGAS, "the round has not started"),
+    for (from, msg, amount, why) in [
+        (&w.alice, "stake:0:0:up:1", USD, "the round has not started"),
+        (&w.dave, "deposit", USD, "register first"),
+        (&w.alice, "deposit_for:nobody.near", USD, "register first"),
+        (&w.dave, dust.as_str(), 50_000, "at least the minimum"),
+        (&w.alice, "register", USD, "already registered"),
+        (&w.alice, "unknown", USD, "unknown action"),
+        (&w.alice, "stake:0:0:up:1", 50_000, "the stake is below the minimum"),
     ] {
         let tokens = ft_balance(&w, from.id()).await;
-        let result = send(&w, from, &r, amount, msg, tgas).await?;
-        assert!(result.is_success(), "{msg}: the token call itself completes");
+        let before = intents_balance(&w, from.id()).await;
+        let result = send(&w, from, &r, amount, msg).await?;
+        assert!(result.is_success(), "{msg}: the transfer call itself completes");
         assert!(
             format!("{:?}", result.receipt_failures()).contains(why),
-            "{msg} at {tgas} TGas: {:?}",
+            "{msg}: {:?}",
             result.receipt_failures()
         );
         assert_eq!(
             ft_balance(&w, from.id()).await,
-            tokens,
-            "{msg} at {tgas} TGas: the token came back"
+            tokens - amount,
+            "{msg}: the first step deposited the token into Intents"
+        );
+        assert_eq!(
+            intents_balance(&w, from.id()).await,
+            before + amount,
+            "{msg}: the entire refused transfer stays in the sender's Intents account"
         );
     }
     assert_eq!(ft_balance(&w, &id).await, 0);
@@ -556,40 +557,63 @@ async fn a_refused_token_transfer_comes_back_whole() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn a_token_stake_that_just_clears_the_floor_completes() -> anyhow::Result<()> {
+async fn direct_token_deposits_are_refunded_without_starting_a_forward() -> anyhow::Result<()> {
     let w = setup().await?;
     let r = deploy(&w).await?;
     register_on_token(&w, r.contract.id()).await?;
     register_in_near(&r, &w.alice).await?;
-    skip_until(&w, r.start_of(0)).await;
-    for tgas in 76..100 {
-        let result = send(&w, &w.alice, &r, USD, "stake:0:0:up:1", tgas).await?;
-        if format!("{:?}", result.receipt_failures()).contains("attach at least") {
-            continue;
+    let gift = format!("deposit_for:{}", w.alice.id());
+    let tokens = ft_balance(&w, w.alice.id()).await;
+    let held = intents_balance(&w, w.alice.id()).await;
+    for msg in ["deposit", gift.as_str(), "stake:0:0:up:1"] {
+        for tgas in [100, 300] {
+            let result = send_direct_token(&w, &w.alice, &r, USD, msg, tgas).await?;
+            assert!(result.is_success(), "the token resolver refunds the refused transfer");
+            assert!(format!("{:?}", result.receipt_failures())
+                .contains("deposit into your own Intents account, then use mt_transfer_call"));
+            assert_eq!(ft_balance(&w, w.alice.id()).await, tokens);
+            assert_eq!(intents_balance(&w, w.alice.id()).await, held);
+            assert_eq!(ft_balance(&w, r.contract.id()).await, 0);
+            assert_eq!(intents_balance(&w, r.contract.id()).await, 0);
+            assert_eq!(balance(&r, w.alice.id()).await, 0);
+            assert_eq!(round_stake(&r, w.alice.id()).await, Value::Null);
+            assert_books_match(&w, &r).await;
         }
-        assert_clean(&r, &format!("stake by token at {tgas} TGas"), &result);
-        assert_eq!(round_stake(&r, w.alice.id()).await["amount"], USD.to_string());
-        assert_books_match(&w, &r).await;
-        return Ok(());
     }
-    panic!("the floor refused every gas amount tried");
+    Ok(())
 }
 
 #[tokio::test]
-async fn a_token_stake_the_round_refuses_stays_a_balance() -> anyhow::Result<()> {
+async fn an_intents_stake_at_the_minimum_completes() -> anyhow::Result<()> {
     let w = setup().await?;
     let r = deploy(&w).await?;
-    register_on_token(&w, r.contract.id()).await?;
+    register_in_near(&r, &w.alice).await?;
+    skip_until(&w, r.start_of(0)).await;
+    let amount = 100_000;
+    let result = send(&w, &w.alice, &r, amount, "stake:0:0:up:1").await?;
+    assert_clean(&r, "minimum stake through Intents", &result);
+    assert_eq!(round_stake(&r, w.alice.id()).await["amount"], amount.to_string());
+    assert_books_match(&w, &r).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stake_the_round_refuses_returns_to_the_senders_intents_balance() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let r = deploy(&w).await?;
     register_in_near(&r, &w.alice).await?;
     skip_until(&w, r.start_of(0)).await;
     let greedy = format!("stake:0:0:up:{}", 100 * USD);
-    let result = send(&w, &w.alice, &r, 4 * USD, &greedy, SEND_TGAS).await?;
+    let before = intents_balance(&w, w.alice.id()).await;
+    let result = send(&w, &w.alice, &r, 4 * USD, &greedy).await?;
+    assert!(result.is_success());
     assert!(
         format!("{:?}", result.receipt_failures()).contains("fewer shares than the minimum"),
         "{:?}",
         result.receipt_failures()
     );
-    assert_eq!(balance(&r, w.alice.id()).await, 4 * USD);
+    assert_eq!(intents_balance(&w, w.alice.id()).await, before + 4 * USD);
+    assert_eq!(balance(&r, w.alice.id()).await, 0);
     assert_eq!(round_stake(&r, w.alice.id()).await, Value::Null);
     assert_books_match(&w, &r).await;
     Ok(())
@@ -600,7 +624,6 @@ async fn an_owner_funds_an_agent_that_never_holds_the_token() -> anyhow::Result<
     let w = setup().await?;
     let r = deploy(&w).await?;
     let id = r.contract.id().clone();
-    register_on_token(&w, &id).await?;
     let (owner, agent) = (&w.dave, &w.alice);
     owner
         .call(&id, "storage_deposit")
@@ -611,7 +634,7 @@ async fn an_owner_funds_an_agent_that_never_holds_the_token() -> anyhow::Result<
         .into_result()?;
     let tokens = ft_balance(&w, agent.id()).await;
     let gift = format!("deposit_for:{}", agent.id());
-    let result = send(&w, owner, &r, 15 * USD, &gift, SEND_TGAS).await?;
+    let result = send(&w, owner, &r, 15 * USD, &gift).await?;
     assert_clean(&r, "deposit for the agent", &result);
     let from = format!("\"from\":\"{}\"", owner.id());
     assert!(
