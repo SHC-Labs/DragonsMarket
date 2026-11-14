@@ -505,7 +505,7 @@ async fn the_token_hooks_cannot_be_called_directly() -> anyhow::Result<()> {
             w.market.id(),
             "ft_on_transfer",
             json!({ "sender_id": w.dave.id(), "amount": "1000000000", "msg": "deposit" }),
-            "only the collateral token can deliver money",
+            "deposit into your own Intents account, then use mt_transfer_call",
         ),
         (
             w.oracle.id(),
